@@ -225,6 +225,7 @@ impl App {
                 (w, 0) => shown.push_str(&format!("   ·   {w} more at work: SPC a T")),
                 (_, n) => shown.push_str(&format!("   ·   {n} more waiting on you: SPC a T")),
             }
+            let shown = self.keys_text(&shown);
             self.pane_titles.insert(pane, shown);
         }
         if let Some(pane) = composer_pane {
@@ -234,10 +235,10 @@ impl App {
             };
             let at_gate = self.agents.shown(&self.pages).is_some_and(|t| self.pipeline_at_gate(&t));
             let send = if at_gate {
-                "Ctrl-Enter sends another round; y in Normal goes on, n stops"
+                "Ctrl+Enter sends another round; y in Normal goes on, n stops"
             } else if waiting {
                 "waiting on you: y or n answers, here or in the thread"
-            } else { "Ctrl-Enter sends (Enter in Normal), ↑ the last one" };
+            } else { "Ctrl+Enter sends (Enter in Normal), ↑ the last one" };
             self.pane_titles.insert(pane, format!("{to}   ·   {send}"));
         }
     }

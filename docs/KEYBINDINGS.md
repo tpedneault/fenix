@@ -56,7 +56,8 @@ extension's keys come with it.
 | `Esc`, a plain click | Back to one cursor |
 
 Typing, deleting, `Enter`, `Tab`, the arrows and Shift with them happen at
-every cursor, as one undo step. `Ctrl+V` pastes a line at each cursor when
+every cursor, as one undo step; `Ctrl+Z` and `Ctrl+Y` put the cursors back
+as they were. `Ctrl+V` pastes a line at each cursor when
 the clipboard has as many lines as there are cursors. Any other key, or an
 edit made elsewhere (a language server's, an agent's), goes back to one.
 `editor.multi_cursor_modifier = "ctrl"` makes it `Ctrl`+click, for
@@ -250,7 +251,7 @@ keys'; the palette has the commands).
 | `SPC ] d` / `SPC [ d` | Next / previous problem (also `h` hunk, `a` agent's change, `t` TODO, `c` side by side's change) |
 | `SPC ] f` | Open the file named under the cursor, as `gf` |
 | `SPC C-i` | Hover, as `K` (standard keys' `Ctrl+K Ctrl+I`) |
-| `SPC h x` / `SPC h w` | The Extensions page / the welcome's packs |
+| `SPC h x` / `SPC h w` | The Extensions page / the welcome (keys, look, packs, where to learn) |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |
 | `SPC h b` / `SPC h K` | The keys bound here / where keys disagree |
 | `SPC h e` / `SPC h l` | Your keybindings (`keybindings.toml`) / what the code extensions said |

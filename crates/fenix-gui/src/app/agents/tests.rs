@@ -540,6 +540,73 @@ fn a_write_through_fenix_lands_in_the_buffer_saved() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
 }
 
+/// Following, the pane beside the dock goes to the file the agent edits
+/// -- though another was open there -- and, once it writes, to the line
+/// it changed, which its edit doesn't name.
+#[test]
+fn following_goes_to_the_file_and_the_line_the_agent_changed() {
+    let mut f = fixture("--fs");
+    let other = f.root.join("other.txt");
+    std::fs::write(&other, "something else
+").unwrap();
+    let file = f.root.join("long.txt");
+    std::fs::write(&file, (1..=30).map(|n| format!("e{n}
+")).collect::<String>()).unwrap();
+    f.app.test_open_path(&other);
+    let code = f.app.focused_pane_id();
+    f.app.agents_open_panel();
+    f.app.config.set_value("agents.save_before_prompt", Some(fenix_config::Value::Text("never".into())));
+    f.app.agents_toggle_follow();
+    f.type_prompt("edit long.txt e20=>changed");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    let shown = |app: &App| app.windows().content(code).and_then(|id| app.buffers.get(*id)).and_then(|ob| ob.buffer.path().map(Path::to_path_buf));
+    assert_eq!(shown(&f.app).as_deref(), Some(file.as_path()), "the file it's editing, in place of the other");
+    assert!(f.app.agents_is_dock_pane(f.app.focused_pane_id()), "the keyboard left in the dock");
+    f.key(Key::Char('y'));
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    let id = *f.app.windows().content(code).unwrap();
+    let cursor = f.app.pane_state(code).cursor;
+    let line = f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0;
+    assert_eq!(line + 1, 20, "on the line it changed");
+    // Another update to the same edit doesn't pull it back.
+    let thread = f.thread();
+    f.app.agents_follow(&thread);
+    let cursor = f.app.pane_state(code).cursor;
+    assert_eq!(f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0 + 1, 20);
+}
+
+/// The same, for an agent that writes to disk itself (Claude Code's
+/// adapter): the buffer follows the disk, and the pane its first changed
+/// line.
+#[test]
+fn following_an_agent_that_writes_to_disk_goes_to_the_line_it_changed() {
+    let mut f = fixture("");
+    let other = f.root.join("other.txt");
+    std::fs::write(&other, "something else
+").unwrap();
+    let file = f.root.join("long.txt");
+    std::fs::write(&file, (1..=30).map(|n| format!("e{n}
+")).collect::<String>()).unwrap();
+    f.app.test_open_path(&other);
+    let code = f.app.focused_pane_id();
+    f.app.agents_open_panel();
+    f.app.agents_toggle_follow();
+    f.type_prompt("edit long.txt e20=>changed");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    f.key(Key::Char('y'));
+    let id = f.app.buffers.id_for_path(&file).expect("opened by following");
+    assert!(f.pump(|app| app.buffers.get(id).is_some_and(|ob| ob.buffer.text().contains("changed"))), "the buffer follows the disk");
+    assert_eq!(f.app.windows().content(code), Some(&id));
+    let cursor = f.app.pane_state(code).cursor;
+    assert_eq!(f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0 + 1, 20, "on the line it changed");
+    // Without the focus the pane wouldn't scroll to it by itself: it's
+    // scrolled, its line in view, on the next frame.
+    assert!(f.app.reveal_panes.contains(&code));
+    f.app.reveal_cursor(code, id, 8);
+    let top = f.app.pane_state(code).scroll_line;
+    assert!((top..top + 8).contains(&19), "line 20 in view from {top}");
+}
+
 #[test]
 fn a_write_over_your_unsaved_edits_asks_and_keep_mine_refuses_it() {
     let mut f = fixture("--fs");
@@ -1390,7 +1457,7 @@ fn a_pipelines_gate_takes_another_round() {
     assert_eq!(f.app.vim.mode(), Mode::Insert);
     assert!(!f.app.agents_composer_key(KeyPress::char('y')));
     assert!(at_gate(&f.app));
-    assert!(f.app.pane_titles.values().any(|t| t.contains("Ctrl-Enter sends another round")));
+    assert!(f.app.pane_titles.values().any(|t| t.contains("Ctrl+Enter sends another round")));
     // Another round: the question goes, and comes back at its end.
     f.type_prompt("second");
     assert!(!at_gate(&f.app) || f.view().is_working(), "taken back as it goes");

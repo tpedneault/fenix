@@ -70,6 +70,7 @@ use explorer_host::{is_bare_server, is_unc, PromptKind};
 mod disk_probe;
 mod remote;
 mod extensions_host;
+mod welcome_host;
 mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
@@ -2951,6 +2952,27 @@ fn popup_beside_row(
     Some(fenix_window::Rect { x, y, w: width, h: height })
 }
 
+/// A key in a prompt whose prefilled `input` is selected (`selected`):
+/// the selection ends with any key; a character or a paste replaces the
+/// text, Backspace or Delete clears it (and is spent). Returns whether
+/// the key was spent here.
+fn take_selected_prefill(input: &mut String, selected: &mut bool, key: KeyPress) -> bool {
+    if !std::mem::take(selected) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char(_) if !key.mods.alt && !key.mods.super_ && (!key.mods.ctrl || key == KeyPress::char('v').with_ctrl()) => {
+            input.clear();
+            false
+        }
+        KeyCode::Named(FenixNamedKey::Backspace | FenixNamedKey::Delete) => {
+            input.clear();
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Ctrl+Backspace in a one-line prompt: the word before the end goes,
 /// with any spaces or punctuation after it -- `count_words` all at once,
 /// `src/lib` back to `src/`.
@@ -3246,33 +3268,6 @@ fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
 /// the tail of the previous tab's own text instead of the gap between
 /// tabs, and a click square on the last tab's visible `×` landed `PAD_
 /// LEFT` short of it.
-/// `path` inside `root`, as `src/main.rs`: matched however either was
-/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
-/// kept canonical and a buffer's path as it was opened.
-fn path_within(root: &Path, path: &Path) -> Option<String> {
-    if let Ok(rest) = path.strip_prefix(root) {
-        return Some(rest.to_string_lossy().replace('\\', "/"));
-    }
-    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
-    let (root, path) = (plain(root), plain(path));
-    let root = format!("{}\\", root.trim_end_matches('\\'));
-    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
-    inside.then(|| path[root.len()..].replace('\\', "/"))
-}
-
-/// `path` whole, its home folder as `~`: a file outside the project.
-fn home_relative(path: &Path) -> String {
-    // A file on a remote machine, as that machine names it.
-    if fenix_vfs::is_remote(path) {
-        return fenix_vfs::display(path);
-    }
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
-    match home.and_then(|h| path_within(&h, path)) {
-        Some(rest) => format!("~/{rest}"),
-        None => path.display().to_string(),
-    }
-}
-
 fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
     fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
 }
@@ -4797,6 +4792,10 @@ pub struct App {
     /// The pane a jump just moved the cursor in (`mark_jump`): its next
     /// scroll centres the cursor when it's out of view.
     jump_view: Option<fenix_window::WindowId>,
+    /// Panes without the focus whose cursor was moved for you (following
+    /// an agent): scrolled to it, centred, on the next frame -- only the
+    /// focused pane follows its cursor by itself.
+    reveal_panes: HashSet<fenix_window::WindowId>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -4972,6 +4971,10 @@ pub struct App {
     /// synchronously -- the edit only lands once the server answers,
     /// see `PendingLspRequest::Rename`).
     lsp_rename_prompt: Option<String>,
+    /// With standard keys, a rename prompt's prefilled name is selected
+    /// until a key: typing replaces it, Backspace clears it, an arrow
+    /// keeps it to change.
+    prompt_prefill_selected: bool,
     refactor_preview: Option<refactor::Preview>,
     /// The coding agents: their connections, the threads, the panel and
     /// its prompt (`agents`).
@@ -5004,6 +5007,9 @@ pub struct App {
     last_key_at: Option<Instant>,
     /// Each pane's extra carets (standard keys' more cursors).
     carets: carets::PaneCarets,
+    /// Edits made at several carets, by the tag on their undo step: the
+    /// carets before and after, for undo and redo to put back.
+    caret_steps: carets::CaretSteps,
     /// The switcher `buffer.switch_recent` (Ctrl+Tab) opened is up: letting
     /// go of Ctrl picks its row.
     switching_recent: bool,
@@ -6024,6 +6030,7 @@ impl App {
             term_hover: None,
             term_clicks: crate::mouse::ClickCounter::default(),
             jump_view: None,
+            reveal_panes: HashSet::new(),
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -6186,6 +6193,7 @@ impl App {
             find_file_prompt: None,
             rename_file_prompt: None,
             lsp_rename_prompt: None,
+            prompt_prefill_selected: false,
             refactor_preview: None,
             agents: agents::AgentHost::new(),
             agent_calls: agent_calls::AgentCalls::default(),
@@ -6199,6 +6207,7 @@ impl App {
             last_key_at: None,
             leader_uses: 0,
             carets: Default::default(),
+            caret_steps: Default::default(),
             switching_recent: false,
             delete_file_confirm: false,
             vim,
@@ -8205,6 +8214,7 @@ impl App {
         let cursor = self.cursor();
         let ob = self.open();
         let current = completion::identifier_at_cursor(&ob.buffer, &cursor).unwrap_or_default();
+        self.prompt_prefill_selected = self.standard_keys() && !current.is_empty();
         self.lsp_rename_prompt = Some(current);
     }
 
@@ -8213,6 +8223,12 @@ impl App {
     /// `textDocument/rename` request rather than applying anything
     /// synchronously (the edit only lands once the server answers).
     fn lsp_rename_prompt_key(&mut self, key: KeyPress) {
+        if let Some(input) = &mut self.lsp_rename_prompt {
+            if take_selected_prefill(input, &mut self.prompt_prefill_selected, key) {
+                self.wake_caret();
+                return;
+            }
+        }
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(input), Some(text)) = (&mut self.lsp_rename_prompt, pasted) {
@@ -9565,7 +9581,7 @@ impl App {
         self.terminal_focused = false;
         self.sidebar_focused = false;
         let name = self.buffer_display_name(id);
-        self.set_message(format!("{name} -- Ctrl-\\ to leave the terminal"));
+        self.set_message(format!("{name} -- Ctrl+\\ to leave the terminal"));
     }
 
     /// Releases keyboard capture without closing anything -- the pane
@@ -9985,7 +10001,7 @@ impl App {
         for &id in ids {
             let Some(ob) = self.buffers.get(id) else { continue };
             let label = if let Some(path) = ob.buffer.path() {
-                self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+                self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
             } else if ob.kind == BufferKind::Dashboard {
                 // Each pane's Home is the one Home: by the workspace's
                 // name, as its tab has it.
@@ -14944,6 +14960,7 @@ impl App {
     pub(crate) fn start_rename_file_prompt(&mut self) {
         let Some(path) = self.open().buffer.path() else { return };
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        self.prompt_prefill_selected = self.standard_keys() && !name.is_empty();
         self.rename_file_prompt = Some(name);
         self.wake_caret();
     }
@@ -14951,6 +14968,12 @@ impl App {
     /// Routes one keypress to the in-progress `rename_file_prompt` --
     /// same shape as `find_file_prompt_key`.
     fn rename_file_prompt_key(&mut self, key: KeyPress) {
+        if let Some(input) = &mut self.rename_file_prompt {
+            if take_selected_prefill(input, &mut self.prompt_prefill_selected, key) {
+                self.wake_caret();
+                return;
+            }
+        }
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(input), Some(text)) = (&mut self.rename_file_prompt, pasted) {
@@ -15061,7 +15084,7 @@ impl App {
     /// `path` as a message says it: inside the project from its root
     /// (`src/lib.rs`), else from home (`~/notes.md`).
     fn shown_path(&self, path: &Path) -> String {
-        self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+        self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
     }
 
     /// What happens after a key has been through Vim, whatever it did:
@@ -15824,13 +15847,19 @@ impl App {
 
     pub(crate) fn undo(&mut self) {
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        buffer.undo(cursor);
+        let tag = buffer.undo_tag();
+        if buffer.undo(cursor) {
+            self.carets_after_undo(tag, true);
+        }
         self.wake_caret();
     }
 
     pub(crate) fn redo(&mut self) {
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        buffer.redo(cursor);
+        let tag = buffer.redo_tag();
+        if buffer.redo(cursor) {
+            self.carets_after_undo(tag, false);
+        }
         self.wake_caret();
     }
 
@@ -16577,7 +16606,9 @@ impl App {
             return;
         }
 
-        if self.snippet_key(keypress) || self.completion_key(keypress) {
+        // Shift+Tab keeps its Shift for a snippet: it goes back a field.
+        let snippet_key = if full == KeyPress::named(FenixNamedKey::Tab).with_shift() { full } else { keypress };
+        if self.snippet_key(snippet_key) || self.completion_key(keypress) {
             self.wake_caret();
             return;
         }
@@ -17405,6 +17436,20 @@ impl App {
         self.update_rendered_scroll();
     }
 
+    /// A pane without the focus scrolled to its cursor, centred when out of
+    /// view, as a jump in the focused pane is.
+    fn reveal_cursor(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, visible_lines: usize) {
+        let Some(ob) = self.buffers.get(buffer_id) else { return };
+        let document_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
+        let display = self.pane_display_lines(pane, buffer_id);
+        let line = display.iter().position(|&row| row == document_line).unwrap_or(document_line);
+        let target = scroll_for_cursor(self.pane_state(pane).scroll_line, line, visible_lines, display.len(), true);
+        self.workspaces.active_scroll_anims_mut().remove(&pane);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = target;
+        state.rendered_scroll = target as f32;
+    }
+
     /// Horizontal analog of `ensure_cursor_visible` -- keeps the cursor's
     /// *visual* column within the focused pane's visible window, snapping
     /// `scroll_col` instantly (no `rendered_scroll`-style easing on this
@@ -17584,7 +17629,14 @@ impl App {
     /// position underneath it, the same "additive, doesn't replace the
     /// real indicator" posture `recording_indicator`/`workspace_
     /// indicator` already have below.
+    /// The modeline's badge and text, its keys said in the scheme in use
+    /// (a Git operation's `SPC g x c continue`, an explorer job's stop).
     fn modeline_pieces(&self) -> (&'static str, String) {
+        let (badge, text) = self.modeline_pieces_as_written();
+        (badge, self.keys_text(&text))
+    }
+
+    fn modeline_pieces_as_written(&self) -> (&'static str, String) {
         // A live status/error message pre-empts even the Explorer/Picker
         // badge -- it's telling the user something just happened,
         // regardless of what view they're in. Uses the plain mode badge
@@ -17775,8 +17827,8 @@ impl App {
         // How to get the keyboard back, while a shell has it (#42).
         let terminal_hint = match self.terminal_focused.then(|| self.terminal_title(terminal_mouse::TermTarget::Panel)).flatten() {
             // The panel has no title of its own: what it runs is here.
-            Some(what) => format!("   {what}   Ctrl-\\ back to the editor"),
-            None if self.terminal_has_keyboard() => "   Ctrl-\\ back to the editor".to_string(),
+            Some(what) => format!("   {what}   C-\\ back to the editor"),
+            None if self.terminal_has_keyboard() => "   C-\\ back to the editor".to_string(),
             None => String::new(),
         };
         let place = if on_page { String::new() } else { format!("   Ln {}, Col {}", line + 1, col + 1) };
@@ -18725,6 +18777,19 @@ impl App {
     /// path, a commit message), so the only ceiling here is the same
     /// window-width-based one `which_key_popup` itself computes before
     /// *additionally* clamping to `WHICH_KEY_MAX_WIDTH`.
+    /// The chars of the prompt's text drawn selected: a rename prompt's
+    /// prefilled name, until a key.
+    fn prompt_selection(&self) -> Option<std::ops::Range<usize>> {
+        if !self.prompt_prefill_selected {
+            return None;
+        }
+        let text = self.active_prompt_text()?;
+        let input = self.rename_file_prompt.as_ref().or(self.lsp_rename_prompt.as_ref())?;
+        let len = input.chars().count();
+        let total = text.chars().count();
+        text.ends_with(input.as_str()).then(|| total - len..total)
+    }
+
     fn prompt_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
         let content = self.active_prompt_text()?;
 
@@ -19133,7 +19198,7 @@ impl App {
             // panel grabs focus -- there's no other UI surface that
             // mentions the chord at all, and this is exactly the moment
             // a user unfamiliar with it needs to see it.
-            return Some(terminal_view::TermView { spans: vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], ..Default::default() });
+            return Some(terminal_view::TermView { spans: vec![("Starting shell... (Ctrl+\\ to unfocus)".to_string(), self.theme.fg, false)], ..Default::default() });
         }
         None
     }
@@ -19522,6 +19587,16 @@ impl App {
                         }
                         self.wake_caret();
                         return;
+                    }
+                    // The welcome's caps: a click presses the key on one.
+                    if pos.1 >= content.y {
+                        if let Some(&page) = self.windows().content(id) {
+                            let (line, col) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
+                            if self.welcome_click(page, line, col) {
+                                self.wake_caret();
+                                return;
+                            }
+                        }
                     }
                     // Standard keys: an answer on an agent's question card.
                     if pos.1 >= content.y && self.standard_keys() {
@@ -20284,6 +20359,9 @@ impl App {
                 // long enough to follow its cursor.
                 self.search_reveal(pane, pane_visible_lines);
             }
+            if !is_focused && self.reveal_panes.remove(&pane) {
+                self.reveal_cursor(pane, buffer_id, pane_visible_lines);
+            }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
@@ -20764,6 +20842,7 @@ impl App {
         // See `popup::PopupId::Prompt`'s own doc comment for why this
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
+        let prompt_selection = self.prompt_selection();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
         // The right click's menu.
         let context_menu_popup = overlays_here.then(|| self.context_menu_popup(window_width, window_height)).flatten();
@@ -22170,6 +22249,17 @@ impl App {
                 // The completion popup's own selected-candidate row --
                 // `theme.selection`, not `theme.hl_line`: the popup has no
                 // caret of its own, so this has to stand out on its own.
+                // A rename prompt's prefilled name, selected.
+                if let (popup::PopupId::Prompt, Some(chars)) = (draw.id, prompt_selection.clone()) {
+                    let x = rect.x + text::PAD_LEFT + chars.start as f32 * char_width;
+                    let w = (chars.len() as f32 * char_width).min(rect.x + rect.w - x).max(0.0);
+                    popup_rect.push_box(gpu, x, rect.y + 4.0, w, line_height, crate::rect::BoxStyle {
+                        radius: 2.0,
+                        fill: with_alpha(theme.selection, alpha),
+                        border: 0.0,
+                        border_color: [0.0; 4],
+                    });
+                }
                 if matches!(draw.id, popup::PopupId::Completion | popup::PopupId::ContextMenu) {
                     if let Some(row) = draw.selected {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
@@ -28392,7 +28482,7 @@ configure_board stm32
         app.status_message = None;
         let (badge, rest) = app.modeline_pieces();
         assert_eq!(badge, "TERMINAL");
-        assert!(rest.contains("Ctrl-\\ back to the editor"), "{rest}");
+        assert!(rest.contains("C-\\ back to the editor"), "{rest}");
         app.terminal_focused = false;
         let (badge, rest) = app.modeline_pieces();
         assert_ne!(badge, "TERMINAL");
@@ -30600,8 +30690,8 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels[0], home_relative(&b), "outside a project: the whole path, from ~ when under it");
-                assert!(labels.contains(&home_relative(&a).as_str()));
+                assert_eq!(labels[0], crate::page::home_relative(&b), "outside a project: the whole path, from ~ when under it");
+                assert!(labels.contains(&crate::page::home_relative(&a).as_str()));
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
@@ -30625,8 +30715,8 @@ configure_board stm32
     fn picker_switch_buffer_lists_lookalikes_once() {
         // However the root and the file were spelt, a file in the project
         // is by its place in it.
-        assert_eq!(path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
-        assert_eq!(path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
+        assert_eq!(crate::page::path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
+        assert_eq!(crate::page::path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
         let mut homes = App::with_file(None);
         // A second Home, as a session restored with one a pane can have.
         let other = homes.new_home_buffer();
@@ -31597,6 +31687,17 @@ configure_board stm32
         let dock: String = app.debug_dock_spans(100).into_iter().map(|(text, _, _)| text).collect();
         let bottom = dock.lines().last().unwrap_or("");
         assert!(bottom.starts_with("› ") && bottom.contains("raw = b'"), "the selected value on the bottom line: {bottom}");
+    }
+
+    #[test]
+    fn the_debug_dock_says_the_standard_keys_with_standard_keys() {
+        let mut app = App::with_file(None);
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        debug_test_session(&mut app);
+        let dock: String = app.debug_dock_spans(200).into_iter().map(|(text, _, _)| text).collect();
+        assert!(!dock.contains("SPC ") && !dock.contains("K on a name"), "{dock}");
+        assert!(dock.contains("C-k u f") && dock.contains("C-k u e evaluates"), "{dock}");
     }
 
     fn debug_test_session(app: &mut App) {

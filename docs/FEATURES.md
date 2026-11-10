@@ -681,6 +681,14 @@ its extension. The rest is built into Fenix.
   columns reflow to two, then one, as the window narrows, and every
   colour comes from the active theme (the brand orange only marks a
   running timer).
+- **Welcome** (`SPC h w`, and a fresh install's first screen): five
+  steps, one at a time -- what Fenix is; how you'd like to edit (Vim keys,
+  recommended, or standard keys); a theme and the text size, applied as
+  you pick them; the extension packs (`x` opens them to install); and
+  where to learn: the tutorial, the keys page, a folder to work in. Each
+  choice is a setting in use at once. `Enter` and `←` step through, `Esc`
+  skips the rest, and a click on a key's cap -- or on a choice -- presses
+  it. Finishing writes `settings.toml`, so the next start goes to Home.
 - **Tutorial** (`SPC h T`, and `t` on the welcome at first launch):
   vimtutor for all of Fenix, in sections of lessons. Editing: modes
   and moving; words, lines and counts; operators and text objects; Visual

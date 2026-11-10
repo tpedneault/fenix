@@ -214,6 +214,10 @@ const STANDARD_PHRASES: &[(&str, &str)] = &[
     ("use :w to save", "Ctrl+S saves"),
     ("K on a name shows its value", "Ctrl+K Ctrl+I on a name shows its value"),
     ("K is the hover", "Ctrl+K Ctrl+I is the hover"),
+    // The bracket jumps type with standard keys: a chord, or the leader.
+    ("]h next", "M-F5 next"),
+    ("]a next", "SPC ] a next"),
+    (", ]a)", ", SPC ] a)"),
 ];
 
 impl App {

@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-09
+
 ### Added
 
 - Remote projects, a preview: `SPC p R` (`project.open_remote`) opens a
@@ -16,11 +18,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   there; a dropped connection is made again by itself. Terminals, Git,
   search, language servers, tasks and the debugger don't work on a
   remote project yet. See FEATURES.md's Files and projects.
-
-## [1.5.0] - 2026-11-09
-
-### Added
-
+- A welcome for a first run (`SPC h w` brings it back): what Fenix is,
+  then a step each for how you'd like to edit (Vim keys, recommended, or
+  standard keys), a theme and the text size, the extension packs, and
+  where to learn -- the tutorial in the keys you picked, the keys page, a
+  folder to open. Every choice is in use as it's made; a click on a
+  choice picks it. The packs are on a view of their own
+  (`extensions.welcome`).
 - Standard keys: a traditional IDE's way to edit, beside Vim's
   (`editor.keys = "standard"`, `SPC t k`, or the welcome's question). A
   file's text is typed into at once; Shift with a movement selects, and
@@ -34,8 +38,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keys, and ADR 0004.
 - More cursors, with standard keys: Alt+click adds one (or takes it away),
   Alt+Shift+drag makes a column; typing, deleting, Enter, Tab, the arrows
-  and pasting happen at each, as one undo step
-  (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click instead).
+  and pasting happen at each, as one undo step, and undo and redo bring
+  the cursors back (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click
+  instead).
 - Chords are keymap data: `[[keys]]` in `keybindings.toml` and in
   extensions' keymaps binds or unbinds a key with its modifiers (`C-s`,
   `C-S-p`, `F12`) for a key scheme and a place; Ctrl+S, Ctrl+Z and the
@@ -61,13 +66,39 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The refactor preview (a rename, a code action) shows each change as its
   own hunk, files named from the project root; `code.undo_refactor`
   (`SPC c R`) undoes a refactor with either keys.
-- Rename (`F2`, `SPC c r`) starts from the whole name under the cursor;
-  Ctrl+Backspace deletes a word in one-line prompts.
+- Rename (`F2`, `SPC c r`) starts from the whole name under the cursor --
+  selected, with standard keys, so typing replaces it; Ctrl+Backspace
+  deletes a word in one-line prompts.
+- A snippet's previous field is Shift+Tab (and Ctrl+K with Vim keys: with
+  standard keys Ctrl+K stays the leader).
+- The Search page fits a narrow pane: its toggles go under the field and
+  its scopes wrap.
 - Find references says how many there are and the key for the next.
 - The keys page is a buffer of its own, with no file behind it.
 
 ### Fixed
 
+- Following the agent (`SPC a f`) goes to the line it changed, not only the
+  file, and scrolls there: the pane beside the dock moved its cursor but,
+  without the focus, never scrolled to it. When the agent writes -- through
+  Fenix, or to disk itself as Claude Code does -- it goes to the first line
+  the write changed; before that, to the line it last read there, as an
+  agent's edit seldom names one. A later update to the same edit doesn't
+  pull the view back. With the dock across the whole window, `SPC a f` says
+  there's no pane beside it to follow in, and follows in any pane that isn't
+  the dock's.
+- A folder opened as the project from outside (`fenix <folder>`,
+  `--project`, `fenix/openProject`) gets a workspace of its own, as `SPC p p`
+  gives it, and stays the project once a file in it is open -- a folder with
+  no `.git` or `Cargo.toml` stopped being the project then.
+- A file in the project has its breadcrumb from the project, however the
+  project's folder was spelt (`\\?\`, a drive letter's case), not its whole
+  path.
+- The agents' tool cards show a file in the project from the project, and
+  one elsewhere from `~`, not the whole path the agent gave.
+- `settings.toml` loses a table once its last setting is unset (no bare
+  `[appearance]` left behind); the comment at the top of the file stays
+  there.
 - Enter on an indented blank line kept no indent for the next.
 - Task Output could show a program's stdout before stderr it had written
   earlier (`cargo test`'s `Running …`).
@@ -80,6 +111,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pane beside it.
 - Save and delete messages named files by their whole path, the question
   cut off at the prompt's edge.
+- With standard keys, the debugger's drawer, the agents' dock titles, the
+  Git and review popups, notification cards and the modeline's Git
+  operation said Vim's keys (`SPC u e`, `K`, `]h`).
 
 ## [1.4.0] - 2026-11-08
 

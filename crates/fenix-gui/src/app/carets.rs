@@ -39,6 +39,25 @@ pub(crate) struct Carets {
 
 pub(crate) type PaneCarets = HashMap<fenix_window::WindowId, Carets>;
 
+/// The carets around an edit made at several: the primary, then the
+/// extras, before it and after it.
+#[derive(Debug, Clone)]
+pub(crate) struct CaretStep {
+    before: (Caret, Vec<Caret>),
+    after: (Caret, Vec<Caret>),
+}
+
+/// Edits made at several carets, by their undo step's tag.
+#[derive(Debug, Default)]
+pub(crate) struct CaretSteps {
+    steps: HashMap<u64, CaretStep>,
+    next: u64,
+}
+
+/// How many such edits keep their carets for undo: past it, the oldest
+/// undo to one cursor, as any other edit does.
+const KEPT_CARET_STEPS: u64 = 1_000;
+
 impl App {
     /// The focused pane's extra carets, if they still hold.
     pub(crate) fn extra_carets(&self) -> &[Caret] {
@@ -225,7 +244,9 @@ impl App {
         // (caret, is the primary)
         let mut carets: Vec<(Caret, bool)> = self.extra_carets().iter().map(|c| (*c, false)).collect();
         carets.push((Caret { at: primary_cursor.char_idx, sticky: primary_cursor.sticky_col, anchor: primary_anchor }, true));
+        let before = (carets.last().map(|(c, _)| *c).unwrap_or(Caret { at: 0, sticky: 0, anchor: None }), self.extra_carets().to_vec());
         carets.sort_by_key(|(c, _)| std::cmp::Reverse(c.at));
+        let edits_before = self.open().buffer.edit_count();
         self.focused_buffer_and_cursor_mut().0.begin_undo_group();
         for i in 0..carets.len() {
             let (caret, _) = carets[i];
@@ -268,8 +289,27 @@ impl App {
             buffer.break_undo_run();
             buffer.end_undo_group();
         }
-        // The primary back as the cursor, in its mode.
         let primary = carets.iter().find(|(_, p)| *p).map(|(c, _)| *c).unwrap_or(Caret { at: 0, sticky: 0, anchor: None });
+        let extra: Vec<Caret> = carets.into_iter().filter(|(_, p)| !*p).map(|(c, _)| c).collect();
+        self.put_carets(primary, extra);
+        // An edit: its undo step remembers the carets around it.
+        if self.open().buffer.edit_count() != edits_before {
+            let after = (primary, self.extra_carets().to_vec());
+            let steps = &mut self.caret_steps;
+            steps.next += 1;
+            let tag = steps.next;
+            if self.focused_buffer_and_cursor_mut().0.tag_last_undo_step(tag) {
+                let steps = &mut self.caret_steps;
+                steps.steps.insert(tag, CaretStep { before, after });
+                steps.steps.remove(&tag.saturating_sub(KEPT_CARET_STEPS));
+            }
+        }
+    }
+
+    /// `primary` as the cursor, in its mode, and `extra` around it; carets
+    /// that met are one.
+    fn put_carets(&mut self, primary: Caret, mut extra: Vec<Caret>) {
+        let pane = self.focused_pane_id();
         if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
             state.cursor = Cursor { char_idx: primary.at, sticky_col: primary.sticky };
         }
@@ -286,10 +326,19 @@ impl App {
             }
             None => self.enter_insert_in_place(),
         }
-        // Carets that met are one.
-        let mut extra: Vec<Caret> = carets.into_iter().filter(|(_, p)| !*p).map(|(c, _)| c).collect();
         extra.retain(|c| c.at != primary.at);
         self.set_extra_carets(extra);
+    }
+
+    /// After an undo (or a redo) of the step tagged `tag`: when it was
+    /// made at several carets, those carets come back -- as they were
+    /// before it for an undo, after it for a redo.
+    pub(crate) fn carets_after_undo(&mut self, tag: u64, undo: bool) {
+        let Some(step) = self.caret_steps.steps.get(&tag).cloned() else { return };
+        let (primary, extra) = if undo { step.before } else { step.after };
+        let len = self.open().buffer.len_chars();
+        let fit = |c: Caret| Caret { at: c.at.min(len), anchor: c.anchor.map(|a| a.min(len)), ..c };
+        self.put_carets(fit(primary), extra.into_iter().map(fit).collect());
     }
 }
 
@@ -334,7 +383,16 @@ mod tests {
         assert_eq!(app.text(), "yza\nyzb\nyzc\n");
         app.press("C-z");
         assert_eq!(app.text(), "ya\nyb\nyc\n", "one keystroke, at every caret");
-        assert!(app.extra_carets().is_empty(), "undo is another edit: back to one");
+        assert_eq!(app.extra_carets().len(), 2, "undo puts the carets back");
+        app.type_text("w");
+        assert_eq!(app.text(), "ywa\nywb\nywc\n", "and they still type at each");
+        app.press_all("C-z C-z");
+        assert_eq!(app.text(), "a\nb\nc\n", "a keystroke at a time");
+        assert_eq!(app.extra_carets().len(), 2);
+        app.press_all("C-y C-y");
+        assert_eq!(app.text(), "ywa\nywb\nywc\n", "redo, at every caret");
+        assert_eq!(app.extra_carets().len(), 2, "with its carets");
+        assert_eq!(app.line_col(), (0, 2), "the primary where it was after");
     }
 
     #[test]

@@ -217,6 +217,7 @@ impl App {
             text.push('\n');
         }
         text.push_str("\nSPC g a stage · SPC g d discard · ]h next");
+        let text = self.keys_text(&text);
         self.lsp_hover = Some(text);
         self.wake_caret();
     }

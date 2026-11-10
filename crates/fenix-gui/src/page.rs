@@ -7,6 +7,7 @@
 //! a test can read.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use fenix_project::ProjectKind;
 
@@ -336,6 +337,33 @@ pub struct Grid {
     pub cards: Vec<Card>,
     pub chips: Vec<(usize, Range<usize>, Chip)>,
     pub graph: Vec<GraphStrip>,
+}
+
+/// `path` inside `root`, as `src/main.rs`: matched however either was
+/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
+/// kept canonical and a buffer's path as it was opened.
+pub fn path_within(root: &Path, path: &Path) -> Option<String> {
+    if let Ok(rest) = path.strip_prefix(root) {
+        return Some(rest.to_string_lossy().replace('\\', "/"));
+    }
+    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
+    let (root, path) = (plain(root), plain(path));
+    let root = format!("{}\\", root.trim_end_matches('\\'));
+    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
+    inside.then(|| path[root.len()..].replace('\\', "/"))
+}
+
+/// `path` whole, its home folder as `~`: a file outside the project.
+pub fn home_relative(path: &Path) -> String {
+    // A file on a remote machine, as that machine names it.
+    if fenix_vfs::is_remote(path) {
+        return fenix_vfs::display(path);
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
+    match home.and_then(|h| path_within(&h, path)) {
+        Some(rest) => format!("~/{rest}"),
+        None => path.display().to_string(),
+    }
 }
 
 /// Cuts `s` to `max` chars, ending in "…" when it had to.

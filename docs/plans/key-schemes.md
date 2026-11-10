@@ -902,3 +902,7 @@ Where the implementation differs from the plan above, and why:
   are in `app/standard_tests.rs`, `app/carets.rs` and `fenix-vim`'s
   `state/standard.rs`.
 
+- **The welcome question** (§4.7) is a step of a welcome of its own
+  (`welcome_page.rs`), not a line above the packs: Hello, Keys (Vim keys
+  marked recommended), Look, Extensions, Learn. The packs are a view of
+  the Extensions page the Extensions step opens.

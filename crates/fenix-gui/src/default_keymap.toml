@@ -340,8 +340,8 @@ command = "extensions.open"
 
 [[leader]]
 keys = "SPC h w"
-label = "welcome: packs"
-command = "extensions.welcome"
+label = "welcome"
+command = "help.welcome"
 
 [[leader]]
 keys = "SPC h l"

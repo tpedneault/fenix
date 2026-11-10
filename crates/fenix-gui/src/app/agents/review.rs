@@ -359,33 +359,72 @@ impl App {
         self.agents.dirty.insert(thread.clone());
     }
 
+    /// The newest place `thread`'s tool calls name: the entry's index,
+    /// the file, and its line -- the one the call names, else the one an
+    /// earlier call named in the same file (an edit says no line; the read
+    /// before it did).
+    pub(super) fn agents_newest_place(&self, thread: &ThreadId) -> Option<(usize, PathBuf, Option<u32>)> {
+        let root = self.agents.hub.meta(thread).map(|m| m.root.clone())?;
+        let view = self.agents.hub.view(thread)?;
+        let mut places = view.thread.entries.iter().enumerate().rev().filter_map(|(i, e)| match e {
+            fenix_acp::thread::Entry::Tool(call) => call.locations.first().map(|l| (i, root.join(&l.path), l.line)),
+            _ => None,
+        });
+        let (i, path, line) = places.next()?;
+        let line = line.or_else(|| places.find(|(_, p, l)| *p == path && l.is_some()).and_then(|(_, _, l)| l));
+        Some((i, path, line))
+    }
+
+    /// The pane follow mode shows the agent's work in: the one the dock
+    /// was opened from, else the first that isn't the dock's.
+    pub(super) fn agents_follow_pane(&self) -> Option<fenix_window::WindowId> {
+        let panes = self.windows().windows();
+        self.agents.code_pane.filter(|p| panes.contains(p) && !self.agents_is_dock_pane(*p)).or_else(|| panes.iter().copied().find(|p| !self.agents_is_dock_pane(*p)))
+    }
+
     /// Follow mode: the pane beside the panel shows where the agent works.
     pub(super) fn agents_follow(&mut self, thread: &ThreadId) {
         if !self.agents.following {
             return;
         }
         let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
-        let Some((path, line)) = self.agents.hub.view(thread).and_then(|v| {
-            v.thread.entries.iter().rev().find_map(|e| match e {
-                fenix_acp::thread::Entry::Tool(call) => call.locations.first().map(|l| (root.join(&l.path), l.line)),
-                _ => None,
-            })
-        }) else {
+        let Some((call, path, line)) = self.agents_newest_place(thread) else { return };
+        // Gone to already: as it was then, or on to the line its write
+        // changed since. A line it names only now, before any write, is
+        // gone to.
+        let same_file = self.agents.followed.as_ref().is_some_and(|(p, _)| *p == path);
+        match self.agents.followed_call {
+            Some((c, _, true)) if c == call && same_file => return,
+            Some((c, l, false)) if c == call && l == line && same_file => return,
+            _ => {}
+        }
+        if !within(&root, &path) || !path.is_file() {
             return;
-        };
-        if self.agents.followed.as_ref() == Some(&(path.clone(), line)) || !within(&root, &path) || !path.is_file() {
+        }
+        self.agents.followed_call = Some((call, line, false));
+        self.agents_follow_to(&path, line);
+    }
+
+    /// Shows `path` at `line` (from 1) in the follow pane, the keyboard
+    /// left where it was.
+    pub(super) fn agents_follow_to(&mut self, path: &Path, line: Option<u32>) {
+        let path = path.to_path_buf();
+        if self.agents.followed.as_ref() == Some(&(path.clone(), line)) {
             return;
         }
         self.agents.followed = Some((path.clone(), line));
-        let Some(pane) = self.agents.code_pane.filter(|p| self.windows().windows().contains(p)) else { return };
+        let Some(pane) = self.agents_follow_pane() else { return };
         let back = self.focused_pane_id();
         self.windows_mut().focus(pane);
         self.open_file_from_picker(&path);
         if let Some(line) = line {
             self.jump_to_grep_match(&fenix_project::GrepMatch { path, line: line.max(1) as usize, col: 1, text: String::new() });
         }
-        if self.windows().windows().contains(&back) {
+        if self.windows().windows().contains(&back) && back != pane {
             self.windows_mut().focus(back);
+            // It no longer has the focus to follow its cursor: scrolled
+            // to it on the next frame.
+            self.reveal_panes.insert(pane);
         }
     }
 
@@ -444,6 +483,7 @@ impl App {
             text.push_str(&format!("+ {line}\n"));
         }
         text.push_str("\nSPC a y keep · SPC a x reject · ]a next");
+        let text = self.keys_text(&text);
         self.lsp_hover = Some(text);
         self.wake_caret();
     }
@@ -477,6 +517,13 @@ impl App {
     pub(crate) fn agents_toggle_follow(&mut self) {
         self.agents.following = !self.agents.following;
         self.agents.followed = None;
-        self.set_message(if self.agents.following { "following the agent: the pane beside it shows where it works" } else { "not following the agent" });
+        self.agents.followed_call = None;
+        let message = match (self.agents.following, self.agents_follow_pane().is_some()) {
+            (false, _) => "not following the agent",
+            (true, true) => "following the agent: the pane beside it shows where it works",
+            // Nothing to show it in: the dock has the window.
+            (true, false) => "following the agent -- once there's a pane beside the dock to show it in (SPC w v)",
+        };
+        self.set_message(message);
     }
 }

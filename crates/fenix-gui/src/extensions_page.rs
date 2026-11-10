@@ -11,9 +11,9 @@
 //! changes and screenshots with them, in the reading view. Only the rows
 //! that fit are laid out, so hundreds are as quick as ten.
 //!
-//! The welcome (`SPC h w`, and a fresh install's first screen) is the
-//! bundles alone: the registry's, or -- until it's read, or when it
-//! can't be -- `FALLBACK_BUNDLES`.
+//! The packs view (`extensions.welcome`, the welcome's Extensions step)
+//! is the bundles alone: the registry's, or -- until it's read, or when
+//! it can't be -- `FALLBACK_BUNDLES`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use fenix_extensions::manifest::CATEGORIES;
 use fenix_extensions::registry::{Index, Listing};
 use fenix_extensions::{Permissions, Runtime};
 
-use crate::page::{Chip, fit, frame, wrap, Filter, Grid, ImageKey, Key, Page, Role};
+use crate::page::{fit, frame, wrap, Filter, Grid, ImageKey, Key, Page, Role};
 
 /// A bundle Fenix knows without the registry: the registry's own
 /// (fenix-extensions' `extensions/*-bundle`), as they were when this
@@ -182,10 +182,6 @@ pub enum Action {
     SwitchBundle { on: bool, members: Vec<String>, install: Option<String> },
     /// Say this on the page.
     Say(String),
-    /// The welcome's `t`: the tutorial.
-    Tutorial,
-    /// The welcome's `v` and `s`: edit with Vim keys or standard keys.
-    KeyScheme(&'static str),
 }
 
 /// What `d` shows the details of.
@@ -272,8 +268,6 @@ const LIST_TOP: usize = 7;
 pub struct ExtensionsPage {
     /// The welcome: bundles alone, no tabs.
     pub welcome: bool,
-    /// The key scheme in use (`editor.keys`), for the welcome's question.
-    pub keys: &'static str,
     pub tab: Tab,
     /// The category the list keeps to (`other` for none of the page's);
     /// none, every one.
@@ -307,7 +301,6 @@ impl ExtensionsPage {
     pub fn new() -> Self {
         ExtensionsPage {
             welcome: false,
-            keys: "vim",
             tab: Tab::Installed,
             category: None,
             sidebar: false,
@@ -678,9 +671,6 @@ impl ExtensionsPage {
                 Action::None
             }
             Key::Char('r') => Action::Refresh,
-            Key::Char('t') if self.welcome => Action::Tutorial,
-            Key::Char('v') if self.welcome => Action::KeyScheme("vim"),
-            Key::Char('s') if self.welcome => Action::KeyScheme("standard"),
             Key::Char('d') => match entry {
                 Some(Entry::Installed(i)) => Action::Details(Target::Installed(self.installed[i].id.clone())),
                 Some(Entry::Available(i)) => self.available().get(i).map_or(Action::None, |r| Action::Details(Target::Available(r.id.clone()))),
@@ -925,7 +915,7 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
     let welcome = page.welcome;
     let (left, width) = frame(cols, if welcome { 100 } else { 160 });
     let mut g = Grid::new();
-    let end = g.put(1, left, if welcome { "Welcome to Fenix" } else { "Extensions" }, Role::Title);
+    let end = g.put(1, left, if welcome { "Extension packs" } else { "Extensions" }, Role::Title);
     let plain = |r: &&InstalledRow| r.runtime != Some(Runtime::Bundle);
     let status = if welcome {
         String::new()
@@ -934,7 +924,7 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         format!("{on} of {} on", page.installed.iter().filter(plain).count())
     };
     // What the page is, when there's room for it before the status.
-    let subtitle = if welcome { "· pick what you'll use" } else { "· installed and in the registry" };
+    let subtitle = if welcome { "· extensions that go together" } else { "· installed and in the registry" };
     if end + 2 + subtitle.chars().count() + 2 + status.chars().count() <= left + width {
         g.put(1, end + 2, subtitle, Role::Muted);
     }
@@ -993,25 +983,8 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
             g.put(3 + i, left, line, note_role);
             welcome_top = 3 + i + 2;
         }
-        let x = g.put(welcome_top - 1, left, "New to Fenix's keys? ", Role::Text);
-        let x = g.put(welcome_top - 1, x, "t", Role::Accent);
-        g.put(welcome_top - 1, x, " starts the tutorial, a lesson at a time (SPC h T later).", Role::Text);
-        // How you edit: asked once, here; SPC t k switches later.
-        // Each answer on a line of its own, so a narrow pane cuts neither.
-        let standard = page.keys == "standard";
-        g.put(welcome_top, left, "How do you like to edit?", Role::Text);
-        for (key, what, on) in [(" v ", "Vim keys: modes, and Space for the rest", !standard), (" s ", "Standard keys: an IDE's, and Ctrl+K for the rest", standard)] {
-            welcome_top += 1;
-            let x = g.chip(welcome_top, left + 2, key, Role::Accent, if on { Chip::Chosen } else { Chip::Key });
-            g.put(welcome_top, x + 1, &fit(what, width.saturating_sub(x + 1 - left)), if on { Role::Text } else { Role::Muted });
-        }
-        welcome_top += 1;
-        if standard && cfg!(target_os = "linux") {
-            for line in wrap("Alt+click adds a cursor; if your desktop moves windows with Alt+drag, set editor.multi_cursor_modifier to ctrl (SPC ,).", width) {
-                g.put(welcome_top, left, &line, Role::Muted);
-                welcome_top += 1;
-            }
-        }
+        let x = g.put(welcome_top - 1, left, "All the extensions: ", Role::Muted);
+        g.put(welcome_top - 1, x, "SPC h x", Role::Accent);
         welcome_top += 1;
     } else {
         g.put(4, left, &fit(&note, width), note_role);
@@ -1204,10 +1177,7 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
             (_, Tab::Browse) => "install",
         };
         let mut keys = vec![("Enter", enter)];
-        if welcome {
-            keys.push(("t", "tutorial"));
-            keys.push(("v s", "Vim / standard keys"));
-        } else {
+        if !welcome {
             keys.extend([("Tab", "next tab"), ("d", "details"), ("/", "search"), ("h l", "categories")]);
         }
         if page.installed.iter().any(|r| page.update_of(r).is_some()) {
@@ -1678,7 +1648,7 @@ mod tests {
     fn the_welcomes_bundles_are_fenixs_own_until_the_registry_is_read() {
         let mut p = ExtensionsPage::welcome();
         let text = layout(&p, 120).all_text();
-        assert!(text.contains("Welcome to Fenix") && text.contains("Looking at the registry") && !text.contains("Browse"), "{text}");
+        assert!(text.contains("Extension packs") && text.contains("Looking at the registry") && !text.contains("Browse"), "{text}");
         assert_eq!(p.bundles().iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Personal", "Mission", "Review", "Jira", "Lab", "Python", "Reading"]);
         p.focus = 1;
         let mission: Vec<String> = ["fenix.mib", "fenix.ccsds", "fenix.tcl"].map(String::from).to_vec();
@@ -1692,19 +1662,6 @@ mod tests {
         assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: false, members: mission, install: None }, "all on: off again");
         p.registry = Registry::Failed("offline".into());
         assert!(layout(&p, 120).all_text().contains("offline -- r tries again. These are the bundles this Fenix knows"));
-    }
-
-    /// The welcome offers the tutorial; the Extensions page's `t` is
-    /// nothing.
-    #[test]
-    fn the_welcome_offers_the_tutorial() {
-        let mut p = ExtensionsPage::welcome();
-        let text = layout(&p, 120).all_text();
-        assert!(text.contains("New to Fenix's keys? t starts the tutorial") && text.contains("t tutorial"), "{text}");
-        assert_eq!(p.key(Key::Char('t')), Action::Tutorial);
-        let mut e = ExtensionsPage::new();
-        assert!(!layout(&e, 160).all_text().contains("tutorial"));
-        assert_eq!(e.key(Key::Char('t')), Action::None);
     }
 
     /// Read, the registry's bundles take the place of Fenix's own:
@@ -1746,15 +1703,5 @@ mod tests {
         assert_eq!(excerpt("## 2.0.0\n- New\n## 1.0.0", true, 8), ["2.0.0", "- New"], "no title");
     }
 
-    #[test]
-    fn the_welcome_asks_how_you_edit_and_v_and_s_answer() {
-        let mut p = ExtensionsPage::welcome();
-        let text = layout(&p, 120).all_text();
-        assert!(text.contains("How do you like to edit?") && text.contains("Vim keys") && text.contains("Standard keys"), "{text}");
-        assert_eq!(p.key(Key::Char('s')), Action::KeyScheme("standard"));
-        assert_eq!(p.key(Key::Char('v')), Action::KeyScheme("vim"));
-        let mut list = ExtensionsPage::new();
-        assert_ne!(list.key(Key::Char('s')), Action::KeyScheme("standard"), "only the welcome asks");
-    }
 
 }

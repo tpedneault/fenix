@@ -50,6 +50,15 @@ pub struct Status {
     /// How a code block in what the agent says is coloured: per line,
     /// (columns, capture name). None: plain.
     pub highlight: Option<Highlight>,
+    /// The thread's project: a path in it is shown from there.
+    pub root: Option<std::path::PathBuf>,
+}
+
+/// A path the agent named, shorter: from the project when it's in it,
+/// else from `~`, else whole.
+fn short_path(status: &Status, path: &str) -> String {
+    let path = std::path::Path::new(path);
+    status.root.as_deref().and_then(|root| crate::page::path_within(root, path)).unwrap_or_else(|| crate::page::home_relative(path))
 }
 
 /// A code block's colours by its language: per line, (columns, capture).
@@ -610,9 +619,10 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                     y += 1;
                 }
                 if let Some(l) = call.locations.first() {
+                    let shown = short_path(status, &l.path);
                     let place = match l.line {
-                        Some(line) => format!("{}:{line}", l.path),
-                        None => l.path.clone(),
+                        Some(line) => format!("{shown}:{line}"),
+                        None => shown,
                     };
                     g.put(y, left + 3, &fit(&place, inner.saturating_sub(1)), Role::Accent);
                     y += 1;
@@ -621,7 +631,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                     for content in &call.content {
                         match content {
                             ToolContent::Diff { path, old_text, new_text } => {
-                                g.put(y, left + 3, &fit(path, inner.saturating_sub(1)), Role::Muted);
+                                g.put(y, left + 3, &fit(&short_path(status, path), inner.saturating_sub(1)), Role::Muted);
                                 y += 1;
                                 for line in diff_lines(old_text.as_deref().unwrap_or(""), new_text).iter().take(60) {
                                     let role = match line.chars().next() {
@@ -852,6 +862,17 @@ mod tests {
 
     fn status() -> Status {
         Status { agent: "Claude Code".into(), state: "ready".into(), ..Status::default() }
+    }
+
+    /// A tool card names a file in the project from the project, not the
+    /// whole path the agent gave.
+    #[test]
+    fn a_tool_cards_path_is_from_the_project() {
+        let t = thread();
+        let page = AgentPage::new(ThreadId("x".into()));
+        let status = Status { root: Some(std::path::PathBuf::from("/p")), ..status() };
+        let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status, 100).all_text();
+        assert!(text.contains("src/parse.rs:2") && !text.contains("/p/src/parse.rs"), "{text}");
     }
 
     #[test]
