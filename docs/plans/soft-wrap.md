@@ -1,0 +1,168 @@
+# Plan: soft wrap
+
+- **Status:** in progress, for the release after 1.5 (issue #107).
+- **Scope:** a line wider than its pane goes on under itself, per buffer,
+  with a default in settings; the agents' compose pane wraps. The row
+  model it brings is also what code lens (#106) needs: rows in a pane
+  that aren't lines of the buffer.
+- **Lands as:** the stages in §4, each compiling and passing with wrap
+  off behaving exactly as before.
+
+## 1. What it is
+
+- A line wider than its pane continues on the next rows, broken after
+  the last whitespace that fits (in the middle of a word only when the
+  word alone is wider), at the pane's real width: a resize or a split
+  wraps again.
+- `view.toggle_wrap` (`SPC t w`; Alt+Z with standard keys) turns it on
+  or off for the buffer in front. `editor.wrap` is the default, with a
+  list of languages that wrap whatever it says (Markdown, plain text)
+  and one of those that never do.
+- An agent's prompt (a `Prompt` buffer) wraps by default.
+- A continuation row keeps the line's indent (at most half the pane);
+  the gutter's number, signs and fold marker are on the line's first row
+  only.
+- Movement follows the screen where the scheme expects it: `gj`/`gk`
+  (new) by row and `j`/`k` by line with Vim keys; Up/Down by row with
+  standard keys and in Insert; Home and End go to the row's ends first,
+  then the line's.
+- Never wrapped: tables, diffs, merges, Git pages, the graph, terminals,
+  pages and Home (already laid out to their pane), and a side-by-side
+  pane (its filler rows need a row per line).
+
+## 2. Where Fenix stands (1.5)
+
+One screen row per display line. A pane's rows are
+`pane_display_lines(pane, buffer) -> Vec<usize>` (`app/side_by_side.rs`):
+the buffer's lines with folds applied (`folded_display_lines`,
+`app/editor_ui.rs`) and, side by side, `FILLER` rows. `PaneState`
+(`app.rs`) keeps `scroll_line` (an index into the display lines),
+`rendered_scroll` (eased, in display lines) and `scroll_col`. Everything
+that draws or hit-tests does its own `line - render_base_line` and
+`col - scroll_col`:
+
+- drawing: `content_spans_decorated` (gutter on every row, one string
+  with `\n` between rows), `folded_content_spans`,
+  `syntax_highlights_from_column`, the per-pane block of `redraw`
+  (`col_maps` by row, indent guides, `remap_col` / `remap_segments`,
+  three branches for overlays depending on folds, `render_base_override`);
+- overlays: `visual_selection_segments`, `range_to_segments`,
+  `bracket_match_segments`, `hlsearch_segments`, `focused_caret`,
+  `pulse_overlay`, `change_overlays`, `beacon_row`, debug and Git marks,
+  todo tints, `polish_pane` (problems, rainbow brackets, selection
+  dots), sticky headers;
+- hit-testing: `text_hit` (`app/mouse.rs`), `fold_marker_click`,
+  `decoration_click`, `cell_at`, the layers' `GeoPane`;
+- scrolling: `ensure_cursor_visible`, `reveal_cursor`, `search_reveal`,
+  `reveal_lines`, `scroll_window_at` (`zt`/`zz`/`zb`),
+  `scroll_unfocused_pane`, `scroll_focused_pane`, PageUp/PageDown,
+  `update_rendered_scroll`, the overview ruler (`ruler_for`,
+  `ruler_click`);
+- motion: `fenix-vim`'s `motion::vertical`, `state/standard.rs`'s
+  `Move::Up/Down/Home/End`, Insert's arrows, `Buffer::move_vertical`;
+  the GUI only gets `VimEvent`s back, there is no callback into it.
+
+A code pane is a grid of cells: a column per char after tabs are
+expanded and decorations laid out, wide characters included. `redraw`
+returns early with no GPU, so its per-pane block is tested through its
+pieces.
+
+There is no `gj`/`gk`, no `H`/`M`/`L`, no Ctrl+F/B/D/U, no scrollbar
+beyond the overview ruler, no inlay hints from language servers, and no
+per-language or per-buffer editor option yet.
+
+## 3. Design
+
+### Rows
+
+`app/rows.rs`:
+
+```rust
+enum RowKind { Text, Filler, Virtual(u32) }
+struct Row { line: usize, kind: RowKind, cols: Range<usize>, indent: usize, first: bool, last: bool }
+```
+
+`cols` are visual columns of the line's display text (tabs expanded,
+decorations laid out); `indent` is what a continuation row is pushed in
+by. A `RowMap` holds a pane's rows for a frame and is the only
+translator between the text and the screen:
+
+- `locate(line, col) -> Option<(row, x)>`: where a column is drawn;
+- `segments(line, cols) -> [(row, x0, x1)]`: a range on a line, split
+  across its rows;
+- `at(row, x) -> (line, col)`: what's under a cell;
+- `first_row(line)`, `rows_of(line)`.
+
+With wrap off every line has one row with `cols = 0..` and the map is
+what `line - render_base_line` was.
+
+### Breaking
+
+`wrap::break_line(display, width, indent) -> Vec<Range<usize>>`, pure:
+break after the last whitespace that fits, hard-break a longer word; a
+continuation's indent is `min(leading, width / 2)`. A column per char,
+to agree with the caret. A line past the highlighter's long-line limit
+breaks arithmetically (row k is `k*w..(k+1)*w`), so its rows cost
+nothing to find.
+
+### Scroll position
+
+`scroll_line` stays an index into the display lines and gains
+`scroll_row`: how many of that line's rows are above the top. Never a
+global row index: that needs the whole file laid out and moves at every
+resize. Layout is the visible rows and a bounded walk from the anchor;
+nothing counts the rows of a whole buffer. The overview ruler stays in
+lines. A wrapped pane's vertical scroll snaps (no easing) at first.
+
+### Choke points
+
+1. `App::wrap_cols(pane, buffer) -> Option<usize>`: `None` and every
+   path is as before. It needs the pane's width in columns outside
+   `redraw`: kept per pane from the last frame and the `*_at` functions,
+   with a setter for tests.
+2. `App::pane_rows(pane, buffer, top, count) -> RowMap`.
+3. `App::row_step(pane, buffer, (line, row), ±n)` and
+   `rows_from_top(pane, cursor, cap)`, for all scrolling.
+4. `fenix_vim::ScreenRows` (`row_move`, `row_bounds`): `handle_key`
+   delegates to `handle_key_with(…, &dyn ScreenRows)` with a no-wrap
+   one; the GUI passes a snapshot (width, tab stops, decorations) that
+   doesn't borrow `App`. A `goal_x` beside `sticky_col`, cleared by any
+   other motion.
+
+### What is hard
+
+- A selection (Char, Line, Block) and every overlay split across rows.
+- Following the cursor inside a line taller than the pane.
+- A decoration that changes width when the cursor enters its line
+  re-breaks the line under the caret.
+- What is added at a line's end (a problem's message, `⋯ N lines`) goes
+  on the last row; sticky headers are off in a wrapped pane at first.
+
+## 4. Stages
+
+1. **The row map, one row per line.** `rows.rs`; the segment functions
+   return line-space segments, mapped once; `text_hit`,
+   `fold_marker_click`, `decoration_click`, the overlays and
+   `polish_pane` go through it. Selections, extra cursors and the change
+   pulse are then drawn with a fold closed too.
+2. **Breaking and drawing.** `break_line`, `wrap_cols`, a per-buffer
+   flag and `view.toggle_wrap` (unbound); rows drawn with the gutter
+   once, the indent, guides, the fold's and the problem's text on the
+   last row; highlights by a row's columns; `scroll_col` held at 0;
+   `scroll_row`.
+3. **Everything mapped.** The caret and popups, selections, search hits,
+   brackets, the pulse, underlines, decoration marks, tints, Git and
+   debug marks (first row); click, drag and hover; the layers' geometry.
+4. **Scrolling.** Follow-cursor, reveal, `zt`/`zz`/`zb`, the wheel on a
+   focused and an unfocused pane, PageUp/PageDown by the pane's rows,
+   drag-scroll, the reload clamp, the ruler's band.
+5. **Motion.** `ScreenRows`; `gj`/`gk` with counts, operators and
+   Visual; Up/Down by row and Home/End by row then line with standard
+   keys and in Insert; the extra cursors' replay.
+6. **Settings and keys.** `editor.wrap` and the per-language lists;
+   `Prompt` buffers on; `SPC t w` and Alt+Z; CONFIGURATION, KEYBINDINGS,
+   FEATURES.
+7. **Hardening, and rows that aren't lines.** The break cache, the
+   long-line path, a million-line file with wrap on; a
+   `RowKind::Virtual` row above a line that scrolling, hit-testing and
+   the caret step over, ready for code lens.
