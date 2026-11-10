@@ -362,7 +362,12 @@ impl App {
     pub(crate) fn caret_mark(&self) -> Option<CaretMark> {
         let buffer = self.focused_buffer_id();
         let edits = self.buffers.get(buffer)?.buffer.edit_count();
-        Some(CaretMark { buffer, pane: self.focused_pane_id(), edits, primary: self.primary_caret(), extra: self.extra_carets().to_vec() })
+        // A linewise selection as the text it holds: carets are charwise.
+        let primary = match (self.vim.mode() == Mode::Visual && self.vim.visual_kind() == VisualKind::Line).then(|| self.selection_or_word()).flatten() {
+            Some((range, false)) => Caret { at: range.end, sticky: self.cursor().sticky_col, anchor: Some(range.start) },
+            _ => self.primary_caret(),
+        };
+        Some(CaretMark { buffer, pane: self.focused_pane_id(), edits, primary, extra: self.extra_carets().to_vec() })
     }
 
     /// After a key (or a click) that may have moved the cursors: where
@@ -390,8 +395,11 @@ impl App {
     /// before the last move, or before the last cursor was added.
     pub(crate) fn cmd_cursor_undo(&mut self) {
         let Some(now) = self.caret_mark() else { return };
-        while let Some(mark) = self.caret_marks.pop() {
-            if mark.buffer != now.buffer || mark.pane != now.pane || mark.edits != now.edits || (mark.primary, &mark.extra) == (now.primary, &now.extra) {
+        // The latest of this buffer's and pane's: the others' are kept for
+        // when you're back in them.
+        while let Some(i) = self.caret_marks.iter().rposition(|m| m.buffer == now.buffer && m.pane == now.pane) {
+            let mark = self.caret_marks.remove(i);
+            if mark.edits != now.edits || (mark.primary, &mark.extra) == (now.primary, &now.extra) {
                 continue;
             }
             self.caret_undoing = true;

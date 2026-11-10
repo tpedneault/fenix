@@ -19605,6 +19605,13 @@ impl App {
     /// (which no headless test ever constructs), so it's directly
     /// testable the same way `frame_geometry` already is.
     fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        // A click that moves the cursors is a move Ctrl+U takes back.
+        let before = self.caret_mark();
+        self.handle_click_at_inner(pos, window_width, window_height);
+        self.note_caret_move(before);
+    }
+
+    fn handle_click_at_inner(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         if self.click_breadcrumb(&geometry, pos) { return }

@@ -490,3 +490,58 @@ fn the_line_commands_are_vim_s_own_keys_with_vim_keys() {
     assert_eq!(app.text(), before, "Ctrl+L is still Vim's");
     assert_ne!(app.vim.mode(), Mode::Visual, "nothing selected");
 }
+
+#[test]
+fn ctrl_shift_brackets_close_and_open_the_fold() {
+    let (mut app, _f) = standard_on("a.rs", "fn a() {\n    x();\n}\n");
+    app.press("Down");
+    app.press("C-{");
+    let id = app.focused_buffer_id();
+    assert!(app.code_folds.get(&id).is_some_and(|f| !f.is_empty()), "closed");
+    app.press("C-}");
+    assert!(app.code_folds.get(&id).is_none_or(|f| f.is_empty()), "open again");
+}
+
+#[test]
+fn ctrl_shift_backslash_is_a_jump_ctrl_o_comes_back_from() {
+    let (mut app, _f) = standard_on("a.txt", "(ab\ncd)");
+    app.press("C-|");
+    assert_eq!(app.line_col(), (1, 2), "to the pair");
+    app.run_cmd("nav.jump_back");
+    assert_eq!(app.line_col(), (0, 0), "back");
+}
+
+#[test]
+fn a_whole_selection_is_its_lines_to_every_line_command() {
+    let (mut app, _f) = standard_on("a.txt", "a\nb");
+    app.press_all("C-a C-S-k");
+    assert_eq!(app.text(), "", "Ctrl+A: both lines, the last with no break");
+    let (mut app, _f) = standard_on("a.txt", "one\ntwo\nthree\nfour\n");
+    app.press_all("Down C-l M-Down");
+    assert_eq!(app.text(), "one\nthree\ntwo\nfour\n", "Ctrl+L then Alt+Down moves its one line");
+    let (mut app, _f) = standard_on("a.txt", "ab\ncd\n");
+    app.press_all("C-l C-]");
+    assert_eq!(app.text(), "    ab\ncd\n", "and Ctrl+] indents one");
+}
+
+#[test]
+fn ctrl_u_keeps_each_buffer_s_moves_and_takes_back_a_click_s() {
+    let (mut app, _f) = standard_on("a.txt", "abc\n");
+    let a = app.focused_buffer_id();
+    app.press_all("Right Right");
+    app.run_cmd("buffer.scratch");
+    app.press("C-u");
+    assert!(app.modeline_text().contains("no cursor move"), "{}", app.modeline_text());
+    app.switch_focused_to_buffer(a);
+    app.press("C-u");
+    assert_eq!(app.line_col(), (0, 1), "a's moves were kept");
+}
+
+#[test]
+fn the_new_commands_run_from_the_palette_too() {
+    let (mut app, _f) = standard_on("a.txt", "x\n");
+    for id in ["git.open", "code.problems", "code.project_symbols", "edit.cursor_undo", "nav.matching_bracket", "code.fold", "code.unfold"] {
+        app.run_cmd(id);
+        app.active_picker = None;
+    }
+}
