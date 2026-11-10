@@ -523,11 +523,15 @@ impl App {
         }
         for (id, decorations) in found {
             stale.retain(|s| *s != id);
+            self.wasm.decorations_rev += 1;
+
             let sets = self.wasm.decorations.entry(id).or_default();
             sets.retain(|(who, _)| who != DEBUG_DECORATIONS);
             sets.push((DEBUG_DECORATIONS.to_string(), decorations));
         }
         for id in stale {
+            self.wasm.decorations_rev += 1;
+
             if let Some(sets) = self.wasm.decorations.get_mut(&id) {
                 sets.retain(|(who, _)| who != DEBUG_DECORATIONS);
             }

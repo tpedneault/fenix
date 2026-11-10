@@ -379,17 +379,34 @@ stage by stage.
   rows without another parameter through every key handler. The GUI's
   is `PaneRows`, a snapshot of the focused pane's width, tab stops and
   decorations that doesn't borrow `App`.
-- The goal cell is `(char, x)`: kept by a move by row, and forgotten
-  by any other move, which leaves the cursor on another char, so
-  nothing has to clear it.
+- The goal cell is kept for each cursor (the char it's on, and the
+  cell), so extra cursors each keep their own, and only from one key to
+  the next: `VimState::begin_key`, called for every key routed, makes
+  the cells the last key kept the ones kept now, and a key that moved
+  no cursor by row (`h`, `x`, an undo, a switch of buffer) forgets them
+  -- unless it only began a command (`g`, a count), whose next key goes
+  on with them.
 - `Motion::ScreenDown` / `ScreenUp` (`gj`, `gk`, `g<Down>`, `g<Up>`) in
   Normal, Visual (Block too) and after an operator: charwise and
   exclusive, as Vim's, with a count; never onto the empty line after a
   last newline; without wrap, the line motions.
 - Up and Down with standard keys and in Insert go by rows. Home and End
   go to the row's ends first, then the line's: End on a row before the
-  line's last goes to that row's last char, since the place after it
-  is drawn at the next row's start.
+  line's last that ends in a blank goes after its last word (the blank's
+  place, where typing goes on with that word); on a row ending inside a
+  word broken by the row, to that row's last char, since the place after
+  it is drawn at the next row's start. Shift+End selects to there.
+- `gj` on the last row, or a count of them past it, stops on the last
+  row there is, as `j` does: never onto the empty line after a last
+  newline (a row back from it, at the same cell).
+- The rows are set (`sync_screen_rows`) and the cells kept rotate
+  (`begin_key`) where every key is routed, `route_keypress`: a macro or
+  `.` that goes to another pane moves by that pane's rows. In a
+  picker, the sidebar or a terminal they're a row a line. The rows'
+  copy of the buffer's decorations is shared from key to key while
+  `decorations_rev` (bumped wherever an extension's or the debugger's
+  decorations change) says they haven't, and a line is broken only as
+  far as the rows a move needs.
 - PageUp/PageDown in a wrapped pane move the cursor by the pane's rows
   less one (`VimState::move_rows`; twenty rows without a window).
 - Adding a cursor above or below (Ctrl+Alt+Up/Down) stays by line; the

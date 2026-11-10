@@ -520,7 +520,7 @@ pub struct VimState {
     /// The focused pane's rows, for `gj`/`gk` and the arrows by row
     /// (`set_screen_rows`), and the cell a run of moves by row keeps to.
     screen: std::sync::Arc<dyn crate::screen::ScreenRows>,
-    row_goal: std::cell::Cell<Option<(usize, usize)>>,
+    row_goals: crate::screen::Goals,
 
     normal_matcher: Matcher<'static, VimAction>,
     visual_matcher: Matcher<'static, VisualAction>,
@@ -585,7 +585,7 @@ impl VimState {
             syntax_indent: None,
             iskeyword_extra: crate::charclass::DEFAULT_ISKEYWORD_EXTRA.to_vec(),
             screen: std::sync::Arc::new(crate::screen::LineRows),
-            row_goal: std::cell::Cell::new(None),
+            row_goals: crate::screen::Goals::default(),
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
             pending_matcher: keymaps::pending_trie().matcher(),
@@ -1024,7 +1024,31 @@ impl VimState {
     }
 
     fn screen(&self) -> crate::screen::Screen<'_> {
-        crate::screen::Screen { rows: &*self.screen, goal: &self.row_goal }
+        crate::screen::Screen { rows: &*self.screen, goals: &self.row_goals }
+    }
+
+    /// A key is coming, for every cursor at once: the cells the last
+    /// key's moves by row kept are the ones kept now, and a key that
+    /// moved no cursor by row forgets them -- unless it only began a
+    /// sequence (`g`, a count), whose next key goes on with them.
+    pub fn begin_key(&self) {
+        let keeping = std::mem::take(&mut *self.row_goals.keeping.borrow_mut());
+        if keeping.is_empty() && self.has_pending_input() {
+            return;
+        }
+        *self.row_goals.kept.borrow_mut() = keeping;
+    }
+
+    /// Whether the keys so far are the start of a command.
+    fn has_pending_input(&self) -> bool {
+        matches!(self.mode, Mode::Normal | Mode::Visual)
+            && (self.count.is_some()
+                || self.pending_op.is_some()
+                || self.pending_prefix.is_some()
+                || self.active_register.is_some()
+                || self.normal_matcher.is_pending()
+                || self.visual_matcher.is_pending()
+                || self.pending_matcher.is_pending())
     }
 
     /// PageUp/PageDown in a wrapped pane: `cursor` `delta` rows on, as
@@ -1057,13 +1081,20 @@ impl VimState {
     }
 
     /// End on a wrapped line's row before its last, the cursor not
-    /// already at its end: the row's last char (the place after it is
-    /// the next row's start). `None` otherwise, for the line's own End.
+    /// already there: after the row's last word when the row ends in
+    /// blanks (where typing goes on with that word), else the row's last
+    /// char (the place after it is the next row's start). `None`
+    /// otherwise, for the line's own End.
     pub(crate) fn row_end(&self, buffer: &Buffer, at: usize) -> Option<usize> {
         let row = self.screen.row_bounds(buffer, at)?;
         let line = buffer.rope().char_to_line(at.min(buffer.len_chars()));
+        if row.end >= buffer.line_start_char(line) + buffer.line_len(line) {
+            return None;
+        }
+        let blank = |i: usize| buffer.char_at(i).is_some_and(char::is_whitespace);
         let last = row.end.checked_sub(1)?;
-        (row.end < buffer.line_start_char(line) + buffer.line_len(line) && at < last).then_some(last)
+        let to = if blank(last) { (row.start..row.end).rev().find(|&i| !blank(i)).map_or(row.start, |i| i + 1) } else { last };
+        (at < to).then_some(to)
     }
 
     pub fn handle_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
@@ -3349,7 +3380,16 @@ fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, isk
     // a line's last, as `j`/`k`).
     if matches!(m, Motion::ScreenDown | Motion::ScreenUp) {
         let delta = count.max(1) as isize * if m == Motion::ScreenDown { 1 } else { -1 };
-        if let Some((to, x)) = screen.step(buffer, cursor.char_idx, delta) {
+        // Not onto the empty line after a last newline, as `j` won't: a
+        // row less, and from the last row no move at all.
+        let past = |to: usize| buffer.rope().char_to_line(to.min(buffer.len_chars())) >= buffer.visual_line_count();
+        let step = match screen.step(buffer, cursor.char_idx, delta) {
+            // Onto that empty line: a row back from it, at the same cell,
+            // is the last row there is.
+            Some((to, x)) if delta > 0 && past(to) => screen.rows.row_move(buffer, to, -1, Some(x)),
+            other => other,
+        };
+        if let Some((to, x)) = step {
             // Not onto the empty line after a last newline, as `j` won't.
             let line = buffer.rope().char_to_line(to.min(buffer.len_chars())).min(buffer.visual_line_count().saturating_sub(1));
             let to = to.min(buffer.line_start_char(line) + buffer.line_len(line));
@@ -3380,8 +3420,8 @@ fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, isk
 fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u32, iskeyword_extra: &[char], screen: &crate::screen::Screen) -> usize {
     let mut probe = *cursor;
     // An operator's range is only looked at: it keeps no goal cell.
-    let goal = std::cell::Cell::new(screen.goal.get());
-    apply_motion(buffer, &mut probe, m, count, iskeyword_extra, &crate::screen::Screen { rows: screen.rows, goal: &goal });
+    let goals = crate::screen::Goals { kept: std::cell::RefCell::new(screen.goals.kept.borrow().clone()), keeping: std::cell::RefCell::new(screen.goals.keeping.borrow().clone()) };
+    apply_motion(buffer, &mut probe, m, count, iskeyword_extra, &crate::screen::Screen { rows: screen.rows, goals: &goals });
     probe.char_idx
 }
 

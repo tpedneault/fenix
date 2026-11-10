@@ -5230,6 +5230,9 @@ pub struct App {
     /// Buffers whose wrap was turned on or off (`view.toggle_wrap`),
     /// whatever the default for them is.
     wrap_overrides: HashMap<BufferId, bool>,
+    /// The focused buffer's decorations as moves by row see them, and the
+    /// `decorations_rev` they were copied at.
+    screen_decorations: Option<(BufferId, u64, std::sync::Arc<Vec<crate::decorations::Decoration>>)>,
     /// The columns of text each pane had room for at the last frame:
     /// what its lines wrap at.
     pane_text_cols: HashMap<fenix_window::WindowId, usize>,
@@ -6216,6 +6219,7 @@ impl App {
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
             wrap_overrides: HashMap::new(),
+            screen_decorations: None,
             pane_text_cols: HashMap::new(),
             fold_levels: HashMap::new(),
             notifications: crate::notify::Center::new(),
@@ -16448,8 +16452,6 @@ impl App {
         self.change_capture.push(keypress);
         let before = self.motion_before_key();
         let carets_before = self.caret_mark();
-        // What a move by row goes by: the focused pane's rows now.
-        self.sync_screen_rows();
         self.route_keypress(keypress, event_loop);
         // And whatever the key itself did that wasn't theirs (an undo).
         self.follow_outside_edits();
@@ -16471,6 +16473,12 @@ impl App {
 
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         let _profile = crate::profile::Scope::new("route_keypress");
+        // What a move by row goes by: the focused pane's rows now, for a
+        // key typed and for each a macro or `.` plays (which may have
+        // gone to another pane); and the cells the last key's moves by
+        // row kept.
+        self.sync_screen_rows();
+        self.vim.begin_key();
         // Everything but the chords reads keys as it always has, without
         // Shift (see `KeyPress::legacy`).
         // Standard keys in a listing: F2 renames and Delete deletes, as

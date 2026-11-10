@@ -4,7 +4,7 @@
 //! pane's width; the editor tells it (`VimState::set_screen_rows`), and
 //! without wrap a row is a line and these motions are the line ones.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::ops::Range;
 
 use fenix_core::Buffer;
@@ -32,25 +32,34 @@ impl ScreenRows for LineRows {
     }
 }
 
-/// The rows to move by, and the cell a run of moves by row keeps to
-/// (`goal`: the char it was kept for, and the cell), as the sticky
-/// column is kept for `j`/`k`. Any other move leaves the cursor
-/// elsewhere, which forgets it.
+/// The cells runs of moves by row keep to, as the sticky column is kept
+/// for `j`/`k`: one for each cursor (the char it's on, and the cell),
+/// the last key's (`kept`) and this key's (`keeping`). A key that moves
+/// no cursor by row forgets them (`VimState::begin_key`).
+#[derive(Default)]
+pub(crate) struct Goals {
+    pub kept: RefCell<Vec<(usize, usize)>>,
+    pub keeping: RefCell<Vec<(usize, usize)>>,
+}
+
+/// The rows to move by, and the cells kept.
 pub(crate) struct Screen<'a> {
     pub rows: &'a dyn ScreenRows,
-    pub goal: &'a Cell<Option<(usize, usize)>>,
+    pub goals: &'a Goals,
 }
 
 impl Screen<'_> {
-    /// Where `delta` rows from `at` is, at the goal cell: the char and
-    /// the cell. `None` when a row is a line.
+    /// Where `delta` rows from `at` is, at the cell the cursor on `at`
+    /// kept: the char and the cell. `None` when a row is a line.
     pub(crate) fn step(&self, buffer: &Buffer, at: usize, delta: isize) -> Option<(usize, usize)> {
-        let x = self.goal.get().filter(|&(was, _)| was == at).map(|(_, x)| x);
+        let x = self.goals.keeping.borrow().iter().chain(self.goals.kept.borrow().iter()).find(|(was, _)| *was == at).map(|&(_, x)| x);
         self.rows.row_move(buffer, at, delta, x)
     }
 
-    /// The goal cell `x` kept, the cursor now on `at`.
+    /// The cell `x` kept for the cursor now on `at`.
     pub(crate) fn keep(&self, at: usize, x: usize) {
-        self.goal.set(Some((at, x)));
+        let mut keeping = self.goals.keeping.borrow_mut();
+        keeping.retain(|(was, _)| *was != at);
+        keeping.push((at, x));
     }
 }

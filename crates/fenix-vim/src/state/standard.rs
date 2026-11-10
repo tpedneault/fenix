@@ -259,9 +259,9 @@ impl VimState {
                 return;
             }
             // A wrapped line's row's start first, past its first row.
-            Move::Home if self.row_home(buffer, cursor.char_idx).is_some() => self.row_home(buffer, cursor.char_idx).unwrap_or(cursor.char_idx),
+            Move::Home if let Some(at) = self.row_home(buffer, cursor.char_idx) => at,
             // And its row's end, before its last.
-            Move::End if self.row_end(buffer, cursor.char_idx).is_some() => self.row_end(buffer, cursor.char_idx).unwrap_or(cursor.char_idx),
+            Move::End if let Some(at) = self.row_end(buffer, cursor.char_idx) => at,
             Move::Home => {
                 // The line's first character that isn't a space, then its
                 // very start.
