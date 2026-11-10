@@ -366,6 +366,12 @@ pub fn copy(from: &Path, to: &Path, go_on: &dyn Fn() -> bool) -> io::Result<()> 
     }
     create_dir_all(to)?;
     for entry in list(from)? {
+        // Onto this machine, a name has to be one that stays in the
+        // folder it's put in. What a remote machine calls its files is
+        // its own business there, and not a way to write elsewhere here.
+        if !is_remote(to) && !path::is_local_name(&entry.name) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{:?} in {} can't be a file's name on this machine", entry.name, display(from))));
+        }
         copy(&child(from, &entry.name), &child(to, &entry.name), go_on)?;
     }
     Ok(())
@@ -460,6 +466,63 @@ mod tests {
         copy(&remote("box-copy", "/beside"), &here.path().join("back"), &|| true).unwrap();
         assert_eq!(std::fs::read(here.path().join("back/src/main.rs")).unwrap(), b"fn main() {}");
         assert_eq!(copy(&remote("box-copy", "/up"), &here.path().join("stopped"), &|| false).unwrap_err().kind(), io::ErrorKind::Interrupted);
+    }
+
+    /// A machine that lies about what a folder holds.
+    struct Liar(&'static str);
+
+    impl Remote for Liar {
+        fn home(&self) -> String {
+            "/".into()
+        }
+        fn run(&self, _: &str, _: Run<'_>) -> io::Result<Ran> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+        fn stat(&self, path: &str) -> io::Result<Meta> {
+            let dir = path == "/loot";
+            Ok(Meta { name: "loot".into(), kind: if dir { Kind::Dir } else { Kind::File }, symlink: false, len: 4, version: Version { len: 4, mtime: 0 }, mode: 0o644 })
+        }
+        fn list(&self, _: &str) -> io::Result<Vec<Meta>> {
+            Ok(vec![Meta { name: self.0.into(), kind: Kind::File, symlink: false, len: 4, version: Version { len: 4, mtime: 0 }, mode: 0o644 }])
+        }
+        fn read(&self, path: &str) -> io::Result<(Vec<u8>, Meta)> {
+            Ok((b"evil".to_vec(), self.stat(path)?))
+        }
+        fn write(&self, _: &str, _: &[u8], _: Over) -> io::Result<Meta> {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+        fn rename(&self, _: &str, _: &str, _: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn remove(&self, _: &str, _: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn create_dir(&self, _: &str, _: bool) -> io::Result<()> {
+            Ok(())
+        }
+        fn copy(&self, _: &str, _: &str) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_remote_machine_cannot_name_its_way_out_of_the_folder_copied_into() {
+        let here = tempfile::tempdir().unwrap();
+        let outside = here.path().join("outside.txt");
+        let mut lies = vec!["../outside.txt", "..", "/etc/passwd", "a/b"];
+        if cfg!(windows) {
+            lies.extend(["..\\outside.txt", "C:\\outside.txt", "nul"]);
+        }
+        for (i, lie) in lies.into_iter().enumerate() {
+            let host = format!("liar-{i}");
+            mount(&host, Arc::new(Liar(lie)));
+            let into = here.path().join("into").join(i.to_string());
+            std::fs::create_dir_all(into.parent().unwrap()).unwrap();
+            let refused = copy(&remote(&host, "/loot"), &into, &|| true).unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::InvalidInput, "{lie}: {refused}");
+            assert!(!outside.exists(), "{lie} wrote outside the folder");
+            unmount(&host);
+        }
     }
 
     #[test]

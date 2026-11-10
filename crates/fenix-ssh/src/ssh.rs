@@ -45,6 +45,13 @@ impl Target {
             // and later.
             .args(["-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"])
             .args(&self.options)
+            // The remote machine gets a connection for Fenix's helper and
+            // nothing of this one's: not the agent's keys to use, not a
+            // display to draw on, whatever `~/.ssh/config` says for the
+            // host. (`ssh` keeps the first value it's given, so an option
+            // above, which only a caller of this code can set, still
+            // wins.)
+            .args(["-o", "ForwardAgent=no", "-o", "ForwardX11=no"])
             .arg(&self.host)
             .arg(remote);
         match askpass {
@@ -260,6 +267,17 @@ fn send(helper: &Path, to: &mut impl Write) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_remote_machine_is_given_no_agent_and_no_display() {
+        let command = Target::new("devbox").command("true", None).unwrap();
+        let args: Vec<String> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        let host = args.iter().position(|arg| arg == "devbox").unwrap();
+        for option in ["ForwardAgent=no", "ForwardX11=no"] {
+            let at = args.iter().position(|arg| arg == option).unwrap_or_else(|| panic!("{option} in {args:?}"));
+            assert!(at < host && args[at - 1] == "-o", "{args:?}");
+        }
+    }
 
     #[test]
     fn a_machine_is_matched_to_its_helper() {

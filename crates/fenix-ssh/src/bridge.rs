@@ -6,7 +6,7 @@
 //! that joins the open connection through a [`Bridge`] and passes stdin,
 //! stdout, stderr and the exit code through. The caller can't tell.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
@@ -74,12 +74,11 @@ impl Bridge {
 }
 
 fn serve(session: &impl Fn() -> Result<Arc<Session>, Error>, stream: std::net::TcpStream, token: &str) -> io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+    let (line, mut reader) = local::first_line(&stream)?;
     let mut writer = stream;
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
     let ask: Ask = serde_json::from_str(&line).map_err(io::Error::other)?;
-    if ask.token != token {
+    // Not a stand-in Fenix started: nothing is run for it.
+    if !local::same_token(&ask.token, token) {
         return Ok(());
     }
     let refuse = |writer: &mut std::net::TcpStream, message: String| Frame::json(Kind::Err, 0, &Failure { code: FailureCode::Other, message }).write(writer);

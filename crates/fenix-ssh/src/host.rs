@@ -19,11 +19,17 @@ use fenix_vfs::{Kind, Meta, Over, Ran, Run};
 
 use crate::askpass::Askpass;
 use crate::bridge::Bridge;
-use crate::session::{Error, Session};
+use crate::session::{Error, Output, Session};
 use crate::ssh::{connect, ConnectError, Helpers, Target};
 
 /// How often the connection is looked at.
 const WATCH: Duration = Duration::from_millis(250);
+
+/// The most a program run to its end (`Remote::run`: a listing of the
+/// project's files, a Git command) may print before it's stopped. What a
+/// remote machine sends is kept in memory here, and a machine that never
+/// stops sending must not be able to fill it.
+const MOST_OUTPUT: usize = 256 * 1024 * 1024;
 
 /// The waits between tries to connect again; the last one repeats.
 const BACKOFF: [u64; 6] = [1, 2, 4, 8, 15, 30];
@@ -255,8 +261,21 @@ impl fenix_vfs::Remote for Host {
             }
             input.close().map_err(io_error)?;
         }
-        let finished = process.finish().map_err(io_error)?;
-        Ok(Ran { code: finished.code, stdout: finished.stdout, stderr: finished.stderr })
+        let mut ran = Ran::default();
+        loop {
+            match process.next().map_err(io_error)? {
+                Output::Stdout(bytes) => ran.stdout.extend(bytes),
+                Output::Stderr(bytes) => ran.stderr.extend(bytes),
+                Output::Exit(code) => {
+                    ran.code = code;
+                    return Ok(ran);
+                }
+            }
+            if ran.stdout.len() + ran.stderr.len() > MOST_OUTPUT {
+                let _ = process.input().kill();
+                return Err(io::Error::other(format!("{} printed more than Fenix will hold, and was stopped", run.program)));
+            }
+        }
     }
 
     fn stat(&self, path: &str) -> io::Result<Meta> {
@@ -265,7 +284,10 @@ impl fenix_vfs::Remote for Host {
 
     fn list(&self, path: &str) -> io::Result<Vec<Meta>> {
         let entries = self.session().and_then(|session| session.list(path)).map_err(io_error)?;
-        Ok(entries.into_iter().map(|entry| meta(entry, None)).collect())
+        // A folder's entries are names in that folder. One that says it
+        // is elsewhere (`..`, `a/b`) is no name a file system gives, and
+        // comes from a machine that isn't to be believed: left out.
+        Ok(entries.into_iter().filter(|entry| fenix_vfs::path::is_one_name(&entry.name)).map(|entry| meta(entry, None)).collect())
     }
 
     fn read(&self, path: &str) -> io::Result<(Vec<u8>, Meta)> {

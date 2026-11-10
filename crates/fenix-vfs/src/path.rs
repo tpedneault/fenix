@@ -120,6 +120,32 @@ pub fn child(folder: &Path, name: &str) -> PathBuf {
     }
 }
 
+/// Whether `name` is one name in a folder, as any file system gives
+/// them: not empty, not `.` or `..`, and with no `/` in it. What a remote
+/// machine lists is held to this, since a name that isn't one (`../x`)
+/// would point outside the folder it was listed in.
+pub fn is_one_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\0'])
+}
+
+/// Whether a file of this name can be made in a folder on *this*
+/// machine and stay in it: `is_one_name`, and on Windows nothing that
+/// Windows reads as more than a name -- a `\`, a drive or a stream
+/// (`:`), a device (`CON`, `NUL`), a name ending in a dot or a space
+/// (which it drops). A remote file whose name isn't one is not copied
+/// here under another: the copy says it can't.
+pub fn is_local_name(name: &str) -> bool {
+    if !is_one_name(name) {
+        return false;
+    }
+    if cfg!(windows) {
+        let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+        let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.ends_with(|c: char| c.is_ascii_digit()));
+        return !device && !name.contains(['\\', ':', '<', '>', '"', '|', '?', '*']) && !name.chars().any(char::is_control) && !name.ends_with(['.', ' ']);
+    }
+    true
+}
+
 /// `relative` under `folder`, where `relative` is what a person typed:
 /// one name or several, with `/` (or, on Windows, `\`) between them.
 pub fn join(folder: &Path, relative: &str) -> PathBuf {
@@ -192,6 +218,21 @@ mod tests {
         assert_eq!(split(&join(&folder, "docs/notes.md")), Some(("devbox".into(), "/srv/docs/notes.md".into())));
         assert_eq!(split(&join(&folder, r"docs\notes.md")), Some(("devbox".into(), "/srv/docs/notes.md".into())));
         assert_eq!(join(Path::new("here"), "a.txt"), Path::new("here").join("a.txt"));
+    }
+
+    #[test]
+    fn a_name_is_one_name_and_a_local_one_stays_in_its_folder() {
+        for name in ["a.txt", ".git", "sp ace", "ünï", "..."] {
+            assert!(is_one_name(name), "{name}");
+        }
+        for name in ["", ".", "..", "a/b", "../x", "/etc/passwd", "a\0b"] {
+            assert!(!is_one_name(name) && !is_local_name(name), "{name:?}");
+        }
+        assert!(is_local_name("main.rs") && is_local_name("Makefile"));
+        // What Windows would read as more than a name.
+        for name in ["..\\x", "C:evil", "a:b", "CON", "nul.txt", "COM1", "trailing.", "trailing ", "a|b", "bell\u{7}"] {
+            assert_eq!(is_local_name(name), !cfg!(windows), "{name:?}");
+        }
     }
 
     #[test]

@@ -13,6 +13,8 @@ publish.workspace = true
 [dependencies]
 fenix-remote = { path = "../fenix-remote" }
 fenix-vfs = { path = "../fenix-vfs" }
+# The tokens the askpass hook and the stand-in present: from the system.
+getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
