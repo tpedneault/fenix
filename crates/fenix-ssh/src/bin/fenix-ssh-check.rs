@@ -1,14 +1,14 @@
-//! Phase 0 of docs/plans/remote-ssh.md: the risky parts of remote
-//! projects, run against a real machine and timed.
+//! The checks of docs/plans/remote-ssh.md that want a real machine: a
+//! connection through the system's `ssh`, run and timed.
 //!
-//!     fenix-ssh-spike [--helpers DIR] [--answer TEXT]… [--runs N] [-- SSH-OPTION…] HOST REMOTE-DIR
+//!     fenix-ssh-check [--helpers DIR] [--answer TEXT]… [--runs N] [-- SSH-OPTION…] HOST REMOTE-DIR
 //!
 //! REMOTE-DIR is a Git repository on HOST that the run may write a
 //! scratch file in. `--answer` gives what `ssh` asks for, in order, for
 //! a run with nobody at the keyboard; without it the question is put on
 //! the console.
 //!
-//! Throwaway: nothing in Fenix uses this program.
+//! Not shipped: a tool for whoever works on remote projects.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -18,14 +18,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use fenix_ssh::askpass::Askpass;
-use fenix_ssh::bridge::Bridge;
-use fenix_ssh::{connect, Error, Exec, FailureCode, Helpers, Output, Session, Target};
+use fenix_ssh::{connect, Error, Exec, FailureCode, Helpers, Host, Output, Session, Status, Target};
 
 fn main() -> ExitCode {
     // This program is also what `ssh` runs to ask a question, and the
     // stand-in for a remote program.
     if let Some(code) = fenix_ssh::askpass::answer_if_asked() {
-        return code;
+        std::process::exit(code);
     }
     if let Some(code) = fenix_ssh::bridge::stand_in_if_asked() {
         std::process::exit(code);
@@ -61,14 +60,14 @@ fn run() -> Outcome {
             _ => rest.push(arg),
         }
     }
-    let [host, dir] = rest.as_slice() else { return Err("usage: fenix-ssh-spike [--helpers DIR] [--answer TEXT]… [-- SSH-OPTION…] HOST REMOTE-DIR".into()) };
+    let [host, dir] = rest.as_slice() else { return Err("usage: fenix-ssh-check [--helpers DIR] [--answer TEXT]… [-- SSH-OPTION…] HOST REMOTE-DIR".into()) };
     let target = Target { options, ..Target::new(host.clone()) };
     let helpers = Helpers { folder: helpers };
 
     let asked = Arc::new(AtomicUsize::new(0));
     let answers = Mutex::new(answers);
     let counting = asked.clone();
-    let askpass = Askpass::start(move |prompt| {
+    let ask = Arc::new(move |prompt: &str| {
         counting.fetch_add(1, Ordering::SeqCst);
         if let Some(answer) = answers.lock().unwrap().pop_front() {
             println!("    ssh asks: {:?} -> answered from --answer", prompt.trim());
@@ -78,7 +77,9 @@ fn run() -> Outcome {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok()?;
         Some(line.trim_end_matches(['\r', '\n']).to_string()).filter(|answer| !answer.is_empty())
-    })?;
+    });
+    let asking = ask.clone();
+    let askpass = Askpass::start(move |prompt| asking(prompt))?;
 
     println!("== connect");
     let began = Instant::now();
@@ -91,7 +92,14 @@ fn run() -> Outcome {
     let began = Instant::now();
     let connected = connect(&target, &helpers, Some(&askpass))?;
     println!("  next connect:  {:?} (installed now: {}, questions asked: {})", began.elapsed(), connected.installed, asked.load(Ordering::SeqCst) - before);
-    let session = Arc::new(connected.session);
+    drop(connected);
+
+    // From here on, as Fenix will: a host that stays connected.
+    let asking = ask.clone();
+    let before = asked.load(Ordering::SeqCst);
+    let machine = Host::connect("spike", target.clone(), helpers.clone(), move |prompt| asking(prompt))?;
+    let session = machine.session()?;
+    println!("  as a host: connected, questions asked: {}", asked.load(Ordering::SeqCst) - before);
 
     println!("== files");
     let entries = session.list(dir)?;
@@ -100,15 +108,15 @@ fn run() -> Outcome {
     println!("  list, median of {runs}: {:?}", median(runs, || session.list(dir).map(drop))?);
 
     let scratch = format!("{dir}/.fenix-spike.txt");
-    let first = session.write(&scratch, b"one\n", None)?;
+    let first = session.write(&scratch, b"one\n", None, true)?;
     sh(&session, &format!("chmod 754 '{scratch}'"))?;
     let (bytes, read) = session.read(&scratch)?;
     check(bytes == b"one\n", "what was written is what is read")?;
-    let second = session.write(&scratch, b"two\n", Some(read.version()))?;
+    let second = session.write(&scratch, b"two\n", Some(read.version()), false)?;
     check(second.mode == 0o754, &format!("a save keeps the file's mode ({:o})", second.mode))?;
     // Someone else changes it, a second later so the clock shows it too.
     sh(&session, &format!("sleep 1.1; echo theirs >> '{scratch}'"))?;
-    match session.write(&scratch, b"mine\n", Some(second.version())) {
+    match session.write(&scratch, b"mine\n", Some(second.version()), false) {
         Err(Error::Remote(failure)) if failure.code == FailureCode::Changed => println!("  ok: a save over a file changed there is refused ({})", failure.message),
         other => return Err(format!("a save over a changed file wasn't refused: {other:?}").into()),
     }
@@ -118,7 +126,7 @@ fn run() -> Outcome {
     for megabytes in [1usize, 16] {
         let big: Vec<u8> = (0..megabytes * 1024 * 1024).map(|i| (i * 31 % 251) as u8).collect();
         let began = Instant::now();
-        session.write(&scratch, &big, None)?;
+        session.write(&scratch, &big, None, false)?;
         let wrote = began.elapsed();
         let began = Instant::now();
         let back = session.read(&scratch)?.0;
@@ -135,7 +143,7 @@ fn run() -> Outcome {
     check(status.code == Some(0), &format!("git status there: {} changed files", String::from_utf8_lossy(&status.stdout).lines().count()))?;
     println!("  git status over the session, median of {runs}:    {:?}", median(runs, || session.output(git()).map(drop))?);
 
-    let bridge = Bridge::start(session.clone())?;
+    let bridge = &machine;
     let through = || -> Outcome<std::process::Output> { Ok(bridge.command("git", Some(dir))?.args(["status", "--porcelain"]).stdin(Stdio::null()).output()?) };
     let stood_in = through()?;
     check(stood_in.status.success() && stood_in.stdout == status.stdout, "the stand-in process gives git's own output and exit code")?;
@@ -150,6 +158,11 @@ fn run() -> Outcome {
 
     let failing = bridge.command("sh", None)?.args(["-c", "echo no >&2; exit 7"]).stdin(Stdio::null()).output()?;
     check(failing.status.code() == Some(7) && failing.stderr == b"no\n", "the stand-in passes on stderr and a failing exit code")?;
+
+    let mut variable = bridge.command("sh", None)?;
+    fenix_ssh::bridge::env(&mut variable, "GIT_EDITOR", "true");
+    let said = variable.args(["-c", "echo $GIT_EDITOR"]).stdin(Stdio::null()).output()?;
+    check(said.stdout == b"true\n", "a variable set for the remote program reaches it")?;
 
     let megabyte: Vec<u8> = (0..1024 * 1024).map(|i| (i % 253) as u8).collect();
     let mut cat = bridge.command("cat", None)?.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
@@ -193,6 +206,24 @@ fn run() -> Outcome {
     check(count(&session, "sleep 333")? == 0, "ending the connection ends the helper's programs")?;
     check(count(&session, "fenix-remote --stdio")? == 1, "and only this connection's helper is left")?;
     let _ = began;
+
+    println!("== a connection that drops");
+    let began = Instant::now();
+    session.sever();
+    while machine.session().is_ok() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    check(session.stat(dir).is_err(), &format!("the loss is noticed in {:?}, and a request fails instead of waiting", began.elapsed()))?;
+    let before = asked.load(Ordering::SeqCst);
+    while machine.status() != Status::Connected || machine.session().is_err() {
+        if let Status::Down(why) = machine.status() {
+            return Err(format!("it didn't come back: {why}").into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    println!("  ok: connected again by itself after {:?}, with {} more questions", began.elapsed(), asked.load(Ordering::SeqCst) - before);
+    check(!machine.session()?.list(dir)?.is_empty(), "and the files are there again")?;
+    machine.close();
 
     println!("\nall passed");
     Ok(())

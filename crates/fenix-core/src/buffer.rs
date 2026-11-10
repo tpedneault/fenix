@@ -164,7 +164,8 @@ impl Buffer {
 
     pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        let (text, encoding) = decode_text(&std::fs::read(path)?);
+        // On this machine or another: `fenix_vfs` knows which.
+        let (text, encoding) = decode_text(&fenix_vfs::read(path)?);
         Ok(Self {
             rope: Rope::from_str(&text),
             path: Some(crate::plain_path(path)),
@@ -201,6 +202,21 @@ impl Buffer {
         }
     }
 
+    /// Saves to a file on a remote machine: sent whole, and put in place
+    /// there only once all of it has arrived, as the staged write does
+    /// here.
+    fn write_remote(&self, path: &Path, encoded: Option<Vec<u8>>, over: fenix_vfs::Over) -> io::Result<()> {
+        let bytes = match encoded {
+            Some(bytes) => bytes,
+            None => {
+                let mut bytes = Vec::with_capacity(self.rope.len_bytes());
+                self.rope.write_to(&mut bytes)?;
+                bytes
+            }
+        };
+        fenix_vfs::write(path, &bytes, over).map(drop)
+    }
+
     /// How the file's bytes read.
     pub fn encoding(&self) -> TextEncoding {
         self.encoding
@@ -214,7 +230,7 @@ impl Buffer {
     /// encodings can't be told from another, so one in use stays.
     pub fn read_disk_text(&self) -> io::Result<(String, TextEncoding)> {
         let path = self.path.as_deref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "buffer has no path"))?;
-        let bytes = std::fs::read(path)?;
+        let bytes = fenix_vfs::read(path)?;
         Ok(match self.encoding {
             TextEncoding::Legacy(_) => (self.encoding.decode(&bytes), self.encoding),
             _ => decode_text(&bytes),
@@ -233,7 +249,11 @@ impl Buffer {
         self.flush_pending();
         let path = path.as_ref();
         let encoded = self.encoded()?;
-        fenix_storage::atomic_write(path, |writer| self.write_text(writer, encoded.as_deref()))?;
+        if fenix_vfs::is_remote(path) {
+            self.write_remote(path, encoded, fenix_vfs::Over::Anything)?;
+        } else {
+            fenix_storage::atomic_write(path, |writer| self.write_text(writer, encoded.as_deref()))?;
+        }
         self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())
@@ -243,7 +263,11 @@ impl Buffer {
     pub fn save_new(&mut self, path: &Path) -> io::Result<()> {
         self.flush_pending();
         let encoded = self.encoded()?;
-        fenix_storage::atomic_write_new(path, |writer| self.write_text(writer, encoded.as_deref()))?;
+        if fenix_vfs::is_remote(path) {
+            self.write_remote(path, encoded, fenix_vfs::Over::Nothing)?;
+        } else {
+            fenix_storage::atomic_write_new(path, |writer| self.write_text(writer, encoded.as_deref()))?;
+        }
         self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())

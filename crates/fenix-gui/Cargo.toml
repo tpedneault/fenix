@@ -44,6 +44,7 @@ fenix-recovery = { path = "../fenix-recovery" }
 fenix-syntax = { path = "../fenix-syntax" }
 fenix-brand = { path = "../fenix-brand" }
 fenix-snippets = { path = "../fenix-snippets" }
+fenix-ssh = { path = "../fenix-ssh" }
 fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }
 fenix-terminal = { path = "../fenix-terminal" }

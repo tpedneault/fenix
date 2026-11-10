@@ -22,6 +22,14 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // Run by the helper itself, through the user's login shell, to
+        // learn the environment that shell gives its programs.
+        Some("--print-env") => {
+            // On a line of its own, whatever the shell printed before it.
+            println!();
+            println!("{}", fenix_remote::server::environment_line());
+            ExitCode::SUCCESS
+        }
         Some("--version") => {
             println!("fenix-remote {} (protocol {})", env!("CARGO_PKG_VERSION"), fenix_remote::PROTOCOL);
             ExitCode::SUCCESS

@@ -1,8 +1,10 @@
 # Remote projects over SSH
 
-Status: Phase 0 (the spike) done 2026-11-09, on `claude/remote-ssh-spike`:
-the design holds. See [Phase 0: what the spike found](#phase-0-what-the-spike-found).
-Nothing is wired into Fenix yet.
+Status, 2026-11-09, on `claude/remote-ssh-spike`: Phase 0 (the spike)
+and Phase 1 (the foundation) are done. See
+[Phase 0: what the spike found](#phase-0-what-the-spike-found) and
+[Phase 1: what's built](#phase-1-whats-built). Nothing a person can use
+yet: Phase 2 is next.
 
 The aim: open a folder on another machine as a Fenix project, over SSH,
 and work in it as in a local one. Files first (browse, open, edit, save),
@@ -109,12 +111,63 @@ disk the save took 2.1 s: that is the `fsync`, not the connection.
 - A home folder mounted `noexec`.
 - A pty, file watching and search: not in the spike.
 
-To run it again: build the helper into `target/helpers/` as
-`fenix-remote-linux-x86_64`, then
+To run it again, against a container: `dev/remote-ssh/check.sh` (in
+Git Bash on Windows). Against a machine of your own, after
+`packaging/build-remote-helpers.sh target/remote-check`:
 
 ```powershell
-cargo run --release -p fenix-ssh --bin fenix-ssh-spike -- HOST /path/to/a/git/repo/there
+cargo run --release -p fenix-ssh --bin fenix-ssh-check -- --helpers target/remote-check/remote HOST /path/to/a/git/repo/there
 ```
+
+## Phase 1: what's built
+
+The foundation, with nothing yet for a person to open: no command
+connects to a machine. That is Phase 2.
+
+| Crate | What it is |
+|---|---|
+| `fenix-vfs` | Remote paths (`remote`, `split`, `child`, `display`) and the file calls that take either kind of path: `read`, `write`, `metadata`, `list`, `rename`, `remove`, `create_dir_all`. A machine is `mount`ed by its host name as a `Remote`. Depends on nothing. |
+| `fenix-remote` | The protocol and the helper. Files in 256 KiB pieces, with progress and a way to stop; rename, delete, make a folder, copy; programs started with the user's login shell's environment. |
+| `fenix-ssh` | `Host`: connects, mounts itself in `fenix-vfs`, reconnects by itself (1, 2, 4, 8, 15, then 30 s apart), says its status. `Askpass` with remembered answers. The stand-in (`Host::command`). `config::hosts()` reads `~/.ssh/config`. |
+
+Wired into Fenix so far:
+
+- `fenix-core`: a document on a remote path is read and saved through
+  `fenix-vfs` (`Buffer::from_path`, `save`, `save_new`,
+  `read_disk_text`), and `path_key` keeps a remote path's case.
+- `fenix` itself answers `ssh`'s questions (the askpass run) and is the
+  stand-in (`fenix --remote-exec`), before anything else in `main`.
+- Releases: `packaging/build-remote-helpers.sh` builds both helpers on
+  any system; they ship in `remote/` beside the program (the zip, the
+  tarball, the installer) and in `/usr/lib/fenix/remote` (deb, rpm).
+- Tests: every platform runs the helper in-process and a `Host` against
+  `fake-ssh`; Linux CI also runs `dev/remote-ssh/check.sh`, the whole
+  thing through the system's `ssh` against an `sshd` in a container.
+
+Where it left the plan as first written:
+
+- **`fenix-vfs` is its own crate**, not a module of `fenix-fs`:
+  `fenix-core` reads and saves documents and sits below `fenix-fs`. And
+  it knows nothing of SSH: `fenix-ssh` mounts into it, so the crates
+  that open files don't depend on how a machine is reached.
+- **The protocol lives in `fenix-remote`**, with the helper, not in a
+  crate of its own: there was nothing else to share it with.
+- **The stand-in still reaches Fenix over a loopback port**, with its
+  token passed in the environment (not in arguments, which other users
+  can read on Linux). A pipe of its own, with the control pipe's
+  same-user check, is still to do.
+- **Installing takes two `ssh` runs, not three**: the run that finds no
+  helper takes it on stdin. With remembered answers, a password or
+  passphrase is asked once for a host's life, reconnects included.
+- **A `\` in a remote name** is kept on Windows as a private-use
+  character (U+F05C), as Cygwin and WSL do, so such a file can be
+  opened rather than hidden.
+- A change to a document that's saved elsewhere isn't checked for yet
+  when saving (`Over::Anything`): the buffer doesn't know the version it
+  read. Phase 2, with the "changed on disk" question.
+
+Checked on Windows 11 and, in containers, on Debian with Rust 1.99; the
+`aarch64` helper builds but has not been run.
 
 ## The design
 

@@ -62,6 +62,8 @@ Name: "openwith"; Description: "Add ""Open with Fenix"" to Explorer's right-clic
 Source: "{#SourceDir}\fenix.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\fenix-pdfium.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
+; The helpers Fenix copies to a remote machine (Linux programs).
+Source: "{#SourceDir}\remote\*"; DestDir: "{app}\remote"; Flags: ignoreversion
 Source: "{#SourceDir}\licenses\pdfium\*"; DestDir: "{app}\licenses\pdfium"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion

@@ -28,9 +28,17 @@ pub const BANNER: &str = "FENIX-REMOTE ";
 /// run, followed by `uname -sm`.
 pub const MISSING: &str = "FENIX-MISSING ";
 
-/// The largest frame either side accepts. A file is sent whole in one
-/// frame in this spike, so this is also the largest file.
-pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// The largest frame either side accepts.
+pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+
+/// How much of a file travels in one frame. Small enough that other
+/// requests get a word in between two pieces of a large file, and that a
+/// transfer can be stopped soon after it's asked to.
+pub const PIECE: usize = 256 * 1024;
+
+/// What the helper prints, run as `--print-env`: its environment, which
+/// is the user's login shell's when that shell ran it.
+pub const ENVIRONMENT: &str = "FENIX-ENV ";
 
 /// What a frame is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,18 +46,19 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 pub enum Kind {
     /// Fenix asks: a JSON [`Request`].
     Request = 1,
-    /// Bytes that go with the request of the same id: a file's new
-    /// contents, or a program's stdin.
+    /// Bytes that go with the request of the same id: a piece of a
+    /// file's new contents, or of a program's stdin.
     Body = 2,
-    /// No more stdin for the program.
+    /// No more of them: the file is whole, the program's stdin ends.
     BodyEnd = 3,
-    /// Stop the program, and everything it started.
+    /// Stop: the program and everything it started, or the transfer.
     Kill = 4,
     /// The answer, as JSON.
     Ok = 16,
     /// The request failed: a JSON [`Failure`].
     Err = 17,
-    /// The answer, as bytes: a file's contents.
+    /// A piece of the answer, as bytes: a file's contents, in order,
+    /// before the `Ok` that ends them.
     Bytes = 18,
     /// What a program wrote to stdout.
     Stdout = 19,
@@ -149,12 +158,46 @@ pub enum Request {
     Stat { path: String },
     /// A folder's entries → `Ok` `Vec<Entry>`.
     List { path: String },
-    /// A file's contents → `Bytes`, then `Ok` [`Entry`] as it was read.
+    /// A file's contents → `Bytes` frames, then `Ok` [`Entry`] as it was
+    /// when the read began. `Kill` stops it.
     Read { path: String },
-    /// Replaces a file's contents with the `Body` frame that follows,
-    /// through a temporary file beside it → `Ok` [`Entry`] as written.
-    /// With `expect`, only if the file is still as Fenix last saw it.
-    Write { path: String, expect: Option<Version> },
+    /// Replaces a file's contents with the `Body` frames that follow, up
+    /// to `BodyEnd`, through a temporary file beside it → `Ok` [`Entry`]
+    /// as written. With `expect`, only if the file is still as Fenix last
+    /// saw it; with `create_new`, only if there is no such file. `Kill`
+    /// stops it and leaves the file as it was.
+    Write {
+        path: String,
+        #[serde(default)]
+        expect: Option<Version>,
+        #[serde(default)]
+        create_new: bool,
+    },
+    /// Moves or renames → `Ok`. Without `replace`, refuses to take the
+    /// place of something there.
+    Rename {
+        from: String,
+        to: String,
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Deletes a file, a link, or an empty folder; with `recursive`, a
+    /// folder and all in it → `Ok`. There is no bin to take it back from.
+    Remove {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+    },
+    /// Makes a folder; with `parents`, those above it too, and no
+    /// complaint if it's there → `Ok` [`Entry`].
+    CreateDir {
+        path: String,
+        #[serde(default)]
+        parents: bool,
+    },
+    /// Copies a file, or a folder and all in it, on the remote machine
+    /// itself → `Ok`. Refuses to take the place of something there.
+    Copy { from: String, to: String },
     /// Starts a program → `Stdout`/`Stderr` frames, then `Exit`. `Err`
     /// if it couldn't be started.
     Exec(Exec),
@@ -226,6 +269,10 @@ pub enum FailureCode {
     Denied,
     /// A checked write found the file changed since Fenix read it.
     Changed,
+    /// Something is already there, where nothing was to be replaced.
+    Exists,
+    /// Stopped because Fenix asked.
+    Cancelled,
     Other,
 }
 

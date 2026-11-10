@@ -15,10 +15,27 @@ use fenix_remote::{Exec, Exit, Failure, FailureCode, Frame, Kind};
 use serde::{Deserialize, Serialize};
 
 use crate::local::{self, Door};
-use crate::session::{Output, Session};
+use crate::session::{Error, Output, Session};
 
 /// The stand-in's first argument.
 pub const STAND_IN: &str = "--remote-exec";
+
+/// Where the stand-in finds its bridge, and what to say to be heard. In
+/// the environment, which other users of the machine can't read, and not
+/// in the arguments, which on Linux they can.
+const ADDR: &str = "FENIX_REMOTE_EXEC_ADDR";
+const TOKEN: &str = "FENIX_REMOTE_EXEC_TOKEN";
+
+/// A variable of this prefix on the stand-in is the remote program's,
+/// without the prefix: see [`env`].
+const ENV: &str = "FENIX_REMOTE_ENV_";
+
+/// Sets a variable for the remote program a stand-in `command` runs.
+/// (`Command::env` would set it for the stand-in, here, where nothing
+/// reads it.)
+pub fn env(command: &mut Command, key: &str, value: &str) {
+    command.env(format!("{ENV}{key}"), value);
+}
 
 #[derive(Serialize, Deserialize)]
 struct Ask {
@@ -32,7 +49,9 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn start(session: Arc<Session>) -> io::Result<Bridge> {
+    /// `session` gives the connection to run a program over, each time
+    /// one is asked for: after a reconnect it's another.
+    pub fn start(session: impl Fn() -> Result<Arc<Session>, Error> + Send + Sync + 'static) -> io::Result<Bridge> {
         let door = local::listen("fenix-remote-exec", move |stream, token| {
             let _ = serve(&session, stream, token);
         })?;
@@ -43,7 +62,7 @@ impl Bridge {
     /// there. Its stdin, stdout, stderr and exit code are the program's.
     pub fn command(&self, program: &str, cwd: Option<&str>) -> io::Result<Command> {
         let mut command = Command::new(std::env::current_exe()?);
-        command.arg(STAND_IN).arg(self.door.addr.to_string()).arg(&self.door.token).arg(cwd.unwrap_or("")).arg(program);
+        command.arg(STAND_IN).arg(cwd.unwrap_or("")).arg(program).env(ADDR, self.door.addr.to_string()).env(TOKEN, &self.door.token);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -54,7 +73,7 @@ impl Bridge {
     }
 }
 
-fn serve(session: &Session, stream: std::net::TcpStream, token: &str) -> io::Result<()> {
+fn serve(session: &impl Fn() -> Result<Arc<Session>, Error>, stream: std::net::TcpStream, token: &str) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     let mut line = String::new();
@@ -64,7 +83,7 @@ fn serve(session: &Session, stream: std::net::TcpStream, token: &str) -> io::Res
         return Ok(());
     }
     let refuse = |writer: &mut std::net::TcpStream, message: String| Frame::json(Kind::Err, 0, &Failure { code: FailureCode::Other, message }).write(writer);
-    let process = match session.exec(ask.exec) {
+    let process = match session().and_then(|session| session.exec(ask.exec)) {
         Ok(process) => process,
         Err(error) => return refuse(&mut writer, error.to_string()),
     };
@@ -102,19 +121,20 @@ fn serve(session: &Session, stream: std::net::TcpStream, token: &str) -> io::Res
     }
 }
 
-/// When this process is a stand-in (`--remote-exec addr token cwd
-/// program args…`), runs the program through the bridge and gives the
+/// When this process is a stand-in (`--remote-exec cwd program args…`),
+/// runs the program through the bridge and gives the
 /// exit code to end with. `None` for any other run.
 pub fn stand_in_if_asked() -> Option<i32> {
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() != Some(STAND_IN) {
         return None;
     }
-    let (Some(addr), Some(token), Some(cwd), Some(program)) = (args.next(), args.next(), args.next(), args.next()) else {
+    let (Ok(addr), Ok(token), Some(cwd), Some(program)) = (std::env::var(ADDR), std::env::var(TOKEN), args.next(), args.next()) else {
         eprintln!("fenix: {STAND_IN} is run by Fenix itself");
         return Some(2);
     };
-    let exec = Exec { program, args: args.collect(), cwd: Some(cwd).filter(|cwd| !cwd.is_empty()), env: Vec::new(), stdin: true };
+    let env = std::env::vars().filter_map(|(key, value)| key.strip_prefix(ENV).map(|key| (key.to_string(), value))).collect();
+    let exec = Exec { program, args: args.collect(), cwd: Some(cwd).filter(|cwd| !cwd.is_empty()), env, stdin: true };
     Some(match stand_in(&addr, &Ask { token, exec }) {
         Ok(code) => code,
         Err(error) => {

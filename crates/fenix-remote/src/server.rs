@@ -2,20 +2,26 @@
 //! until the first ends.
 //!
 //! Nothing here outlives the connection. When the input ends, every
-//! program started over it is killed with all it started, and `serve`
-//! returns.
+//! program started over it is killed with all it started, every file
+//! half written is put away, and `serve` returns.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::{Entry, Exec, Exit, Failure, FailureCode, FileKind, Frame, Hello, Kind, Request, Version, MAX_FRAME, PROTOCOL};
+use crate::{Entry, Exec, Exit, Failure, FailureCode, FileKind, Frame, Hello, Kind, Request, Version, ENVIRONMENT, PIECE, PROTOCOL};
+
+/// How long the user's login shell gets to say what its environment is
+/// before programs are started with the helper's own.
+const SHELL_PATIENCE: Duration = Duration::from_secs(5);
 
 /// Who the helper is, for its first line.
 pub fn hello() -> Hello {
@@ -30,6 +36,12 @@ pub fn hello() -> Hello {
     }
 }
 
+/// This process's environment, as `--print-env` prints it.
+pub fn environment_line() -> String {
+    let pairs: Vec<(String, String)> = std::env::vars_os().map(|(key, value)| (key.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())).collect();
+    format!("{ENVIRONMENT}{}", serde_json::to_string(&pairs).expect("strings serialize"))
+}
+
 #[derive(Clone)]
 struct Out(Arc<Mutex<Box<dyn Write + Send>>>);
 
@@ -41,8 +53,12 @@ impl Out {
         let _ = frame.write(&mut *out).and_then(|()| out.flush());
     }
 
-    fn fail(&self, id: u32, error: &io::Error) {
-        self.send(Frame::json(Kind::Err, id, &failure(error)));
+    fn ok(&self, id: u32, value: &impl serde::Serialize) {
+        self.send(Frame::json(Kind::Ok, id, value));
+    }
+
+    fn fail(&self, id: u32, failure: &Failure) {
+        self.send(Frame::json(Kind::Err, id, failure));
     }
 }
 
@@ -50,26 +66,101 @@ fn failure(error: &io::Error) -> Failure {
     let code = match error.kind() {
         io::ErrorKind::NotFound => FailureCode::NotFound,
         io::ErrorKind::PermissionDenied => FailureCode::Denied,
+        io::ErrorKind::AlreadyExists => FailureCode::Exists,
         _ => FailureCode::Other,
     };
     Failure { code, message: error.to_string() }
 }
 
-/// A started program: where its stdin goes, and what to kill.
-struct Running {
-    stdin: Option<Sender<Vec<u8>>>,
-    pid: u32,
+fn failed(code: FailureCode, message: impl Into<String>) -> Failure {
+    Failure { code, message: message.into() }
 }
 
-type Programs = Arc<Mutex<HashMap<u32, Running>>>;
+/// Something that goes on past its request, and can be fed or stopped.
+enum Ongoing {
+    Program { stdin: Option<Sender<Vec<u8>>>, pid: u32 },
+    /// A file being written: its pieces, then `None` for the end.
+    Upload(Sender<Option<Vec<u8>>>),
+    Download(Arc<AtomicBool>),
+}
+
+type Ongoings = Arc<Mutex<HashMap<u32, Ongoing>>>;
+
+type Environment = Vec<(OsString, OsString)>;
+
+/// The environment programs are started with: the user's login shell's,
+/// asked once, so that what they installed for themselves is found.
+struct LoginEnvironment {
+    /// Set once the shell has answered, or failed to.
+    found: Arc<OnceLock<Option<Environment>>>,
+    until: Instant,
+}
+
+impl LoginEnvironment {
+    fn ask() -> LoginEnvironment {
+        let found = Arc::new(OnceLock::new());
+        let finding = found.clone();
+        thread::spawn(move || {
+            let _ = finding.set(ask_login_shell());
+        });
+        LoginEnvironment { found, until: Instant::now() + SHELL_PATIENCE }
+    }
+
+    /// The login environment, waiting for it while there's still hope.
+    fn get(&self) -> Option<&[(OsString, OsString)]> {
+        while self.found.get().is_none() && Instant::now() < self.until {
+            thread::sleep(Duration::from_millis(10));
+        }
+        self.found.get().and_then(|found| found.as_deref())
+    }
+}
+
+/// Has the user's shell, as a login shell, run this very program to print
+/// the environment it was given. Whatever the shell's files print is no
+/// trouble: only the marked line is read.
+#[cfg(unix)]
+fn ask_login_shell() -> Option<Environment> {
+    let shell = std::env::var_os("SHELL").filter(|shell| !shell.is_empty())?;
+    let helper = std::env::current_exe().ok()?;
+    // Single quotes mean the same to sh, bash, zsh, fish and csh.
+    let quoted = format!("'{}'", helper.to_string_lossy().replace('\'', r"'\''"));
+    let mut command = Command::new(shell);
+    command.args(["-l", "-c", &format!("{quoted} --print-env")]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    own_group(&mut command);
+    let mut child = command.spawn().ok()?;
+    let pid = child.id();
+    let mut stdout = child.stdout.take()?;
+    // A shell that waits on something never comes back: it's put down
+    // when patience runs out, which ends the read below.
+    let done = Arc::new(AtomicBool::new(false));
+    let watching = done.clone();
+    thread::spawn(move || {
+        thread::sleep(SHELL_PATIENCE);
+        if !watching.load(Ordering::SeqCst) {
+            kill_tree(pid);
+        }
+    });
+    let mut said = Vec::new();
+    let _ = stdout.read_to_end(&mut said);
+    done.store(true, Ordering::SeqCst);
+    let _ = child.wait();
+    let said = String::from_utf8_lossy(&said);
+    let line = said.lines().find_map(|line| line.strip_prefix(ENVIRONMENT))?;
+    let pairs: Vec<(String, String)> = serde_json::from_str(line).ok()?;
+    Some(pairs.into_iter().map(|(key, value)| (key.into(), value.into())).collect())
+}
+
+#[cfg(not(unix))]
+fn ask_login_shell() -> Option<Environment> {
+    None
+}
 
 /// Serves requests from `input`, answering on `output`, until `input`
 /// ends.
 pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::Result<()> {
     let out = Out(Arc::new(Mutex::new(Box::new(output))));
-    let programs: Programs = Arc::default();
-    // A write's request, waiting for the body that follows it.
-    let mut writes: HashMap<u32, (String, Option<Version>)> = HashMap::new();
+    let ongoing: Ongoings = Arc::default();
+    let environment = LoginEnvironment::ask();
 
     let result = loop {
         let frame = match Frame::read(&mut input) {
@@ -80,35 +171,63 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
         let id = frame.id;
         match frame.kind {
             Kind::Request => match serde_json::from_slice::<Request>(&frame.payload) {
-                Ok(Request::Write { path, expect }) => {
-                    writes.insert(id, (path, expect));
+                Ok(Request::Write { path, expect, create_new }) => {
+                    let (pieces, receiver) = mpsc::channel();
+                    ongoing.lock().unwrap().insert(id, Ongoing::Upload(pieces));
+                    let (out, ongoing) = (out.clone(), ongoing.clone());
+                    thread::spawn(move || {
+                        let written = write(Path::new(&path), receiver, expect, create_new, id);
+                        ongoing.lock().unwrap().remove(&id);
+                        match written {
+                            Ok(entry) => out.ok(id, &entry),
+                            Err(failure) => out.fail(id, &failure),
+                        }
+                    });
                 }
-                Ok(Request::Exec(exec)) => start(id, exec, &out, &programs),
+                Ok(Request::Read { path }) => {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    ongoing.lock().unwrap().insert(id, Ongoing::Download(stop.clone()));
+                    let (out, ongoing) = (out.clone(), ongoing.clone());
+                    thread::spawn(move || {
+                        let read = read(Path::new(&path), path.clone(), id, &out, &stop);
+                        ongoing.lock().unwrap().remove(&id);
+                        match read {
+                            Ok(entry) => out.ok(id, &entry),
+                            Err(failure) => out.fail(id, &failure),
+                        }
+                    });
+                }
+                Ok(Request::Exec(exec)) => start(id, exec, &out, &ongoing, environment.get()),
                 Ok(request) => {
                     let out = out.clone();
-                    thread::spawn(move || answer(id, request, &out));
-                }
-                Err(error) => out.send(Frame::json(Kind::Err, id, &Failure { code: FailureCode::Other, message: format!("not a request: {error}") })),
-            },
-            Kind::Body => {
-                if let Some((path, expect)) = writes.remove(&id) {
-                    let out = out.clone();
-                    thread::spawn(move || match write(Path::new(&path), &frame.payload, expect, id) {
-                        Ok(entry) => out.send(Frame::json(Kind::Ok, id, &entry)),
-                        Err(failure) => out.send(Frame::json(Kind::Err, id, &failure)),
+                    thread::spawn(move || match answer(request) {
+                        Ok(value) => out.ok(id, &value),
+                        Err(error) => out.fail(id, &failure(&error)),
                     });
-                } else if let Some(stdin) = programs.lock().unwrap().get(&id).and_then(|running| running.stdin.clone()) {
-                    let _ = stdin.send(frame.payload);
                 }
-            }
-            Kind::BodyEnd => {
-                if let Some(running) = programs.lock().unwrap().get_mut(&id) {
-                    running.stdin = None;
-                }
-            }
+                Err(error) => out.fail(id, &failed(FailureCode::Other, format!("not a request: {error}"))),
+            },
+            Kind::Body => match ongoing.lock().unwrap().get(&id) {
+                Some(Ongoing::Program { stdin: Some(stdin), .. }) => drop(stdin.send(frame.payload)),
+                Some(Ongoing::Upload(pieces)) => drop(pieces.send(Some(frame.payload))),
+                _ => {}
+            },
+            Kind::BodyEnd => match ongoing.lock().unwrap().get_mut(&id) {
+                Some(Ongoing::Program { stdin, .. }) => *stdin = None,
+                Some(Ongoing::Upload(pieces)) => drop(pieces.send(None)),
+                _ => {}
+            },
             Kind::Kill => {
-                if let Some(running) = programs.lock().unwrap().get(&id) {
-                    kill_tree(running.pid);
+                let mut ongoing = ongoing.lock().unwrap();
+                match ongoing.get(&id) {
+                    Some(Ongoing::Program { pid, .. }) => kill_tree(*pid),
+                    Some(Ongoing::Download(stop)) => stop.store(true, Ordering::SeqCst),
+                    Some(Ongoing::Upload(_)) | None => {}
+                }
+                // An upload's pieces end without the word that they're
+                // all there: the write gives up and tidies.
+                if matches!(ongoing.get(&id), Some(Ongoing::Upload(_))) {
+                    ongoing.remove(&id);
                 }
             }
             // Answers travel the other way only.
@@ -116,26 +235,44 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
         }
     };
 
-    for running in programs.lock().unwrap().values() {
-        kill_tree(running.pid);
+    // Dropping the uploads' senders ends each write without its file.
+    for (_, left) in ongoing.lock().unwrap().drain() {
+        match left {
+            Ongoing::Program { pid, .. } => kill_tree(pid),
+            Ongoing::Download(stop) => stop.store(true, Ordering::SeqCst),
+            Ongoing::Upload(_) => {}
+        }
     }
     result
 }
 
-fn answer(id: u32, request: Request, out: &Out) {
-    let result = match request {
-        Request::Stat { path } => entry(Path::new(&path), path.clone()).map(|entry| Frame::json(Kind::Ok, id, &entry)),
-        Request::List { path } => list(Path::new(&path)).map(|entries| Frame::json(Kind::Ok, id, &entries)),
-        Request::Read { path } => read(Path::new(&path), path.clone()).map(|(bytes, entry)| {
-            out.send(Frame::new(Kind::Bytes, id, bytes));
-            Frame::json(Kind::Ok, id, &entry)
-        }),
-        Request::Write { .. } | Request::Exec(_) => return,
-    };
-    match result {
-        Ok(frame) => out.send(frame),
-        Err(error) => out.fail(id, &error),
+fn answer(request: Request) -> io::Result<serde_json::Value> {
+    match request {
+        Request::Stat { path } => entry(Path::new(&path), path.clone()).map(|entry| json(&entry)),
+        Request::List { path } => list(Path::new(&path)).map(|entries| json(&entries)),
+        Request::Rename { from, to, replace } => {
+            if !replace && fs::symlink_metadata(&to).is_ok() {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} is already there")));
+            }
+            fs::rename(&from, &to).map(|()| serde_json::Value::Null)
+        }
+        Request::Remove { path, recursive } => remove(Path::new(&path), recursive).map(|()| serde_json::Value::Null),
+        Request::CreateDir { path, parents } => {
+            if parents { fs::create_dir_all(&path) } else { fs::create_dir(&path) }?;
+            entry(Path::new(&path), path.clone()).map(|entry| json(&entry))
+        }
+        Request::Copy { from, to } => {
+            if fs::symlink_metadata(&to).is_ok() {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} is already there")));
+            }
+            copy(Path::new(&from), Path::new(&to)).map(|()| serde_json::Value::Null)
+        }
+        Request::Read { .. } | Request::Write { .. } | Request::Exec(_) => unreachable!("served where they're read"),
     }
+}
+
+fn json(value: &impl serde::Serialize) -> serde_json::Value {
+    serde_json::to_value(value).expect("protocol types serialize")
 }
 
 fn entry(path: &Path, name: String) -> io::Result<Entry> {
@@ -183,51 +320,93 @@ fn list(path: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-fn read(path: &Path, name: String) -> io::Result<(Vec<u8>, Entry)> {
-    let before = entry(path, name)?;
-    if before.len as usize > MAX_FRAME {
-        return Err(io::Error::other(format!("{} bytes is more than can be sent at once", before.len)));
+/// Sends a file a piece at a time, and gives the file as it was when the
+/// read began: what a later checked write is held against.
+fn read(path: &Path, name: String, id: u32, out: &Out, stop: &AtomicBool) -> Result<Entry, Failure> {
+    let io = |error: io::Error| failure(&error);
+    let before = entry(path, name).map_err(io)?;
+    let mut file = fs::File::open(path).map_err(io)?;
+    let mut piece = vec![0u8; PIECE];
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return Err(failed(FailureCode::Cancelled, "stopped"));
+        }
+        match file.read(&mut piece).map_err(io)? {
+            0 => return Ok(before),
+            n => out.send(Frame::new(Kind::Bytes, id, &piece[..n])),
+        }
     }
-    let bytes = fs::read(path)?;
-    Ok((bytes, before))
 }
 
-/// Replaces `path`'s contents: a complete, synced file beside it first,
-/// then a rename over it, so there is never half a file under the name.
-fn write(path: &Path, contents: &[u8], expect: Option<Version>, id: u32) -> Result<Entry, Failure> {
+/// Replaces `path`'s contents with the pieces received: a complete,
+/// synced file beside it first, then a rename over it, so there is never
+/// half a file under the name.
+fn write(path: &Path, pieces: Receiver<Option<Vec<u8>>>, expect: Option<Version>, create_new: bool, id: u32) -> Result<Entry, Failure> {
     let name = path.to_string_lossy().into_owned();
     // A link is written through, not replaced by a file.
     let target: PathBuf = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let existing = entry(&target, name.clone()).ok();
-    if let Some(expected) = expect {
-        let now = existing.as_ref().map(Entry::version);
-        if now != Some(expected) {
-            let message = match now {
-                Some(_) => "the file changed since it was read",
-                None => "the file is no longer there",
-            };
-            return Err(Failure { code: FailureCode::Changed, message: message.to_string() });
+    let unchanged = |existing: &Option<Entry>| -> Result<(), Failure> {
+        if create_new && existing.is_some() {
+            return Err(failed(FailureCode::Exists, format!("{name} is already there")));
         }
-    }
+        let Some(expected) = expect else { return Ok(()) };
+        match existing.as_ref().map(Entry::version) {
+            Some(now) if now == expected => Ok(()),
+            Some(_) => Err(failed(FailureCode::Changed, "the file changed since it was read")),
+            None => Err(failed(FailureCode::Changed, "the file is no longer there")),
+        }
+    };
+    let existing = entry(&target, name.clone()).ok();
+    unchanged(&existing)?;
+
     let io = |error: io::Error| failure(&error);
-    let folder = target.parent().ok_or_else(|| Failure { code: FailureCode::Other, message: "no folder to write in".into() })?;
+    let folder = target.parent().ok_or_else(|| failed(FailureCode::Other, "no folder to write in"))?;
     let file_name = target.file_name().unwrap_or_default().to_string_lossy();
     let staged = folder.join(format!(".{file_name}.fenix-{}-{id}.tmp", std::process::id()));
-    let written = (|| {
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&staged)?;
-        file.write_all(contents)?;
-        if let Some(existing) = &existing {
-            keep_mode(&file, existing.mode)?;
+    let written = (|| -> Result<(), Failure> {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&staged).map_err(io)?;
+        loop {
+            match pieces.recv() {
+                Ok(Some(piece)) => file.write_all(&piece).map_err(io)?,
+                Ok(None) => break,
+                // Stopped, or the connection went, before the end.
+                Err(_) => return Err(failed(FailureCode::Cancelled, "stopped before the whole file arrived")),
+            }
         }
-        file.sync_all()?;
+        if let Some(existing) = &existing {
+            keep_mode(&file, existing.mode).map_err(io)?;
+        }
+        file.sync_all().map_err(io)?;
         drop(file);
-        fs::rename(&staged, &target)
+        // A long upload leaves time for someone else to save.
+        unchanged(&entry(&target, name.clone()).ok())?;
+        if create_new {
+            place_new(&staged, &target).map_err(io)
+        } else {
+            fs::rename(&staged, &target).map_err(io)
+        }
     })();
-    if let Err(error) = written {
+    if let Err(failure) = written {
         let _ = fs::remove_file(&staged);
-        return Err(io(error));
+        return Err(failure);
     }
     entry(&target, name).map_err(io)
+}
+
+/// Gives the staged file its name only if nothing has it: a link fails
+/// where a rename would replace.
+#[cfg(unix)]
+fn place_new(staged: &Path, target: &Path) -> io::Result<()> {
+    fs::hard_link(staged, target)?;
+    fs::remove_file(staged)
+}
+
+#[cfg(not(unix))]
+fn place_new(staged: &Path, target: &Path) -> io::Result<()> {
+    if target.exists() {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "already there"));
+    }
+    fs::rename(staged, target)
 }
 
 #[cfg(unix)]
@@ -241,9 +420,51 @@ fn keep_mode(_: &fs::File, _: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn start(id: u32, exec: Exec, out: &Out, programs: &Programs) {
+fn remove(path: &Path, recursive: bool) -> io::Result<()> {
+    // A link to a folder is a link: it goes, the folder stays.
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        fs::remove_file(path)
+    } else if recursive {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_dir(path)
+    }
+}
+
+fn copy(from: &Path, to: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        return copy_link(from, to);
+    }
+    if !meta.is_dir() {
+        return fs::copy(from, to).map(drop);
+    }
+    fs::create_dir(to)?;
+    for item in fs::read_dir(from)? {
+        let item = item?;
+        copy(&item.path(), &to.join(item.file_name()))?;
+    }
+    fs::set_permissions(to, meta.permissions())
+}
+
+#[cfg(unix)]
+fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(fs::read_link(from)?, to)
+}
+
+#[cfg(not(unix))]
+fn copy_link(from: &Path, to: &Path) -> io::Result<()> {
+    fs::copy(from, to).map(drop)
+}
+
+fn start(id: u32, exec: Exec, out: &Out, ongoing: &Ongoings, environment: Option<&[(OsString, OsString)]>) {
     let mut command = Command::new(&exec.program);
-    command.args(&exec.args).envs(exec.env.iter().map(|(key, value)| (key, value)));
+    command.args(&exec.args);
+    if let Some(environment) = environment {
+        command.env_clear().envs(environment.iter().map(|(key, value)| (key, value)));
+    }
+    command.envs(exec.env.iter().map(|(key, value)| (key, value)));
     if let Some(cwd) = &exec.cwd {
         command.current_dir(cwd);
     }
@@ -252,7 +473,7 @@ fn start(id: u32, exec: Exec, out: &Out, programs: &Programs) {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            out.fail(id, &io::Error::new(error.kind(), format!("couldn't run {}: {error}", exec.program)));
+            out.fail(id, &failure(&io::Error::new(error.kind(), format!("couldn't run {}: {error}", exec.program))));
             return;
         }
     };
@@ -270,20 +491,20 @@ fn start(id: u32, exec: Exec, out: &Out, programs: &Programs) {
         });
         sender
     });
-    programs.lock().unwrap().insert(id, Running { stdin, pid: child.id() });
+    ongoing.lock().unwrap().insert(id, Ongoing::Program { stdin, pid: child.id() });
 
     let pumps = [
         child.stdout.take().map(|pipe| pump(pipe, Kind::Stdout, id, out.clone())),
         child.stderr.take().map(|pipe| pump(pipe, Kind::Stderr, id, out.clone())),
     ];
-    let (out, programs) = (out.clone(), programs.clone());
+    let (out, ongoing) = (out.clone(), ongoing.clone());
     thread::spawn(move || {
         // Output first, to its end: `Exit` is the last word on a program.
         for pump in pumps.into_iter().flatten() {
             let _ = pump.join();
         }
         let code = wait(&mut child);
-        programs.lock().unwrap().remove(&id);
+        ongoing.lock().unwrap().remove(&id);
         out.send(Frame::json(Kind::Exit, id, &Exit { code }));
     });
 }

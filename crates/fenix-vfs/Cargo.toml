@@ -1,0 +1,16 @@
+[package]
+name = "fenix-vfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# Where a file is: on this machine, or on one Fenix is connected to.
+# Below every crate that opens a project's files, so it knows nothing of
+# how a remote machine is reached: that is whoever mounts one.
+[dependencies]
+
+[dev-dependencies]
+tempfile = "3"

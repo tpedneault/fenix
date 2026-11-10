@@ -1201,6 +1201,7 @@ version = "1.5.0"
 dependencies = [
  "encoding_rs",
  "fenix-storage",
+ "fenix-vfs",
  "ropey",
  "tempfile",
 ]
@@ -1305,6 +1306,7 @@ dependencies = [
  "fenix-project",
  "fenix-recovery",
  "fenix-snippets",
+ "fenix-ssh",
  "fenix-storage",
  "fenix-syntax",
  "fenix-table",
@@ -1434,6 +1436,7 @@ name = "fenix-ssh"
 version = "1.5.0"
 dependencies = [
  "fenix-remote",
+ "fenix-vfs",
  "serde",
  "serde_json",
  "sha2",
@@ -1507,6 +1510,13 @@ dependencies = [
  "fenix-rpc",
  "portable-pty",
  "vt100",
+]
+
+[[package]]
+name = "fenix-vfs"
+version = "1.5.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

@@ -9,12 +9,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use fenix_remote::{Entry, Exec, Exit, Failure, Frame, Hello, Kind, Request, Version, BANNER, MISSING, PROTOCOL};
+use fenix_remote::{Entry, Exec, Exit, Failure, Frame, Hello, Kind, Request, Version, BANNER, MISSING, PIECE, PROTOCOL};
 
-/// How long a file request may take before the connection is taken for
-/// dead. Nothing waits on a remote machine without a limit.
+/// How long the helper may say nothing to a request before the
+/// connection is taken for dead. Nothing waits on a remote machine
+/// without a limit. A large file moves in pieces, each within it.
 pub const DEADLINE: Duration = Duration::from_secs(30);
 
 /// How much a shell may print before the helper's first line.
@@ -26,6 +27,8 @@ pub enum Error {
     Lost,
     /// No answer within the deadline.
     TimedOut,
+    /// Stopped because the caller said so.
+    Cancelled,
     /// The helper answered that it couldn't.
     Remote(Failure),
     /// Something that isn't the protocol.
@@ -37,6 +40,7 @@ impl fmt::Display for Error {
         match self {
             Error::Lost => f.write_str("the connection was lost"),
             Error::TimedOut => f.write_str("the remote machine didn't answer in time"),
+            Error::Cancelled => f.write_str("stopped"),
             Error::Remote(failure) => f.write_str(&failure.message),
             Error::Protocol(what) => write!(f, "unexpected from the helper: {what}"),
         }
@@ -117,6 +121,11 @@ impl Session {
     pub fn start(output: impl Read + Send + 'static, input: impl Write + Send + 'static) -> Result<Session, StartError> {
         let mut reader = BufReader::new(Box::new(output) as Box<dyn Read + Send>);
         let hello = preamble(&mut reader)?;
+        Session::greeted(reader, input, hello)
+    }
+
+    /// Starts a session with a helper whose first line was read already.
+    pub(crate) fn greeted(reader: BufReader<Box<dyn Read + Send>>, input: impl Write + Send + 'static, hello: Hello) -> Result<Session, StartError> {
         if hello.protocol != PROTOCOL {
             return Err(StartError::Version(hello.protocol));
         }
@@ -124,6 +133,13 @@ impl Session {
         let routing = shared.clone();
         thread::Builder::new().name("fenix-ssh-read".into()).spawn(move || route(reader, &routing)).map_err(StartError::Io)?;
         Ok(Session { hello, shared, carrier: Mutex::new(None) })
+    }
+
+    /// Cuts the connection under the session, as a network would.
+    pub fn sever(&self) {
+        if let Some(carrier) = self.carrier.lock().unwrap().as_mut() {
+            let _ = carrier.kill();
+        }
     }
 
     /// Has the session end `carrier` when it ends itself.
@@ -142,46 +158,114 @@ impl Session {
     }
 
     pub fn stat(&self, path: &str) -> Result<Entry, Error> {
-        self.call(Request::Stat { path: path.into() }, None).and_then(|(_, value)| parse(value))
+        self.ask(Request::Stat { path: path.into() })
     }
 
     pub fn list(&self, path: &str) -> Result<Vec<Entry>, Error> {
-        self.call(Request::List { path: path.into() }, None).and_then(|(_, value)| parse(value))
+        self.ask(Request::List { path: path.into() })
     }
 
     /// A file's contents, and the file as it was when read.
     pub fn read(&self, path: &str) -> Result<(Vec<u8>, Entry), Error> {
-        let (bytes, value) = self.call(Request::Read { path: path.into() }, None)?;
-        Ok((bytes.ok_or_else(|| Error::Protocol("a read with no contents".into()))?, parse(value)?))
+        self.read_watched(path, &mut |_| true)
     }
 
-    /// Replaces a file's contents; with `expect`, only if it is still as
-    /// it was (`FailureCode::Changed` otherwise).
-    pub fn write(&self, path: &str, contents: &[u8], expect: Option<Version>) -> Result<Entry, Error> {
-        self.call(Request::Write { path: path.into(), expect }, Some(contents)).and_then(|(_, value)| parse(value))
+    /// `read`, telling `progress` how many bytes have come so far; it
+    /// answers whether to go on.
+    pub fn read_watched(&self, path: &str, progress: &mut dyn FnMut(u64) -> bool) -> Result<(Vec<u8>, Entry), Error> {
+        let (bytes, value) = self.call(Request::Read { path: path.into() }, None, progress)?;
+        Ok((bytes, parse(value)?))
     }
 
-    fn call(&self, request: Request, body: Option<&[u8]>) -> Result<(Option<Vec<u8>>, serde_json::Value), Error> {
+    /// Replaces a file's contents, whole or not at all. With `expect`,
+    /// only if it is still as it was (`FailureCode::Changed` otherwise);
+    /// with `create_new`, only if there's no such file.
+    pub fn write(&self, path: &str, contents: &[u8], expect: Option<Version>, create_new: bool) -> Result<Entry, Error> {
+        self.write_watched(path, contents, expect, create_new, &mut |_| true)
+    }
+
+    /// `write`, telling `progress` how many bytes have gone so far; it
+    /// answers whether to go on. Stopped, the file is as it was.
+    pub fn write_watched(&self, path: &str, contents: &[u8], expect: Option<Version>, create_new: bool, progress: &mut dyn FnMut(u64) -> bool) -> Result<Entry, Error> {
+        self.call(Request::Write { path: path.into(), expect, create_new }, Some(contents), progress).and_then(|(_, value)| parse(value))
+    }
+
+    pub fn rename(&self, from: &str, to: &str, replace: bool) -> Result<(), Error> {
+        self.ask::<serde_json::Value>(Request::Rename { from: from.into(), to: to.into(), replace }).map(drop)
+    }
+
+    /// Deletes, for good.
+    pub fn remove(&self, path: &str, recursive: bool) -> Result<(), Error> {
+        self.ask::<serde_json::Value>(Request::Remove { path: path.into(), recursive }).map(drop)
+    }
+
+    pub fn create_dir(&self, path: &str, parents: bool) -> Result<Entry, Error> {
+        self.ask(Request::CreateDir { path: path.into(), parents })
+    }
+
+    /// Copies a file or a folder within the remote machine.
+    pub fn copy(&self, from: &str, to: &str) -> Result<(), Error> {
+        self.ask::<serde_json::Value>(Request::Copy { from: from.into(), to: to.into() }).map(drop)
+    }
+
+    fn ask<T: serde::de::DeserializeOwned>(&self, request: Request) -> Result<T, Error> {
+        self.call(request, None, &mut |_| true).and_then(|(_, value)| parse(value))
+    }
+
+    /// One request to its answer: `upload`, if any, sent in pieces after
+    /// it, and whatever bytes come back gathered.
+    fn call(&self, request: Request, upload: Option<&[u8]>, progress: &mut dyn FnMut(u64) -> bool) -> Result<(Vec<u8>, serde_json::Value), Error> {
         let (id, answers) = self.shared.open();
-        let mut frames = vec![Frame::json(Kind::Request, id, &request)];
-        frames.extend(body.map(|body| Frame::new(Kind::Body, id, body)));
-        let result = self.shared.send(&frames).and_then(|()| {
-            let until = Instant::now() + DEADLINE;
-            let mut bytes = None;
+        let stop = || {
+            let _ = self.shared.send(&[Frame::new(Kind::Kill, id, [])]);
+            Error::Cancelled
+        };
+        let result = (|| {
+            self.shared.send(&[Frame::json(Kind::Request, id, &request)])?;
+            let mut early = None;
+            if let Some(contents) = upload {
+                let mut sent = 0u64;
+                // A piece a send, so other requests get in between.
+                for piece in contents.chunks(PIECE) {
+                    // Refused already (the file changed): no use sending
+                    // the rest.
+                    if let Ok(frame) = answers.try_recv() {
+                        early = Some(frame);
+                        break;
+                    }
+                    self.shared.send(&[Frame::new(Kind::Body, id, piece)])?;
+                    sent += piece.len() as u64;
+                    if !progress(sent) {
+                        return Err(stop());
+                    }
+                }
+                if early.is_none() {
+                    self.shared.send(&[Frame::new(Kind::BodyEnd, id, [])])?;
+                }
+            }
+            let mut bytes = Vec::new();
             loop {
-                let frame = match answers.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                    Ok(frame) => frame,
-                    Err(RecvTimeoutError::Timeout) => return Err(Error::TimedOut),
-                    Err(RecvTimeoutError::Disconnected) => return Err(Error::Lost),
+                let frame = match early.take() {
+                    Some(frame) => frame,
+                    None => match answers.recv_timeout(DEADLINE) {
+                        Ok(frame) => frame,
+                        Err(RecvTimeoutError::Timeout) => return Err(Error::TimedOut),
+                        Err(RecvTimeoutError::Disconnected) => return Err(Error::Lost),
+                    },
                 };
                 match frame.kind {
-                    Kind::Bytes => bytes = Some(frame.payload),
+                    Kind::Bytes => {
+                        bytes.extend_from_slice(&frame.payload);
+                        if !progress(bytes.len() as u64) {
+                            return Err(stop());
+                        }
+                    }
                     Kind::Ok => return serde_json::from_slice(&frame.payload).map(|value| (bytes, value)).map_err(|error| Error::Protocol(error.to_string())),
                     Kind::Err => return Err(Error::Remote(parse_slice(&frame.payload)?)),
                     other => return Err(Error::Protocol(format!("{other:?} in answer to a request"))),
                 }
             }
-        });
+        })();
         self.shared.close(id);
         result
     }
@@ -221,7 +305,7 @@ fn parse_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error>
 
 /// Reads up to the helper's first line. A login shell may print a
 /// greeting first; none of it is the protocol's.
-fn preamble(reader: &mut impl BufRead) -> Result<Hello, StartError> {
+pub(crate) fn preamble(reader: &mut impl BufRead) -> Result<Hello, StartError> {
     let mut seen = Vec::new();
     loop {
         let mut line = Vec::new();
@@ -396,7 +480,7 @@ mod tests {
 
         let (bytes, read) = session.read(&remote(&file)).unwrap();
         assert_eq!(bytes, b"one\r\ntwo\n\xff");
-        let written = session.write(&remote(&file), b"three", Some(read.version())).unwrap();
+        let written = session.write(&remote(&file), b"three", Some(read.version()), false).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"three");
         assert_eq!(written.len, 5);
         // Nothing staged is left beside it.
@@ -412,11 +496,11 @@ mod tests {
         let (_, read) = session.read(&remote(&file)).unwrap();
         std::fs::write(&file, b"someone else's, longer").unwrap();
 
-        let refused = session.write(&remote(&file), b"over it", Some(read.version()));
+        let refused = session.write(&remote(&file), b"over it", Some(read.version()), false);
         assert!(matches!(refused, Err(Error::Remote(failure)) if failure.code == FailureCode::Changed));
         assert_eq!(std::fs::read(&file).unwrap(), b"someone else's, longer");
         // Unchecked, it goes through.
-        session.write(&remote(&file), b"over it", None).unwrap();
+        session.write(&remote(&file), b"over it", None, false).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"over it");
     }
 
@@ -426,6 +510,70 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = session.read(&remote(&dir.path().join("nope")));
         assert!(matches!(missing, Err(Error::Remote(failure)) if failure.code == FailureCode::NotFound));
+    }
+
+    #[test]
+    fn a_large_file_moves_in_pieces_and_can_be_stopped() {
+        let session = local();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.bin");
+        let big: Vec<u8> = (0..3 * PIECE + 17).map(|i| (i % 251) as u8).collect();
+        let mut steps = Vec::new();
+        let written = session.write_watched(&remote(&file), &big, None, true, &mut |sent| {
+            steps.push(sent);
+            true
+        });
+        written.unwrap();
+        assert_eq!(steps, [PIECE as u64, 2 * PIECE as u64, 3 * PIECE as u64, big.len() as u64]);
+        let mut seen = 0;
+        let read = session.read_watched(&remote(&file), &mut |got| {
+            seen = got;
+            true
+        });
+        assert_eq!(read.unwrap().0, big);
+        assert_eq!(seen, big.len() as u64);
+
+        // Stopped part way, a write leaves the file as it was, and
+        // nothing beside it.
+        let stopped = session.write_watched(&remote(&file), &vec![0u8; 4 * PIECE], None, false, &mut |sent| sent < 2 * PIECE as u64);
+        assert!(matches!(stopped, Err(Error::Cancelled)));
+        assert!(matches!(session.read_watched(&remote(&file), &mut |_| false), Err(Error::Cancelled)));
+        // The helper tidies in its own time.
+        for _ in 0..100 {
+            if std::fs::read_dir(dir.path()).unwrap().count() == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read(&file).unwrap(), big);
+        // An empty file is a file.
+        let empty = dir.path().join("empty");
+        assert_eq!(session.write(&remote(&empty), b"", None, true).unwrap().len, 0);
+        let again = session.write(&remote(&empty), b"x", None, true);
+        assert!(matches!(again, Err(Error::Remote(failure)) if failure.code == FailureCode::Exists));
+    }
+
+    #[test]
+    fn folders_and_files_are_made_moved_copied_and_deleted() {
+        let session = local();
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| remote(&dir.path().join(name));
+        session.create_dir(&at("a/b/c"), true).unwrap();
+        assert!(matches!(session.create_dir(&at("x/y"), false), Err(Error::Remote(failure)) if failure.code == FailureCode::NotFound));
+        session.write(&at("a/b/c/f.txt"), b"f", None, true).unwrap();
+        session.copy(&at("a"), &at("copy")).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("copy/b/c/f.txt")).unwrap(), b"f");
+        assert!(matches!(session.copy(&at("a"), &at("copy")), Err(Error::Remote(failure)) if failure.code == FailureCode::Exists));
+        session.rename(&at("copy/b/c/f.txt"), &at("g.txt"), false).unwrap();
+        assert!(matches!(session.rename(&at("a/b/c/f.txt"), &at("g.txt"), false), Err(Error::Remote(failure)) if failure.code == FailureCode::Exists));
+        session.rename(&at("a/b/c/f.txt"), &at("g.txt"), true).unwrap();
+        assert!(session.remove(&at("a"), false).is_err(), "a folder with something in it");
+        session.remove(&at("a"), true).unwrap();
+        session.remove(&at("g.txt"), false).unwrap();
+        let mut left: Vec<_> = session.list(&remote(dir.path())).unwrap().into_iter().map(|entry| entry.name).collect();
+        left.sort();
+        assert_eq!(left, ["copy"]);
     }
 
     fn shell(script: &str, stdin: bool) -> Exec {

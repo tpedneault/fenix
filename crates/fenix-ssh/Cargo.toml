@@ -12,6 +12,7 @@ publish.workspace = true
 # programs run over that one connection.
 [dependencies]
 fenix-remote = { path = "../fenix-remote" }
+fenix-vfs = { path = "../fenix-vfs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
