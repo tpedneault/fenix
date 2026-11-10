@@ -186,6 +186,12 @@ impl App {
         let sections: Vec<(String, Vec<(String, String, bool, usize)>)> = sections(pending.hints.clone(), by_label).into_iter().map(|(name, hints)| (if name.is_empty() { "keys".to_string() } else { name }, hints.iter().map(entry).collect())).collect();
         // The chords run lately that go on from here: their remaining keys
         // and what they run.
+        // Standard keys open the leader with their chord: it's written so.
+        let leader = if app_standard_leader(self) { Some(self.leader_chord_text()) } else { None };
+        let shown = pending.path.iter().enumerate().map(|(i, k)| match (&leader, i, k) {
+            (Some(chord), 0, k) if *k == fenix_keymap::KeyPress::char(' ') => chord.clone(),
+            _ => keymap::describe_keypress(k),
+        }).collect::<Vec<_>>().join(" ");
         let here = pending.path.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
         let places = self.places();
         // Two commands of one name (`SPC SPC` and `SPC f f`, both "find
@@ -206,7 +212,7 @@ impl App {
         let placeholder = if top { format!("Type the next key, or : to search all {} commands by name", self.commands.iter().filter(|c| c.id != "commands.palette").count()) } else { "Type the next key".to_string() };
 
         let view = palette::View {
-            prompt: here,
+            prompt: shown,
             prompt_is_key: true,
             query: String::new(),
             placeholder,
@@ -218,6 +224,11 @@ impl App {
         };
         palette::layout(&view, self.theme, area, char_width, line_height, page)
     }
+}
+
+/// Whether the leader was opened by standard keys' chord.
+fn app_standard_leader(app: &super::App) -> bool {
+    app.standard_keys()
 }
 
 #[cfg(test)]
@@ -346,3 +357,4 @@ mod tests {
         assert!(!app.leader_matcher.is_pending());
     }
 }
+

@@ -1,4 +1,5 @@
 id = "editing.search"
+scheme = "vim"
 track = "Editing"
 order = 5
 title = "Search and substitute"

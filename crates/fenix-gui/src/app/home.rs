@@ -150,6 +150,7 @@ impl App {
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
         let sections = self.home_sections(None);
+        let update = self.update_notice();
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
@@ -202,10 +203,11 @@ impl App {
                 todos,
                 recovery,
                 sections,
+                update: update.clone(),
             };
             scoped.insert(root, data);
         }
-        let data = HomeData { date, resume, recent, projects, todos, recovery, sections };
+        let data = HomeData { date, resume, recent, projects, todos, recovery, sections, update };
         if data != self.home_data || scoped != self.home_project_data {
             self.home_data = data;
             self.home_project_data = scoped;
@@ -367,7 +369,11 @@ impl App {
             return;
         }
         let selected = self.home_selected_slot(id, pane).and_then(|i| self.home_views.get(&id).map(|v| v.slots[i].entry.clone()));
-        let view = dashboard::layout(self.home_data_for(id), cols, rows);
+        let mut view = dashboard::layout(self.home_data_for(id), cols, rows);
+        // Standard keys: the leader's keys with its chord, as wide as SPC.
+        if let Some(leader) = self.standard_keys().then(|| self.leader_chord_text()).filter(|l| l.chars().count() == 3) {
+            view.text = super::translate_leader(&view.text, &leader);
+        }
         let Some(ob) = self.buffers.get_mut(id) else { return };
         if ob.buffer.text() != view.text {
             let end = ob.buffer.len_chars();

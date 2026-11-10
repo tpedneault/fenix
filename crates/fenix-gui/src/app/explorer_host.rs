@@ -34,6 +34,9 @@ pub(super) enum ExplorerPurpose {
     /// A path for the settings page (`b`, `Ctrl-O`): `Enter` on a file
     /// hands it back (unless a folder's wanted), `S` the folder.
     PickSettingPath { folder: bool },
+    /// `SPC p R`, on a remote machine's folders: `S` opens the one shown
+    /// as a project.
+    PickRemoteProject,
 }
 
 /// Which explorer-mode prompt (if any) is capturing the next keystrokes --
@@ -367,6 +370,7 @@ impl App {
             ExplorerPurpose::PickWizardParent => "S creates the project in the folder shown",
             ExplorerPurpose::PickSettingPath { folder: true } => "S picks the folder shown",
             ExplorerPurpose::PickSettingPath { folder: false } => "Enter picks a file · S the folder shown",
+            ExplorerPurpose::PickRemoteProject => "S opens the folder shown as a project",
         };
         self.open_page_with(|_| PageModel::Explorer(ExplorerTarget::Overlay, Box::new(explorer_page::View::new(explorer_page::Form::Picker { picks }))));
         self.explorer_header_facts(ExplorerTarget::Overlay);
@@ -880,7 +884,7 @@ impl App {
 
     /// Opens the sidebar on the file being edited's project, showing
     /// the file.
-    fn open_sidebar(&mut self) {
+    pub(super) fn open_sidebar(&mut self) {
         let file = self.followed_file();
         let dir = self.sidebar_root_for(file.as_deref());
         // As it was left in this project: its open folders, its filter,
@@ -1640,7 +1644,10 @@ impl App {
             }
             ExplorerAction::Refresh => self.explorer_relist(),
             ExplorerAction::ParentDir => {
-                let parent = self.active_explorer().unwrap().cwd.parent().map(Path::to_path_buf);
+                let cwd = self.active_explorer().unwrap().cwd.clone();
+                // A remote machine's `/` is as far up as it goes: above
+                // it is no folder, there or here.
+                let parent = cwd.parent().map(Path::to_path_buf).filter(|parent| !fenix_vfs::is_remote(&cwd) || fenix_vfs::is_remote(parent));
                 if let Some(parent) = parent {
                     self.explorer_go_to(&parent);
                 }
@@ -1687,6 +1694,10 @@ impl App {
                 } else if picking && self.explorer_purpose == ExplorerPurpose::PickWizardParent {
                     let cwd = self.active_explorer().unwrap().cwd.clone();
                     self.wizard_parent_picked(&cwd);
+                } else if picking && self.explorer_purpose == ExplorerPurpose::PickRemoteProject {
+                    let cwd = self.active_explorer().unwrap().cwd.clone();
+                    self.close_folder_picker();
+                    self.open_project(cwd, None, true);
                 } else if picking && matches!(self.explorer_purpose, ExplorerPurpose::PickSettingPath { .. }) {
                     // A path setting takes a folder as readily as a file.
                     let cwd = self.active_explorer().unwrap().cwd.clone();
@@ -1733,7 +1744,7 @@ impl App {
         }
         if target == ExplorerTarget::Overlay {
             match self.explorer_purpose {
-                ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickWizardParent | ExplorerPurpose::PickSettingPath { folder: true } => return,
+                ExplorerPurpose::PickProjectDir | ExplorerPurpose::PickWizardParent | ExplorerPurpose::PickSettingPath { folder: true } | ExplorerPurpose::PickRemoteProject => return,
                 ExplorerPurpose::PickSettingPath { folder: false } => {
                     self.settings_path_picked(&path);
                     return;
@@ -1987,7 +1998,7 @@ impl App {
     /// Anything else is a directory, and the explorer's own error path
     /// handles it not existing.
     pub(crate) fn explorer_open_path(&mut self, target: &Path) {
-        if target.is_file() {
+        if fenix_vfs::metadata(target).is_ok_and(|meta| meta.is_file()) {
             self.open_file_from_picker(target);
             return;
         }

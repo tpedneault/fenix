@@ -399,11 +399,11 @@ impl App {
         let Some(session) = self.debug_session.as_ref() else { return Vec::new() };
         let plain = |text: String| -> Vec<(String, RowAct)> { text.lines().map(|l| (l.to_string(), RowAct::None)).collect() };
         match column {
-            Column::Stack if session.ended || (session.stopped_thread.is_none() && session.children.is_empty()) => plain(render_call_stack_text(session)),
+            Column::Stack if session.ended || (session.stopped_thread.is_none() && session.children.is_empty()) => plain(self.keys_text(&render_call_stack_text(session))),
             Column::Stack => stack_rows(session),
             Column::Variables if session.variables.is_empty() => plain(if session.stopped_thread.is_some() { "…".into() } else { "(not stopped)".into() }),
             Column::Variables => variable_rows(&session.variables, &session.toggled),
-            Column::Watches if session.watches.is_empty() && self.debug_pins.is_empty() => plain("(none -- a adds one, SPC u P pins one)".into()),
+            Column::Watches if session.watches.is_empty() && self.debug_pins.is_empty() => plain(self.keys_text("(none -- a adds one, SPC u P pins one)")),
             Column::Watches => {
                 let mut rows: Vec<(String, RowAct)> = session
                     .watches
@@ -431,7 +431,7 @@ impl App {
                     .collect();
                 all.sort_by_key(|(path, line, _)| (file_label(path), *line));
                 if all.is_empty() {
-                    rows.push(("(none -- F9 or SPC u b)".into(), RowAct::None));
+                    rows.push((self.keys_text("(none -- F9 or SPC u b)"), RowAct::None));
                 }
                 rows.extend(all.into_iter().map(|(path, line, text)| (text, RowAct::Breakpoint(path, line))));
                 rows
@@ -521,7 +521,10 @@ impl App {
         } else {
             &[("F5", "continue"), ("F10", "next"), ("F11", "in"), ("⇧F11", "out"), ("⇧F5", "stop"), ("SPC u f", "drawer")]
         };
-        let (strip, caps) = key_strip(keys);
+        // The leader's keys as the scheme in use writes them.
+        let keys: Vec<(String, &str)> = keys.iter().map(|(k, what)| (self.keys_text(k), *what)).collect();
+        let keys: Vec<(&str, &str)> = keys.iter().map(|(k, what)| (k.as_str(), *what)).collect();
+        let (strip, caps) = key_strip(&keys);
         let lead = 4;
         // In the text's own face, not the hints': the caps are placed by
         // its character cells.
@@ -559,7 +562,7 @@ impl App {
             }
             _ if focused && COLUMNS[self.debug_drawer.column] == Column::Breakpoints => out.push(("t on/off  e condition  H hit count  L log message  x remove".to_string(), muted, true)),
             _ if focused => out.push(("› i evaluates in the selected frame, a adds a watch".to_string(), muted, true)),
-            _ => out.push(("› SPC u e evaluates  K on a name shows its value".to_string(), muted, true)),
+            _ => out.push((self.keys_text("› SPC u e evaluates  K on a name shows its value"), muted, true)),
         }
         (out, decor)
     }

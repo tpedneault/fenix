@@ -25,6 +25,12 @@ pub fn spaces_to_next_stop(col: usize, width: usize) -> usize {
 pub fn leading_whitespace(buffer: &Buffer, line: usize) -> String {
     let start = buffer.line_start_char(line);
     let first = motion::line_first_non_blank(buffer, line);
+    // A line of nothing but spaces (an indented blank line, Enter twice)
+    // is all indent: `line_first_non_blank` answers its start for it.
+    let end = start + buffer.line_len(line);
+    if first == start && (start..end).all(|i| buffer.char_at(i).is_some_and(|c| c == ' ' || c == '\t')) {
+        return buffer.text_range(start, end);
+    }
     buffer.text_range(start, first)
 }
 
@@ -440,6 +446,8 @@ mod tests {
         assert_eq!(leading_whitespace(&b, 0), "    ");
         assert_eq!(leading_whitespace(&b, 1), "");
         assert_eq!(leading_whitespace(&b, 2), "\t");
+        let blank = buf("    \nx");
+        assert_eq!(leading_whitespace(&blank, 0), "    ", "a blank line's spaces are its indent");
     }
 
     #[test]

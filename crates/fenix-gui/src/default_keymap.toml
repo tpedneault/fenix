@@ -340,8 +340,8 @@ command = "extensions.open"
 
 [[leader]]
 keys = "SPC h w"
-label = "welcome: packs"
-command = "extensions.welcome"
+label = "welcome"
+command = "help.welcome"
 
 [[leader]]
 keys = "SPC h l"
@@ -397,6 +397,16 @@ command = "project.add"
 keys = "SPC p d"
 label = "delete project"
 command = "project.delete"
+
+[[leader]]
+keys = "SPC p R"
+label = "remote project"
+command = "project.open_remote"
+
+[[leader]]
+keys = "SPC p y"
+label = "allow its programs"
+command = "project.trust"
 
 # `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
 # so the build/task runner nests under `SPC p` instead --
@@ -824,6 +834,11 @@ label = "rename (LSP)"
 command = "code.lsp_rename"
 
 [[leader]]
+keys = "SPC c R"
+label = "undo the last refactor"
+command = "code.undo_refactor"
+
+[[leader]]
 keys = "SPC c i"
 label = "implementations (LSP)"
 command = "code.implementations"
@@ -871,6 +886,16 @@ command = "code.breadcrumbs"
 # `z`, not `f` -- `SPC c f` is already "indent region"
 # (`code.format_selection`, above); `z` matches real Vim's own
 # `zo`/`zc`/`za` fold mnemonic instead of colliding with it.
+[[leader]]
+keys = "SPC c p"
+label = "problems, every file's"
+command = "code.problems"
+
+[[leader]]
+keys = "SPC c j"
+label = "a symbol in the project"
+command = "code.project_symbols"
+
 [[leader]]
 keys = "SPC c z"
 label = "toggle fold"
@@ -920,6 +945,26 @@ command = "window.split_vertical"
 keys = "SPC w s"
 label = "split horizontal"
 command = "window.split_horizontal"
+
+[[leader]]
+keys = "SPC w Left"
+label = "focus left"
+command = "window.navigate_left"
+
+[[leader]]
+keys = "SPC w Down"
+label = "focus down"
+command = "window.navigate_down"
+
+[[leader]]
+keys = "SPC w Up"
+label = "focus up"
+command = "window.navigate_up"
+
+[[leader]]
+keys = "SPC w Right"
+label = "focus right"
+command = "window.navigate_right"
 
 [[leader]]
 keys = "SPC w h"
@@ -1216,6 +1261,16 @@ label = "threads"
 command = "agents.threads"
 
 [[leader]]
+keys = "SPC a l"
+label = "threads, every project's"
+command = "agents.threads_everywhere"
+
+[[leader]]
+keys = "SPC a z"
+label = "archive thread"
+command = "agents.archive"
+
+[[leader]]
 keys = "SPC a p"
 label = "agents, logins"
 command = "agents.agents"
@@ -1299,3 +1354,614 @@ command = "agents.delete"
 keys = "SPC a U"
 label = "usage: tokens, cost"
 command = "agents.usage"
+
+# `SPC ]` / `SPC [`: the bracket jumps (`]d`, `[h`...) as leader keys,
+# for standard keys, where `]` and `[` are typed text.
+[[leader]]
+keys = "SPC ]"
+group = "next"
+
+[[leader]]
+keys = "SPC ] d"
+label = "problem"
+command = "nav.next_problem"
+
+[[leader]]
+keys = "SPC ] h"
+label = "changed hunk"
+command = "nav.next_hunk"
+
+[[leader]]
+keys = "SPC ] a"
+label = "agent's change"
+command = "nav.next_agent_change"
+
+[[leader]]
+keys = "SPC ] t"
+label = "TODO"
+command = "nav.next_todo"
+
+[[leader]]
+keys = "SPC ] f"
+label = "the file named here (gf)"
+command = "nav.follow_link"
+
+[[leader]]
+keys = "SPC ] c"
+label = "change (side by side)"
+command = "nav.next_side_change"
+
+[[leader]]
+keys = "SPC ["
+group = "previous"
+
+[[leader]]
+keys = "SPC [ d"
+label = "problem"
+command = "nav.prev_problem"
+
+[[leader]]
+keys = "SPC [ h"
+label = "changed hunk"
+command = "nav.prev_hunk"
+
+[[leader]]
+keys = "SPC [ a"
+label = "agent's change"
+command = "nav.prev_agent_change"
+
+[[leader]]
+keys = "SPC [ t"
+label = "TODO"
+command = "nav.prev_todo"
+
+[[leader]]
+keys = "SPC [ c"
+label = "change (side by side)"
+command = "nav.prev_side_change"
+
+[[leader]]
+keys = "SPC u ["
+label = "back along the trail"
+command = "debug.trail_back"
+
+[[leader]]
+keys = "SPC u ]"
+label = "on along the trail"
+command = "debug.trail_forward"
+
+# `SPC C-i` is VS Code's Ctrl+K Ctrl+I with standard keys.
+[[leader]]
+keys = "SPC C-i"
+label = "hover"
+command = "code.hover"
+
+[[leader]]
+keys = "SPC t k"
+label = "Vim / standard keys"
+command = "view.key_scheme"
+
+[[leader]]
+keys = "SPC h ?"
+label = "the keys page"
+command = "help.keys_sheet"
+
+# Chords: keys with Ctrl, Alt or an F-key, outside the leader. `scheme`
+# says which key scheme an entry is for (vim, standard, any), `when` where
+# it applies (anywhere, text, typing, not_typing, page, terminal). Your
+# keybindings.toml's [[keys]] go over these.
+
+[[keys]]
+keys = "C-s"
+command = "file.save"
+
+[[keys]]
+keys = "C-z"
+command = "edit.undo"
+
+[[keys]]
+keys = "C-S-z"
+command = "edit.redo"
+
+[[keys]]
+keys = "C-y"
+command = "edit.redo"
+
+[[keys]]
+keys = "C-q"
+command = "app.quit"
+
+[[keys]]
+keys = "C-="
+command = "view.increase_font_size"
+
+[[keys]]
+keys = "C-+"
+command = "view.increase_font_size"
+
+[[keys]]
+keys = "C--"
+command = "view.decrease_font_size"
+
+[[keys]]
+keys = "C-0"
+command = "view.reset_font_size"
+
+[[keys]]
+keys = "C-PgDn"
+command = "tab.next"
+
+[[keys]]
+keys = "C-PgUp"
+command = "tab.prev"
+
+[[keys]]
+keys = "C-Tab"
+command = "tab.last"
+
+# In Insert, Ctrl-O is Vim's: one Normal command.
+[[keys]]
+keys = "C-o"
+command = "nav.jump_back"
+when = "not_typing"
+scheme = "vim"
+
+[[keys]]
+keys = "C-i"
+command = "nav.jump_forward"
+when = "not_typing"
+scheme = "vim"
+
+# Vim mode always read these letters in either case.
+[[keys]]
+keys = "C-S-s"
+command = "file.save"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-y"
+command = "edit.redo"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-q"
+command = "app.quit"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-o"
+command = "nav.jump_back"
+when = "not_typing"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-i"
+command = "nav.jump_forward"
+when = "not_typing"
+scheme = "vim"
+
+[[keys]]
+keys = "M-x"
+command = "commands.palette"
+
+# Standard keys: a traditional IDE's (VS Code's, on Windows and Linux),
+# for Fenix's own commands. The leader is Ctrl+K (keys.leader_chord).
+
+# Files and tabs
+[[keys]]
+keys = "C-p"
+command = "project.find_file"
+scheme = "standard"
+when = "terminal"
+
+[[keys]]
+keys = "C-o"
+command = "file.find"
+scheme = "standard"
+
+[[keys]]
+keys = "C-n"
+command = "buffer.scratch"
+scheme = "standard"
+
+[[keys]]
+keys = "C-w"
+command = "tab.close"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-t"
+command = "tab.reopen"
+scheme = "standard"
+
+[[keys]]
+keys = "C-Tab"
+command = "buffer.switch_recent"
+scheme = "standard"
+when = "terminal"
+
+[[keys]]
+keys = "C-e"
+command = "file.recent"
+scheme = "standard"
+
+# Editing
+[[keys]]
+keys = "C-c"
+command = "edit.copy"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-x"
+command = "edit.cut"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-v"
+command = "edit.paste"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-a"
+command = "edit.select_all"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-/"
+command = "code.toggle_comment"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-Up"
+command = "edit.move_lines_up"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-Down"
+command = "edit.move_lines_down"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-S-Up"
+command = "edit.copy_lines_up"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-S-Down"
+command = "edit.copy_lines_down"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-g"
+command = "nav.goto_line"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-S-k"
+command = "edit.delete_line"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-Enter"
+command = "edit.new_line_below"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-S-Enter"
+command = "edit.new_line_above"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-l"
+command = "edit.select_line"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-]"
+command = "edit.indent_lines"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-["
+command = "edit.outdent_lines"
+scheme = "standard"
+when = "text"
+
+# Ctrl+Shift+\, [ and ], as a US keyboard sends them.
+[[keys]]
+keys = "C-|"
+command = "nav.matching_bracket"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-{"
+command = "code.fold"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-}"
+command = "code.unfold"
+scheme = "standard"
+when = "text"
+
+# More cursors
+[[keys]]
+keys = "C-u"
+command = "edit.cursor_undo"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-d"
+command = "edit.add_next_occurrence"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-S-l"
+command = "edit.select_all_occurrences"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-M-Up"
+command = "edit.add_cursor_above"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-M-Down"
+command = "edit.add_cursor_below"
+scheme = "standard"
+when = "text"
+
+# Finding
+[[keys]]
+keys = "C-f"
+command = "search.file"
+scheme = "standard"
+
+[[keys]]
+keys = "C-h"
+command = "search.replace_buffer"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-f"
+command = "search.project"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-h"
+command = "search.replace_project"
+scheme = "standard"
+
+[[keys]]
+keys = "F3"
+command = "project.quickfix_next"
+scheme = "standard"
+
+[[keys]]
+keys = "S-F3"
+command = "project.quickfix_prev"
+scheme = "standard"
+
+# Code
+[[keys]]
+keys = "F12"
+command = "code.goto_definition"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-F12"
+command = "nav.follow_link"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "S-F12"
+command = "code.references"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-F12"
+command = "code.implementations"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "F2"
+command = "code.lsp_rename"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-."
+command = "code.lsp_code_action"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-S-f"
+command = "code.format_buffer"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-S-o"
+command = "code.outline"
+scheme = "standard"
+
+[[keys]]
+keys = "C-t"
+command = "code.project_symbols"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-m"
+command = "code.problems"
+scheme = "standard"
+
+[[keys]]
+keys = "F8"
+command = "nav.next_problem"
+scheme = "standard"
+
+[[keys]]
+keys = "S-F8"
+command = "nav.prev_problem"
+scheme = "standard"
+
+[[keys]]
+keys = "M-F5"
+command = "nav.next_hunk"
+scheme = "standard"
+
+[[keys]]
+keys = "M-S-F5"
+command = "nav.prev_hunk"
+scheme = "standard"
+
+[[keys]]
+keys = "M-Left"
+command = "nav.jump_back"
+scheme = "standard"
+
+[[keys]]
+keys = "M-Right"
+command = "nav.jump_forward"
+scheme = "standard"
+
+# The workbench
+[[keys]]
+keys = "C-S-p"
+command = "commands.palette"
+scheme = "standard"
+when = "terminal"
+
+[[keys]]
+keys = "F1"
+command = "commands.palette"
+scheme = "standard"
+
+[[keys]]
+keys = "C-b"
+command = "explorer.toggle_sidebar"
+scheme = "standard"
+when = "terminal"
+
+[[keys]]
+keys = "C-0"
+command = "window.focus_sidebar"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-e"
+command = "explorer.reveal_current"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-g"
+command = "git.open"
+scheme = "standard"
+
+[[keys]]
+keys = "C-\\"
+command = "window.split_vertical"
+scheme = "standard"
+
+[[keys]]
+keys = "C-j"
+command = "terminal.toggle"
+scheme = "standard"
+when = "terminal"
+
+[[keys]]
+keys = "C-`"
+command = "terminal.focus"
+scheme = "standard"
+when = "terminal"
+
+[[keys]]
+keys = "C-,"
+command = "settings.open"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-n"
+command = "frame.new"
+scheme = "standard"
+
+[[keys]]
+keys = "C-M-Right"
+command = "window.move_tab_next"
+scheme = "standard"
+
+[[keys]]
+keys = "C-M-Left"
+command = "window.move_tab_prev"
+scheme = "standard"
+
+[[keys]]
+keys = "C-1"
+command = "window.focus_1"
+scheme = "standard"
+
+[[keys]]
+keys = "C-2"
+command = "window.focus_2"
+scheme = "standard"
+
+[[keys]]
+keys = "C-3"
+command = "window.focus_3"
+scheme = "standard"
+
+[[keys]]
+keys = "C-4"
+command = "window.focus_4"
+scheme = "standard"
+
+[[keys]]
+keys = "C-5"
+command = "window.focus_5"
+scheme = "standard"
+
+[[keys]]
+keys = "C-6"
+command = "window.focus_6"
+scheme = "standard"
+
+[[keys]]
+keys = "C-7"
+command = "window.focus_7"
+scheme = "standard"
+
+[[keys]]
+keys = "C-8"
+command = "window.focus_8"
+scheme = "standard"
+
+[[keys]]
+keys = "C-9"
+command = "window.focus_9"
+scheme = "standard"

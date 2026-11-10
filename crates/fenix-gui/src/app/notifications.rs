@@ -71,7 +71,10 @@ impl App {
 
     /// Shows a notification: as a toast, in the history, and -- when
     /// Fenix isn't in front -- the system's too.
-    pub(crate) fn notify(&mut self, request: Request) -> Pushed {
+    pub(crate) fn notify(&mut self, mut request: Request) -> Pushed {
+        // Its keys as the scheme in use says them.
+        request.summary = self.keys_text(&request.summary);
+        request.body = self.keys_text(&request.body);
         let settings = self.notification_settings();
         let system = request.clone();
         let pushed = self.notifications.push(request, &settings);
@@ -170,7 +173,7 @@ impl App {
                 hint.push(format!("+{} more", note.actions.len() - 1));
             }
             if Some(note.id) == newest && slot == 0 {
-                hint.push(if note.actions.is_empty() { "SPC o x dismiss".into() } else { "SPC o . · SPC o x".into() });
+                hint.push(self.keys_text(if note.actions.is_empty() { "SPC o x dismiss" } else { "SPC o . · SPC o x" }));
             }
             if slot + 1 == visible.len() && waiting > 0 {
                 hint.push(format!("{waiting} more waiting"));

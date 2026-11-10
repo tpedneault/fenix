@@ -97,7 +97,7 @@ impl App {
         let name = crate::lsp::language_config_name(language);
         let (mut templates, _) = crate::dap::templates_for(&crate::installed::data_dirs("launch"), &name);
         templates.extend(self.wasm.launches(&root).into_iter().filter(|t| t.languages.contains(&name)));
-        let project = fenix_project::tools::ProjectTools::read(&root).is_ok_and(|t| !t.launch.is_empty());
+        let project = self.project_tools(&root).is_ok_and(|t| !t.launch.is_empty());
         Ok((templates, project))
     }
 

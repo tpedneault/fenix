@@ -23,10 +23,12 @@
 mod align;
 mod parse;
 mod patch;
+mod replace;
 
 pub use align::{align, changed_spans, Alignment, Block, BlockKind, Side};
 pub use parse::parse;
 pub use patch::{hunk_patch, lines_patch};
+pub use replace::replacements;
 
 /// What happened to a file in this diff, as its own `diff --git` header
 /// declares it -- `Modified` is the default because that's the case git

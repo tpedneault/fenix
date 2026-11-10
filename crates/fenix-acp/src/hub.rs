@@ -64,6 +64,34 @@ pub struct ThreadMeta {
     pub session_id: Option<SessionId>,
     /// The thread this one was handed off from, if any.
     pub handed_off_from: Option<ThreadId>,
+    /// The pipeline run it's a step of, when it is one.
+    pub run: Option<RunTag>,
+    /// Put away: left out of the thread list unless archived ones are
+    /// shown. Never deleted for it.
+    pub archived: bool,
+}
+
+/// A pipeline step's thread: the run it belongs to and which step.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RunTag {
+    /// The run's own id, the same on each of its steps.
+    pub id: String,
+    /// The pipeline's title.
+    pub pipeline: String,
+    /// What was asked of it.
+    pub request: String,
+    /// Which step, from 0, and its name.
+    pub step: usize,
+    pub step_name: String,
+    /// The order the run's threads were started in, from 0: a step run
+    /// again (another round) is a thread of its own, later.
+    pub seq: usize,
+    /// When the run started, in seconds since 1970.
+    pub started: u64,
+    /// How it ended (`done: ...`, `stopped: ...`); none while it runs.
+    pub ended: Option<String>,
+    /// The step whose ledger holds the run's changes.
+    pub ledger: Option<ThreadId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,9 +437,15 @@ impl Hub {
     pub fn new_thread(&mut self, agent: &str, root: &Path) -> ThreadId {
         let id = ThreadId(format!("{}-{}", self.id_prefix, self.next_thread));
         self.next_thread += 1;
-        let meta = ThreadMeta { id: id.clone(), agent: agent.to_string(), root: root.to_path_buf(), session_id: None, handed_off_from: None };
+        let meta = ThreadMeta { id: id.clone(), agent: agent.to_string(), root: root.to_path_buf(), session_id: None, handed_off_from: None, run: None, archived: false };
         self.insert(meta, Thread::default());
         id
+    }
+
+    /// A thread's metadata, to change what's kept about it (its run, its
+    /// being archived).
+    pub fn meta_mut(&mut self, id: &ThreadId) -> Option<&mut ThreadMeta> {
+        self.threads.get_mut(id).map(|slot| &mut slot.meta)
     }
 
     /// A thread read back from disk: detached until it's looked at.

@@ -125,6 +125,11 @@ jobs:
           save-if: ${{ github.event_name == 'push' }}
       - name: Filesystem, process, and protocol regressions
         run: ./scripts/ci.ps1 -Suite Reliability
+      # Remote projects end to end: the system's ssh, a real sshd in a
+      # container, the helper installed and run there.
+      - name: Remote projects, against an SSH server
+        shell: bash
+        run: dev/remote-ssh/check.sh
       - name: Upload diagnostic logs
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

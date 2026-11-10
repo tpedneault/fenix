@@ -57,6 +57,10 @@ pub(crate) enum Pick {
     /// `SPC a h`: the thread goes on with this agent.
     HandOff(String),
     Delete(ThreadId),
+    /// The thread list: a pipeline run's heading (its id), and a
+    /// project's (by project).
+    Run(String),
+    Project(PathBuf),
     Nothing,
     /// The ACP registry's agents, to install one.
     Registry,
@@ -124,6 +128,11 @@ pub(crate) struct AgentHost {
     pub(super) form: Option<elicit::FormFill>,
     /// Where `Effect::Listed` goes: a picker to import from.
     listing: bool,
+    /// The thread list (`SPC a t`): how it's shown.
+    pub(super) list: list::ThreadList,
+    /// A pipeline run's summary page, by buffer: the thread whose ledger
+    /// `SPC a r` there reviews.
+    pub(super) run_summaries: HashMap<BufferId, ThreadId>,
     /// Files changed during a turn with nothing to compare them to.
     pub(super) unknown: HashMap<ThreadId, BTreeSet<PathBuf>>,
     /// What git said was changed when each running turn started.
@@ -137,6 +146,10 @@ pub(crate) struct AgentHost {
     /// Follow mode (`SPC a f`), and where it last went.
     following: bool,
     followed: Option<(PathBuf, Option<u32>)>,
+    /// The thread entry (a tool call) follow mode last went to, the line
+    /// it named then, and whether a write took the view on from there to
+    /// the line it changed -- which later updates to the call leave be.
+    followed_call: Option<(usize, Option<u32>, bool)>,
     /// `@selection`'s, from `SPC a e`.
     pub(super) selection: Option<context::Selection>,
     /// Pictures pasted into the prompt, to go with it.
@@ -206,12 +219,15 @@ impl AgentHost {
             held: None,
             form: None,
             listing: false,
+            list: Default::default(),
+            run_summaries: HashMap::new(),
             unknown: HashMap::new(),
             turn_start: HashMap::new(),
             turning: HashMap::new(),
             to_review: 0,
             following: false,
             followed: None,
+            followed_call: None,
             selection: None,
             images: Vec::new(),
             sent: Vec::new(),
@@ -273,25 +289,20 @@ impl AgentHost {
             (Link::Detached, ..) => ("not started".into(), Some(crate::page::Role::Muted)),
         };
         let logins = view.connection.filter(|c| c.state == ConnState::NeedsAuth).and_then(|c| c.info.as_ref()).map(|i| i.auth_methods.iter().map(|m| (m.id.clone(), m.name.clone())).collect()).unwrap_or_default();
-        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new(), highlight: Some(super::reading_host::highlight_block) }
+        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new(), highlight: Some(super::reading_host::highlight_block), root: Some(view.meta.root.clone()) }
     }
 
     /// Reads the store's threads for `root` into the hub, newest first,
     /// at most `limit`.
     fn load_threads(&mut self, root: &Path, limit: usize) -> Vec<ThreadId> {
         let Some(store) = &self.store else { return Vec::new() };
+        let index = store.index();
         let mut ids = Vec::new();
-        for entry in store.index().into_iter().filter(|e| e.root == root).take(limit) {
+        for entry in index.into_iter().filter(|e| e.root == root).take(limit) {
             if !self.loaded.contains(&entry.id) && self.hub.view(&entry.id).is_none() {
-                if let Ok(saved) = store.load(&entry.id) {
-                    self.hub.restore(saved.meta, saved.thread);
-                    if let Some(baselines) = saved.extra.get("baselines").and_then(Value::as_object) {
-                        let map = baselines.iter().map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string))).collect();
-                        self.baselines.insert(entry.id.clone(), map);
-                    }
-                    if let Some(unknown) = saved.extra.get("unknown").and_then(Value::as_array) {
-                        self.unknown.insert(entry.id.clone(), unknown.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
-                    }
+                let loaded = self.store.as_ref().map(|store| store.load(&entry.id));
+                if let Some(Ok(saved)) = loaded {
+                    self.restore_saved(&entry.id, saved);
                 }
                 self.loaded.insert(entry.id.clone());
             }
@@ -303,17 +314,58 @@ impl AgentHost {
     }
 
     fn save(&mut self, id: &ThreadId) {
-        self.dirty.remove(id);
-        let (Some(store), Some(view)) = (&self.store, self.hub.view(id)) else { return };
-        if view.thread.entries.is_empty() {
-            return;
-        }
-        let baselines: serde_json::Map<String, Value> = self.baselines.get(id).map(|b| b.iter().map(|(p, t)| (p.to_string_lossy().into_owned(), json!(t))).collect()).unwrap_or_default();
         let updated = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let unknown: Vec<String> = self.unknown.get(id).map(|u| u.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default();
-        if let Err(e) = store.save(view.meta, view.thread, &json!({ "baselines": baselines, "unknown": unknown }), updated) {
+        if let Err(e) = self.save_as_of(id, updated) {
             eprintln!("fenix: couldn't save agent thread {id}: {e}");
         }
+    }
+
+    /// Archived (or brought back) where it's kept: the file and its index
+    /// line patched as they are on disk -- what another window wrote to
+    /// it since stays -- and then this window's copy. One never kept (a
+    /// thread of this window's not saved yet) is saved with the mark.
+    /// On failure nothing here changes.
+    pub(super) fn set_archived(&mut self, id: &ThreadId, archived: bool) -> Result<(), String> {
+        let Some(store) = &self.store else { return Err("nowhere to keep threads".into()) };
+        match store.set_archived(id, archived) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.hub.view(id).is_some_and(|v| !v.thread.entries.is_empty()) => {
+                let was = self.hub.meta(id).is_some_and(|m| m.archived);
+                if let Some(meta) = self.hub.meta_mut(id) {
+                    meta.archived = archived;
+                }
+                let updated = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                if let Err(e) = self.save_as_of(id, updated) {
+                    if let Some(meta) = self.hub.meta_mut(id) {
+                        meta.archived = was;
+                    }
+                    return Err(e.to_string());
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        if let Some(meta) = self.hub.meta_mut(id) {
+            meta.archived = archived;
+        }
+        Ok(())
+    }
+
+    /// Whether `id` can be read: kept where threads are, or here with
+    /// something in it.
+    pub(super) fn readable(&self, id: &ThreadId) -> bool {
+        self.hub.view(id).is_some_and(|v| !v.thread.entries.is_empty()) || self.store.as_ref().is_some_and(|s| s.load(id).is_ok())
+    }
+
+    fn save_as_of(&mut self, id: &ThreadId, updated: u64) -> std::io::Result<()> {
+        self.dirty.remove(id);
+        let (Some(store), Some(view)) = (&self.store, self.hub.view(id)) else { return Ok(()) };
+        if view.thread.entries.is_empty() {
+            return Ok(());
+        }
+        let baselines: serde_json::Map<String, Value> = self.baselines.get(id).map(|b| b.iter().map(|(p, t)| (p.to_string_lossy().into_owned(), json!(t))).collect()).unwrap_or_default();
+        let unknown: Vec<String> = self.unknown.get(id).map(|u| u.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        store.save(view.meta, view.thread, &json!({ "baselines": baselines, "unknown": unknown }), updated)
     }
 }
 
@@ -337,6 +389,13 @@ fn mcp_server(name: &str, line: &str) -> Option<McpServer> {
         return Some(if sse { McpServer::Sse { name, url, headers } } else { McpServer::Http { name, url, headers } });
     }
     Some(McpServer::Stdio { name: name.to_string(), command: first.clone(), args: rest.to_vec(), env: vec![] })
+}
+
+/// The first line (from 1) where `after` differs from `before`: where a
+/// write changed a file. Past the shorter's end when one only grew.
+fn first_changed_line(before: &str, after: &str) -> usize {
+    let (old, new): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    old.iter().zip(&new).position(|(a, b)| a != b).unwrap_or(old.len().min(new.len())) + 1
 }
 
 fn within(root: &Path, path: &Path) -> bool {
@@ -445,8 +504,10 @@ impl App {
         }
         let entries = self.agents_configure();
         let root = self.agents_root();
+        // The project's last thread, not one put away (archived).
         let existing = self.agents.load_threads(&root, 20);
-        let thread = existing.into_iter().next().or_else(|| self.agents.hub.thread_ids().iter().rev().find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root)).cloned());
+        let archived = |hub: &fenix_acp::hub::Hub, t: &ThreadId| hub.meta(t).is_some_and(|m| m.archived);
+        let thread = existing.into_iter().find(|t| !archived(&self.agents.hub, t)).or_else(|| self.agents.hub.thread_ids().iter().rev().find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root && !m.archived)).cloned());
         let thread = match thread {
             Some(t) => t,
             None => {
@@ -513,38 +574,6 @@ impl App {
         }
         for e in entries.iter().filter(|e| e.source == catalog::Source::Registry) {
             candidates.push(fenix_picker::Candidate::new(format!("Uninstall {} (from the registry)", e.spec.name), Pick::Uninstall(e.spec.id.clone())));
-        }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
-    }
-
-    /// `SPC a t`: the project's threads.
-    pub(crate) fn agents_pick_thread(&mut self) {
-        self.agents_configure();
-        let root = self.agents_root();
-        self.agents.load_threads(&root, 200);
-        let mut candidates = Vec::new();
-        for id in self.agents.hub.thread_ids().iter().rev() {
-            let Some(view) = self.agents.hub.view(id) else { continue };
-            if view.meta.root != root {
-                continue;
-            }
-            let state = if view.is_waiting_on_you() {
-                "waiting on you"
-            } else if view.is_working() {
-                "working"
-            } else if matches!(view.link, Link::ReadOnly(_)) {
-                "read-only"
-            } else {
-                ""
-            };
-            let label = format!("{}   {}{}", view.thread.display_title(), view.meta.agent, if state.is_empty() { String::new() } else { format!(" · {state}") });
-            candidates.push(fenix_picker::Candidate::new(label, Pick::Thread(id.clone())));
-        }
-        // Waiting threads first.
-        candidates.sort_by_key(|c| !c.label.contains("waiting on you"));
-        if candidates.is_empty() {
-            self.set_message("no agent threads in this project yet: SPC a n starts one");
-            return;
         }
         self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
@@ -773,7 +802,9 @@ impl App {
                 let id = self.agents.hub.new_thread(&agent, &self.agents_root());
                 self.agents_show(id);
             }
-            Pick::Thread(id) => self.agents_show(id),
+            Pick::Thread(id) => self.thread_list_open_thread(id),
+            Pick::Run(id) => self.thread_list_open_run(id),
+            Pick::Project(_) => self.set_message("a project's threads are under it: pick one"),
             Pick::Running(id) => self.agents_go_to_running(id),
             Pick::Mode(mode) => {
                 if let Some(thread) = self.agents.shown(&self.pages) {
@@ -1406,6 +1437,7 @@ impl App {
             Some(ob) => Some(ob.buffer.text()),
             None => std::fs::read_to_string(path).ok(),
         };
+        let before_text = before.clone();
         self.agents.baselines.entry(thread.clone()).or_default().entry(path.to_path_buf()).or_insert(before);
         match open {
             Some(id) => {
@@ -1428,6 +1460,13 @@ impl App {
         }
         self.agents.dirty.insert(thread.clone());
         self.agents_refresh_marks();
+        // Following: to the first line it changed -- an agent's edit
+        // seldom says which line (Claude Code's doesn't).
+        if self.agents.following && self.agents.shown(&self.pages).as_ref() == Some(thread) {
+            let line = first_changed_line(before_text.as_deref().unwrap_or(""), content);
+            self.agents.followed_call = self.agents_newest_place(thread).map(|(i, _, l)| (i, l, true));
+            self.agents_follow_to(path, Some(line as u32));
+        }
         // An object, as ACP says: `null` reads as a failed write to a strict
         // agent, though the file was written.
         Ok(serde_json::json!({}))
@@ -1494,7 +1533,18 @@ impl App {
             }
             changed = true;
             if let Some(id) = self.buffers.id_for_path(&path) {
+                let before = self.buffers.get(id).map(|ob| ob.buffer.text());
                 self.check_one_file(id, &mut sweep, false, None);
+                // Following an agent that writes to disk itself (Claude
+                // Code's adapter): to the first line it changed.
+                let after = self.buffers.get(id).map(|ob| ob.buffer.text());
+                if let (true, Some(before), Some(after)) = (self.agents.following, before, after) {
+                    if before != after {
+                        let thread = self.agents.shown(&self.pages);
+                        self.agents.followed_call = thread.and_then(|t| self.agents_newest_place(&t)).map(|(i, _, l)| (i, l, true));
+                        self.agents_follow_to(&path, Some(first_changed_line(&before, &after) as u32));
+                    }
+                }
             }
         }
         self.agents_refresh_marks();
@@ -1562,6 +1612,7 @@ mod dock;
 mod review;
 mod terminals;
 pub(crate) mod threads;
+mod list;
 mod install;
 pub(crate) use elicit::FORM_PROMPT;
 pub(crate) use install::SECRET_PROMPT;

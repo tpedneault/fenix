@@ -12,7 +12,7 @@ to run.
 
 [[step]]
 say = "SPC p p: every project Fenix knows, how each is doing, and Enter opens one."
-hint = "Space, p (project), p."
+hint = "{leader}, p (project), p."
 page = "projects"
 
 [[step]]

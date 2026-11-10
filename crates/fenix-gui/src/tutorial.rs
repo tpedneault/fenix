@@ -62,7 +62,28 @@ pub const BUILT_IN: &[(&str, &str)] = &[
     ("fenix-5-terminals.toml", include_str!("../tutorial/fenix-5-terminals.toml")),
     ("fenix-6-settings.toml", include_str!("../tutorial/fenix-6-settings.toml")),
     ("git-1-basics.toml", include_str!("../tutorial/git-1-basics.toml")),
+    ("standard-1-basics.toml", include_str!("../tutorial/standard-1-basics.toml")),
 ];
+
+/// The lessons for key scheme `scheme` (`vim`, `standard`), their words
+/// put through `say` (`{leader}`, `{key:…}`, the leader's keys).
+pub fn for_scheme(lessons: Vec<Lesson>, scheme: &str, say: impl Fn(&str) -> String) -> Vec<Lesson> {
+    lessons
+        .into_iter()
+        .filter(|l| l.scheme.as_deref().is_none_or(|s| s == "any" || s == scheme))
+        .map(|mut l| {
+            l.title = say(&l.title);
+            l.about = say(&l.about);
+            l.text = say(&l.text);
+            for step in &mut l.steps {
+                step.say = say(&step.say);
+                step.hint = say(&step.hint);
+                step.text = step.text.as_deref().map(&say);
+            }
+            l
+        })
+        .collect()
+}
 
 /// The keybindings doc, shown when you're done.
 pub const KEYBINDINGS: &str = include_str!("../../../docs/KEYBINDINGS.md");
@@ -86,6 +107,12 @@ pub struct Lesson {
     /// A line on what it's about, under its title.
     #[serde(default)]
     pub about: String,
+    /// The key scheme it teaches: `vim`, `standard`, or `any` (the
+    /// default) -- only those for the scheme in use are listed. Its text
+    /// may write `{leader}` for the leader key and `{key:command.id}` for
+    /// the keys that run a command, said as the scheme in use has them.
+    #[serde(default)]
+    pub scheme: Option<String>,
     /// The practice buffer's text to start with.
     #[serde(default)]
     pub text: String,
@@ -724,13 +751,15 @@ mod tests {
     fn every_built_in_lesson_reads() {
         let (lessons, problems) = load(&[]);
         assert!(problems.is_empty(), "{problems:?}");
-        assert_eq!(lessons.len(), 13);
+        assert_eq!(lessons.len(), 14);
         let tracks: Vec<&str> = lessons.iter().map(|l| l.track.as_str()).collect();
-        assert_eq!(tracks.iter().filter(|t| **t == "Editing").count(), 6);
-        assert_eq!(&tracks[6..12], ["Fenix"; 6]);
-        assert_eq!(tracks[12], "Git", "a section of its own, after Fenix");
+        // Vim's six, then standard keys' one (each listed for its scheme).
+        assert_eq!(tracks.iter().filter(|t| **t == "Editing").count(), 7);
+        assert_eq!(lessons[6].id, "standard.basics");
+        assert_eq!(&tracks[7..13], ["Fenix"; 6]);
+        assert_eq!(tracks[13], "Git", "a section of its own, after Fenix");
         let ids: BTreeSet<&str> = lessons.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids.len(), 13, "ids are each their own");
+        assert_eq!(ids.len(), 14, "ids are each their own");
         assert!(lessons.iter().all(|l| l.steps.len() >= 3), "several steps each");
     }
 
@@ -753,9 +782,9 @@ mod tests {
         std::fs::write(dir.path().join("broken.toml"), "id = ").unwrap();
         std::fs::write(dir.path().join("zz-again.toml"), lesson.replace("Procs", "Again")).unwrap();
         let (lessons, problems) = load(&[dir.path().to_path_buf()]);
-        assert_eq!(lessons.len(), 14);
-        assert_eq!(lessons[13].id, "tcl.procs");
-        assert_eq!(lessons[13].file.as_deref(), Some(dir.path().join("procs.toml").as_path()));
+        assert_eq!(lessons.len(), 15);
+        assert_eq!(lessons[14].id, "tcl.procs");
+        assert_eq!(lessons[14].file.as_deref(), Some(dir.path().join("procs.toml").as_path()));
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems.iter().any(|p| p.contains("broken.toml")) && problems.iter().any(|p| p.contains("already")), "{problems:?}");
     }
@@ -851,7 +880,7 @@ mod tests {
         assert_eq!(page.focus, 2, "on to the next");
         let text = layout(&page, 100).all_text();
         assert!(text.contains("Lesson done (1 skipped). Enter starts the next one, Operators and text objects."), "{text}");
-        assert!(text.contains("2 of 13 done"), "{text}");
+        assert!(text.contains("2 of 14 done"), "{text}");
         save_done(&path, &page.done).unwrap();
         assert_eq!(load_done(&path), page.done);
     }

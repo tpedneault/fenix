@@ -65,6 +65,25 @@ struct Pane {
     sticky_col: usize,
     scroll_line: usize,
     scroll_col: usize,
+    /// Its extra cursors, with standard keys (1.5), and how long the text
+    /// was in characters: they come back only to the same text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    carets: Vec<SavedCaret>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    carets_len: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// An extra cursor: where it is and the column it keeps. Not its
+/// selection: the main cursor's isn't kept either, and typing at a
+/// selection on some cursors and not the others would surprise.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct SavedCaret {
+    at: usize,
+    sticky: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -264,8 +283,10 @@ impl App {
                     focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
                     layout: workspace.windows.snapshot(|pane, buffer| {
                         let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
+                        let carets: Vec<SavedCaret> = self.pane_carets(pane, *buffer).iter().map(|c| SavedCaret { at: c.at, sticky: c.sticky }).collect();
+                        let carets_len = if carets.is_empty() { 0 } else { self.buffers.get(*buffer).map_or(0, |ob| ob.buffer.len_chars()) };
                         Pane { document: ids.get(buffer).copied(), cursor: state.cursor.char_idx, sticky_col: state.cursor.sticky_col,
-                            scroll_line: state.scroll_line, scroll_col: state.scroll_col }
+                            scroll_line: state.scroll_line, scroll_col: state.scroll_col, carets, carets_len }
                     }),
                 })
                 .collect();
@@ -364,6 +385,9 @@ impl App {
     fn apply_saved_session(&mut self, mut saved: Session, prefer_first_frame: bool, modified: Option<std::time::SystemTime>) {
         self.restore_debugging(std::mem::take(&mut saved.debugging));
         let mut documents = Vec::new();
+        // Per document: whether its text is the one its panes' extra
+        // cursors were saved against.
+        let mut same_text = Vec::new();
         let mut warnings = Vec::new();
         let recovery = self.recovery_dir.as_ref().map(|dir| fenix_recovery::list(dir)).unwrap_or_default();
         for mut doc in saved.documents {
@@ -377,8 +401,10 @@ impl App {
                     warnings.push(format!("{}: its extension ({}) isn't on to open it", page.title, page.ext));
                 }
                 documents.push(restored);
+                same_text.push(false);
                 continue;
             }
+            let mut from_recovery = false;
             // Recovery is written before the session checkpoint. A newer snapshot
             // can contain edits from a crash or failed session write in between.
             if let Some(snapshot) = recovery.iter().find(|snapshot| {
@@ -391,6 +417,7 @@ impl App {
             }) {
                 doc.text = Some(snapshot.contents.clone());
                 doc.dirty = true;
+                from_recovery = true;
             }
             if doc.in_recovery && doc.text.is_none() {
                 doc.dirty = false;
@@ -402,13 +429,27 @@ impl App {
                 Some(path) => match Buffer::from_path(path) {
                     Ok(buffer) => Some(buffer),
                     Err(error) => {
-                        warnings.push(format!("{}: {error}", path.display()));
-                        doc.text.as_ref().map(|text| Buffer::from_text(text))
+                        // A file on a machine that isn't connected yet is
+                        // no trouble to report: it opens when it is.
+                        if fenix_vfs::is_remote(path) && doc.text.is_none() {
+                            self.remote_reopen_later(path.clone());
+                        } else {
+                            warnings.push(format!("{}: {error}", fenix_vfs::display(path)));
+                        }
+                        // Unsaved text for a file on a machine that isn't
+                        // connected yet stays that file's: it's saved
+                        // there once the machine is back.
+                        doc.text.as_ref().map(|text| if fenix_vfs::is_remote(path) { Buffer::from_text_at(path, text) } else { Buffer::from_text(text) })
                     }
                 },
                 None => Some(Buffer::from_text(doc.text.as_deref().unwrap_or(""))),
             };
-            let Some(buffer) = buffer else { documents.push(None); continue };
+            let Some(buffer) = buffer else { documents.push(None); same_text.push(false); continue };
+            same_text.push(!from_recovery && match (&doc.text, &doc.path) {
+                (Some(_), _) => true,
+                (None, Some(path)) => DiskFingerprint::of(path).is_some() && DiskFingerprint::of(path) == doc.disk,
+                (None, None) => false,
+            });
             let id = existing.filter(|_| buffer.path().is_some()).unwrap_or_else(|| self.buffers.insert_loaded_document(buffer));
             self.note_disk_state(id);
             let ob = self.buffers.get_mut(id).unwrap();
@@ -430,7 +471,7 @@ impl App {
                     self.unnamed_snapshots.insert(id, snapshot.snapshot.clone());
                 }
             }
-            if doc.dirty && (doc.conflict || doc.path.as_ref().is_some_and(|p| DiskFingerprint::of(p) != doc.disk)) {
+            if doc.dirty && (doc.conflict || doc.path.as_ref().is_some_and(|p| DiskFingerprint::look(p).is_some_and(|seen| seen != doc.disk))) {
                 self.externally_changed.insert(id);
                 warnings.push("a restored document changed on disk; review the conflict before saving".into());
             }
@@ -441,6 +482,9 @@ impl App {
         // Every workspace gets its own Home, which is also what a leaf
         // with no restorable document shows.
         let mut frames = Vec::new();
+        // Extra cursors come back with standard keys only: Vim's have none.
+        let standard = self.standard_keys();
+        let mut restored_carets = Vec::new();
         for frame in saved.frames {
             // `capture_session` no longer writes a panel workspace at all
             // (see `workspace_is_ephemeral_session`), but sessions saved
@@ -500,6 +544,11 @@ impl App {
                         continue;
                     }
                     let buffer = &self.buffers.get(*tree.content(id).unwrap()).unwrap().buffer;
+                    let holds = pane.document.is_some_and(|i| same_text.get(i).copied().unwrap_or(false));
+                    if holds && !pane.carets.is_empty() && pane.carets_len == buffer.len_chars() && standard {
+                        let extra: Vec<super::carets::Caret> = pane.carets.iter().take(super::carets::MAX_CARETS).filter(|c| c.at <= pane.carets_len && c.at != pane.cursor).map(|c| super::carets::Caret { at: c.at, sticky: c.sticky.min(1_000_000), anchor: None }).collect();
+                        restored_carets.push((id, shown, extra, buffer.edit_count()));
+                    }
                     let scroll_line = pane.scroll_line.min(buffer.visual_line_count().saturating_sub(1));
                     pane_states.insert(id, PaneState {
                         cursor: Cursor { char_idx: pane.cursor.min(buffer.len_chars()), sticky_col: pane.sticky_col.min(1_000_000) },
@@ -511,6 +560,9 @@ impl App {
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }
         self.workspaces = frames.remove(0);
+        for (pane, buffer, extra, edits) in restored_carets {
+            self.restore_pane_carets(pane, buffer, extra, edits);
+        }
         // The agents' dock came back as two ordinary panes: it's the dock.
         self.agents_adopt_dock();
         self.session.pending = Some((frames, if prefer_first_frame { 0 } else { saved.focused_frame }));
@@ -755,7 +807,7 @@ mod tests {
         // Hand-built the way the old code would have written it: a real
         // file workspace, plus a panel workspace whose panes all record
         // no document at all.
-        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 };
+        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0, carets: Vec::new(), carets_len: 0 };
         let split = |first, second| Layout::Split { kind: SplitKind::Vertical, ratio: 0.5, first: Box::new(first), second: Box::new(second) };
         let saved = Session {
             version: VERSION,
@@ -801,7 +853,7 @@ mod tests {
         std::fs::write(&file, "the one real pane
 ").unwrap();
 
-        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 };
+        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0, carets: Vec::new(), carets_len: 0 };
         let split = |first, second| Layout::Split { kind: SplitKind::Vertical, ratio: 0.5, first: Box::new(first), second: Box::new(second) };
         // Six placeholder panes with the document third from the left,
         // so a passing result can't come from just taking the first or
@@ -1073,7 +1125,7 @@ mod tests {
         let temp = Temp::new();
         let app = temp.app();
         let mut saved = app.capture_session();
-        saved.frames[0].workspaces[0].layout = Layout::Leaf(Pane { document: Some(999), cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 });
+        saved.frames[0].workspaces[0].layout = Layout::Leaf(Pane { document: Some(999), cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0, carets: Vec::new(), carets_len: 0 });
         assert!(saved.validate().is_err());
     }
 
@@ -1170,6 +1222,99 @@ mod tests {
         assert!(!restored.open().buffer.is_dirty());
         assert_eq!(restored.cursor().char_idx, 2);
         assert_eq!(restored.pane_state(restored.focused_pane_id()).scroll_line, 0);
+    }
+
+    fn standard(app: &mut App) {
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+    }
+
+    /// The session restored with standard keys, one frame.
+    fn restore_standard(temp: &Temp) -> App {
+        let mut app = temp.app();
+        standard(&mut app);
+        app.restore_session(false);
+        let (frames, _) = app.session.pending.take().expect("restored");
+        assert!(frames.is_empty(), "one frame");
+        app
+    }
+
+    #[test]
+    fn extra_cursors_come_back_with_the_session_to_the_same_text() {
+        let temp = Temp::new();
+        let path = temp.0.join("carets.txt");
+        std::fs::write(&path, "abc\ndef\nghi\n").unwrap();
+        let mut app = temp.app();
+        standard(&mut app);
+        app.open_startup_file(&path);
+        app.toggle_caret_at(4);
+        app.toggle_caret_at(8);
+        assert_eq!(app.extra_carets().len(), 2);
+        assert!(app.checkpoint_session());
+        let mut restored = restore_standard(&temp);
+        assert_eq!(restored.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [4, 8]);
+        restored.type_text("x");
+        assert_eq!(restored.open().buffer.text(), "xabc\nxdef\nxghi\n", "and they type");
+        // Unsaved, they come back with the unsaved text.
+        assert!(restored.checkpoint_session());
+        let again = restore_standard(&temp);
+        assert!(again.open().buffer.is_dirty());
+        assert_eq!(again.extra_carets().len(), 2);
+        // With Vim keys, only the one cursor.
+        let mut app = temp.app();
+        app.restore_session(false);
+        assert!(app.extra_carets().is_empty());
+    }
+
+    #[test]
+    fn a_pane_saved_before_extra_cursors_were_kept_still_reads() {
+        let pane: Pane = serde_json::from_str(r#"{"document":0,"cursor":3,"sticky_col":1,"scroll_line":2,"scroll_col":0}"#).unwrap();
+        assert!(pane.carets.is_empty() && pane.carets_len == 0);
+        assert_eq!(pane.cursor, 3);
+    }
+
+    #[test]
+    fn extra_cursors_saved_against_another_length_are_left_out() {
+        let temp = Temp::new();
+        let path = temp.0.join("carets.txt");
+        std::fs::write(&path, "abc\ndef\n").unwrap();
+        let mut app = temp.app();
+        standard(&mut app);
+        app.open_startup_file(&path);
+        app.press("x");
+        app.toggle_caret_at(5);
+        assert!(app.checkpoint_session());
+        let file = temp.0.join("session.json");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"carets_len\":9"), "{text}");
+        // The unsaved text itself is the same; only the length the
+        // cursors were saved against isn't.
+        std::fs::write(&file, text.replace("\"carets_len\":9", "\"carets_len\":8")).unwrap();
+        let restored = restore_standard(&temp);
+        assert!(restored.open().buffer.is_dirty(), "the text came back");
+        assert!(restored.extra_carets().is_empty(), "the cursors didn't");
+    }
+
+    #[test]
+    fn a_file_changed_since_brings_back_only_the_primary_cursor() {
+        let temp = Temp::new();
+        let path = temp.0.join("carets.txt");
+        std::fs::write(&path, "abc\ndef\n").unwrap();
+        let mut app = temp.app();
+        standard(&mut app);
+        app.open_startup_file(&path);
+        app.toggle_caret_at(4);
+        assert!(app.checkpoint_session());
+        // As long as before, but not the same file.
+        std::fs::write(&path, "xyz\nuvw\n").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        let restored = restore_standard(&temp);
+        assert_eq!(restored.open().buffer.text(), "xyz\nuvw\n");
+        assert!(restored.extra_carets().is_empty());
+        // Shorter: the same.
+        std::fs::write(&path, "a").unwrap();
+        assert!(restore_standard(&temp).extra_carets().is_empty());
     }
 
     #[test]

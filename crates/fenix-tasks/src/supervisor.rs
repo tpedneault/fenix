@@ -284,12 +284,50 @@ fn supervise<A: ReadyRead, B: ReadyRead>(
                 return;
             }
         }
-        std::thread::sleep(POLL);
+        wait_for_output(&stdout, &stderr);
     }
+}
+
+/// Sleeps up to one tick, waking as soon as either pipe has bytes, so lines
+/// are read close to when they're written. Waking per write keeps stdout and
+/// stderr in the order a program wrote them (cargo's `Running …` on stderr
+/// before the test binary's stdout), which a fixed sleep batches stdout-first.
+#[cfg(unix)]
+fn wait_for_output<A: ReadyRead, B: ReadyRead>(stdout: &Pipe<A>, stderr: &Pipe<B>) {
+    let mut fds: Vec<libc::pollfd> = [
+        (!stdout.eof).then(|| stdout.reader.fd()),
+        (!stderr.eof).then(|| stderr.reader.fd()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|fd| libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    })
+    .collect();
+    if fds.is_empty() {
+        std::thread::sleep(POLL);
+        return;
+    }
+    // Errors (EINTR) just end this tick early; the loop polls again.
+    unsafe {
+        libc::poll(
+            fds.as_mut_ptr(),
+            fds.len() as libc::nfds_t,
+            POLL.as_millis() as libc::c_int,
+        )
+    };
+}
+#[cfg(not(unix))]
+fn wait_for_output<A, B>(_: &Pipe<A>, _: &Pipe<B>) {
+    std::thread::sleep(POLL);
 }
 
 trait ReadyRead: Read {
     fn configure(&self) -> io::Result<()>;
+    #[cfg(unix)]
+    fn fd(&self) -> std::os::fd::RawFd;
     fn ready_read(&mut self, bytes: &mut [u8]) -> io::Result<usize>;
 }
 #[cfg(windows)]
@@ -329,6 +367,9 @@ impl<T: Read + std::os::windows::io::AsRawHandle> ReadyRead for T {
 }
 #[cfg(unix)]
 impl<T: Read + std::os::fd::AsRawFd> ReadyRead for T {
+    fn fd(&self) -> std::os::fd::RawFd {
+        self.as_raw_fd()
+    }
     fn configure(&self) -> io::Result<()> {
         let flags = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_GETFL) };
         if flags < 0
@@ -440,6 +481,17 @@ mod tests {
                 std::io::stderr().write_all(b"ERR\n").unwrap();
                 std::process::exit(7);
             }
+            Ok("order") => {
+                for (i, stream) in ["err", "out", "err", "out"].into_iter().enumerate() {
+                    if stream == "err" {
+                        eprintln!("{i}");
+                    } else {
+                        println!("{i}");
+                        std::io::stdout().flush().unwrap();
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
             Ok("sleep") => {
                 println!("READY {}", std::process::id());
                 std::io::stdout().flush().unwrap();
@@ -486,6 +538,27 @@ mod tests {
             }
             _ => panic!("fixture must be launched by a lifecycle test"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_keeps_the_order_the_two_pipes_were_written_in() {
+        let (_runner, rx) = start("order");
+        let (_, lines) = finish(&rx);
+        let numbered: Vec<_> = lines
+            .iter()
+            .filter(|line| line.text.len() == 1)
+            .map(|line| (line.text.as_str(), line.stream))
+            .collect();
+        assert_eq!(
+            numbered,
+            [
+                ("0", OutputStream::Stderr),
+                ("1", OutputStream::Stdout),
+                ("2", OutputStream::Stderr),
+                ("3", OutputStream::Stdout),
+            ]
+        );
     }
 
     fn start(mode: &str) -> (TaskRunner, Receiver<TaskEvent>) {
@@ -606,6 +679,11 @@ mod tests {
     impl ReadyRead for UnavailablePipe {
         fn configure(&self) -> io::Result<()> {
             Ok(())
+        }
+        // poll(2) ignores a negative descriptor, so the tick just times out.
+        #[cfg(unix)]
+        fn fd(&self) -> std::os::fd::RawFd {
+            -1
         }
         fn ready_read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
             self.read(bytes)

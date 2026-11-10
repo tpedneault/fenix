@@ -44,7 +44,7 @@ mod bindings {
 
 use bindings::{fenix, ExtensionBase as Extension};
 pub use bindings::fenix::extension::types::{
-    Anchor, Canvas, CanvasPopup, CellSpan, Cells, Check, Command, Ease, Event as Notice, Glide, Health, Here, HomeMark, HomeRow, HomeSection, HttpRequest, ImageInfo, Mark, TextEdit, EditorTheme, HttpResponse, Item, Key,
+    KeyScheme, Anchor, Canvas, CanvasPopup, CellSpan, Cells, Check, Command, Ease, Event as Notice, Glide, Health, Here, HomeMark, HomeRow, HomeSection, HttpRequest, ImageInfo, Mark, TextEdit, EditorTheme, HttpResponse, Item, Key,
     KeyHint, LayerLevel, Layout, Level, Line, ModelInfo, Page, PaneBox, PickerItem, Picture, Place, Popup, Pose, ProcessOutput, ProjectInfo, Role, Section, Span, Style, Task,
     CursorImage, Datagram, KeyEvent, Modifiers, NamedKey, PointerEvent, SurfaceInput, SurfaceKey, SurfaceMark, SurfaceOptions, SurfaceScale, SurfaceSize, WheelEvent,
     Changed, CursorInfo, Focus, FocusedPage, FolderEntry,
@@ -585,6 +585,8 @@ pub enum Event {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {
     RunCommand(String),
+    /// You switched key schemes (`key-scheme-changed`), when it has that.
+    KeySchemeChanged(KeyScheme),
     /// Something it asked for has come (a picker's choice, a reply).
     Deliver(Notice),
     /// Its page laid out for a pane `width` cells wide and `height`
@@ -659,6 +661,7 @@ impl Call {
 struct Optional {
     service_cancelled: Option<wasmtime::component::TypedFunc<(u64,), ()>>,
     agent_ask_progress: Option<wasmtime::component::TypedFunc<(u64, String), ()>>,
+    key_scheme_changed: Option<wasmtime::component::TypedFunc<(KeyScheme,), ()>>,
 }
 
 impl Optional {
@@ -666,12 +669,17 @@ impl Optional {
         Optional {
             service_cancelled: instance.get_typed_func::<(u64,), ()>(&mut *store, "service-cancelled").ok(),
             agent_ask_progress: instance.get_typed_func::<(u64, String), ()>(&mut *store, "agent-ask-progress").ok(),
+            key_scheme_changed: instance.get_typed_func::<(KeyScheme,), ()>(&mut *store, "key-scheme-changed").ok(),
         }
     }
 }
 
 /// Reads a secret, for `host.secret`; Fenix's keychain behind it.
 pub type Secrets = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// The keys that run a command now, for `host.key-for`; Fenix's keymap
+/// behind it.
+pub type KeyFor = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// One extension, to be run.
 #[derive(Clone)]
@@ -723,6 +731,10 @@ pub struct Spec {
     pub folders: Vec<(String, PathBuf)>,
     /// The system's font folders, at `/fonts/<n>`, when it may read them.
     pub fonts: Vec<PathBuf>,
+    /// How you edit (`key-scheme`), as Fenix keeps it up to date.
+    pub key_scheme: Arc<RwLock<KeyScheme>>,
+    /// The keys that run a command (`key-for`).
+    pub key_for: KeyFor,
 }
 
 impl Spec {
@@ -751,6 +763,8 @@ impl Spec {
             folders: Vec::new(),
             fonts: Vec::new(),
             palette: Arc::default(),
+            key_scheme: Arc::new(RwLock::new(KeyScheme::Vim)),
+            key_for: Arc::new(|_| None),
             theme: Arc::new(RwLock::new(EditorTheme { name: String::new(), background: (0, 0, 0), text: (255, 255, 255), panel: (0, 0, 0), accent: (255, 255, 255), muted: (128, 128, 128), tint: (0, 0, 0), warn: (255, 200, 0), dark: true })),
         }
     }
@@ -1872,6 +1886,14 @@ impl fenix::extension::host::Host for State {
 
     fn theme_colors(&mut self) -> EditorTheme {
         self.spec.theme.read().map(|t| t.clone()).unwrap_or_else(|p| p.into_inner().clone())
+    }
+
+    fn editor_keys(&mut self) -> KeyScheme {
+        self.spec.key_scheme.read().map(|k| *k).unwrap_or(KeyScheme::Vim)
+    }
+
+    fn key_for(&mut self, command: String) -> Option<String> {
+        (self.spec.key_for)(&command)
     }
 
     fn theme_palette(&mut self) -> Vec<Rgb> {
@@ -3901,6 +3923,11 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             },
             Call::AgentAskProgress { call, text } => match &optional.agent_ask_progress {
                 Some(f) => f.call(&mut *store, (call, text)).map(|()| Ok(Reply::Done)),
+                None => Ok(Ok(Reply::Done)),
+            },
+            // 1.5's, when it has it.
+            Call::KeySchemeChanged(scheme) => match &optional.key_scheme_changed {
+                Some(f) => f.call(&mut *store, (scheme,)).map(|()| Ok(Reply::Done)),
                 None => Ok(Ok(Reply::Done)),
             },
         };

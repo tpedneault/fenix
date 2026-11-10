@@ -207,7 +207,7 @@ fn resumes(target: &Target) {
     // A Fenix started again: the thread read back, detached.
     let mut hub = Hub::new("conf2", "test");
     hub.set_agents(vec![target.spec.clone()]);
-    hub.restore(ThreadMeta { id: id.clone(), agent: target.spec.id.clone(), root: root.clone(), session_id: Some(session), handed_off_from: None }, thread);
+    hub.restore(ThreadMeta { id: id.clone(), agent: target.spec.id.clone(), root: root.clone(), session_id: Some(session), handed_off_from: None, run: None, archived: false }, thread);
     let mut d = Driver::new(hub);
     let fx = d.hub.focus(&id);
     d.apply(fx);

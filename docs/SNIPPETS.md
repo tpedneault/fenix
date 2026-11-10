@@ -6,8 +6,8 @@ An exact snippet wins over the completion popup unless you explicitly select ano
 Tab continues to accept completion or insert indentation as before.
 
 The first field is highlighted. Typing replaces its default, then appends to
-your new value; Backspace removes the last character. Tab/Ctrl-J selects the
-next numbered field; Ctrl-K selects the previous one. Revisiting a field
+your new value; Backspace removes the last character. Tab/Ctrl+J selects the
+next numbered field; Shift+Tab (or Ctrl+K, with Vim keys) selects the previous one. Revisiting a field
 selects its whole value for replacement. `$0` is the final cursor position;
 without it, the cursor finishes at the end. Escape ends the session and
 returns to Normal mode on the same keypress. Arrow keys or other editor

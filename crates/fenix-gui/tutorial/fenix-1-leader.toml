@@ -1,20 +1,21 @@
 id = "fenix.leader"
 track = "Fenix"
 order = 1
-title = "The SPC leader and which-key"
-about = "Space starts every Fenix command that isn't Vim's, and a menu shows what can follow."
+title = "The leader and which-key"
+about = "{leader} starts every Fenix command that isn't the editor's own, and a menu shows what can follow."
 text = """
-Space is Fenix's leader. In Normal mode SPC starts a key sequence, and a
-menu (which-key) shows what can come next: groups like w for windows and
-f for files. Backspace goes back up a level; Esc closes it.
+{leader} is Fenix's leader (with Vim keys, Space in Normal mode). It
+starts a key sequence, and a menu (which-key) shows what can come next:
+groups like w for windows and f for files. Backspace goes back up a
+level; Esc closes it.
 
 SPC : runs any command by its name, SPC h b lists the keys bound where
 you are, and SPC h k says what a key does.
 """
 
 [[step]]
-say = "Press SPC and wait a moment: the menu shows the groups."
-hint = "Space, in Normal mode -- Esc first if the modeline says INSERT."
+say = "Press {leader} and wait a moment: the menu shows the groups."
+hint = "{leader} -- with Vim keys, in Normal mode: Esc first if the modeline says INSERT."
 leader = true
 
 [[step]]
@@ -24,7 +25,7 @@ leader = false
 
 [[step]]
 say = "SPC : opens the command palette, every command by name."
-hint = "Space, then the colon."
+hint = "{leader}, then the colon."
 picker = "commands"
 
 [[step]]
@@ -34,7 +35,7 @@ picker = "none"
 
 [[step]]
 say = "SPC h b lists the keys bound here, and what each runs."
-hint = "Space, h (help), b."
+hint = "{leader}, h (help), b."
 picker = "bindings"
 
 [[step]]

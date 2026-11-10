@@ -4,12 +4,16 @@ use fenix_keymap::{KeyCode, KeyPress, KeyTrie, Mods, NamedKey as FenixNamedKey};
 use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
+pub mod chords;
+pub use chords::{Chord, ChordContext, ChordMap, Scheme, When};
+
 /// Translates a winit key event into fenix-keymap's UI-agnostic `KeyPress`.
 /// Named `Space` is normalized to `KeyCode::Char(' ')` -- treating it like
 /// any other printable key keeps the leader trie's sequences (`SPC f s`)
 /// just a plain char sequence, no special-casing needed downstream.
-/// Returns `None` for keys with nothing sensible to bind (F-keys, media
-/// keys, ...).
+/// Shift is kept as `KeyPress` describes: not on a printable character
+/// typed without Ctrl or Alt. Returns `None` for keys with nothing
+/// sensible to bind (media keys, F13 and up, ...).
 pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
     // Ctrl+Alt+Q is a second Escape. Synthetic input (UI automation,
     // some remote-desktop tools) can fail to deliver Escape itself; this
@@ -33,17 +37,43 @@ pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
         Key::Named(NamedKey::End) => KeyCode::Named(FenixNamedKey::End),
         Key::Named(NamedKey::PageUp) => KeyCode::Named(FenixNamedKey::PageUp),
         Key::Named(NamedKey::PageDown) => KeyCode::Named(FenixNamedKey::PageDown),
+        Key::Named(named) => KeyCode::Named(FenixNamedKey::F(function_key_number(named)?)),
         Key::Character(s) => KeyCode::Char(s.chars().next()?),
         _ => return None,
     };
-    Some(KeyPress {
-        code,
-        mods: Mods { ctrl: mods.control_key(), alt: mods.alt_key(), super_: mods.super_key() },
+    Some(keypress_with(code, mods))
+}
+
+/// `code` with the modifiers held, Shift kept as `KeyPress` says.
+pub fn keypress_with(code: KeyCode, mods: ModifiersState) -> KeyPress {
+    let (ctrl, alt) = (mods.control_key(), mods.alt_key());
+    let printable = matches!(code, KeyCode::Char(_));
+    let shift = mods.shift_key() && (!printable || ctrl || alt);
+    KeyPress { code, mods: Mods { ctrl, alt, super_: mods.super_key(), shift } }
+}
+
+/// F1 to F12's number.
+pub fn function_key_number(named: &NamedKey) -> Option<u8> {
+    Some(match named {
+        NamedKey::F1 => 1,
+        NamedKey::F2 => 2,
+        NamedKey::F3 => 3,
+        NamedKey::F4 => 4,
+        NamedKey::F5 => 5,
+        NamedKey::F6 => 6,
+        NamedKey::F7 => 7,
+        NamedKey::F8 => 8,
+        NamedKey::F9 => 9,
+        NamedKey::F10 => 10,
+        NamedKey::F11 => 11,
+        NamedKey::F12 => 12,
+        _ => return None,
     })
 }
 
 /// A short human-readable label for a keypress, for the which-key popup
-/// (`SPC` rather than a literal space, `C-r` for Ctrl-r, `Esc` for Escape).
+/// (`SPC` rather than a literal space, `C-r` for Ctrl-r, `Esc` for Escape,
+/// `S-Down` for Shift-Down, `s-` for Super).
 pub fn describe_keypress(kp: &KeyPress) -> String {
     let mut s = String::new();
     if kp.mods.ctrl {
@@ -53,26 +83,66 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
         s.push_str("M-");
     }
     if kp.mods.super_ {
+        s.push_str("s-");
+    }
+    if kp.mods.shift {
         s.push_str("S-");
     }
     match kp.code {
         KeyCode::Char(' ') => s.push_str("SPC"),
         KeyCode::Char(c) => s.push(c),
-        KeyCode::Named(FenixNamedKey::Escape) => s.push_str("Esc"),
-        KeyCode::Named(FenixNamedKey::Enter) => s.push_str("Enter"),
-        KeyCode::Named(FenixNamedKey::Tab) => s.push_str("Tab"),
-        KeyCode::Named(FenixNamedKey::Backspace) => s.push_str("Backspace"),
-        KeyCode::Named(FenixNamedKey::Delete) => s.push_str("Delete"),
-        KeyCode::Named(FenixNamedKey::Left) => s.push_str("Left"),
-        KeyCode::Named(FenixNamedKey::Right) => s.push_str("Right"),
-        KeyCode::Named(FenixNamedKey::Up) => s.push_str("Up"),
-        KeyCode::Named(FenixNamedKey::Down) => s.push_str("Down"),
-        KeyCode::Named(FenixNamedKey::Home) => s.push_str("Home"),
-        KeyCode::Named(FenixNamedKey::End) => s.push_str("End"),
-        KeyCode::Named(FenixNamedKey::PageUp) => s.push_str("PgUp"),
-        KeyCode::Named(FenixNamedKey::PageDown) => s.push_str("PgDn"),
+        KeyCode::Named(n) => s.push_str(&named_key_name(n)),
     }
     s
+}
+
+/// A named key as the keymap writes it.
+fn named_key_name(n: FenixNamedKey) -> String {
+    match n {
+        FenixNamedKey::Escape => "Esc".into(),
+        FenixNamedKey::Enter => "Enter".into(),
+        FenixNamedKey::Tab => "Tab".into(),
+        FenixNamedKey::Backspace => "Backspace".into(),
+        FenixNamedKey::Delete => "Delete".into(),
+        FenixNamedKey::Left => "Left".into(),
+        FenixNamedKey::Right => "Right".into(),
+        FenixNamedKey::Up => "Up".into(),
+        FenixNamedKey::Down => "Down".into(),
+        FenixNamedKey::Home => "Home".into(),
+        FenixNamedKey::End => "End".into(),
+        FenixNamedKey::PageUp => "PgUp".into(),
+        FenixNamedKey::PageDown => "PgDn".into(),
+        FenixNamedKey::F(n) => format!("F{n}"),
+    }
+}
+
+/// A named key from its name, as `named_key_name` writes it or as people
+/// do (`Escape`, `PageDown`, `Space`, `Return`), any case.
+fn named_key(name: &str) -> Option<KeyCode> {
+    let lower = name.to_ascii_lowercase();
+    Some(KeyCode::Named(match lower.as_str() {
+        "esc" | "escape" => FenixNamedKey::Escape,
+        "enter" | "return" | "ret" | "cr" => FenixNamedKey::Enter,
+        "tab" => FenixNamedKey::Tab,
+        "backspace" | "bs" => FenixNamedKey::Backspace,
+        "delete" | "del" => FenixNamedKey::Delete,
+        "left" => FenixNamedKey::Left,
+        "right" => FenixNamedKey::Right,
+        "up" => FenixNamedKey::Up,
+        "down" => FenixNamedKey::Down,
+        "home" => FenixNamedKey::Home,
+        "end" => FenixNamedKey::End,
+        "pgup" | "pageup" => FenixNamedKey::PageUp,
+        "pgdn" | "pagedown" => FenixNamedKey::PageDown,
+        "spc" | "space" => return Some(KeyCode::Char(' ')),
+        _ => {
+            let n: u8 = lower.strip_prefix('f')?.parse().ok()?;
+            if !(1..=12).contains(&n) {
+                return None;
+            }
+            FenixNamedKey::F(n)
+        }
+    }))
 }
 
 /// A kind of buffer or project `SPC m` has bindings for. A buffer can be
@@ -245,12 +315,16 @@ pub fn reload_leader() -> Vec<String> {
     // The installed extensions' keymaps, then yours over them.
     let mut problems = Vec::new();
     let mut locals = Vec::new();
+    let mut chords = ChordMap::new();
+    lay_chords(&mut chords, default_keymap(), None, &known, ChordSource::Fenix, &mut Vec::new());
     for path in extension_keymaps() {
         match read_user_keymap(&path) {
             Ok(Some(keys)) => {
                 let mut wrong = Vec::new();
                 locals.extend(extension_locals(keys, &known, &mut wrong));
-                let leader = if keys.local.is_empty() { keys } else { leader_only_of(keys) };
+                let from: &'static str = Box::leak(path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default().into_boxed_str());
+                lay_chords(&mut chords, keys, Some(from), &known, ChordSource::Extension, &mut wrong);
+                let leader = if keys.local.is_empty() && keys.keys.is_empty() { keys } else { leader_only_of(keys) };
                 wrong.extend(apply_user_keys(&mut t, leader, &known).1);
                 problems.extend(wrong.into_iter().map(|w| format!("{}: {w}", path.display())));
             }
@@ -261,7 +335,12 @@ pub fn reload_leader() -> Vec<String> {
     let bound = match user_keymap_path() {
         Some(path) => match read_user_keymap(&path) {
             Ok(Some(user)) => {
-                let (bound, wrong) = apply_user_keys(&mut t, user, &known);
+                let mut wrong = Vec::new();
+                let mut bound = lay_chords(&mut chords, user, Some("keybindings.toml"), &known, ChordSource::Yours, &mut wrong);
+                let leader = if user.keys.is_empty() { user } else { leader_only_of_with_local(user) };
+                let (leader_bound, leader_wrong) = apply_user_keys(&mut t, leader, &known);
+                bound.splice(0..0, leader_bound);
+                problems.extend(leader_wrong);
                 problems.extend(wrong);
                 bound
             }
@@ -273,6 +352,7 @@ pub fn reload_leader() -> Vec<String> {
         },
         None => Vec::new(),
     };
+    *CHORDS.write().unwrap_or_else(|p| p.into_inner()) = Some(Box::leak(Box::new(chords)));
     *USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()) = (bound, problems.clone());
     *EXTENSION_LOCALS.write().unwrap_or_else(|p| p.into_inner()) = locals;
     if let Some(tries) = LOCAL_TRIES.get() {
@@ -282,11 +362,106 @@ pub fn reload_leader() -> Vec<String> {
     problems
 }
 
+/// The chords in use: Fenix's `[[keys]]`, the extensions', yours.
+pub fn chord_map() -> &'static ChordMap {
+    if let Some(map) = *CHORDS.read().unwrap_or_else(|p| p.into_inner()) {
+        return map;
+    }
+    leader_trie();
+    CHORDS.read().unwrap_or_else(|p| p.into_inner()).expect("built with the leader")
+}
+
+static CHORDS: std::sync::RwLock<Option<&'static ChordMap>> = std::sync::RwLock::new(None);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChordSource {
+    Fenix,
+    Extension,
+    Yours,
+}
+
+/// Lays `data`'s `[[keys]]` into `map`. What can't be laid is said in
+/// `problems`; yours come back as `UserKey`s for `SPC h b`.
+fn lay_chords(map: &mut ChordMap, data: &'static KeymapData, from: Option<&'static str>, known: &dyn Fn(&str) -> bool, source: ChordSource, problems: &mut Vec<String>) -> Vec<UserKey> {
+    let mut bound = Vec::new();
+    for entry in &data.keys {
+        let key = match parse_keys(&entry.keys) {
+            Ok(keys) if keys.len() == 1 => keys[0],
+            Ok(_) => {
+                problems.push(format!("{}: a [[keys]] entry is one key with its modifiers (C-s, F12); sequences go in [[leader]]", entry.keys));
+                continue;
+            }
+            Err(e) => {
+                if source == ChordSource::Fenix {
+                    panic!("the built-in keymap: {e}");
+                }
+                problems.push(e);
+                continue;
+            }
+        };
+        let text = describe_keypress(&key);
+        let Some(scheme) = Scheme::parse(entry.scheme.as_deref().unwrap_or("any")) else {
+            problems.push(format!("{text}: scheme is vim, standard or any"));
+            continue;
+        };
+        let Some(when) = When::parse(entry.when.as_deref().unwrap_or("anywhere")) else {
+            problems.push(format!("{text}: when is anywhere, text, typing, not_typing, page or terminal"));
+            continue;
+        };
+        if source == ChordSource::Extension && when == When::Terminal {
+            problems.push(format!("{text}: only Fenix's keys and yours reach past a terminal"));
+            continue;
+        }
+        if source == ChordSource::Extension && RESERVED_CHORDS.iter().any(|r| parse_key(r) == Some(key)) {
+            problems.push(format!("{text} is Fenix's own and can't be taken"));
+            continue;
+        }
+        let at = ChordContext { scheme: if scheme == Scheme::Any { Scheme::Vim } else { scheme }, ..ChordContext::default() };
+        let replaced = map.lookup(key, &at);
+        if entry.unbind {
+            if replaced.is_none() && source == ChordSource::Yours {
+                problems.push(format!("{text}: nothing to unbind"));
+            }
+            map.push(Chord { key, scheme, when, command: None, label: None, from, context: entry.context.as_deref() });
+            bound.push(UserKey { keys: text, command: None, replaced });
+            continue;
+        }
+        let Some(command) = entry.command.as_deref() else {
+            problems.push(format!("{text}: needs a command, or unbind = true"));
+            continue;
+        };
+        if !known(command) {
+            if source == ChordSource::Fenix {
+                // A command of a feature that isn't built in: its key goes
+                // with it, as the leader's do.
+                continue;
+            }
+            problems.push(format!("{text}: {command} isn't a command (SPC h c lists them)"));
+            continue;
+        }
+        map.push(Chord { key, scheme, when, command: Some(command), label: entry.label.as_deref(), from, context: entry.context.as_deref() });
+        bound.push(UserKey { keys: text, command: Some(command.to_string()), replaced: replaced.filter(|r| *r != command) });
+    }
+    bound
+}
+
+/// Chords no extension may bind: the leader's, the palette's, the
+/// terminal's way out.
+pub const RESERVED_CHORDS: &[&str] = &["C-k", "C-S-p", "C-\\", "M-x"];
+
+/// Your file's `[[leader]]` and `[[local.*]]`, without its `[[keys]]`.
+fn leader_only_of_with_local(data: &'static KeymapData) -> &'static KeymapData {
+    let copy = |e: &KeyEntry| KeyEntry { keys: e.keys.clone(), label: e.label.clone(), command: e.command.clone(), group: e.group.clone(), section: e.section.clone(), unbind: e.unbind };
+    let leader = data.leader.iter().map(copy).collect();
+    let local = data.local.iter().map(|(k, v)| (k.clone(), v.iter().map(copy).collect())).collect();
+    Box::leak(Box::new(KeymapData { leader, local, keys: Vec::new() }))
+}
+
 /// `data`'s `[[leader]]` entries alone: an extension's `[[local.*]]`
 /// entries are read apart. Kept, like the file.
 fn leader_only_of(data: &'static KeymapData) -> &'static KeymapData {
     let leader = data.leader.iter().map(|e| KeyEntry { keys: e.keys.clone(), label: e.label.clone(), command: e.command.clone(), group: e.group.clone(), section: e.section.clone(), unbind: e.unbind }).collect();
-    Box::leak(Box::new(KeymapData { leader, local: Default::default() }))
+    Box::leak(Box::new(KeymapData { leader, local: Default::default(), keys: Vec::new() }))
 }
 
 /// Your keybindings: `keybindings.toml`, beside `settings.toml`. None
@@ -422,6 +597,30 @@ struct KeymapData {
     leader: Vec<KeyEntry>,
     #[serde(default)]
     local: std::collections::HashMap<String, Vec<KeyEntry>>,
+    /// Chords: `C-s`, `F12`, outside the leader.
+    #[serde(default)]
+    keys: Vec<ChordEntry>,
+}
+
+/// One `[[keys]]` entry: a chord bound to a command (or `unbind`), for a
+/// key `scheme` (`vim`, `standard`, `any`), `when` it applies.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChordEntry {
+    keys: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    when: Option<String>,
+    #[serde(default)]
+    scheme: Option<String>,
+    /// Only in a buffer of this `SPC m` context.
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    unbind: bool,
 }
 
 /// One entry: `keys` bound to `command` (shown as `label`), or naming a
@@ -453,21 +652,44 @@ fn default_local(name: &str) -> &'static [KeyEntry] {
     default_keymap().local.get(name).map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Keys as the which-key menu writes them (`SPC f s`, `SPC Tab n`, `x`).
+/// Keys as the which-key menu writes them (`SPC f s`, `SPC Tab n`, `x`,
+/// `SPC C-i`), and chords as `[[keys]]` writes them (`C-S-p`, `F12`,
+/// `M-Left`, `<F2>`). Modifiers are `C-` (Ctrl), `M-` (Alt), `s-` (Super)
+/// and `S-` (Shift); a named key may be written in angle brackets.
 pub(crate) fn parse_keys(text: &str) -> Result<Vec<KeyPress>, String> {
-    text.split_whitespace()
-        .map(|token| match token {
-            "SPC" => Ok(KeyPress::char(' ')),
-            "Tab" => Ok(KeyPress::named(FenixNamedKey::Tab)),
-            _ => {
-                let mut chars = token.chars();
-                match (chars.next(), chars.next()) {
-                    (Some(c), None) => Ok(KeyPress::char(c)),
-                    _ => Err(format!("`{token}` in `{text}` isn't a key")),
-                }
-            }
-        })
-        .collect()
+    text.split_whitespace().map(|token| parse_key(token).ok_or_else(|| format!("`{token}` in `{text}` isn't a key"))).collect()
+}
+
+/// One key: `x`, `SPC`, `Tab`, `C-s`, `S-<Down>`, `F12`.
+pub(crate) fn parse_key(token: &str) -> Option<KeyPress> {
+    let mut mods = Mods::default();
+    let mut rest = token;
+    while let (Some(prefix), true) = (rest.get(..2), rest.chars().count() > 2) {
+        match prefix {
+            "C-" => mods.ctrl = true,
+            "M-" => mods.alt = true,
+            "s-" => mods.super_ = true,
+            "S-" => mods.shift = true,
+            _ => break,
+        }
+        rest = &rest[2..];
+    }
+    let rest = rest.strip_prefix('<').and_then(|r| r.strip_suffix('>')).unwrap_or(rest);
+    let mut chars = rest.chars();
+    let code = match (chars.next(), chars.next()) {
+        (Some(c), None) => KeyCode::Char(c),
+        (Some(_), Some(_)) => named_key(rest)?,
+        (None, _) => return None,
+    };
+    let mut key = KeyPress { code, mods };
+    // A plain printable character carries its Shift in its case.
+    if let KeyCode::Char(c) = key.code {
+        if key.mods.shift && !key.mods.ctrl && !key.mods.alt {
+            key.code = KeyCode::Char(c.to_uppercase().next().unwrap_or(c));
+            key.mods.shift = false;
+        }
+    }
+    Some(key.chord())
 }
 
 /// Lays `entries` into `t` under `prefix`.
@@ -537,7 +759,31 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
         let mut menu = HashMap::new();
         data(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), default_local(context.name()));
     }
+    // A chord bound twice for the same scheme and place.
+    let mut chords: HashMap<String, String> = HashMap::new();
+    for e in &default_keymap().keys {
+        let Some(key) = parse_key(&e.keys) else { continue };
+        let scheme = e.scheme.as_deref().unwrap_or("any");
+        let when = e.when.as_deref().unwrap_or("anywhere");
+        let what = e.command.clone().unwrap_or_else(|| "unbind".to_string());
+        // A scheme's own entry over an `any` one is how a scheme differs:
+        // only the same key twice for the same scheme is a clash.
+        note(&mut chords, &mut conflicts, format!("{} ({scheme}, {when})", describe_keypress(&key)), what.clone());
+    }
     conflicts
+}
+
+/// The keys that run `command` under `scheme`, as which-key writes them:
+/// a chord in use (the shortest, yours over Fenix's), else its leader
+/// keys, `SPC` written as `leader` (`C-k` with standard keys).
+pub fn key_for(command: &str, scheme: Scheme, leader: &str) -> Option<String> {
+    let mut chords: Vec<String> = chord_map().in_use(scheme).into_iter().filter(|c| c.command == Some(command)).map(|c| describe_keypress(&c.key)).collect();
+    chords.sort_by_key(|k| (k.len(), k.clone()));
+    if let Some(chord) = chords.into_iter().next() {
+        return Some(chord);
+    }
+    let keys = leader_keys().get(command)?.clone();
+    Some(if scheme == Scheme::Standard { crate::app::translate_leader(&keys, leader) } else { keys })
 }
 
 /// The leader sequence that runs each command, as the which-key menu
@@ -562,6 +808,129 @@ pub fn leader_keys() -> std::collections::HashMap<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chords that were an `if/else` in `route_keypress` before
+    /// 1.5, as `[[keys]]`: every key that chain took, with and without
+    /// Insert, runs what it ran then; nothing else is bound in Vim mode
+    /// but `M-x`, which ran the palette from earlier in the same function.
+    #[test]
+    fn the_default_chords_are_what_route_keypress_ran_before() {
+        let map = chord_map();
+        let at = |typing: bool| ChordContext { scheme: Scheme::Vim, text: true, typing, ..ChordContext::default() };
+        // What the old chain ran for Ctrl + `c` (Shift held or not), and
+        // whether it did while typing.
+        let old = |c: char, shift: bool, typing: bool| -> Option<&'static str> {
+            let lower = c.to_ascii_lowercase();
+            Some(match lower {
+                's' => "file.save",
+                'z' if shift => "edit.redo",
+                'z' => "edit.undo",
+                'y' => "edit.redo",
+                'q' => "app.quit",
+                '=' | '+' => "view.increase_font_size",
+                '-' => "view.decrease_font_size",
+                '0' => "view.reset_font_size",
+                'o' if !typing => "nav.jump_back",
+                'i' if !typing => "nav.jump_forward",
+                _ => return None,
+            })
+        };
+        for typing in [false, true] {
+            for c in ('a'..='z').chain("0123456789=+-[];',./".chars()) {
+                for shift in [false, true] {
+                    let mut key = KeyPress::char(c).with_ctrl();
+                    if shift {
+                        key = key.with_shift();
+                    }
+                    assert_eq!(map.lookup(key, &at(typing)), old(c, shift, typing), "C-{}{c} (typing: {typing})", if shift { "S-" } else { "" });
+                }
+            }
+            let named = |n: FenixNamedKey| KeyPress::named(n).with_ctrl();
+            assert_eq!(map.lookup(named(FenixNamedKey::PageDown), &at(typing)), Some("tab.next"));
+            assert_eq!(map.lookup(named(FenixNamedKey::PageUp), &at(typing)), Some("tab.prev"));
+            assert_eq!(map.lookup(named(FenixNamedKey::Tab), &at(typing)), Some("tab.last"));
+            for n in [FenixNamedKey::Enter, FenixNamedKey::Escape, FenixNamedKey::Left, FenixNamedKey::Backspace, FenixNamedKey::F(5)] {
+                assert_eq!(map.lookup(KeyPress::named(n), &at(typing)), None, "{n:?}");
+                assert_eq!(map.lookup(named(n), &at(typing)), None, "C-{n:?}");
+            }
+        }
+        assert_eq!(map.lookup(KeyPress::char('x').with_alt(), &at(false)), Some("commands.palette"));
+    }
+
+    #[test]
+    fn keys_parse_as_which_key_writes_them() {
+        for text in ["C-s", "C-S-p", "M-Left", "F12", "S-Down", "C-PgDn", "s-e", "SPC", "Tab", "x", "C-+"] {
+            let key = parse_key(text).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(describe_keypress(&key), text, "{text} round-trips");
+        }
+        assert_eq!(parse_key("<F2>"), Some(KeyPress::named(FenixNamedKey::F(2))));
+        assert_eq!(parse_key("C-P"), parse_key("C-S-p"), "a Ctrl letter's case is its Shift");
+        assert_eq!(parse_key("S-a"), Some(KeyPress::char('A')), "a plain letter's Shift is its case");
+        assert_eq!(parse_key("escape"), Some(KeyPress::named(FenixNamedKey::Escape)));
+        assert_eq!(parse_key("F13"), None);
+        assert_eq!(parse_keys("SPC C-i").unwrap(), vec![KeyPress::char(' '), KeyPress::char('i').with_ctrl()]);
+        assert!(parse_keys("SPC blah").is_err());
+    }
+
+    #[test]
+    fn your_chords_go_over_fenix_s_and_say_what_s_wrong() {
+        let leak = |text: &str| -> &'static KeymapData { Box::leak(Box::new(toml::from_str(text).unwrap())) };
+        let known = |id: &str| ["file.save", "commands.palette", "project.find_file"].contains(&id);
+        let mut map = ChordMap::new();
+        lay_chords(&mut map, leak("[[keys]]\nkeys = \"C-s\"\ncommand = \"file.save\"\n"), None, &known, ChordSource::Fenix, &mut Vec::new());
+        let mut problems = Vec::new();
+        let yours = leak(
+            "[[keys]]\nkeys = \"C-s\"\nunbind = true\n\n\
+             [[keys]]\nkeys = \"C-p\"\ncommand = \"project.find_file\"\nscheme = \"standard\"\n\n\
+             [[keys]]\nkeys = \"C-e\"\ncommand = \"nope.nothing\"\n\n\
+             [[keys]]\nkeys = \"C-x C-s\"\ncommand = \"file.save\"\n\n\
+             [[keys]]\nkeys = \"C-t\"\ncommand = \"file.save\"\nwhen = \"sometimes\"\n",
+        );
+        let bound = lay_chords(&mut map, yours, Some("keybindings.toml"), &known, ChordSource::Yours, &mut problems);
+        let vim = ChordContext { scheme: Scheme::Vim, ..ChordContext::default() };
+        let standard = ChordContext { scheme: Scheme::Standard, ..ChordContext::default() };
+        assert_eq!(map.lookup(KeyPress::char('s').with_ctrl(), &vim), None, "unbound");
+        assert_eq!(map.lookup(KeyPress::char('p').with_ctrl(), &standard), Some("project.find_file"));
+        assert_eq!(map.lookup(KeyPress::char('p').with_ctrl(), &vim), None, "standard's only");
+        assert_eq!(bound.len(), 2, "{bound:?}");
+        assert_eq!(bound[0], UserKey { keys: "C-s".into(), command: None, replaced: Some("file.save") });
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("nope.nothing") && problems[1].contains("one key") && problems[2].contains("when is"), "{problems:?}");
+    }
+
+    #[test]
+    fn an_extension_cant_take_fenix_s_own_chords_or_reach_past_a_terminal() {
+        let leak = |text: &str| -> &'static KeymapData { Box::leak(Box::new(toml::from_str(text).unwrap())) };
+        let mut map = ChordMap::new();
+        let mut problems = Vec::new();
+        let theirs = leak("[[keys]]\nkeys = \"C-k\"\ncommand = \"file.save\"\n\n[[keys]]\nkeys = \"C-p\"\ncommand = \"file.save\"\nwhen = \"terminal\"\n\n[[keys]]\nkeys = \"C-Enter\"\ncommand = \"file.save\"\n");
+        lay_chords(&mut map, theirs, Some("database"), &|_| true, ChordSource::Extension, &mut problems);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        let at = ChordContext { scheme: Scheme::Vim, ..ChordContext::default() };
+        assert_eq!(map.lookup(KeyPress::named(FenixNamedKey::Enter).with_ctrl(), &at), Some("file.save"));
+    }
+
+    /// Fenix's own chords name commands Fenix has: a typo'd one would be
+    /// dropped without a word (as a feature's key is when it's off).
+    #[test]
+    fn every_default_chord_runs_a_command_fenix_has() {
+        let registry = crate::commands::CommandRegistry::with_builtins();
+        let missing: Vec<&str> = default_keymap().keys.iter().filter_map(|e| e.command.as_deref()).filter(|c| registry.get(c).is_none()).collect();
+        assert!(missing.is_empty(), "{missing:?}");
+        // Standard keys have the shortcuts the plan promised.
+        let map = chord_map();
+        let standard = ChordContext { scheme: Scheme::Standard, text: true, ..ChordContext::default() };
+        for (key, id) in [("C-c", "edit.copy"), ("C-v", "edit.paste"), ("C-x", "edit.cut"), ("C-p", "project.find_file"), ("C-S-p", "commands.palette"), ("F12", "code.goto_definition"), ("F2", "code.lsp_rename"), ("C-f", "search.file"), ("C-/", "code.toggle_comment"), ("C-w", "tab.close"), ("C-Tab", "buffer.switch_recent"), ("C-0", "window.focus_sidebar")] {
+            assert_eq!(map.lookup(parse_key(key).unwrap(), &standard), Some(id), "{key}");
+        }
+        // Every leader key is reached with standard keys too: Ctrl+K is SPC.
+        assert!(RESERVED_CHORDS.contains(&"C-k"));
+    }
+
+    #[test]
+    fn fenix_s_keymap_binds_nothing_twice() {
+        assert_eq!(keymap_conflicts(), Vec::<String>::new());
+    }
 
     #[test]
     fn describe_keypress_formats_plain_and_modified_chars() {

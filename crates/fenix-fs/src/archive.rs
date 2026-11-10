@@ -52,6 +52,9 @@ pub fn archiver() -> Option<PathBuf> {
 /// `.tgz` and the rest -- because that is what the user typed and what
 /// whatever opens it will expect.
 pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
+    for path in sources.iter().map(PathBuf::as_path).chain([archive]) {
+        crate::remote::local_only(path, "An archive")?;
+    }
     if sources.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "nothing to archive"));
     }
@@ -89,6 +92,8 @@ pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
 /// folder that already had things in it, is a mess nobody can undo.
 /// Choosing that directory is the caller's job; this only makes it.
 pub fn extract(archive: &Path, dest: &Path) -> io::Result<()> {
+    crate::remote::local_only(archive, "An archive")?;
+    crate::remote::local_only(dest, "An archive")?;
     let Some(tar) = archiver() else {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "no archiver available on this machine"));
     };

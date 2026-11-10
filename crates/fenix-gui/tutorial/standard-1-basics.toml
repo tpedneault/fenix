@@ -1,0 +1,48 @@
+# A lesson of the tutorial (`SPC h T`). See `src/tutorial.rs` for the
+# format; every step's result is reached in `app/tutorial_host.rs`'s tests.
+id = "standard.basics"
+scheme = "standard"
+track = "Editing"
+order = 7
+title = "Standard keys"
+about = "Typing, selecting, undo, the clipboard, more cursors and the leader on Ctrl+K: a traditional IDE's keys."
+text = """
+apples
+pears
+plums
+"""
+
+[[step]]
+say = "You type at once: there's no mode to change. Put a full stop after apples: End, then the stop."
+hint = "The arrows move; End goes to the line's end; then type."
+text = "apples.\npears\nplums"
+
+[[step]]
+say = "Shift with an arrow selects. Select pears (Down, Home, Shift+End) and type figs over it."
+hint = "Shift+End selects to the line's end; typing replaces what's selected."
+text = "apples.\nfigs\nplums"
+
+[[step]]
+say = "Ctrl+Z takes back what you typed, a word at a time: until pears is back."
+hint = "Ctrl+Z, until the second line says pears."
+text = "apples.\npears\nplums"
+
+[[step]]
+say = "Ctrl+C with nothing selected copies the line. Copy plums, go below it, and Ctrl+V pastes it."
+hint = "On the plums line: Ctrl+C, then Down, then Ctrl+V."
+text = "apples.\npears\nplums\nplums"
+
+[[step]]
+say = "More cursors: put the cursor before pears, Alt+click before each plums, and type a dash. Esc goes back to one."
+hint = "Ctrl+Home, Down; then hold Alt and click before the p of each plums line; then -."
+text = "apples.\n-pears\n-plums\n-plums"
+
+[[step]]
+say = "Ctrl+K opens the leader's menu: every Fenix command that isn't the editor's own, by its keys."
+hint = "Ctrl+K, and wait a moment."
+leader = true
+
+[[step]]
+say = "Esc closes it. Ctrl+Shift+P runs any command by name, Ctrl+P finds a file, SPC h ? lists the keys."
+hint = "Esc."
+leader = false

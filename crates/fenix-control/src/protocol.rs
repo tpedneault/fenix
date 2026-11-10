@@ -173,7 +173,7 @@ pub struct AgentCaller {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloResult {
     pub protocol: u32,
-    /// Fenix's version, `1.3.0`.
+    /// Fenix's version, `1.5.0`.
     pub version: String,
     /// Fenix's process id: what a client on Windows passes to
     /// `AllowSetForegroundWindow` so Fenix may come to the front.
@@ -256,8 +256,9 @@ pub struct CommandInfo {
     /// What `fenix/runCommand` takes: `agenda.open`.
     pub id: String,
     pub description: String,
-    /// The leader sequence that runs it, as Fenix's own key menu writes
-    /// it (`SPC a a`); absent when no key does.
+    /// The keys that run it now, as Fenix's own key menu writes them: a
+    /// chord (`C-s`) or the leader's keys (`SPC a a`, `C-k a a` with
+    /// standard keys), yours over Fenix's; absent when no key does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<String>,
     /// Whether `fenix/runCommand` runs it: true for commands that make

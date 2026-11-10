@@ -66,7 +66,8 @@ prompt goes to and in which mode.
   thinking (folded), each tool call as a card -- what it read, the diff
   of what it edited, the output of what it ran -- and its plan.
 - Below, the prompt: a buffer with Vim's keys. `Ctrl-Enter` sends it
-  from Insert mode, `Enter` from Normal mode. A prompt sent while the agent works waits its turn; `SPC a k`
+  from Insert mode, `Enter` from Normal mode. With standard keys you type
+  in it at once and `Ctrl+Enter` sends it. A prompt sent while the agent works waits its turn; `SPC a k`
   cancels the turn (or takes back the waiting prompt). `↑` in an empty
   prompt brings back the one sent before, again the one before that;
   `↓` goes the other way.
@@ -78,7 +79,9 @@ prompt goes to and in which mode.
   an outlined card in the thread with its answers, one a line on its
   key's cap (`y`, `Y`, `n`, …), and the modeline says an agent is waiting
   on you. On the card, `j` and `k` move between the answers and Enter
-  gives the one they're on. The keys answer it from anywhere in the
+  gives the one they're on. With standard keys a click on an answer gives
+  it, and from the prompt its key is taken with `Alt` (`Alt+Y`): the
+  plain letter is typed. The keys answer it from anywhere in the
   thread, and from an empty prompt, without going back to the thread. When Fenix isn't in front,
   it asks for your attention (`agents.notify`).
 - A command's card says what ran (`$ rg -n session`) when the agent's
@@ -147,6 +150,51 @@ agent starts again when you look.
 - A thread whose agent can't take it back is read-only; `C` continues it
   in a new session the same way.
 - `SPC a D` deletes the thread, and its session where the agent can.
+
+### The thread list
+
+`SPC a t` (`Ctrl+K a t` with standard keys) lists the project's
+threads, those waiting on you first, then the most recently active. A
+pipeline's run is one entry: a heading with what was asked, the
+pipeline, how it ended and when, its steps under it in order with their
+agent and state. A run under way is open; a finished one folded. A
+thread started on its own is a row of its own. `SPC a l` lists every
+project's, under a heading each, the current project first.
+
+In the list, typing filters it (a run's heading matches what was asked,
+its pipeline and its steps; archived threads only once `Alt+H` shows
+them). While there's a query the rows are flat, in the order they
+match, each step saying its run and, by project, its project. A thread
+that's said nothing yet isn't listed. With either keys:
+
+| Key | Does |
+|---|---|
+| `Enter` | Opens the thread or step; on a run, its summary: what was asked, each step and how it went, how it ended (`SPC a r` there reviews its changes) |
+| `Tab` | Folds or unfolds the run |
+| `Alt+R` | On a run: what it changed, every step's, as one review |
+| `Alt+A` | Archives the thread, or the whole run; on an archived one, brings it back |
+| `Alt+H` | Shows archived threads too, marked, or hides them |
+| `Alt+P` | This project's threads, or every project's |
+
+Archiving puts a thread away, never deletes it: it's stored as it was
+(its place in the list too), can be found with `Alt+H`, opened,
+continued and brought back. A run is archived whole, from its heading or
+any step; one at work or waiting on you isn't, until it's done. A run
+Fenix was closed on is marked stopped, interrupted. A step run again (a
+pipeline's loop) is a row of its own, named by its round: `build (2)`.
+`SPC a a` comes back to the project's last thread that isn't archived.
+From anywhere, `SPC a z` (`agents.archive`) archives the thread the
+agents' panel shows, or brings it back; `agents.threads_archived` opens
+the list with archived threads shown.
+`SPC a T` (threads at work, anywhere) is as it was. Threads kept before
+1.5 are single entries, unarchived. A Fenix before 1.5, run once on the
+same threads, rewrites the list without runs and archiving (a thread it
+didn't change keeps both, and comes back grouped and archived once it's
+saved again by 1.5). Archiving changes that mark alone where the
+thread is kept, so turns another Fenix window added to it since stay;
+otherwise, with two windows on the same threads, the last to save one is
+what's kept, as for everything else in a thread. A new thread that's
+said nothing yet has nothing to archive.
 
 An agent with no thread open stops after `agents.idle_minutes`. One that
 crashes is started again (after 1, 2, then 4 seconds) and its thread

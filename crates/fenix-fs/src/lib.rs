@@ -14,6 +14,7 @@ mod pathbar;
 mod places;
 mod properties;
 mod recycle;
+mod remote;
 mod shell;
 mod transfer;
 

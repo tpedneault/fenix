@@ -137,6 +137,8 @@ pub(super) enum PageModel {
     Notifications(Box<crate::notifications_page::NotificationsPage>),
     /// `SPC a U`: what the agents used (`agents/usage`).
     AgentUsage(Box<crate::agent_usage_page::UsagePage>),
+    /// The welcome: a first run's introduction.
+    Welcome(Box<crate::welcome_page::WelcomePage>),
 }
 
 pub(super) struct PageState {
@@ -173,7 +175,7 @@ impl PageState {
             PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Tutorial(_) | PageModel::Preview(_) => false,
             PageModel::Search(p) => p.typing(),
             PageModel::Agent(p) => p.typing(),
-            PageModel::AgentReview(_) | PageModel::AgentUsage(_) => false,
+            PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) => false,
             PageModel::Notifications(p) => p.typing(),
             PageModel::Code(c) => c.typing(),
             PageModel::Extensions(e) => e.typing(),
@@ -209,7 +211,7 @@ impl PageState {
                 p.paste(text);
             }
             PageModel::Agent(p) => p.filter.paste(text),
-            PageModel::AgentReview(_) | PageModel::AgentUsage(_) => {}
+            PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) => {}
             PageModel::Notifications(p) => p.paste(text),
             PageModel::Extensions(e) => e.paste(text),
             PageModel::Git(g) => g.type_text(text),
@@ -249,6 +251,8 @@ pub enum PageEvent {
     /// Where the focused file's repository stands, for the modeline.
     /// `None`: the focused file isn't in a repository.
     ChromeGit(Option<Box<super::git_editor::ChromeGit>>),
+    /// The sidebar's Git badges, read again for `dir`.
+    SidebarGit { dir: PathBuf, statuses: HashMap<PathBuf, fenix_explorer::GitStatus> },
     /// A background fetch finished.
     AutoFetched { ok: bool },
     /// A picture a page shows, read: its size and BGRA pixels.
@@ -440,6 +444,7 @@ impl App {
             Some(PageModel::Tutorial(_)) => "*tutorial*".to_string(),
             Some(PageModel::AgentReview(_)) => "*agent changes*".to_string(),
             Some(PageModel::AgentUsage(_)) => "*agent usage*".to_string(),
+            Some(PageModel::Welcome(_)) => "*welcome*".to_string(),
             Some(PageModel::Agent(p)) => match self.agents.hub.view(&p.thread) {
                 Some(view) => format!("*agent: {}*", crate::page::fit(&view.thread.display_title(), 32)),
                 None => "*agent*".to_string(),
@@ -634,6 +639,10 @@ impl App {
         if reading.as_ref().is_some_and(|r| r.laid_out()) {
             self.reading_ask(id);
         }
+        // Standard keys: a page's leader keys written with its chord, when
+        // the chord is as wide as `SPC` (the page's cells stay where they
+        // were laid).
+        let leader = self.standard_keys().then(|| self.leader_chord_text()).filter(|l| l.chars().count() == 3);
         let Some(state) = self.pages.get_mut(&id) else { return };
         if reading.as_ref().is_some_and(|r| r.changed()) {
             state.stale = true;
@@ -663,6 +672,7 @@ impl App {
             PageModel::ExtensionOutput(o) => crate::extension_output::layout(o, cols),
             PageModel::Notifications(p) => crate::notifications_page::layout(p, cols),
             PageModel::AgentUsage(p) => crate::agent_usage_page::layout(p, cols),
+            PageModel::Welcome(p) => crate::welcome_page::layout(p, cols),
             PageModel::Code(c) => crate::code_page::layout(c, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
@@ -683,6 +693,11 @@ impl App {
         state.cols = cols;
         state.laid_rows = rows;
         state.stale = false;
+        if let Some(leader) = &leader {
+            if state.page.text.contains("SPC") && !matches!(state.model, PageModel::Reading(_)) {
+                state.page.text = super::translate_leader(&state.page.text, leader);
+            }
+        }
         let text = state.page.text.clone();
         let (mut line, mut col) = state.page.cursor();
         // An agent's thread following the newest card keeps its end in
@@ -866,6 +881,10 @@ impl App {
                 let action = p.key(key);
                 self.agents_usage_page_action(id, action);
             }
+            PageModel::Welcome(p) => {
+                let action = p.key(key);
+                self.welcome_action(id, action);
+            }
             PageModel::Code(c) => match c.key(key) {
                 crate::code_page::Action::Close => self.close_page(id),
                 crate::code_page::Action::Key(key) => self.code_page_key(id, key),
@@ -931,7 +950,8 @@ impl App {
                 self.apply_git_compare_event(event)
             }
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
-            PageEvent::ChromeGit(state) => self.chrome_git = state.map(|s| *s),
+            PageEvent::ChromeGit(state) => self.apply_chrome_git(state.map(|s| *s)),
+            PageEvent::SidebarGit { dir, statuses } => self.apply_sidebar_git(dir, statuses),
             PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
             PageEvent::SearchFound { buffer, generation, files } => self.apply_search_found(buffer, generation, files),
             PageEvent::SearchDone { buffer, generation, result } => self.apply_search_done(buffer, generation, result),
@@ -1233,6 +1253,10 @@ impl App {
     /// `workspace_per_project = false` it's the old behaviour: the file,
     /// or a find-file picker in the root.
     pub(super) fn open_project(&mut self, root: PathBuf, file: Option<PathBuf>, register: bool) {
+        // On a machine that isn't connected: that first, then this.
+        if self.remote_must_connect(&root, remote::Then::OpenProject { root: root.clone(), file: file.clone() }) {
+            return;
+        }
         let root = std::fs::canonicalize(&root).map(fenix_lsp::normalize).unwrap_or(root);
         if register {
             self.known_projects.add(root.clone());
@@ -1425,6 +1449,9 @@ impl App {
             }
         }
         let steps = wizard.run.as_ref().map(|r| r.steps.len()).unwrap_or(0);
+        // Made here, from a template its user picked: what it names is
+        // theirs already.
+        self.trust_project_as_written(&dir);
         self.open_project(dir.clone(), plan.file_to_open(), wizard.register);
         self.close_page(id);
         self.refresh_home_data(false);
@@ -1662,9 +1689,13 @@ impl App {
             FixAction::Editor(fix) => {
                 match fix {
                     EditorFix::UseLanguageServer { language, executable, args } => {
-                        let result = fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
-                            tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
-                            tools.write(&root)
+                        // The doctor's fix is the user's change, made here:
+                        // a project that was trusted stays so.
+                        let result = self.keeping_project_trust(&root, |_| {
+                            fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
+                                tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
+                                tools.write(&root)
+                            })
                         });
                         if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
                             d.last_fix = Some(("use it for this project".to_string(), result.clone()));
@@ -1747,7 +1778,8 @@ impl App {
         use project_settings::Action;
         match action {
             Action::None | Action::Close => {}
-            Action::SaveTools(tools) => match tools.write(&root) {
+            // Edited on the settings page: the user's change, made here.
+            Action::SaveTools(tools) => match self.keeping_project_trust(&root, |_| tools.write(&root)) {
                 Ok(()) => self.set_message("saved .fenix/tools.json"),
                 Err(e) => self.set_error(e),
             },

@@ -40,6 +40,7 @@ pub struct Properties {
 /// (rounding to a cluster size that is itself guessed) would be a
 /// confident wrong answer where none at all is honest.
 pub fn properties(path: &Path) -> io::Result<Properties> {
+    crate::remote::local_only(path, "Properties")?;
     let metadata = std::fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     let kind = if file_type.is_symlink() {
@@ -71,6 +72,7 @@ pub fn properties(path: &Path) -> io::Result<Properties> {
 /// properties dialog to clear it is exactly the trip out of the editor
 /// this explorer exists to remove.
 pub fn set_readonly(path: &Path, readonly: bool) -> io::Result<()> {
+    crate::remote::local_only(path, "Read-only")?;
     let mut permissions = std::fs::symlink_metadata(path)?.permissions();
     #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(readonly);

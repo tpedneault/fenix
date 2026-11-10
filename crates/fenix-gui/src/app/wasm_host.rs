@@ -212,6 +212,10 @@ pub(crate) struct WasmHost {
     pub(crate) home: HashMap<String, fenix_wasm::host::HomeSection>,
     /// The editor theme's colours, as every worker reads them.
     theme: Option<Arc<RwLock<fenix_wasm::host::EditorTheme>>>,
+    /// The key scheme, as every worker reads it (`editor-keys`), and the
+    /// leader chord `key-for` writes `SPC` as.
+    keys: Option<Arc<RwLock<fenix_wasm::host::KeyScheme>>>,
+    leader: Arc<RwLock<String>>,
     /// Where you were when each one's command ran (`editor-here`), for
     /// those with `editor = "read"`.
     heres: HashMap<String, Arc<RwLock<Option<fenix_wasm::host::Here>>>>,
@@ -1026,6 +1030,19 @@ impl App {
         spec.opens = ext.manifest.contributes.opens.clone();
         spec.theme = self.wasm.theme.get_or_insert_with(|| Arc::new(RwLock::new(editor_theme(self.theme)))).clone();
         spec.palette = self.wasm.palette.get_or_insert_with(|| Arc::new(RwLock::new(self.theme.palette()))).clone();
+        // How you edit, and the keys of a command, as they are when asked.
+        let scheme = wit_key_scheme(self.key_scheme());
+        spec.key_scheme = self.wasm.keys.get_or_insert_with(|| Arc::new(RwLock::new(scheme))).clone();
+        *self.wasm.leader.write().unwrap_or_else(|p| p.into_inner()) = self.leader_chord_text();
+        let (keys, leader) = (spec.key_scheme.clone(), self.wasm.leader.clone());
+        spec.key_for = Arc::new(move |command: &str| {
+            let scheme = match *keys.read().unwrap_or_else(|p| p.into_inner()) {
+                fenix_wasm::host::KeyScheme::Standard => crate::keymap::Scheme::Standard,
+                fenix_wasm::host::KeyScheme::Vim => crate::keymap::Scheme::Vim,
+            };
+            let leader = leader.read().unwrap_or_else(|p| p.into_inner()).clone();
+            crate::keymap::key_for(command, scheme, &leader)
+        });
         spec.folders = self.code_folders(&ext);
         if ext.manifest.permissions.fonts {
             spec.fonts = fenix_wasm::host::font_dirs();
@@ -1220,6 +1237,7 @@ impl App {
                 PageModel::Agent(_) => named("agent"),
                 PageModel::AgentReview(_) => named("agent-changes"),
                 PageModel::AgentUsage(_) => named("agent-usage"),
+                PageModel::Welcome(_) => named("welcome"),
                 // A listing in a pane and its preview are the explorer's.
                 PageModel::Explorer(..) | PageModel::Preview(_) => Focus::None,
             };
@@ -1902,6 +1920,20 @@ impl App {
         then(self, &progress);
         if let Some(s) = self.wasm.serving.get_mut(&key) {
             s.progress = Some(then);
+        }
+    }
+
+    /// The key scheme changed: the extensions read the new one, and those
+    /// that have `key-scheme-changed` (API 1.5) are told.
+    pub(crate) fn code_key_scheme_changed(&mut self) {
+        let scheme = wit_key_scheme(self.key_scheme());
+        if let Some(shared) = &self.wasm.keys {
+            *shared.write().unwrap_or_else(|p| p.into_inner()) = scheme;
+        }
+        *self.wasm.leader.write().unwrap_or_else(|p| p.into_inner()) = self.leader_chord_text();
+        let running: Vec<String> = self.wasm.workers.keys().cloned().collect();
+        for ext in running {
+            self.code_call(&ext, Call::KeySchemeChanged(scheme), COMMAND_TICKS, Pending::Other);
         }
     }
 
@@ -3331,7 +3363,7 @@ impl App {
         });
         let Some((buffer, rect)) = target else { return };
         let captured = self.wasm.captured == Some(buffer);
-        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key() });
+        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key(), shift: false });
         let Some(surface) = self.code_surface_mut(buffer) else {
             self.wasm.dragging = None;
             return;
@@ -3450,7 +3482,7 @@ impl App {
     pub(crate) fn code_surface_wheel(&mut self, pane: fenix_window::WindowId, pos: (f32, f32), lines: isize) -> bool {
         let Some(buffer) = self.code_surface_in_pane(pane) else { return false };
         let Some((_, rect)) = self.pane_rect_at(pos) else { return true };
-        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key() });
+        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key(), shift: false });
         let Some(at) = self.code_surface(buffer).and_then(|s| s.to_pixels((rect.x, rect.y, rect.w, rect.h), pos, true)) else { return true };
         self.code_surface_input(buffer, fenix_wasm::host::SurfaceInput::Wheel(fenix_wasm::host::WheelEvent { x: at.0, y: at.1, lines: lines as i32, mods }));
         true
@@ -3508,7 +3540,7 @@ impl App {
     /// The buffer showing extension `ext`'s page `page`, if one does.
     /// The language servers running for the project at `root`, stopped
     /// and started again as its files need them.
-    fn restart_language_servers_in(&mut self, root: &Path) {
+    pub(super) fn restart_language_servers_in(&mut self, root: &Path) {
         let root = fenix_lsp::normalize(refactor::identity(root));
         self.lsp_unavailable.retain(|key| key.root != root);
         let running: Vec<_> = self.lsp_sessions.keys().chain(self.lsp_starting.keys()).filter(|key| key.root == root).cloned().collect();
@@ -3684,6 +3716,26 @@ impl App {
     pub(crate) fn code_prompt_key(&mut self, keypress: KeyPress) -> bool {
         let Some(prompt) = &mut self.wasm.prompt else { return false };
         match keypress.code {
+            // `ssh`'s question, connecting to a remote machine: Escape is
+            // no answer, and it gives up on that way in.
+            // `SPC p y`: whether a project may run what it names. Only a
+            // typed yes allows it.
+            KeyCode::Named(FenixNamedKey::Escape) if prompt.ext == super::trust::PROMPT => {
+                self.wasm.prompt = None;
+                self.project_trust_answered(None);
+            }
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::trust::PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.project_trust_answered(Some(p.input));
+            }
+            KeyCode::Named(FenixNamedKey::Escape) if prompt.ext == super::remote::PROMPT => {
+                self.wasm.prompt = None;
+                self.remote_answered(None);
+            }
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::remote::PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.remote_answered(Some(p.input));
+            }
             KeyCode::Named(FenixNamedKey::Escape) => {
                 let p = self.wasm.prompt.take().unwrap();
                 self.code_deliver(&p.ext, Notice::Prompted((p.id, None)));
@@ -3708,6 +3760,8 @@ impl App {
             KeyCode::Char(c) if !keypress.mods.ctrl => prompt.input.push(c),
             _ => {}
         }
+        // The line is free again: `ssh` may have been waiting for it.
+        self.remote_ask_next();
         self.wake_caret();
         true
     }
@@ -3875,6 +3929,14 @@ trait Forget {
 impl<V> Forget for HashMap<String, V> {
     fn forget(&mut self, ext: &str) {
         self.remove(ext);
+    }
+}
+
+/// Fenix's key scheme as the extension API has it.
+fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme {
+    match scheme {
+        crate::keymap::Scheme::Standard => fenix_wasm::host::KeyScheme::Standard,
+        _ => fenix_wasm::host::KeyScheme::Vim,
     }
 }
 
@@ -5453,6 +5515,32 @@ pub(crate) mod tests {
         assert!(app.wasm.task_spec(&root, "other").is_none());
     }
 
+    /// Its formatter's answer changes only the lines that differ: an
+    /// extra cursor in one it kept stays, and the main one keeps its line.
+    #[test]
+    fn its_formatter_keeps_the_cursors_in_lines_it_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.py");
+        // Words, not single letters: Windows' sort takes a few bytes of
+        // input for UTF-16. And in the line ending sort writes (CRLF on
+        // Windows), or every line would differ by its ending.
+        let nl = if cfg!(windows) { "\r\n" } else { "\n" };
+        std::fs::write(&file, ["apple", "pear", "fig", ""].join(nl)).unwrap();
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        pack_project(&mut app, &file);
+        app.answer_code_request("test.hello", Request::Formatter { languages: vec!["python".into()], program: Some(("sort".into(), Vec::new(), None)), keep_output: false });
+        app.toggle_caret_at(1);
+        app.focused_buffer_and_cursor_mut().1.char_idx = "apple".len() + nl.len();
+        assert!(app.format_with_extension());
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), ["apple", "fig", "pear", ""].join(nl));
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [1], "apple's line wasn't changed");
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1, "the main cursor's line");
+    }
+
     /// its formatter formats the buffer (`SPC c F`) as one change,
     /// and, with `editor.format_on_save`, what's saved.
     #[test]
@@ -5867,3 +5955,4 @@ pub(crate) mod tests {
         pump_until(&mut app, |a| said(a, "debug started: 5 app.js javascript None") && said(a, "debug ended: 5"));
     }
 }
+

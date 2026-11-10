@@ -86,7 +86,8 @@ own fields.
 | `scratch_closed` | You closed one of its scratch buffers. |
 | `focus_moved` | Something else has the focus, when it asks (`events = ["focus"]`), whatever its other permissions: `Focus::File` (its full path with `editor = "read"`, else its path under `/project` when it's there, else none), `Focus::Page` (its kind, and its id when it's one of its own -- `<id>/<kind>` for another extension's, a name for Fenix's: `git`, `settings`, `home`), `Focus::Text` (a buffer that's no file: one of its scratch buffers' id, or none), or `Focus::None` (the explorer). Once as it starts, then as it changes. `Event::FocusChanged` still comes as before. |
 
-| `page_key_press` | On a page that takes more keys: one `page_key` doesn't take -- PageUp, PageDown, Shift with a key that has a name, Ctrl, Alt or the Windows key with others (Ctrl+Z, Ctrl+Shift+Z, Ctrl+A, Ctrl+S) -- with its modifiers, Shift among them. Fenix keeps its own chords (Ctrl+Q, the font's size, Ctrl+O and Ctrl+I, Ctrl+Tab and Ctrl+PageUp/PageDown, Ctrl+\\, Alt+X) and the leader. |
+| `page_key_press` | On a page that takes more keys: one `page_key` doesn't take -- PageUp, PageDown, Shift with a key that has a name, Ctrl, Alt or the Windows key with others (Ctrl+Z, Ctrl+Shift+Z, Ctrl+A, Ctrl+S) -- with its modifiers, Shift among them. Fenix keeps its own chords (Ctrl+Q, the font's size, Ctrl+O and Ctrl+I, Ctrl+Tab and Ctrl+PageUp/PageDown, Ctrl+\\, Alt+X, and standard keys' Ctrl+K and Ctrl+Shift+P) and the leader. |
+| `key_scheme_changed` | API 1.5. You switched between Vim keys and standard keys: a hint that names a key (`key_for`) can be drawn again. |
 | `page_mouse` | On a page that takes the mouse: a press (its button, and `clicks` 2 for a double click), a drag to another cell, the release, the wheel -- at a cell: its line, its column in characters as `Cells` count them, and the cell (a wide character two). The wheel then doesn't scroll the page. |
 
 These are functions of their own, not `Event`s: what a later 1.x adds
@@ -136,6 +137,7 @@ and its answer comes to `handle` as an `Event` with that id.
 | `compose(title, verb, initial, allow_empty)` | A pane to write in → `Event::Composed`. |
 | `compose_with_ask(title, verb, initial, allow_empty, ask, over_initial)` | API 1.4, with `permissions.agents`. The same pane, and `A` in Normal mode while it's empty has the agent answer `ask` into it, as it writes. With `over_initial`, `initial` is only a starting point (a template), and `A` writes over it until it's been touched. The answer isn't given to the extension: what comes back is what's in the pane when you send it. |
 | `here()` | With `editor = "read"`: the file you were in when you ran its command, the selection or the line, its project. |
+| `key_scheme()`, `key_for(command)` | API 1.5, no permission needed. How you edit (`KeyScheme::Vim` or `KeyScheme::Standard`, `editor.keys`), and the keys that run a command now, as the key menu writes them -- `gd` with Vim keys and `F12` with standard keys, `SPC g g` or `C-k g g`, yours over Fenix's -- for a hint that says which key to press: `format!("{} on a name opens its page", key_for("code.goto_definition").unwrap_or_default())`. |
 | `home(Some(&section))` | Its section on Home; a row picked there → `Event::HomePicked`. |
 | `set_setting(key, value)` | One of its own settings changed and saved. A `map` setting reads and writes as JSON, `[["key", "value"], ...]`. |
 | `run::spawn(async { ... })` | Work that waits, written as `async`: `run::fetch(req).await`, `run::call(service, payload).await`, `run::sleep(ms).await`. Its `handle` gives each event to `run::deliver(event)` first, which keeps the answers its jobs wait for. |
@@ -991,6 +993,31 @@ keys = "b"
 label = "build"
 command = "counter.build"
 ```
+
+Its keymaps may give its commands chords too (API 1.5): `[[keys]]`
+entries, as `keybindings.toml` has them (see
+[Your keys](KEYBINDINGS.md#your-keys-keybindingstoml)) -- one key with its
+modifiers, for a key scheme (`vim`, `standard`, `any`) and a place
+(`anywhere`, `text`, `typing`, `not_typing`, `page`). Yours go over
+them. `Ctrl+K`, `Ctrl+Shift+P`, `Ctrl+\` and `Alt+X` are Fenix's own,
+and only Fenix's chords and yours reach past a terminal:
+
+```toml
+[[keys]]
+keys = "C-Enter"
+command = "database.run"
+scheme = "standard"
+when = "text"
+context = "sql"     # only in a buffer of its SPC m context
+```
+
+`context` names one of its contexts (`[[contributes.contexts]]`): the
+chord is there only in the buffers that menu is for, so two extensions'
+`Ctrl+Enter` each run their own.
+
+With standard keys a page's own keys work as they do with Vim keys --
+letters act where you can't type -- and the leader opens on `Ctrl+K`, so
+its `[[leader]]` and `[[local.*]]` keys are reached the same way.
 
 What it says about its project -- a language server, a debug adapter, a
 formatter, doctor checks, tasks -- Fenix keeps and uses there: nothing

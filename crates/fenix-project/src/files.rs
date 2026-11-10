@@ -31,6 +31,9 @@ pub fn list_project_files_including_ignored(root: &Path) -> Vec<PathBuf> {
 }
 
 fn list_project_files_impl(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
+    if fenix_vfs::is_remote(root) {
+        return remote_files(root, include_ignored);
+    }
     // A subproject of a monorepo is in a repository too: `git ls-files`
     // run there lists that folder's files, relative to it.
     if crate::vcs::repository_root(root).is_some() {
@@ -45,6 +48,36 @@ fn list_project_files_impl(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
 }
 
 /// Paths from a helper's NUL-separated output, joined onto `root`.
+/// A remote project's files, listed by the machine itself: its `git`,
+/// which knows what the project ignores, else its `find`, past the
+/// folders nobody means. Nothing, rather than an error, from a machine
+/// that can't be asked: the picker says there's nothing to pick.
+fn remote_files(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
+    let listed = |program: &str, args: &[&str]| {
+        let ran = fenix_vfs::run_there(root, fenix_vfs::Run { program, args, ..Default::default() })?.ok()?;
+        ran.success().then(|| {
+            let text = String::from_utf8_lossy(&ran.stdout).into_owned();
+            // `find` names them `./src/a.rs`; a path there has `/`, which
+            // `join` would misread here.
+            text.split('\0').filter(|name| !name.is_empty()).take(WALK_LIMIT).map(|name| fenix_vfs::join(root, name.trim_start_matches("./"))).collect::<Vec<_>>()
+        })
+    };
+    let mut git = vec!["ls-files", "-z", "--cached", "--others"];
+    if !include_ignored {
+        git.push("--exclude-standard");
+    }
+    if let Some(mut files) = listed("git", &git) {
+        files.dedup();
+        return files;
+    }
+    let mut find = vec!["."];
+    for (i, ignored) in WALK_IGNORE.iter().enumerate() {
+        find.extend(if i == 0 { vec!["(", "-name", ignored] } else { vec!["-o", "-name", ignored] });
+    }
+    find.extend([")", "-prune", "-o", "-type", "f", "-print0"]);
+    listed("find", &find).unwrap_or_default()
+}
+
 fn nul_separated(root: &Path, stdout: &[u8]) -> Vec<PathBuf> {
     String::from_utf8_lossy(stdout).split('\0').filter(|line| !line.is_empty()).map(|line| root.join(line)).collect()
 }
@@ -123,6 +156,24 @@ mod tests {
         git(dir, &["init", "-q"]);
         git(dir, &["config", "user.email", "test@example.com"]);
         git(dir, &["config", "user.name", "Test"]);
+    }
+
+    #[test]
+    fn a_remote_projects_files_are_listed_by_its_own_machine() {
+        let dir = TempDir::new("remote_files");
+        fenix_vfs::testing::Folder::mount("project-files", dir.path());
+        let root = fenix_vfs::remote("project-files", "/");
+        init_repo(dir.path());
+        dir.write("src/main.rs", "x");
+        dir.write(".gitignore", "ignored.txt\n");
+        dir.write("ignored.txt", "x");
+
+        let mut files = list_project_files(&root);
+        files.sort();
+        assert_eq!(files, [fenix_vfs::remote("project-files", "/.gitignore"), fenix_vfs::remote("project-files", "/src/main.rs")]);
+        assert!(list_project_files_including_ignored(&root).contains(&fenix_vfs::remote("project-files", "/ignored.txt")));
+        // A machine that can't be asked lists nothing.
+        assert!(list_project_files(&fenix_vfs::remote("project-nobody", "/")).is_empty());
     }
 
     #[test]

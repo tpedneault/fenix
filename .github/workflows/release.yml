@@ -119,6 +119,10 @@ jobs:
           rustup override set stable
       - name: Build
         run: cargo build --release --locked -p fenix-gui -p fenix-pdfium --target ${{ matrix.target }}
+      # The helpers Fenix copies to a remote machine, for every kind it
+      # supports: static Linux programs, whatever system builds them.
+      - name: Remote helpers
+        run: packaging/build-remote-helpers.sh "target/${{ matrix.target }}/release"
       - name: PDFium
         run: packaging/fetch-pdfium.sh ${{ matrix.pdfium }} "target/${{ matrix.target }}/release"
       - name: Package
@@ -127,6 +131,7 @@ jobs:
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/${{ matrix.pdfium_library }}" "$name/"
           cp -r "target/${{ matrix.target }}/release/licenses" "$name/"
+          cp -r "target/${{ matrix.target }}/release/remote" "$name/"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "target/${{ matrix.target }}/release/${{ matrix.companion }}" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY.md "$name/"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$name.zip" "$name" > /dev/null

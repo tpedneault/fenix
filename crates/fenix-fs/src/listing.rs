@@ -103,6 +103,9 @@ pub struct DirEntryInfo {
 /// `readable: false` -- see the module comment for why that is the
 /// whole point.
 pub fn list_dir(path: &Path) -> io::Result<Vec<DirEntryInfo>> {
+    if fenix_vfs::is_remote(path) {
+        return crate::remote::list_dir(path);
+    }
     let mut out = Vec::new();
     for dirent in fs::read_dir(path)? {
         // An error *here* is about this one entry, not the directory --

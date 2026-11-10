@@ -71,13 +71,20 @@ impl App {
     /// answer it from here, Insert mode or not. Anything else is typed.
     fn agents_composer_answer(&mut self, keypress: KeyPress) -> bool {
         let KeyCode::Char(c) = keypress.code else { return false };
-        if keypress.mods.ctrl || keypress.mods.alt || !self.agents_composer_text().is_empty() || !self.agents_composer_calm() {
+        // Standard keys type in the prompt whatever's in it: an answer's
+        // key is taken with Alt (`Alt+Y`).
+        let standard = self.standard_keys();
+        if standard {
+            if !keypress.mods.alt || keypress.mods.ctrl {
+                return false;
+            }
+        } else if keypress.mods.ctrl || keypress.mods.alt || !self.agents_composer_text().is_empty() || !self.agents_composer_calm() {
             return false;
         }
         let Some(thread) = self.agents.shown(&self.pages) else { return false };
         // At a pipeline's gate the prompt is for another round: `y` starting
         // a sentence isn't "go on". From Normal mode it still is.
-        if self.vim.mode() == Mode::Insert && self.pipeline_at_gate(&thread) {
+        if !standard && self.vim.mode() == Mode::Insert && self.pipeline_at_gate(&thread) {
             return false;
         }
         let answer = self.agents.hub.view(&thread).and_then(|v| agent_page::answer_for(v.thread, crate::page::Key::Char(c)));
@@ -630,5 +637,37 @@ mod tests {
     fn a_fenced_answer_is_unwrapped() {
         assert_eq!(strip_fence("```\nFix it\n\nBecause.\n```"), "Fix it\n\nBecause.");
         assert_eq!(strip_fence("Plain"), "Plain");
+    }
+}
+
+impl App {
+    /// A click on an agent's thread, with standard keys: on an answer of
+    /// the question waiting (a row with its key's cap), that answer.
+    /// Whether it was one.
+    pub(crate) fn agents_card_click(&mut self, page: BufferId, line: usize) -> bool {
+        if !self.standard_keys() {
+            return false;
+        }
+        let Some(state) = self.pages.get(&page) else { return false };
+        let PageModel::Agent(p) = &state.model else { return false };
+        let thread = p.thread.clone();
+        let Some(row) = state.page.text.lines().nth(line) else { return false };
+        let key = state.page.chips.iter().filter(|(l, _, chip)| *l == line && matches!(chip, crate::page::Chip::Key | crate::page::Chip::Chosen)).find_map(|(_, cells, _)| {
+            let cap: String = row.chars().skip(cells.start).take(cells.len()).collect();
+            let mut chars = cap.trim().chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            }
+        });
+        let Some(c) = key else { return false };
+        let answer = self.agents.hub.view(&thread).and_then(|v| agent_page::answer_for(v.thread, crate::page::Key::Char(c)));
+        match answer {
+            Some(agent_page::Action::Permission { key, option }) => self.agents_answer(&thread, &key, Some(&option)),
+            Some(agent_page::Action::Elicit { key, how }) => self.agents_elicit(&thread, &key, how),
+            _ => return false,
+        }
+        self.agents_dock_titles();
+        true
     }
 }

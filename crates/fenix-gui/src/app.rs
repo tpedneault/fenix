@@ -48,6 +48,18 @@ pub(crate) use projects::window_title;
 pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
 mod which_key;
+mod keys_host;
+pub(crate) use keys_host::translate_leader;
+mod edit_commands;
+mod carets;
+mod updates;
+mod auto_save;
+mod problems;
+#[cfg(test)]
+mod test_keys;
+#[cfg(test)]
+mod standard_tests;
+pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
 mod search_host;
@@ -59,7 +71,10 @@ use crate::page::Key as PageKey;
 #[cfg(test)]
 use explorer_host::{is_bare_server, is_unc, PromptKind};
 mod disk_probe;
+mod remote;
+mod trust;
 mod extensions_host;
+mod welcome_host;
 mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
@@ -405,7 +420,21 @@ impl DiskFingerprint {
     /// `None` when the path can't be stat'd at all -- it was deleted,
     /// replaced by a directory, or was never there.
     fn of(path: &Path) -> Option<Self> {
-        Self::from_meta(std::fs::metadata(path).ok())
+        Self::look(path).flatten()
+    }
+
+    /// `of`, telling a file that isn't there (`Some(None)`) from one
+    /// that couldn't be looked at (`None`): a file on a remote machine
+    /// that isn't answering is not a file that's gone.
+    fn look(path: &Path) -> Option<Option<Self>> {
+        if !fenix_vfs::is_remote(path) {
+            return Some(Self::from_meta(std::fs::metadata(path).ok()));
+        }
+        match fenix_vfs::metadata(path) {
+            Ok(meta) => Some(meta.is_file().then(|| DiskFingerprint { mtime: Some(meta.modified()), len: meta.len })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        }
     }
 
     /// `of`, from a stat already made (off the UI thread, by the disk probe).
@@ -1341,6 +1370,8 @@ enum PendingLspRequest {
     WorkspaceNames,
     /// `fenix/lsp`'s, for its client (`LspFanout::Control`).
     Control { fanout: u64 },
+    /// `workspace/symbol`, for the symbol picker's question `generation`.
+    ProjectSymbols { generation: u64 },
     /// An agent's, through Fenix's tools (`agent_lsp`).
     Agent { id: u64 },
 }
@@ -1362,6 +1393,53 @@ fn code_server_name(ext: &str, server: &str) -> String {
 /// Whether `path` is a Tcl file, as its highlighting is chosen.
 fn is_tcl_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language) == Some(fenix_syntax::LanguageId::Tcl)
+}
+
+/// `buffer`'s text made `new` by replacing only the lines that differ,
+/// the last first, as one undo step -- so what's anchored in the lines
+/// that didn't change (extra cursors, marks, an extension's decorations)
+/// stays where it was. `cursor` is moved as the text around it moved;
+/// in a line that was replaced, it keeps its line and column (or the
+/// line's end). The syntax tree hears of it as one edit.
+pub(crate) fn replace_text_by_lines(buffer: &mut Buffer, cursor: &mut Cursor, new: &str) {
+    let old = buffer.text();
+    let replacements = fenix_diff::replacements(&old, new);
+    if replacements.is_empty() {
+        return;
+    }
+    let at = cursor_through_replacements(&old, &replacements, cursor.char_idx);
+    let mut scratch = *cursor;
+    buffer.replace_ranges(&mut scratch, &replacements);
+    cursor.char_idx = at.min(buffer.len_chars());
+    cursor.sticky_col = buffer.line_col(cursor).1;
+}
+
+/// Where `at` in `old` is once `replacements` (in order, char ranges of
+/// `old`) are made: moved by those before it; in one, on the same line of
+/// what replaced it (or its last) at the same column, or the line's end.
+fn cursor_through_replacements(old: &str, replacements: &[(std::ops::Range<usize>, String)], at: usize) -> usize {
+    let mut moved: isize = 0;
+    for (range, text) in replacements {
+        if at <= range.start {
+            break;
+        }
+        let new_len = text.chars().count();
+        if at >= range.end {
+            moved += new_len as isize - range.len() as isize;
+            continue;
+        }
+        let start = (range.start as isize + moved) as usize;
+        let before: String = old.chars().skip(range.start).take(at - range.start).collect();
+        let line = before.matches('\n').count();
+        let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let Some(last) = lines.len().checked_sub(1) else { return start };
+        let line = line.min(last);
+        let ahead: usize = lines[..line].iter().map(|l| l.chars().count()).sum();
+        let width = lines[line].trim_end_matches(['\n', '\r']).chars().count();
+        return start + ahead + column.min(width);
+    }
+    (at as isize + moved).max(0) as usize
 }
 
 /// The functions and methods a `workspace/symbol` answer names.
@@ -1827,11 +1905,20 @@ pub enum FenixUserEvent {
     ExplorerListed { target: ExplorerTarget, request: u64, result: Result<fenix_explorer::Listing, String> },
     /// What the disk poll's worker saw of the open files (`disk_probe`).
     DiskProbed(Box<disk_probe::ProbeResult>),
+    /// `ssh`, connecting to a remote machine, has a question (`remote`).
+    RemoteQuestion(remote::RemoteQuestion),
+    /// A connection to a remote machine was made, or couldn't be.
+    RemoteConnected(Box<remote::RemoteConnected>),
+    /// A remote machine's connection changed: lost, being tried again,
+    /// back.
+    RemoteStatus(String, fenix_ssh::Status),
     /// What Home's recent files looked like, looked at off the UI thread.
     RecentProbed(HashMap<PathBuf, home::RecentSeen>),
     /// The extension registry read, or an install from it done, for the
     /// Extensions page (`extensions_host`).
     Registry(extensions_host::RegistryEvent),
+    /// What the update check found (`app/updates.rs`).
+    Updates(updates::UpdateAnswer),
     /// What a code extension's worker sent (`wasm_host`).
     Wasm { ext: String, event: fenix_wasm::host::Event },
     /// One message from a coding agent's connection, or its end
@@ -1899,8 +1986,10 @@ fn extension_name(id: &str) -> String {
 }
 
 impl App {
-    /// Runs command `id` (see `CommandRegistry::run`).
-    pub(crate) fn run_command(&mut self, event_loop: &ActiveEventLoop, id: &str) -> bool {
+    /// Runs command `id` (see `CommandRegistry::run`), with or without an
+    /// event loop to hand (a test driving the keys has none; a command
+    /// that needs one does nothing then).
+    pub(crate) fn run_command_with(&mut self, event_loop: Option<&ActiveEventLoop>, id: &str) -> bool {
         self.note_command_run(id);
         let commands = Rc::clone(&self.commands);
         commands.run(self, event_loop, id)
@@ -1929,6 +2018,9 @@ impl App {
         let Some(command) = self.commands().get(id) else { return format!("{id} isn't a command") };
         let mut keys: Vec<String> = keymap::leader_trie().bindings().into_iter().filter(|(_, c)| **c == id).map(|(seq, _)| seq.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ")).collect();
         keys.sort();
+        let mut chords: Vec<String> = keymap::chord_map().in_use(self.key_scheme()).into_iter().filter(|c| c.command == Some(id)).map(|c| keymap::describe_keypress(&c.key)).collect();
+        chords.dedup();
+        keys.splice(0..0, chords);
         let keys = if keys.is_empty() { "no key".to_string() } else { keys.join(", ") };
         let from = command.source.map_or_else(|| "core".to_string(), extension_name);
         format!("{id}: {} -- {keys} -- {from}", command.description)
@@ -1944,14 +2036,23 @@ impl App {
     /// can't), says what.
     fn describe_key_feed(&mut self, key: KeyPress) {
         let Some(mut keys) = self.describing_keys.take() else { return };
-        if key == KeyPress::named(FenixNamedKey::Escape) {
+        if key.legacy() == KeyPress::named(FenixNamedKey::Escape) {
             self.set_message("");
             return;
         }
-        keys.push(key);
+        // Leader keys are read as the leader reads them; a chord as it came.
+        keys.push(if keys.is_empty() { key } else { key.legacy() });
         let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
         if keys[0] != KeyPress::char(' ') {
-            self.set_message(format!("{text} -- SPC h k describes leader keys (SPC ...); the palette (SPC :) lists the rest"));
+            match self.chord_command(key) {
+                Some(id) => {
+                    let what = self.describe_command(id);
+                    let yours = keymap::user_keys().iter().any(|u| u.keys == keymap::describe_keypress(&key.chord()));
+                    self.set_message(format!("{text} runs {what}{}", if yours { " -- yours" } else { "" }));
+                }
+                None if key.mods.ctrl || key.mods.alt || key.mods.super_ || key.is_function() => self.set_message(format!("{text} isn't bound here")),
+                None => self.set_message(format!("{text} -- SPC h k describes leader keys (SPC ...) and chords (C-s, F12); the palette (SPC :) lists the rest")),
+            }
             return;
         }
         let local = keys.get(1) == Some(&KeyPress::char('m'));
@@ -1988,7 +2089,9 @@ impl App {
         if !contexts.is_empty() {
             rows.extend(keymap::local_trie(&contexts).bindings().into_iter().map(|(seq, id)| (format!("SPC m {}", text(&seq)), id.to_string())));
         }
+        rows.extend(keymap::chord_map().in_use(self.key_scheme()).into_iter().filter_map(|c| Some((keymap::describe_keypress(&c.key), c.command?.to_string()))));
         rows.sort();
+        rows.dedup();
         let candidates = rows
             .into_iter()
             .map(|(keys, id)| {
@@ -2023,8 +2126,14 @@ impl App {
 
     /// After a save: your keybindings file, saved, is put in use.
     fn reload_keybindings_if_saved(&mut self) {
+        let Some(saved) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        self.reload_keybindings_if(&saved);
+    }
+
+    /// The keys read again when `saved` is your keybindings.toml.
+    pub(super) fn reload_keybindings_if(&mut self, saved: &Path) {
         let Some(path) = keymap::user_keymap_path() else { return };
-        if self.open().buffer.path() != Some(path.as_path()) {
+        if saved != path.as_path() {
             return;
         }
         let problems = keymap::reload_leader();
@@ -2048,20 +2157,21 @@ impl App {
 
     /// Tab in the palette: the next keys typed are `command`'s.
     fn bind_keys_start(&mut self, command: String) {
-        self.set_message(format!("Keys for {command}: type them (SPC ...), Enter binds, Esc stops"));
+        self.set_message(format!("Keys for {command}: type them (SPC ..., or a chord: C-s, F12), Enter binds, Esc stops"));
         self.binding_keys = Some((command, Vec::new()));
     }
 
     /// A key while the palette waits for keys to bind.
     fn bind_keys_feed(&mut self, key: KeyPress) {
         let Some((command, mut keys)) = self.binding_keys.take() else { return };
-        if key == KeyPress::named(FenixNamedKey::Escape) {
+        if key.legacy() == KeyPress::named(FenixNamedKey::Escape) {
             self.set_message("");
             return;
         }
-        if key == KeyPress::named(FenixNamedKey::Enter) {
+        if key.legacy() == KeyPress::named(FenixNamedKey::Enter) {
             return self.bind_keys_finish(&command, &keys);
         }
+        let key = if keys.is_empty() { key } else { key.legacy() };
         if key == KeyPress::named(FenixNamedKey::Backspace) {
             keys.pop();
         } else {
@@ -2077,8 +2187,14 @@ impl App {
     /// or keys under another binding, which it would always run first.
     fn bind_keys_finish(&mut self, command: &str, keys: &[KeyPress]) {
         let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+        if let [key] = keys {
+            let key = key.chord();
+            if key.mods.ctrl || key.mods.alt || key.mods.super_ || key.is_function() {
+                return self.bind_chord_finish(command, key);
+            }
+        }
         if keys.first() != Some(&KeyPress::char(' ')) || keys.len() < 2 {
-            self.set_error(format!("{text}: your keys start with SPC, then at least one more"));
+            self.set_error(format!("{text}: your keys start with SPC, then at least one more -- or are one chord (C-s, F12)"));
             return;
         }
         let trie = keymap::leader_trie();
@@ -2097,6 +2213,32 @@ impl App {
         };
         let was = trie.get(keys).copied().filter(|old| *old != command);
         if let Err(e) = fenix_config::keybindings::write_binding(&path, &text, command) {
+            self.set_error(format!("couldn't write {}: {e}", path.display()));
+            return;
+        }
+        let problems = keymap::reload_leader();
+        self.leader_matcher = keymap::leader_trie().matcher();
+        *self.leader_places.borrow_mut() = None;
+        if !problems.is_empty() {
+            self.set_error(format!("keybindings.toml: {}", problems.join("; ")));
+            return;
+        }
+        self.set_message(match was {
+            Some(old) => format!("{text} runs {command} now (it ran {old}) -- in keybindings.toml"),
+            None => format!("{text} runs {command} now -- in keybindings.toml"),
+        });
+    }
+
+    /// A chord given to `command` from the palette: a `[[keys]]` entry in
+    /// your keybindings, for the key scheme in use.
+    fn bind_chord_finish(&mut self, command: &str, key: KeyPress) {
+        let text = keymap::describe_keypress(&key);
+        let Some(path) = keymap::user_keymap_path() else {
+            self.set_error("no settings folder to keep keybindings.toml in");
+            return;
+        };
+        let was = self.chord_command(key).filter(|old| *old != command);
+        if let Err(e) = fenix_config::keybindings::write_chord(&path, &text, command, self.key_scheme().name()) {
             self.set_error(format!("couldn't write {}: {e}", path.display()));
             return;
         }
@@ -2168,8 +2310,12 @@ impl FenixUserEvent {
             Self::TerminalOutput { .. } => "TerminalOutput",
             Self::ExplorerListed { .. } => "ExplorerListed",
             Self::DiskProbed { .. } => "DiskProbed",
+            Self::RemoteQuestion { .. } => "RemoteQuestion",
+            Self::RemoteConnected { .. } => "RemoteConnected",
+            Self::RemoteStatus { .. } => "RemoteStatus",
             Self::RecentProbed { .. } => "RecentProbed",
             Self::Registry { .. } => "Registry",
+            Self::Updates(_) => "Updates",
             Self::Wasm { .. } => "Wasm",
             Self::Acp { .. } => "Acp",
             Self::FilesListed { .. } => "FilesListed",
@@ -2304,6 +2450,12 @@ enum ActivePicker {
     /// matches -- confirming behaves exactly like `Grep`'s, and the same
     /// list becomes the quickfix list for `SPC p n`/`SPC p N`.
     ProjectTodos(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `code.problems` (Ctrl+Shift+M): every problem reported, in every
+    /// file, as places to go -- confirming goes there, as `ProjectTodos`.
+    Problems(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `code.project_symbols` (Ctrl+T): what the language servers find
+    /// for what's typed (`workspace/symbol`), asked again as it changes.
+    ProjectSymbols(fenix_picker::PickerState<fenix_project::GrepMatch>),
     SwitchProject(fenix_picker::PickerState<PathBuf>),
     SwitchBuffer(fenix_picker::PickerState<BufferId>),
     /// `SPC f v`: unsaved work a previous session left behind, one row
@@ -2325,6 +2477,9 @@ enum ActivePicker {
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
     DeleteProject(fenix_picker::PickerState<PathBuf>),
+    /// `SPC p R`: a machine to open a project on -- the ones connected,
+    /// the hosts of `~/.ssh/config`, or whatever is typed.
+    RemoteHost(fenix_picker::PickerState<String>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
@@ -2415,6 +2570,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Places(s) => s.push_char(c),
         ActivePicker::Agents(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
+        ActivePicker::RemoteHost(s) => s.push_char(c),
         ActivePicker::Encoding(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Commands(s) => s.push_char(c),
@@ -2425,6 +2581,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::BufferSearch(s) => s.push_char(c),
         ActivePicker::BufferTodos(s) => s.push_char(c),
         ActivePicker::ProjectTodos(s) => s.push_char(c),
+        ActivePicker::Problems(s) => s.push_char(c),
+        ActivePicker::ProjectSymbols(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
@@ -2450,6 +2608,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.backspace(),
         ActivePicker::Agents(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
+        ActivePicker::RemoteHost(s) => s.backspace(),
         ActivePicker::Encoding(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Commands(s) => s.backspace(),
@@ -2460,6 +2619,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::BufferSearch(s) => s.backspace(),
         ActivePicker::BufferTodos(s) => s.backspace(),
         ActivePicker::ProjectTodos(s) => s.backspace(),
+        ActivePicker::Problems(s) => s.backspace(),
+        ActivePicker::ProjectSymbols(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
@@ -2485,6 +2646,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Places(s) => s.move_selection(delta),
         ActivePicker::Agents(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
+        ActivePicker::RemoteHost(s) => s.move_selection(delta),
         ActivePicker::Encoding(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Commands(s) => s.move_selection(delta),
@@ -2495,6 +2657,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
         ActivePicker::BufferTodos(s) => s.move_selection(delta),
         ActivePicker::ProjectTodos(s) => s.move_selection(delta),
+        ActivePicker::Problems(s) => s.move_selection(delta),
+        ActivePicker::ProjectSymbols(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
@@ -2523,6 +2687,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.toggle_mark(),
         ActivePicker::Agents(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
+        ActivePicker::RemoteHost(s) => s.toggle_mark(),
         ActivePicker::Encoding(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Commands(s) => s.toggle_mark(),
@@ -2533,6 +2698,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
         ActivePicker::BufferTodos(s) => s.toggle_mark(),
         ActivePicker::ProjectTodos(s) => s.toggle_mark(),
+        ActivePicker::Problems(s) => s.toggle_mark(),
+        ActivePicker::ProjectSymbols(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
@@ -2558,6 +2725,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Places(s) => s.query(),
         ActivePicker::Agents(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
+        ActivePicker::RemoteHost(s) => s.query(),
         ActivePicker::Encoding(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Commands(s) => s.query(),
@@ -2568,6 +2736,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::BufferSearch(s) => s.query(),
         ActivePicker::BufferTodos(s) => s.query(),
         ActivePicker::ProjectTodos(s) => s.query(),
+        ActivePicker::Problems(s) => s.query(),
+        ActivePicker::ProjectSymbols(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
@@ -2593,6 +2763,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.len(),
         ActivePicker::Agents(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
+        ActivePicker::RemoteHost(s) => s.len(),
         ActivePicker::Encoding(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Commands(s) => s.len(),
@@ -2603,6 +2774,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::BufferSearch(s) => s.len(),
         ActivePicker::BufferTodos(s) => s.len(),
         ActivePicker::ProjectTodos(s) => s.len(),
+        ActivePicker::Problems(s) => s.len(),
+        ActivePicker::ProjectSymbols(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
@@ -2628,6 +2801,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.selected_row(),
         ActivePicker::Agents(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
+        ActivePicker::RemoteHost(s) => s.selected_row(),
         ActivePicker::Encoding(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Commands(s) => s.selected_row(),
@@ -2638,6 +2812,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::BufferSearch(s) => s.selected_row(),
         ActivePicker::BufferTodos(s) => s.selected_row(),
         ActivePicker::ProjectTodos(s) => s.selected_row(),
+        ActivePicker::Problems(s) => s.selected_row(),
+        ActivePicker::ProjectSymbols(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
@@ -2668,6 +2844,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Places(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Agents(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::RemoteHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Encoding(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Commands(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -2678,6 +2855,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Problems(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::ProjectSymbols(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -2855,6 +3034,40 @@ fn popup_beside_row(
     let right = (at.pane.x + at.pane.w).min(window_width);
     let x = (x - text::PAD_LEFT).min(right - width).max(at.pane.x.max(0.0));
     Some(fenix_window::Rect { x, y, w: width, h: height })
+}
+
+/// A key in a prompt whose prefilled `input` is selected (`selected`):
+/// the selection ends with any key; a character or a paste replaces the
+/// text, Backspace or Delete clears it (and is spent). Returns whether
+/// the key was spent here.
+fn take_selected_prefill(input: &mut String, selected: &mut bool, key: KeyPress) -> bool {
+    if !std::mem::take(selected) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char(_) if !key.mods.alt && !key.mods.super_ && (!key.mods.ctrl || key == KeyPress::char('v').with_ctrl()) => {
+            input.clear();
+            false
+        }
+        KeyCode::Named(FenixNamedKey::Backspace | FenixNamedKey::Delete) => {
+            input.clear();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Ctrl+Backspace in a one-line prompt: the word before the end goes,
+/// with any spaces or punctuation after it -- `count_words` all at once,
+/// `src/lib` back to `src/`.
+fn delete_word_back(input: &mut String) {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    while input.ends_with(|c: char| !is_word(c)) {
+        input.pop();
+    }
+    while input.ends_with(is_word) {
+        input.pop();
+    }
 }
 
 fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: f32, content_frac: f32, char_width: f32, line_height: f32) -> (f32, f32) {
@@ -3139,29 +3352,6 @@ fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
 /// the tail of the previous tab's own text instead of the gap between
 /// tabs, and a click square on the last tab's visible `×` landed `PAD_
 /// LEFT` short of it.
-/// `path` inside `root`, as `src/main.rs`: matched however either was
-/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
-/// kept canonical and a buffer's path as it was opened.
-fn path_within(root: &Path, path: &Path) -> Option<String> {
-    if let Ok(rest) = path.strip_prefix(root) {
-        return Some(rest.to_string_lossy().replace('\\', "/"));
-    }
-    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
-    let (root, path) = (plain(root), plain(path));
-    let root = format!("{}\\", root.trim_end_matches('\\'));
-    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
-    inside.then(|| path[root.len()..].replace('\\', "/"))
-}
-
-/// `path` whole, its home folder as `~`: a file outside the project.
-fn home_relative(path: &Path) -> String {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
-    match home.and_then(|h| path_within(&h, path)) {
-        Some(rest) => format!("~/{rest}"),
-        None => path.display().to_string(),
-    }
-}
-
 fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
     fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
 }
@@ -4686,6 +4876,10 @@ pub struct App {
     /// The pane a jump just moved the cursor in (`mark_jump`): its next
     /// scroll centres the cursor when it's out of view.
     jump_view: Option<fenix_window::WindowId>,
+    /// Panes without the focus whose cursor was moved for you (following
+    /// an agent): scrolled to it, centred, on the next frame -- only the
+    /// focused pane follows its cursor by itself.
+    reveal_panes: HashSet<fenix_window::WindowId>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -4861,6 +5055,10 @@ pub struct App {
     /// synchronously -- the edit only lands once the server answers,
     /// see `PendingLspRequest::Rename`).
     lsp_rename_prompt: Option<String>,
+    /// With standard keys, a rename prompt's prefilled name is selected
+    /// until a key: typing replaces it, Backspace clears it, an arrow
+    /// keeps it to change.
+    prompt_prefill_selected: bool,
     refactor_preview: Option<refactor::Preview>,
     /// The coding agents: their connections, the threads, the panel and
     /// its prompt (`agents`).
@@ -4881,6 +5079,24 @@ pub struct App {
     /// typing at a time, and it always acts on `self.workspaces`, which
     /// is always whichever frame is currently active.
     workspace_rename_prompt: Option<String>,
+    /// Standard keys: Escape was pressed once in a compose pane with text
+    /// in it; again throws the text away.
+    compose_discard_armed: bool,
+    /// `nav.goto_line`'s prompt: the number typed so far.
+    goto_line_prompt: Option<String>,
+    /// How often the leader's chord opened it this run: the modeline says
+    /// which chord does until it's been used a few times.
+    leader_uses: u32,
+    /// When the last key came: standard keys' undo pause.
+    last_key_at: Option<Instant>,
+    /// Each pane's extra carets (standard keys' more cursors).
+    carets: carets::PaneCarets,
+    /// Edits made at several carets, by the tag on their undo step: the
+    /// carets before and after, for undo and redo to put back.
+    caret_steps: carets::CaretSteps,
+    /// The switcher `buffer.switch_recent` (Ctrl+Tab) opened is up: letting
+    /// go of Ctrl picks its row.
+    switching_recent: bool,
     /// `SPC f D`'s y/n gate, armed until the next keypress confirms
     /// (`y`) or cancels (anything else) -- same shape as `docker_
     /// confirm_remove`.
@@ -4928,6 +5144,10 @@ pub struct App {
     /// When the disk probe now out was sent, and what each buffer's file
     /// looked like then (`disk_probe`).
     disk_probe_out: Option<Instant>,
+    /// The remote machines Fenix is connected to (`remote`).
+    remote: remote::Remotes,
+    /// Which projects may have the programs they name run (`trust`).
+    trust: trust::ProjectTrust,
     disk_probe_basis: HashMap<BufferId, DiskFingerprint>,
     /// Home's recent files as last looked at, when, and when the look now
     /// out was sent (`home::request_recent_probe`).
@@ -5165,6 +5385,16 @@ pub struct App {
     /// proc defined in another file -- found by the Tcl extension's ctags
     /// -- is colored as one.
     lsp_workspace_names: HashMap<LspKey, (Instant, std::sync::Arc<std::collections::HashSet<String>>)>,
+    /// What the symbol picker (Ctrl+T) has asked, and been answered.
+    symbol_search: problems::SymbolSearch,
+    /// Where the cursors were before their last moves, for Ctrl+U
+    /// (`edit.cursor_undo`); and whether it's Ctrl+U moving them now.
+    caret_marks: Vec<carets::CaretMark>,
+    caret_undoing: bool,
+    /// What auto-save (`editor.auto_save`) has seen.
+    auto_save: auto_save::AutoSaveState,
+    /// What the update check (`updates.check`) knows.
+    updates: updates::UpdateState,
     /// Each Tcl buffer's language servers, as last worked out (every few
     /// seconds, not every frame: it can touch the disk) -- whose
     /// `lsp_workspace_names` its calls are colored by.
@@ -5308,6 +5538,9 @@ pub struct App {
     /// string, where only servers are asked.
     completion_local: bool,
     completion_context: Option<(BufferId, fenix_window::WindowId, usize, u64)>,
+    /// The focused buffer and its edit count when `sync_completion` last
+    /// ran: a key that changed neither doesn't open the popup.
+    completion_edit_seen: Option<(BufferId, u64)>,
     snippet: Option<snippets::ActiveSnippet>,
     /// Same role as `picker_scroll`, for the completion popup's own
     /// candidate window.
@@ -5437,6 +5670,9 @@ struct FrameGeometry {
     /// coarser `panes` rects, so a tab or its close glyph wins over
     /// "just focus whatever pane this is."
     tabs: Vec<(fenix_window::WindowId, TabRect)>,
+    /// Each tab strip's split button, right after its tabs: a click splits
+    /// that pane.
+    split_buttons: Vec<(fenix_window::WindowId, fenix_window::Rect)>,
 }
 
 /// What a click or wheel notch landed on, per `hit_test`.
@@ -5450,6 +5686,8 @@ enum ScrollTarget {
     /// A tab's close glyph was clicked -- drop it from that pane's tab
     /// list (see `App::handle_click_at`).
     CloseTab(fenix_window::WindowId, BufferId),
+    /// A tab strip's split button: split that pane.
+    SplitPane(fenix_window::WindowId),
 }
 
 /// Point-in-region hit test shared by click-to-focus and wheel-scroll --
@@ -5467,6 +5705,11 @@ fn hit_test(geometry: &FrameGeometry, pos: (f32, f32)) -> Option<ScrollTarget> {
     if let Some(rect) = geometry.sidebar_rect {
         if rect.contains_point(x, y) {
             return Some(ScrollTarget::Sidebar);
+        }
+    }
+    for (pane, rect) in &geometry.split_buttons {
+        if rect.contains_point(x, y) {
+            return Some(ScrollTarget::SplitPane(*pane));
         }
     }
     for (pane, tab) in &geometry.tabs {
@@ -5491,7 +5734,7 @@ fn hit_test(geometry: &FrameGeometry, pos: (f32, f32)) -> Option<ScrollTarget> {
 /// terminal, dividers, the modeline) is the plain arrow.
 fn cursor_icon_for(geometry: &FrameGeometry, pos: (f32, f32), line_height: f32) -> winit::window::CursorIcon {
     let (x, y) = pos;
-    if geometry.tabs.iter().any(|(_, tab)| tab.body.contains_point(x, y)) {
+    if geometry.tabs.iter().any(|(_, tab)| tab.body.contains_point(x, y)) || geometry.split_buttons.iter().any(|(_, r)| r.contains_point(x, y)) {
         return winit::window::CursorIcon::Pointer;
     }
     if geometry.sidebar_rect.is_some_and(|rect| rect.contains_point(x, y)) {
@@ -5655,7 +5898,12 @@ impl App {
         let mut app = Self::with_file(file_arg.clone());
         app.event_proxy = Some(event_proxy);
         app.session.path = fenix_storage::paths::state_file("session.json");
+        // From here a project's own programs wait to be allowed: before
+        // the session comes back, which opens files and starts servers.
+        app.project_trust_begin(fenix_storage::paths::state_file("trusted-projects.json"));
         app.restore_session(file_arg.is_some());
+        // What was open on other machines: connected to again.
+        app.remote_resume_session();
         // Recording lives here, not inside `with_file` -- `with_file` is
         // what the test suite calls directly to simulate "opened with
         // this file," and recording there would mean every such test
@@ -5881,6 +6129,7 @@ impl App {
             term_hover: None,
             term_clicks: crate::mouse::ClickCounter::default(),
             jump_view: None,
+            reveal_panes: HashSet::new(),
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -5924,6 +6173,8 @@ impl App {
             home_project_data: HashMap::new(),
             file_index: Default::default(),
             disk_probe_out: None,
+            remote: remote::Remotes::default(),
+            trust: trust::ProjectTrust::default(),
             disk_probe_basis: HashMap::new(),
             recent_seen: HashMap::new(),
             recent_probed: None,
@@ -6004,6 +6255,11 @@ impl App {
             page_images: Default::default(),
             lsp_sessions: HashMap::new(),
             lsp_workspace_names: HashMap::new(),
+            symbol_search: Default::default(),
+            caret_marks: Vec::new(),
+            caret_undoing: false,
+            auto_save: Default::default(),
+            updates: updates::UpdateState { file: Some(if cfg!(test) { isolated_test_path("updates.json") } else { fenix_storage::paths::state_file("updates.json").unwrap_or_else(|| PathBuf::from("updates.json")) }), ..Default::default() },
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
             lsp_starting: HashMap::new(),
@@ -6036,11 +6292,13 @@ impl App {
             completion_generation: 0,
             completion_local: true,
             completion_context: None,
+            completion_edit_seen: None,
             snippet: None,
             completion_scroll: 0,
             find_file_prompt: None,
             rename_file_prompt: None,
             lsp_rename_prompt: None,
+            prompt_prefill_selected: false,
             refactor_preview: None,
             agents: agents::AgentHost::new(),
             agent_calls: agent_calls::AgentCalls::default(),
@@ -6049,6 +6307,13 @@ impl App {
             pipelines: agent_pipelines::Pipelines::default(),
             refactor_undo: None,
             workspace_rename_prompt: None,
+            goto_line_prompt: None,
+            compose_discard_armed: false,
+            last_key_at: None,
+            leader_uses: 0,
+            carets: Default::default(),
+            caret_steps: Default::default(),
+            switching_recent: false,
             delete_file_confirm: false,
             vim,
             clipboard: crate::clipboard::Clipboard::new().ok(),
@@ -6823,6 +7088,8 @@ impl App {
         }
         self.refresh_project_settings(false);
         self.tell_extensions(Happened::FocusChanged);
+        // Said before its servers would have started: they won't, yet.
+        self.project_trust_notice();
         self.sync_lsp_for_focused_buffer();
     }
 
@@ -6867,6 +7134,11 @@ impl App {
     /// Starts `path`'s language servers if they aren't running, and tells
     /// those that are its text, if `edit_count` says that's changed.
     fn sync_lsp_for(&mut self, path: &Path, text: &str, edit_count: u64) {
+        // Language servers for a remote project run on its machine, which
+        // isn't done yet: none are started here for its files.
+        if fenix_vfs::is_remote(path) {
+            return;
+        }
         let path = path.to_path_buf();
         let language = fenix_syntax::detect_language_from_path(&path);
         let cwd = tool_sessions::lsp_root_for_path(&path);
@@ -6926,11 +7198,12 @@ impl App {
     fn additional_lsp_servers(&mut self, root: &Path, language: fenix_syntax::LanguageId) -> Vec<fenix_project::tools::AdditionalServer> {
         // The project's own, then those extensions added.
         let added = self.wasm.added_servers(root);
-        let all = self.lsp_additional.entry(root.to_path_buf()).or_insert_with(|| {
-            let mut all = fenix_project::tools::ProjectTools::read(root).map(|tools| tools.lsp.additional).unwrap_or_default();
+        if !self.lsp_additional.contains_key(root) {
+            let mut all = self.project_tools(root).map(|tools| tools.lsp.additional).unwrap_or_default();
             all.extend(added);
-            all
-        });
+            self.lsp_additional.insert(root.to_path_buf(), all);
+        }
+        let all = &self.lsp_additional[root];
         let name = crate::lsp::language_config_name(language);
         all.iter().filter(|server| server.serves(&name)).cloned().collect()
     }
@@ -7015,7 +7288,7 @@ impl App {
     fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
         let key = LspKey::primary(language, fenix_lsp::normalize(refactor::identity(cwd)));
         if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) || self.lsp_starting.contains_key(&key) { return; }
-        let configured = match fenix_project::tools::ProjectTools::read(&key.root) {
+        let configured = match self.project_tools(&key.root) {
             Ok(config) => config,
             Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
         };
@@ -7211,6 +7484,7 @@ impl App {
     fn apply_lsp_response(&mut self, key: LspKey, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         match pending {
             PendingLspRequest::Agent { id } => self.agent_lsp_answered(id, result.map_err(|e| e.message)),
+            PendingLspRequest::ProjectSymbols { generation } => self.project_symbols_answered(key, generation, result.map_err(|e| e.message)),
             PendingLspRequest::Initialize => match result {
                 Ok(value) => {
                     let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
@@ -7455,7 +7729,8 @@ impl App {
                     .flatten();
                 let complete = gather.is_complete();
                 if text.is_some() {
-                    self.lsp_hover = text;
+                    // The leader's keys in it, as the key scheme writes them.
+                    self.lsp_hover = text.map(|t| if self.standard_keys() { keys_host::translate_leader(&t, &self.leader_chord_text()) } else { t });
                     self.wake_caret();
                 }
                 complete
@@ -7706,10 +7981,18 @@ impl App {
             .filter_map(|loc| fenix_lsp::uri_to_path(&loc.uri).map(|path| QuickfixEntry::Lsp { path, position: loc.range.start }))
             .collect();
         self.quickfix_index = None;
+        // The Search page's results aren't the list any more: it stops
+        // following F3 and `]q`.
+        self.search.quickfix_page = None;
         if self.quickfix.is_empty() {
             self.set_error("no references found".to_string());
         } else {
             self.quickfix_step(1);
+            let n = self.quickfix.len();
+            if n > 1 {
+                let next = self.key_for("project.quickfix_next").unwrap_or_else(|| "]q".to_string());
+                self.set_message(format!("{n} references -- {next} goes to the next"));
+            }
         }
     }
 
@@ -7726,8 +8009,7 @@ impl App {
         match fenix_lsp::workspace_edit::apply_text_edits(&ob.buffer.text(), &edits) {
             Ok(text) => {
                 if text != ob.buffer.text() {
-                    let end = ob.buffer.len_chars();
-                    ob.buffer.replace_range(&mut ob.cursor, 0, end, &text);
+                    replace_text_by_lines(&mut ob.buffer, &mut ob.cursor, &text);
                 }
             }
             Err(error) => self.set_error(format!("LSP edits rejected: {error}")),
@@ -8025,8 +8307,8 @@ impl App {
         }
     }
 
-    /// `SPC c r` -- opens the rename prompt, pre-filled with whatever
-    /// identifier-prefix precedes the cursor (real editors' own
+    /// `SPC c r` -- opens the rename prompt, pre-filled with the
+    /// identifier the cursor is in (real editors' own
     /// convention: rename almost always starts from "call this
     /// something else," not a blank field), same capturing-prompt shape
     /// as `start_rename_file_prompt`. A no-op (with a message) if no
@@ -8039,7 +8321,8 @@ impl App {
         }
         let cursor = self.cursor();
         let ob = self.open();
-        let current = completion::prefix_at_cursor(&ob.buffer, &cursor).map(|(_, prefix)| prefix).unwrap_or_default();
+        let current = completion::identifier_at_cursor(&ob.buffer, &cursor).unwrap_or_default();
+        self.prompt_prefill_selected = self.standard_keys() && !current.is_empty();
         self.lsp_rename_prompt = Some(current);
     }
 
@@ -8048,6 +8331,12 @@ impl App {
     /// `textDocument/rename` request rather than applying anything
     /// synchronously (the edit only lands once the server answers).
     fn lsp_rename_prompt_key(&mut self, key: KeyPress) {
+        if let Some(input) = &mut self.lsp_rename_prompt {
+            if take_selected_prefill(input, &mut self.prompt_prefill_selected, key) {
+                self.wake_caret();
+                return;
+            }
+        }
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(input), Some(text)) = (&mut self.lsp_rename_prompt, pasted) {
@@ -8063,6 +8352,7 @@ impl App {
                 let new_name = self.lsp_rename_prompt.take().unwrap_or_default();
                 self.send_lsp_rename(&new_name);
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -8181,6 +8471,15 @@ impl App {
     /// identifier prefix at the cursor, or the prefix no longer matches
     /// anything.
     fn sync_completion(&mut self) {
+        // The popup opens on an edit (a character typed, one deleted) and
+        // only follows the cursor once open: an arrow or a click that
+        // lands after a word is not asking for it -- in standard keys,
+        // where a buffer rests in Insert, it would follow every move.
+        let seen = self.buffers.get(self.focused_buffer_id()).map(|b| (self.focused_buffer_id(), b.buffer.edit_count()));
+        let edited = std::mem::replace(&mut self.completion_edit_seen, seen) != seen;
+        if self.completion.is_none() && !edited {
+            return;
+        }
         if self.snippet_is_valid() {
             self.completion = None;
             return;
@@ -8263,6 +8562,12 @@ impl App {
         }
         if self.completion.is_none() {
             return false;
+        }
+        // With standard keys Escape never leaves Insert, so it is free to
+        // do what it does in every other editor: close the popup.
+        if keypress == KeyPress::named(FenixNamedKey::Escape) && self.standard_keys() {
+            self.completion = None;
+            return true;
         }
         if self.completion.as_ref().is_some_and(|s| s.picker.is_empty()) { return false; }
         if keypress.code == KeyCode::Named(FenixNamedKey::Enter) && keypress.mods == Mods::default() && self.enter_is_a_new_line() {
@@ -8606,8 +8911,7 @@ impl App {
             Ok(formatted) => {
                 let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
                 let (line, col) = buffer.line_col(cursor);
-                let end = buffer.len_chars();
-                buffer.replace_range(cursor, 0, end, &formatted);
+                replace_text_by_lines(buffer, cursor, &formatted);
                 let line = line.min(buffer.line_count().saturating_sub(1));
                 cursor.char_idx = buffer.line_start_char(line) + col.min(buffer.line_len(line));
                 cursor.sticky_col = col;
@@ -8641,8 +8945,7 @@ impl App {
             return;
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
-        buffer.replace_range(cursor, 0, end, &formatted);
+        replace_text_by_lines(buffer, cursor, &formatted);
     }
 
     /// `SPC c f` -- reindents the active Visual selection's lines in
@@ -8764,11 +9067,15 @@ impl App {
             return;
         }
         let path = PathBuf::from(input);
-        let path = if path.is_absolute() { path } else {
-            self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).join(path)
+        let path = if path.is_absolute() {
+            path
+        } else {
+            // In the project, wherever that is: a remote one's paths
+            // aren't joined as this machine's are.
+            fenix_vfs::join(&self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))), input)
         };
         // Naming a scratch document must never overwrite another document.
-        if path.exists() || self.buffers.id_for_path(&path).is_some() {
+        if fenix_vfs::exists(&path) || self.buffers.id_for_path(&path).is_some() {
             self.set_error("destination already exists or is open; choose a new file name");
             return;
         }
@@ -8779,7 +9086,7 @@ impl App {
                 self.note_disk_state(id);
                 self.discard_recovery_for(id);
                 self.refresh_project_root();
-                self.set_message(format!("saved {}", path.display()));
+                self.set_message(format!("saved {}", self.shown_path(&path)));
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
         }
@@ -8823,8 +9130,8 @@ impl App {
         let unformatted = if self.config.format_on_save == Some(true) { self.run_extension_formatter().and_then(Result::err) } else { None };
         // A new file (`SPC f f src/new/mod.rs`) in folders that aren't
         // there yet: they're made.
-        if let Some(parent) = self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
-            if let Err(err) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty() && !fenix_vfs::exists(p)) {
+            if let Err(err) = fenix_vfs::create_dir_all(parent) {
                 self.set_error(format!("save failed: couldn't create {}: {err}", fenix_core::plain_path(parent).display()));
                 self.wake_caret();
                 return;
@@ -8834,37 +9141,44 @@ impl App {
         match ob.buffer.save() {
             Ok(()) => {
                 let path = ob.buffer.path().unwrap().to_path_buf();
-                // Recorded before the message: this is what stops the
-                // next sweep reporting Fenix's own write as somebody
-                // else's change.
-                self.note_disk_state(id);
-                // The work is on disk now, so the snapshot describes
-                // nothing that's lost -- and leaving it would offer to
-                // "recover" it on the next start.
-                self.discard_recovery_for(id);
-                self.refresh_gutter_hunks(id);
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.editor_event("saved", fenix_wasm::host::Notice::Saved(name));
-                self.code_file_saved(&path);
-                // A server's settings, edited (`.fenix/lsp/<name>.json`):
-                // it's told.
-                if let Some(project) = lsp_settings_file(&path) {
-                    let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.lsp_settings_changed(&project, Some(&server));
-                }
+                self.after_saved(id, &path);
                 match (self.xml_save_problem(&path), Self::snippet_save_note(&path)) {
-                    (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", path.display())),
+                    (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", self.shown_path(&path))),
                     (None, Some(Ok(note))) => self.set_message(format!("saved -- {note}")),
                     (None, Some(Err(why))) => self.set_error(format!("saved -- {why}")),
-                    (None, None) => self.set_message(format!("saved {}", path.display())),
+                    (None, None) => self.set_message(format!("saved {}", self.shown_path(&path))),
                 }
                 if let Some(why) = unformatted {
-                    self.set_error(format!("saved {}, unformatted -- {why}", path.display()));
+                    self.set_error(format!("saved {}, unformatted -- {why}", self.shown_path(&path)));
                 }
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
         }
         self.wake_caret();
+    }
+
+    /// What follows a buffer written to its file, however it was saved
+    /// (`:w`, auto-save).
+    pub(super) fn after_saved(&mut self, id: BufferId, path: &Path) {
+        // Recorded before anything else: this is what stops the next
+        // sweep reporting Fenix's own write as somebody else's change.
+        self.note_disk_state(id);
+        // The work is on disk now, so the snapshot describes nothing
+        // that's lost -- and leaving it would offer to "recover" it on
+        // the next start.
+        self.discard_recovery_for(id);
+        self.refresh_gutter_hunks(id);
+        // A save of yours settles what auto-save held back.
+        self.auto_save_settled(id);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.editor_event("saved", fenix_wasm::host::Notice::Saved(name));
+        self.code_file_saved(path);
+        // A server's settings, edited (`.fenix/lsp/<name>.json`): it's
+        // told.
+        if let Some(project) = lsp_settings_file(path) {
+            let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            self.lsp_settings_changed(&project, Some(&server));
+        }
     }
 
     /// Every open buffer whose kind can actually hold savable content
@@ -9022,9 +9336,9 @@ impl App {
     /// the dirty buffers so the user can jump to and save them instead
     /// of guessing, anything else cancels. Same "captures the very
     /// next key" shape as `DockerHost::confirm_key`/`git_confirm_key`.
-    fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+    fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         match self.resolve_quit_confirm_action(keypress) {
-            QuitConfirmAction::Quit => { if self.discard_session_edits() { event_loop.exit(); } },
+            QuitConfirmAction::Quit => { if self.discard_session_edits() { if let Some(event_loop) = event_loop { event_loop.exit(); } } },
             QuitConfirmAction::ShowDirtyBuffers => self.picker_switch_dirty_buffers(),
             QuitConfirmAction::Cancel => {}
         }
@@ -9231,6 +9545,10 @@ impl App {
     pub(crate) fn open_terminal_buffer(&mut self) {
         let cwd = self.terminal_start_dir();
         self.open_terminal_buffer_in(cwd);
+        // Said, because the shell that just opened looks like any other.
+        if self.project_root.as_deref().is_some_and(fenix_vfs::is_remote) {
+            self.set_message("this shell is on this machine: terminals on a remote project's machine aren't there yet");
+        }
     }
 
     /// Where a shell starts unless asked to start somewhere: the project
@@ -9376,7 +9694,7 @@ impl App {
         self.terminal_focused = false;
         self.sidebar_focused = false;
         let name = self.buffer_display_name(id);
-        self.set_message(format!("{name} -- Ctrl-\\ to leave the terminal"));
+        self.set_message(format!("{name} -- Ctrl+\\ to leave the terminal"));
     }
 
     /// Releases keyboard capture without closing anything -- the pane
@@ -9648,7 +9966,7 @@ impl App {
         self.known_projects
             .roots()
             .iter()
-            .map(|root| fenix_picker::Candidate::new(root.to_string_lossy().into_owned(), root.clone()))
+            .map(|root| fenix_picker::Candidate::new(fenix_vfs::display(root), root.clone()))
             .collect()
     }
 
@@ -9796,7 +10114,7 @@ impl App {
         for &id in ids {
             let Some(ob) = self.buffers.get(id) else { continue };
             let label = if let Some(path) = ob.buffer.path() {
-                self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+                self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
             } else if ob.kind == BufferKind::Dashboard {
                 // Each pane's Home is the one Home: by the workspace's
                 // name, as its tab has it.
@@ -10074,7 +10392,7 @@ impl App {
             self.set_error(format!("no known tasks for {}", root.display()));
             return;
         }
-        let own = fenix_project::tools::ProjectTools::read(&root).map(|tools| tools.tasks).unwrap_or_default();
+        let own = self.project_tools(&root).map(|tools| tools.tasks).unwrap_or_default();
         let candidates = tasks
             .into_iter()
             .map(|t| {
@@ -10148,7 +10466,7 @@ impl App {
         // An extension's first; core's defaults only where they add a
         // name and a command line it doesn't have (#35).
         let mut tasks = fenix_tasks::merge_tasks(self.wasm.tasks(root), fenix_tasks::discover_tasks(root));
-        let tools = fenix_project::tools::ProjectTools::read(root)?;
+        let tools = self.project_tools(root)?;
         for (name, spec) in tools.tasks {
             tasks.retain(|task| task.name != name);
             tasks.push(fenix_tasks::TaskDef { name, command: spec.executable, args: spec.args });
@@ -10209,7 +10527,7 @@ impl App {
         if self.task_session.as_ref().is_some_and(|s| s.runner.is_some() && s.root != root) {
             self.set_error("a task is running in another project; cancel it from its task panel first"); return false;
         }
-        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return false; } };
+        let tools = match self.project_tools(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return false; } };
         // The project's own first, then an extension's as it gave it (with
         // its environment), then the task as it is.
         let given = given.or_else(|| self.wasm.task_spec(&root, &task.name).filter(|s| s.executable == task.command && s.args == task.args));
@@ -10218,6 +10536,7 @@ impl App {
         task.args = spec.args.clone();
         self.project_last_tasks.insert(root.clone(), task.clone());
         self.quickfix.clear();
+        self.search.quickfix_page = None;
         self.quickfix_index = None;
         let header = format!("$ {} {}\n", task.command, task.args.join(" "));
 
@@ -10500,7 +10819,7 @@ impl App {
             return;
         };
         let root = self.integration_root();
-        let tools = match fenix_project::tools::ProjectTools::read(&root) {
+        let tools = match self.project_tools(&root) {
             Ok(tools) => tools,
             Err(error) => { self.set_error(error); return; }
         };
@@ -10581,7 +10900,7 @@ impl App {
             return;
         };
         let root = self.integration_root();
-        let tools = match fenix_project::tools::ProjectTools::read(&root) {
+        let tools = match self.project_tools(&root) {
             Ok(tools) => tools,
             Err(error) => { self.set_error(error); return; }
         };
@@ -11382,7 +11701,7 @@ impl App {
             .filter_map(|key| match key.server { LspServer::Primary(language) => Some(language), LspServer::Additional(_) => None })
             .collect();
         let root = self.integration_root();
-        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
+        let tools = match self.project_tools(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
         let dap_language = self.debug_session.as_ref().filter(|s| s.root == root).map(|s| s.language);
         let configured_command = |spec: &fenix_project::tools::CommandSpec| {
             spec.command(&root).ok().map(|command| (command.get_program().to_string_lossy().into_owned(), spec.args.clone()))
@@ -12557,7 +12876,12 @@ impl App {
 
         let fingerprint = match seen {
             Some(seen) => seen,
-            None => DiskFingerprint::of(&path),
+            None => match DiskFingerprint::look(&path) {
+                Some(looked) => looked,
+                // Its machine isn't answering: nothing is known, and
+                // nothing is concluded.
+                None => return,
+            },
         };
         let Some(fingerprint) = fingerprint else {
             // Gone, or no longer a regular file. Never reloaded to
@@ -12648,8 +12972,11 @@ impl App {
             .map(|state| ob.buffer.line_col(&Cursor { char_idx: state.cursor.char_idx.min(old_len), sticky_col: 0 }).0)
             .collect();
 
+        // Only the lines that changed are replaced, so what's anchored
+        // in the rest (extra cursors, an extension's decorations) stays
+        // where it was.
         let mut scratch = Cursor::at_start();
-        ob.buffer.replace_range(&mut scratch, 0, old_len, on_disk);
+        replace_text_by_lines(&mut ob.buffer, &mut scratch, on_disk);
         // A reload isn't user work: leaving it dirty would make every
         // touched file look unsaved and block `:qa`.
         ob.buffer.mark_saved();
@@ -12686,13 +13013,15 @@ impl App {
     /// somebody else's change.
     fn note_disk_state(&mut self, id: BufferId) {
         let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return };
-        match DiskFingerprint::of(&path) {
-            Some(fingerprint) => {
+        match DiskFingerprint::look(&path) {
+            Some(Some(fingerprint)) => {
                 self.disk_state.insert(id, fingerprint);
             }
-            None => {
+            Some(None) => {
                 self.disk_state.remove(&id);
             }
+            // Not looked at: what was known stands.
+            None => return,
         }
         self.externally_changed.remove(&id);
     }
@@ -12974,13 +13303,19 @@ impl App {
         // what needs the room, and is what you're looking at while you
         // write.
         self.windows_mut().resize_focused(0.25);
-        self.pane_titles.insert(pane, purpose.title());
+        let title = self.keys_text(&purpose.title());
+        self.pane_titles.insert(pane, title);
         self.windows_mut().focus(pane);
         self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to, seed: seed.to_string(), agent_over_seed: false });
         // A blank one is there to be typed into: it opens in Insert, so
         // the first word written isn't run as commands (`P` pasting).
         // One with text to edit (an amend, a description) opens in Normal.
-        if seed.is_empty() && self.vim.mode() == Mode::Normal {
+        if self.standard_keys() {
+            // Standard keys type at once, wherever the text is.
+            self.settle_keys();
+            let agent = self.compose.as_ref().is_some_and(|c| c.purpose.agent_writes());
+            self.set_message(if agent { "write, or Ctrl+Shift+A for the agent; Ctrl+Enter sends -- Esc discards" } else { "write, then Ctrl+Enter to send -- Esc discards" });
+        } else if seed.is_empty() && self.vim.mode() == Mode::Normal {
             if let (Some(ob), Some(state)) = (self.buffers.get_mut(buffer), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                 self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
             }
@@ -13069,7 +13404,7 @@ impl App {
     fn compose_agent_offered(&self) -> bool {
         let Some(compose) = self.compose.as_ref() else { return false };
         compose.pane == self.focused_pane_id()
-            && self.vim.mode() == Mode::Normal
+            && (self.vim.mode() == Mode::Normal || (self.standard_keys() && self.vim.is_inserting()))
             && !self.vim.is_pending()
             && compose.purpose.agent_writes()
             && self.buffers.get(compose.buffer).is_some_and(|ob| {
@@ -13698,9 +14033,8 @@ impl App {
         let start_char = self.open().buffer.line_start_char(conflict.start);
 
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
         let mut scratch = Cursor::at_start();
-        buffer.replace_range(&mut scratch, 0, end, &resolved);
+        replace_text_by_lines(buffer, &mut scratch, &resolved);
         // Land on where the conflict was, so the next one is a `SPC g j`
         // away rather than needing the file re-navigated.
         cursor.char_idx = start_char.min(buffer.len_chars());
@@ -14214,6 +14548,9 @@ impl App {
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
     /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
+        // Whatever opens it says what it is: the thread list sets its own
+        // mark after.
+        self.agents.list.open = false;
         self.active_picker = Some(picker);
         self.picker_scroll = 0;
         self.main_view = MainView::Picker;
@@ -14279,7 +14616,7 @@ impl App {
                 self.active_picker = None;
                 self.switch_to_project(root);
             }
-            Some(ActivePicker::ProjectTodos(state)) => {
+            Some(ActivePicker::ProjectTodos(state) | ActivePicker::Problems(state) | ActivePicker::ProjectSymbols(state)) => {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
@@ -14314,6 +14651,15 @@ impl App {
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 self.explorer_open_path(&path);
+            }
+            Some(ActivePicker::RemoteHost(state)) => {
+                // A name that matches none of the listed is a machine
+                // too: `user@host`, as typed.
+                let typed = Some(state.query().trim().to_string()).filter(|typed| !typed.is_empty());
+                let Some(host) = state.selected().map(|c| c.payload.clone()).or(typed) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.remote_host_picked(&host);
             }
             Some(ActivePicker::DeleteProject(state)) => {
                 let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -14534,7 +14880,15 @@ impl App {
     /// buffer's folder, then the project -- in the preview tab. A file an
     /// extension opens (a PDF) goes to it, at the page a `#page=38` after
     /// it names.
-    pub(super) fn follow_link_under_cursor(&mut self) {
+    /// Whether there's a file name (`spec.pdf#page=3`, `src/a.rs:12`) under
+    /// the cursor that `gf` would follow.
+    pub(crate) fn link_under_cursor(&self) -> bool {
+        let (line, col) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        crate::file_link::link_at(text.trim_end_matches(['\n', '\r']), col).is_some()
+    }
+
+    pub(crate) fn follow_link_under_cursor(&mut self) {
         let (line, col) = self.open().buffer.line_col(&self.cursor());
         let text = self.open().buffer.line(line).to_string();
         let Some((name, page)) = crate::file_link::link_at(text.trim_end_matches(['\n', '\r']), col) else {
@@ -14562,6 +14916,12 @@ impl App {
     }
 
     fn open_file_as(&mut self, path: &Path, preview: bool) {
+        // A file on a remote machine is text to edit: the extensions that
+        // open files, and the look at its first bytes, read this
+        // machine's disk.
+        if fenix_vfs::is_remote(path) {
+            return self.open_text_file(path, preview);
+        }
         if let Some(open) = self.opener_for(path) {
             open(self, path, preview);
             return;
@@ -14584,8 +14944,32 @@ impl App {
     }
 
     fn open_text_file(&mut self, path: &Path, preview: bool) {
+        // A remote file that can't be read is not opened as an empty one
+        // (which a save would then put in its place): it says why.
+        if fenix_vfs::is_remote(path) && self.buffers.id_for_path(path).is_none() {
+            match Buffer::from_path(path) {
+                Ok(buffer) => {
+                    self.buffers.insert_loaded_document(buffer);
+                }
+                // Not there yet: a new file, named, as for a local one.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.set_error(format!("couldn't open {}: {error}", fenix_vfs::display(path)));
+                    self.wake_caret();
+                    return;
+                }
+            }
+        }
+        let was_open = self.buffers.id_for_path(path);
         let id = self.buffers.open_path(path);
-        self.note_disk_state(id);
+        // Opened again, a buffer with edits of its own (or one already
+        // found changed on disk) keeps what's known of the disk: looking
+        // afresh would take the other side's change for its own and let
+        // a save write over it.
+        let keep_disk_state = was_open == Some(id) && (self.externally_changed.contains(&id) || self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()));
+        if !keep_disk_state {
+            self.note_disk_state(id);
+        }
         self.open_buffer_in_focused_pane_as(id, preview);
         self.refresh_project_root();
         self.record_recent_file(path);
@@ -14632,6 +15016,7 @@ impl App {
                 let input = self.find_file_prompt.take().unwrap_or_default();
                 self.open_typed_path(&input);
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -14676,7 +15061,9 @@ impl App {
     /// What to show in place of the modeline while `find_file_prompt` is
     /// active -- mirrors `explorer_prompt_text`.
     fn find_file_prompt_text(&self) -> Option<String> {
-        self.find_file_prompt.as_ref().map(|input| format!("find file: {input}"))
+        // Where a relative path starts: the project, else Fenix's folder.
+        let from = self.project_root.as_deref().and_then(Path::file_name).map(|n| format!(" (in {})", n.to_string_lossy())).unwrap_or_default();
+        self.find_file_prompt.as_ref().map(|input| format!("find file{from}: {input}"))
     }
 
     /// `SPC f y`: copies the focused buffer's file path to the OS
@@ -14699,6 +15086,7 @@ impl App {
     pub(crate) fn start_rename_file_prompt(&mut self) {
         let Some(path) = self.open().buffer.path() else { return };
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        self.prompt_prefill_selected = self.standard_keys() && !name.is_empty();
         self.rename_file_prompt = Some(name);
         self.wake_caret();
     }
@@ -14706,6 +15094,12 @@ impl App {
     /// Routes one keypress to the in-progress `rename_file_prompt` --
     /// same shape as `find_file_prompt_key`.
     fn rename_file_prompt_key(&mut self, key: KeyPress) {
+        if let Some(input) = &mut self.rename_file_prompt {
+            if take_selected_prefill(input, &mut self.prompt_prefill_selected, key) {
+                self.wake_caret();
+                return;
+            }
+        }
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(input), Some(text)) = (&mut self.rename_file_prompt, pasted) {
@@ -14721,6 +15115,7 @@ impl App {
                 let input = self.rename_file_prompt.take().unwrap_or_default();
                 self.apply_rename_file(&input);
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -14807,8 +15202,15 @@ impl App {
         if !self.delete_file_confirm {
             return None;
         }
-        let name = self.open().buffer.path().map(|p| p.display().to_string()).unwrap_or_default();
-        Some(format!("Delete {name}? (y/n)"))
+        // The question first: a long path is cut at the prompt's edge.
+        let name = self.open().buffer.path().map(|p| self.shown_path(p)).unwrap_or_default();
+        Some(format!("Delete? y deletes, n keeps -- {name}"))
+    }
+
+    /// `path` as a message says it: inside the project from its root
+    /// (`src/lib.rs`), else from home (`~/notes.md`).
+    fn shown_path(&self, path: &Path) -> String {
+        self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
     }
 
     /// What happens after a key has been through Vim, whatever it did:
@@ -14991,6 +15393,11 @@ impl App {
     /// the explorer's, so unrecognized keys just don't do anything
     /// rather than falling through to something else).
     fn picker_key(&mut self, key: KeyPress) {
+        // The thread list's own keys (`Tab`, `Alt+A`...), ahead of the query.
+        if self.thread_list_key(key) {
+            self.wake_caret();
+            return;
+        }
         // Tab in the palette: give the command under the cursor keys.
         if key == KeyPress::named(FenixNamedKey::Tab) && !self.palette_describes {
             if let Some(ActivePicker::Commands(state)) = &self.active_picker {
@@ -15437,6 +15844,7 @@ impl App {
                     self.workspaces.rename_active(trimmed.to_string());
                 }
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -15570,13 +15978,19 @@ impl App {
 
     pub(crate) fn undo(&mut self) {
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        buffer.undo(cursor);
+        let tag = buffer.undo_tag();
+        if buffer.undo(cursor) {
+            self.carets_after_undo(tag, true);
+        }
         self.wake_caret();
     }
 
     pub(crate) fn redo(&mut self) {
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        buffer.redo(cursor);
+        let tag = buffer.redo_tag();
+        if buffer.redo(cursor) {
+            self.carets_after_undo(tag, false);
+        }
         self.wake_caret();
     }
 
@@ -15888,8 +16302,12 @@ impl App {
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
             FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
             FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
+            FenixUserEvent::RemoteQuestion(question) => self.remote_question(question),
+            FenixUserEvent::RemoteConnected(connected) => self.remote_connected(*connected),
+            FenixUserEvent::RemoteStatus(host, status) => self.remote_status(host, status),
             FenixUserEvent::RecentProbed(seen) => self.apply_recent_probed(seen),
             FenixUserEvent::Registry(event) => self.apply_registry_event(event),
+            FenixUserEvent::Updates(answer) => self.apply_update_answer(answer),
             FenixUserEvent::Wasm { ext, event } => self.apply_wasm_event(ext, event),
             FenixUserEvent::Acp { conn, generation, event } => self.apply_acp_event(conn, generation, event),
             FenixUserEvent::HomeTodos { root, items } => self.apply_home_todos(root, items),
@@ -15959,7 +16377,7 @@ impl App {
         }
         let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
         self.code_active();
-        self.dispatch_keypress(keypress, event_loop);
+        self.dispatch_keypress(keypress, Some(event_loop));
     }
 
     /// Every real keypress passes through here exactly once -- the tap
@@ -15984,10 +16402,15 @@ impl App {
     /// place `vim.handle_key` is called). `.` itself replays through
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
-    fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+    fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
+        // Extra cursors follow whatever edited their text since.
+        self.follow_outside_edits();
+        self.sync_key_policy();
+        self.settle_keys();
+        self.note_typing_pause(Instant::now());
         // The right click's menu, open, has the keyboard.
         if self.mouse.menu.is_some() {
-            if let Some(action) = self.menu_key(keypress) {
+            if let Some(action) = self.menu_key(keypress.legacy()) {
                 self.run_menu_action(action);
             }
             return;
@@ -16001,8 +16424,15 @@ impl App {
         }
         self.change_capture.push(keypress);
         let before = self.motion_before_key();
+        let carets_before = self.caret_mark();
         self.route_keypress(keypress, event_loop);
+        // And whatever the key itself did that wasn't theirs (an undo).
+        self.follow_outside_edits();
         self.motion_after_key(before, keypress);
+        self.note_caret_move(carets_before);
+        // Standard keys: back into Insert (or out of it) for where the key
+        // left you.
+        self.settle_keys();
         // A lesson of the tutorial's, under way, looks at what came of it.
         self.tutorial_check();
         if self.vim.is_idle() {
@@ -16014,8 +16444,15 @@ impl App {
         }
     }
 
-    fn route_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+    fn route_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         let _profile = crate::profile::Scope::new("route_keypress");
+        // Everything but the chords reads keys as it always has, without
+        // Shift (see `KeyPress::legacy`).
+        // Standard keys in a listing: F2 renames and Delete deletes, as
+        // its `R` and `D` do.
+        let keypress = self.standard_explorer_alias(keypress).unwrap_or(keypress);
+        let full = keypress;
+        let keypress = keypress.legacy();
         // A feature's informational menu (the Docker panel's `x`) is not a
         // capturing prompt -- cleared unconditionally on *every* keypress
         // before that keypress is dispatched normally below, so pressing
@@ -16039,6 +16476,15 @@ impl App {
         // is the one reserved chord that unfocuses (not closes) it
         // instead of forwarding, mirroring Neovim's own `:terminal`
         // convention -- see `App::terminal_focused`'s own doc comment.
+        // A chord that skips the shell (standard keys' Ctrl+P, Ctrl+`...)
+        // works from a terminal too.
+        if self.terminal_focused || self.terminal_buffer_focused.is_some() {
+            if let Some(id) = keymap::chord_map().skips_terminal(full, self.key_scheme()) {
+                self.run_command_with(event_loop, id);
+                self.wake_caret();
+                return;
+            }
+        }
         if self.terminal_focused {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 self.terminal_focused = false;
@@ -16129,6 +16575,10 @@ impl App {
             return;
         }
         // `SPC TAB r` -- same capturing-prompt tier.
+        if self.goto_line_prompt.is_some() {
+            self.goto_line_prompt_key(keypress);
+            return;
+        }
         if self.workspace_rename_prompt.is_some() {
             self.workspace_rename_prompt_key(keypress);
             return;
@@ -16146,19 +16596,30 @@ impl App {
         // state to check here -- it's the directory picker, an explorer
         // page routed the same way `SPC f j`'s is.
         if self.binding_keys.is_some() {
-            self.bind_keys_feed(keypress);
+            self.bind_keys_feed(full);
             self.wake_caret();
             return;
         }
         if self.describing_keys.is_some() {
-            self.describe_key_feed(keypress);
+            self.describe_key_feed(full);
+            self.wake_caret();
+            return;
+        }
+        // Ctrl+Tab again, with the recent-buffer switcher up: the next row
+        // (with Shift, the one before).
+        if self.switching_recent && full.code == KeyCode::Named(FenixNamedKey::Tab) && full.mods.ctrl {
+            if let Some(ActivePicker::SwitchBuffer(picker)) = &mut self.active_picker {
+                picker.move_selection(if full.mods.shift { -1 } else { 1 });
+            }
             self.wake_caret();
             return;
         }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
+            self.ask_project_symbols();
+            self.thread_list_follow_query();
             if let Some(id) = self.queued_command.take() {
-                self.run_command(event_loop, &id);
+                self.run_command_with(event_loop, &id);
                 self.wake_caret();
             }
             return;
@@ -16168,7 +16629,7 @@ impl App {
         // Alt-x: the command palette, from anywhere -- a page or Insert
         // too -- but not from inside a picker or prompt (`SPC :` in Normal).
         if keypress.mods.alt && !keypress.mods.ctrl && keypress.code == KeyCode::Char('x') {
-            self.run_command(event_loop, "commands.palette");
+            self.run_command_with(event_loop, "commands.palette");
             self.wake_caret();
             return;
         }
@@ -16194,76 +16655,43 @@ impl App {
         // back to the editor, since leader commands act on the window/
         // buffer layer, not the sidebar.
         if self.sidebar_focused {
-            if keypress == KeyPress::char(' ') && self.vim.mode() == Mode::Normal && !self.explorer_matcher.is_pending() && !self.explorer_editing(ExplorerTarget::Sidebar) {
+            if (keypress == KeyPress::char(' ') || self.leader_starts(full)) && self.leader_starts(full) && !self.explorer_matcher.is_pending() && !self.explorer_editing(ExplorerTarget::Sidebar) {
                 self.sidebar_focused = false;
             } else if self.explorer_page_key(ExplorerTarget::Sidebar, keypress) {
                 return;
             }
         }
 
-        // `keypress.mods.ctrl`, not `self.modifiers.control_key()` --
-        // the two always agree for a real hardware keypress (`keypress`
-        // is derived from `self.modifiers` at conversion time), but only
-        // `keypress` carries the *recorded* modifier state for a macro
-        // replay, which has no live hardware modifiers of its own to
-        // read. The Ctrl-Shift-Z-vs-Ctrl-Z distinction still reads the
-        // live `self.modifiers.shift_key()` rather than the char's case
-        // -- unlike Ctrl itself, this codebase has no evidence winit
-        // reliably reports the *shifted* character through a Ctrl-chord
-        // on every platform, so this one sub-branch keeps the original,
-        // proven-correct check; a macro that recorded Ctrl-Shift-Z
-        // specifically just won't replay that distinction faithfully, a
-        // narrow, disclosed gap far preferable to risking a regression
-        // in the everyday redo shortcut itself.
-        if keypress.mods.ctrl {
-            // The editors' own tab keys, in any mode -- Insert included,
-            // where `gt` would only type.
-            let tab_move = match keypress.code {
-                KeyCode::Named(FenixNamedKey::PageDown) => Some(fenix_vim::TabMove::Next),
-                KeyCode::Named(FenixNamedKey::PageUp) => Some(fenix_vim::TabMove::Prev(1)),
-                KeyCode::Named(FenixNamedKey::Tab) => Some(fenix_vim::TabMove::Last),
-                _ => None,
-            };
-            if let Some(mv) = tab_move {
-                self.move_tab(mv);
-                return;
+        // In an open leader menu, Backspace goes up a level and Ctrl-n /
+        // Ctrl-p page through it (see `which_key`) -- ahead of the chords,
+        // which may bind those keys elsewhere.
+        if (self.local_matcher.is_some() || self.leader_matcher.is_pending())
+            && (self.which_key_back(keypress) || self.which_key_paging(keypress))
+        {
+            self.wake_caret();
+            return;
+        }
+        // Chords: `[[keys]]` in Fenix's keymap, the extensions' and yours
+        // (`C-s`, `C-z`, `F12`...). They read the key as it came, Shift
+        // and all (`full`); a macro's recorded key carries its own
+        // modifiers, so a replay runs the same chord.
+        let in_leader = self.local_matcher.is_some() || self.leader_matcher.is_pending();
+        // A compose pane's own keys, with standard keys, go to it first.
+        let composing = self.standard_keys() && self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id());
+        let in_leader = in_leader || (composing && (full.chord() == KeyPress::named(FenixNamedKey::Enter).with_ctrl() || full.chord() == KeyPress::char('a').with_ctrl().with_shift()));
+        if let Some(id) = self.chord_command(full).filter(|_| !in_leader) {
+            // Only the clipboard's own work at every caret, and the
+            // commands that add carets keep those there are.
+            if !carets::keeps_carets(id) {
+                self.clear_carets();
             }
-            if let KeyCode::Char(c) = keypress.code {
-                let id = if c.eq_ignore_ascii_case(&'s') {
-                    Some("file.save")
-                } else if c.eq_ignore_ascii_case(&'z') && self.modifiers.shift_key() {
-                    Some("edit.redo")
-                } else if c.eq_ignore_ascii_case(&'z') {
-                    Some("edit.undo")
-                } else if c.eq_ignore_ascii_case(&'y') {
-                    Some("edit.redo")
-                } else if c.eq_ignore_ascii_case(&'q') {
-                    Some("app.quit")
-                } else if c == '=' || c == '+' {
-                    Some("view.increase_font_size")
-                } else if c == '-' {
-                    Some("view.decrease_font_size")
-                } else if c == '0' {
-                    Some("view.reset_font_size")
-                } else if !self.vim.is_inserting() && c.eq_ignore_ascii_case(&'o') {
-                    // In Insert, Ctrl-O is Vim's: one Normal command.
-                    Some("nav.jump_back")
-                } else if !self.vim.is_inserting() && c.eq_ignore_ascii_case(&'i') {
-                    Some("nav.jump_forward")
-                } else {
-                    None
-                };
-                if let Some(id) = id {
-                    // Built fresh per chord rather than stored on App: it's
-                    // just a few fn-pointer entries, and this sidesteps
-                    // borrowing `self` both as receiver and argument.
-                    self.run_command(event_loop, id);
-                    self.wake_caret();
-                    return;
-                }
-            }
-            // Not a recognized global chord (e.g. Ctrl-r is Vim's redo):
-            // fall through instead of swallowing it.
+            self.run_command_with(event_loop, id);
+            self.wake_caret();
+            return;
+        }
+        // An F-key nothing took means nothing below.
+        if full.is_function() {
+            return;
         }
 
         // Window-size-aware paging is a GUI concern, handled the same way
@@ -16295,25 +16723,29 @@ impl App {
         // never reach `self.vim`, so the selection's anchor/cursor stay
         // exactly as they were until whatever command they resolve to
         // (e.g. `format_selection`) reads them.
-        // In an open leader menu, Backspace goes up a level and Ctrl-n /
-        // Ctrl-p page through it (see `which_key`).
-        if (self.local_matcher.is_some() || self.leader_matcher.is_pending())
-            && (self.which_key_back(keypress) || self.which_key_paging(keypress))
-        {
-            self.wake_caret();
-            return;
-        }
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
-                self.run_command(event_loop, id);
+                // As by its chord: the extra cursors stay only for what
+                // works at each of them.
+                if !carets::keeps_carets(id) {
+                    self.clear_carets();
+                }
+                self.run_command_with(event_loop, id);
             }
             return;
         }
-        if self.leader_matcher.is_pending()
-            || (matches!(self.vim.mode(), Mode::Normal | Mode::Visual) && keypress == KeyPress::char(' '))
-        {
-            if let Step::Matched(&id) = self.leader_matcher.feed(keypress) {
-                self.run_command(event_loop, id);
+        if self.leader_matcher.is_pending() || self.leader_starts(full) {
+            // The leader chord starts the leader as SPC does: its keys
+            // follow.
+            let fed = if self.leader_matcher.is_pending() { keypress.chord().legacy() } else {
+                self.leader_uses = self.leader_uses.saturating_add(1);
+                KeyPress::char(' ')
+            };
+            if let Step::Matched(&id) = self.leader_matcher.feed(fed) {
+                if !carets::keeps_carets(id) {
+                    self.clear_carets();
+                }
+                self.run_command_with(event_loop, id);
             }
             self.wake_caret();
             return;
@@ -16323,7 +16755,16 @@ impl App {
             return;
         }
 
-        if self.snippet_key(keypress) || self.completion_key(keypress) {
+        // Shift+Tab keeps its Shift for a snippet: it goes back a field.
+        let snippet_key = if full == KeyPress::named(FenixNamedKey::Tab).with_shift() { full } else { keypress };
+        let before = (self.open().buffer.edit_count(), self.cursor().char_idx);
+        if self.snippet_key(snippet_key) || self.completion_key(keypress) {
+            // A completion taken or a snippet's field moved to is the
+            // primary's alone: the others go, as for any other key that
+            // edits. Moving in the completion menu leaves them be.
+            if (self.open().buffer.edit_count(), self.cursor().char_idx) != before {
+                self.clear_carets();
+            }
             self.wake_caret();
             return;
         }
@@ -16342,7 +16783,8 @@ impl App {
         // Escape means anything, and it means "throw the edits away".
         if self.rename_mode.contains_key(&self.focused_buffer_id())
             && keypress.code == KeyCode::Named(FenixNamedKey::Escape)
-            && self.vim.mode() == Mode::Normal
+            // Standard keys type here, and Escape is how they say no.
+            && (self.vim.mode() == Mode::Normal || (self.standard_keys() && self.vim.is_inserting()))
         {
             let id = self.focused_buffer_id();
             self.cancel_rename_mode(id);
@@ -16413,8 +16855,38 @@ impl App {
         // writing a comment in a real buffer.
         // Not halfway through a leader key, though: `SPC q q` from the
         // pane quits, it doesn't drop what's written.
+        // Standard keys: Ctrl+Enter sends, Escape asks before it throws
+        // what's written away, Ctrl+Shift+A has the agent write it.
+        if self.standard_keys() && self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id()) && !self.leader_matcher.is_pending() && self.local_matcher.is_none() {
+            let chord = full.chord();
+            if chord == KeyPress::named(FenixNamedKey::Enter).with_ctrl() {
+                self.compose_discard_armed = false;
+                self.compose_submit();
+                return;
+            }
+            if chord == KeyPress::char('a').with_ctrl().with_shift() {
+                if self.compose_agent_offered() {
+                    self.compose_agent_write();
+                } else {
+                    self.set_message("the agent writes a box that's empty -- clear it to ask again");
+                }
+                return;
+            }
+            if full == KeyPress::named(FenixNamedKey::Escape) && self.vim.mode() != Mode::Visual && self.extra_carets().is_empty() {
+                let written = self.compose.as_ref().and_then(|c| self.buffers.get(c.buffer).map(|ob| (ob.buffer.text(), c.seed.clone()))).is_some_and(|(text, seed)| !text.trim().is_empty() && text.trim_end() != seed.trim_end());
+                if !written || std::mem::take(&mut self.compose_discard_armed) {
+                    self.compose_cancel();
+                } else {
+                    self.compose_discard_armed = true;
+                    self.set_message("Esc again throws what's written away -- Ctrl+Enter sends it");
+                }
+                return;
+            }
+            self.compose_discard_armed = false;
+        }
         if self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id())
             && self.vim.mode() == Mode::Normal
+            && !self.standard_keys()
             && keypress.mods == Mods::default()
             && !self.leader_matcher.is_pending()
             && self.local_matcher.is_none()
@@ -16739,9 +17211,16 @@ impl App {
             return;
         }
 
+        // More than one caret: the key at each.
+        if self.multi_caret_key(full) {
+            self.wake_caret();
+            return;
+        }
         self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
+        // Standard keys read Shift (Shift+arrows select); Vim's don't.
+        let vim_key = if self.vim.policy() == fenix_vim::EditPolicy::Standard { full } else { keypress };
         let vim_event = {
             let reverts_edits = self.buffers.get(id).is_some_and(|ob| self.buffer_edits_are_reverted(id, ob.kind));
             let Some(ob) = self.buffers.get_mut(id) else { return };
@@ -16756,7 +17235,7 @@ impl App {
                 });
                 self.vim.set_syntax_indent(indent);
             }
-            let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress);
+            let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, vim_key);
             // See `dispatch_keypress`'s own doc comment for `change_
             // capture`/`replaying_change` -- suppressed only while `.`
             // itself is replaying, so its own outer span doesn't get
@@ -16809,47 +17288,47 @@ impl App {
         match vim_event {
             VimEvent::RequestSessionSave => { self.save_session_explicit(); }
             VimEvent::RequestProjectNew(args) => self.project_new_with(&args),
-            VimEvent::RequestSessionQuit => { if self.save_session_explicit() { event_loop.exit(); } }
+            VimEvent::RequestSessionQuit => { if self.save_session_explicit() { if let Some(event_loop) = event_loop { event_loop.exit(); } } }
             VimEvent::RequestRestartLsp(name) => { self.restart_project_lsp(&name); }
             VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
             VimEvent::RequestSave => {
-                self.run_command(event_loop, "file.save");
+                self.run_command_with(event_loop, "file.save");
             }
             VimEvent::RequestSaveAs(path) => {
                 self.save_unnamed_as(&path);
             }
             VimEvent::RequestOpenFile { path, split } => {
                 if let Some(way) = split {
-                    self.run_command(event_loop, if way == fenix_vim::SplitWay::Vertical { "window.split_vertical" } else { "window.split_horizontal" });
+                    self.run_command_with(event_loop, if way == fenix_vim::SplitWay::Vertical { "window.split_vertical" } else { "window.split_horizontal" });
                 }
                 self.open_typed_path(&path);
             }
             VimEvent::RunCommand(id) => {
-                self.run_command(event_loop, id);
+                self.run_command_with(event_loop, id);
             }
             VimEvent::RequestForceSave => {
-                self.run_command(event_loop, "file.save_force");
+                self.run_command_with(event_loop, "file.save_force");
             }
             VimEvent::RequestReloadFile => {
-                self.run_command(event_loop, "file.reload");
+                self.run_command_with(event_loop, "file.reload");
             }
             VimEvent::RequestCloseBuffer => {
-                self.run_command(event_loop, "buffer.kill");
+                self.run_command_with(event_loop, "buffer.kill");
             }
             VimEvent::RequestForceCloseBuffer => {
-                self.run_command(event_loop, "buffer.kill_force");
+                self.run_command_with(event_loop, "buffer.kill_force");
             }
             VimEvent::RequestSaveAndCloseBuffer => {
-                self.run_command(event_loop, "buffer.save_and_kill");
+                self.run_command_with(event_loop, "buffer.save_and_kill");
             }
             VimEvent::RequestQuitAll => {
-                self.run_command(event_loop, "app.quit");
+                self.run_command_with(event_loop, "app.quit");
             }
             VimEvent::RequestForceQuitAll => {
-                self.run_command(event_loop, "app.quit_force");
+                self.run_command_with(event_loop, "app.quit_force");
             }
             VimEvent::RequestSaveAllAndQuit => {
-                self.run_command(event_loop, "app.save_all_and_quit");
+                self.run_command_with(event_loop, "app.save_all_and_quit");
             }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::Message(msg) => self.set_message(msg),
@@ -16951,7 +17430,7 @@ impl App {
     /// replay calls via a single counter on `self`, so a runaway macro
     /// bails out with a modeline-visible message instead of freezing
     /// the app.
-    fn play_macro(&mut self, register: char, count: u32, event_loop: &ActiveEventLoop) {
+    fn play_macro(&mut self, register: char, count: u32, event_loop: Option<&ActiveEventLoop>) {
         let register = if register == '@' { self.last_played_macro } else { Some(register) };
         let Some(register) = register else { return };
         if self.replay_depth >= MAX_MACRO_REPLAY_DEPTH {
@@ -16993,7 +17472,7 @@ impl App {
     /// keypress's own span look dirty too, and `last_change_keys` would
     /// get overwritten with just `['.']` on every repeat. A silent no-op
     /// if nothing's been recorded yet.
-    fn repeat_last_change(&mut self, event_loop: &ActiveEventLoop) {
+    fn repeat_last_change(&mut self, event_loop: Option<&ActiveEventLoop>) {
         let Some(keys) = self.last_change_keys.clone() else { return };
         self.replaying_change = true;
         for key in &keys {
@@ -17111,6 +17590,20 @@ impl App {
             self.pane_state_mut(pane).scroll_line = target;
         }
         self.update_rendered_scroll();
+    }
+
+    /// A pane without the focus scrolled to its cursor, centred when out of
+    /// view, as a jump in the focused pane is.
+    fn reveal_cursor(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, visible_lines: usize) {
+        let Some(ob) = self.buffers.get(buffer_id) else { return };
+        let document_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
+        let display = self.pane_display_lines(pane, buffer_id);
+        let line = display.iter().position(|&row| row == document_line).unwrap_or(document_line);
+        let target = scroll_for_cursor(self.pane_state(pane).scroll_line, line, visible_lines, display.len(), true);
+        self.workspaces.active_scroll_anims_mut().remove(&pane);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = target;
+        state.rendered_scroll = target as f32;
     }
 
     /// Horizontal analog of `ensure_cursor_visible` -- keeps the cursor's
@@ -17242,7 +17735,8 @@ impl App {
     /// confirmations ("saved", "tags refreshed"), not failures -- use
     /// `set_error` for those, which also tints the text.
     fn set_message(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { text: text.into(), is_error: false, set_at: Instant::now() });
+        let text = self.keys_text(&text.into());
+        self.status_message = Some(StatusMessage { text, is_error: false, set_at: Instant::now() });
     }
 
     /// Sets an error status message -- same display as `set_message`,
@@ -17251,7 +17745,8 @@ impl App {
     /// failure sites: invisible in a normally-launched GUI window, so
     /// the user had no way to know a search/save/format/etc. failed.
     fn set_error(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { text: text.into(), is_error: true, set_at: Instant::now() });
+        let text = self.keys_text(&text.into());
+        self.status_message = Some(StatusMessage { text, is_error: true, set_at: Instant::now() });
     }
 
     /// The modeline's mode badge: "CAPTURE" while a surface has the
@@ -17276,6 +17771,9 @@ impl App {
         if self.debug_mode_active() {
             return "DEBUG";
         }
+        if let Some(badge) = self.standard_badge() {
+            return badge;
+        }
         if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() }
     }
 
@@ -17287,7 +17785,14 @@ impl App {
     /// position underneath it, the same "additive, doesn't replace the
     /// real indicator" posture `recording_indicator`/`workspace_
     /// indicator` already have below.
+    /// The modeline's badge and text, its keys said in the scheme in use
+    /// (a Git operation's `SPC g x c continue`, an explorer job's stop).
     fn modeline_pieces(&self) -> (&'static str, String) {
+        let (badge, text) = self.modeline_pieces_as_written();
+        (badge, self.keys_text(&text))
+    }
+
+    fn modeline_pieces_as_written(&self) -> (&'static str, String) {
         // A live status/error message pre-empts even the Explorer/Picker
         // badge -- it's telling the user something just happened,
         // regardless of what view they're in. Uses the plain mode badge
@@ -17310,22 +17815,25 @@ impl App {
                         if explorer.marks.is_empty() { String::new() } else { format!(" [{} marked]", explorer.marks.len()) };
                     match purpose {
                         ExplorerPurpose::Browse => {
-                            format!("{}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
+                            format!("{}{marked}   {} items ", fenix_vfs::display(&explorer.cwd), explorer.entries.len())
                         }
                         ExplorerPurpose::PickProjectDir => {
-                            format!("{}   S to add as a project, q to cancel ", explorer.cwd.display())
+                            format!("{}   S to add as a project, q to cancel ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickWizardParent => {
-                            format!("{}   S to create the project here, q to go back ", explorer.cwd.display())
+                            format!("{}   S to create the project here, q to go back ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickSettingPath { folder: true } => {
-                            format!("{}   S to pick this folder, q to go back ", explorer.cwd.display())
+                            format!("{}   S to pick this folder, q to go back ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickSettingPath { folder: false } => {
-                            format!("{}   Enter to pick a file, S this folder, q to go back ", explorer.cwd.display())
+                            format!("{}   Enter to pick a file, S this folder, q to go back ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::FindFrom => {
-                            format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
+                            format!("{}{marked}   Enter to open, S to search here, q to cancel ", fenix_vfs::display(&explorer.cwd))
+                        }
+                        ExplorerPurpose::PickRemoteProject => {
+                            format!("{}   S to open this folder as a project, q to cancel ", fenix_vfs::display(&explorer.cwd))
                         }
                     }
                 }
@@ -17337,6 +17845,7 @@ impl App {
                 ExplorerPurpose::PickWizardParent => "NEWIN",
                 ExplorerPurpose::PickSettingPath { .. } => "PICK",
                 ExplorerPurpose::FindFrom => "FINDFROM",
+                ExplorerPurpose::PickRemoteProject => "REMOTE",
             };
             return (badge, suffix);
         }
@@ -17344,12 +17853,15 @@ impl App {
             let (label, count) = match &self.active_picker {
                 Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
                 Some(picker @ (ActivePicker::BufferTodos(_) | ActivePicker::ProjectTodos(_))) => ("TODOS", picker_len(picker)),
+                Some(picker @ ActivePicker::Problems(_)) => ("PROBLEMS", picker_len(picker)),
+                Some(picker @ ActivePicker::ProjectSymbols(_)) => ("SYMBOLS", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::Recovery(_)) => ("RECOVER", picker_len(picker)),
                 Some(picker @ ActivePicker::Places(_)) => ("PLACES", picker_len(picker)),
                 Some(picker @ ActivePicker::Agents(_)) => ("AGENTS", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
+                Some(picker @ ActivePicker::RemoteHost(_)) => ("REMOTE", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::Encoding(_)) => ("ENCODING", picker_len(picker)),
                 Some(picker @ ActivePicker::Commands(_)) => (if self.palette_describes { "DESCRIBE" } else { "COMMAND" }, picker_len(picker)),
@@ -17423,6 +17935,10 @@ impl App {
         // indicator`.
         let recording_indicator =
             match self.vim.recording_register() {
+                _ if !self.extra_carets().is_empty() => format!("   {} cursors", self.extra_carets().len() + 1),
+                // Standard keys: which chord opens the leader, until it's
+                // been used a few times (`keys.leader_hint`).
+                None if self.standard_keys() && self.leader_uses < 3 && self.config.bool_value("keys.leader_hint") != Some(false) => format!("   {} commands", self.leader_chord_text()),
                 Some(reg) => format!("   recording @{reg}"),
                 None => String::new(),
             };
@@ -17460,6 +17976,7 @@ impl App {
         let feature_indicators: String = self.code_statuses().concat();
         let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.agents_usage_segment() + &self.notifications_segment();
         let git_indicator = self.chrome_git_segment();
+        let remote_indicator = self.remote_indicator();
         let search_indicator = match self.search_count() {
             Some((_, 0)) | None => String::new(),
             Some((i, n)) => format!("   [{i}/{n}]"),
@@ -17468,13 +17985,13 @@ impl App {
         // How to get the keyboard back, while a shell has it (#42).
         let terminal_hint = match self.terminal_focused.then(|| self.terminal_title(terminal_mouse::TermTarget::Panel)).flatten() {
             // The panel has no title of its own: what it runs is here.
-            Some(what) => format!("   {what}   Ctrl-\\ back to the editor"),
-            None if self.terminal_has_keyboard() => "   Ctrl-\\ back to the editor".to_string(),
+            Some(what) => format!("   {what}   C-\\ back to the editor"),
+            None if self.terminal_has_keyboard() => "   C-\\ back to the editor".to_string(),
             None => String::new(),
         };
         let place = if on_page { String::new() } else { format!("   Ln {}, Col {}", line + 1, col + 1) };
         let suffix = format!(
-            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}{place}   {details} "
+            "{filename}{modified}{terminal_hint}{workspace_indicator}{remote_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}{place}   {details} "
         );
         (mode_label, suffix)
     }
@@ -17528,6 +18045,7 @@ impl App {
             .or_else(|| self.rename_file_prompt_text())
             .or_else(|| self.lsp_rename_prompt_text())
             .or_else(|| self.workspace_rename_prompt_text())
+            .or_else(|| self.goto_line_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
     }
 
@@ -17549,7 +18067,8 @@ impl App {
     /// matches real Vim's own cursor-shape convention (block outside
     /// Insert, thin bar while actively typing).
     fn caret_is_block(&self) -> bool {
-        self.vim.mode() != Mode::Insert
+        // Standard keys' caret is a bar, always.
+        !self.standard_keys() && self.vim.mode() != Mode::Insert
     }
 
     /// three kinds all share one accent (matching orbit-emacs's own
@@ -17566,6 +18085,10 @@ impl App {
         // The stop's own colour, the gutter's bar.
         if self.debug_mode_active() {
             return (glyphon_to_rgba(theme.git_modified), theme.mode_text_dark);
+        }
+        // Standard keys: one quiet colour, but for a selection.
+        if self.standard_keys() && matches!(self.vim.mode(), Mode::Normal | Mode::Insert) {
+            return (theme.mode_normal, theme.mode_text_dark);
         }
         match self.vim.mode() {
             Mode::Normal => (theme.mode_normal, theme.mode_text_dark),
@@ -18213,8 +18736,16 @@ impl App {
         match self.vim.visual_kind() {
             VisualKind::Char => {
                 let cursor_idx = self.cursor().char_idx;
-                let (lo, hi) =
-                    if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+                // Standard keys select between the anchor and the cursor,
+                // the cursor's character not in it -- drawn so, as the
+                // extra cursors' selections are.
+                let (lo, hi) = if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+                    (anchor.min(cursor_idx), anchor.max(cursor_idx))
+                } else if anchor <= cursor_idx {
+                    (anchor, cursor_idx + 1)
+                } else {
+                    (cursor_idx, anchor + 1)
+                };
                 let hi = hi.min(self.open().buffer.len_chars());
                 segments = self.range_to_segments(lo..hi, visible_lines);
             }
@@ -18412,6 +18943,19 @@ impl App {
     /// path, a commit message), so the only ceiling here is the same
     /// window-width-based one `which_key_popup` itself computes before
     /// *additionally* clamping to `WHICH_KEY_MAX_WIDTH`.
+    /// The chars of the prompt's text drawn selected: a rename prompt's
+    /// prefilled name, until a key.
+    fn prompt_selection(&self) -> Option<std::ops::Range<usize>> {
+        if !self.prompt_prefill_selected {
+            return None;
+        }
+        let text = self.active_prompt_text()?;
+        let input = self.rename_file_prompt.as_ref().or(self.lsp_rename_prompt.as_ref())?;
+        let len = input.chars().count();
+        let total = text.chars().count();
+        text.ends_with(input.as_str()).then(|| total - len..total)
+    }
+
     fn prompt_popup(&self, window_width: f32, modeline_top: f32) -> Option<(fenix_window::Rect, RowSpans)> {
         let content = self.active_prompt_text()?;
 
@@ -18641,7 +19185,8 @@ impl App {
                 extra.push((format!("{prefix}{}", completion::clipped_line(line, 72)), self.theme.fg_modeline));
             }
         }
-        extra.push((format!("{}/{}  ↑↓ choose · Tab/Enter accept · C-e close", state.picker.selected_row() + 1, state.picker.len()), self.theme.gutter_fg));
+        let close = if self.standard_keys() { "Esc" } else { "C-e" };
+        extra.push((format!("{}/{}  ↑↓ choose · Tab/Enter accept · {close} close", state.picker.selected_row() + 1, state.picker.len()), self.theme.gutter_fg));
         extra.truncate(available.saturating_sub(1).min(4));
         let shown_rows = (available - extra.len()).min(COMPLETION_MAX_ROWS);
         let offset = completion::scroll_offset(state.picker.selected_row(), self.completion_scroll, shown_rows);
@@ -18819,7 +19364,7 @@ impl App {
             // panel grabs focus -- there's no other UI surface that
             // mentions the chord at all, and this is exactly the moment
             // a user unfamiliar with it needs to see it.
-            return Some(terminal_view::TermView { spans: vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], ..Default::default() });
+            return Some(terminal_view::TermView { spans: vec![("Starting shell... (Ctrl+\\ to unfocus)".to_string(), self.theme.fg, false)], ..Default::default() });
         }
         None
     }
@@ -18953,6 +19498,10 @@ impl App {
                 spans.push((name_span, name_color, false));
                 spans.push((close_span, theme.gutter_fg, false));
             }
+            // The split button, right after the tabs.
+            if !layout.is_empty() {
+                spans.push((format!(" {} ", icon::WINDOW), theme.gutter_fg, true));
+            }
             // The focused pane's breadcrumb is the Ember Trail's ribbon while
             // there's one.
             let ribbon = if is_focused { self.debug_ribbon_spans() } else { None };
@@ -19006,6 +19555,19 @@ impl App {
         // measurement instead of two disagreeing calculations. Cheaper
         // too -- this used to resolve display names on every mouse move.
         let tabs = if self.tab_style().is_some() { self.tab_geometry.clone() } else { Vec::new() };
+        // Right after each strip's last tab, as wide as a close glyph.
+        let title_char_width = self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+        let mut split_buttons: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        for (pane, tab) in &tabs {
+            let right = tab.body.x + tab.body.w;
+            match split_buttons.iter_mut().find(|(p, _)| p == pane) {
+                Some((_, r)) if r.x < right => r.x = right,
+                Some(_) => {}
+                None => split_buttons.push((*pane, fenix_window::Rect { x: right, y: tab.body.y, w: TAB_CLOSE_CHARS as f32 * title_char_width, h: tab.body.h })),
+            }
+        }
+        // Only where it fits in its pane.
+        split_buttons.retain(|(pane, r)| panes.iter().any(|(p, pr)| p == pane && r.x + r.w <= pr.x + pr.w));
         let breadcrumb_panes = panes.iter().map(|(id, _)| *id).filter(|id| self.pane_has_breadcrumb(*id)).collect();
         FrameGeometry {
             panes,
@@ -19015,6 +19577,7 @@ impl App {
             terminal_rect: (terminal_h > 0.0)
                 .then_some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: window_width, h: terminal_h }),
             tabs,
+            split_buttons,
         }
     }
 
@@ -19149,6 +19712,13 @@ impl App {
     /// (which no headless test ever constructs), so it's directly
     /// testable the same way `frame_geometry` already is.
     fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        // A click that moves the cursors is a move Ctrl+U takes back.
+        let before = self.caret_mark();
+        self.handle_click_at_inner(pos, window_width, window_height);
+        self.note_caret_move(before);
+    }
+
+    fn handle_click_at_inner(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         if self.click_breadcrumb(&geometry, pos) { return }
@@ -19191,6 +19761,26 @@ impl App {
                         self.wake_caret();
                         return;
                     }
+                    // The welcome's caps: a click presses the key on one.
+                    if pos.1 >= content.y {
+                        if let Some(&page) = self.windows().content(id) {
+                            let (line, col) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
+                            if self.welcome_click(page, line, col) {
+                                self.wake_caret();
+                                return;
+                            }
+                        }
+                    }
+                    // Standard keys: an answer on an agent's question card.
+                    if pos.1 >= content.y && self.standard_keys() {
+                        if let Some(&page) = self.windows().content(id) {
+                            let (line, _) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
+                            if self.agents_card_click(page, line) {
+                                self.wake_caret();
+                                return;
+                            }
+                        }
+                    }
                     // Text: the cursor to the glyph, a selection started.
                     if pos.1 >= content.y && self.text_press(id, rect, pos, Instant::now()) {
                         self.unfocus_terminal_buffer();
@@ -19212,6 +19802,13 @@ impl App {
                     Some(buffer) => self.focus_terminal_buffer(buffer),
                     None => self.unfocus_terminal_buffer(),
                 }
+            }
+            Some(ScrollTarget::SplitPane(pane)) => {
+                self.windows_mut().focus(pane);
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+                self.split_vertical();
+                self.refresh_project_root();
             }
             Some(ScrollTarget::SwitchTab(pane, buffer)) => {
                 self.windows_mut().focus(pane);
@@ -19348,7 +19945,7 @@ impl App {
         // tab's own pane, same as landing anywhere else in it -- neither
         // "switch tab" nor "close tab" is a wheel gesture.
         let target = match target {
-            ScrollTarget::SwitchTab(pane, _) | ScrollTarget::CloseTab(pane, _) => ScrollTarget::Pane(pane),
+            ScrollTarget::SwitchTab(pane, _) | ScrollTarget::CloseTab(pane, _) | ScrollTarget::SplitPane(pane) => ScrollTarget::Pane(pane),
             other => other,
         };
         match target {
@@ -19383,7 +19980,7 @@ impl App {
                     self.scroll_unfocused_pane(pane, lines, rect_h, line_height);
                 }
             }
-            ScrollTarget::SwitchTab(..) | ScrollTarget::CloseTab(..) => unreachable!("normalized to Pane above"),
+            ScrollTarget::SwitchTab(..) | ScrollTarget::CloseTab(..) | ScrollTarget::SplitPane(..) => unreachable!("normalized to Pane above"),
         }
         self.wake_caret();
     }
@@ -19421,6 +20018,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.follow_outside_edits();
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         // A pane that left the agents' dock gets its tabs back.
@@ -19626,6 +20224,8 @@ impl App {
             selection_segments: Segments,
             pulse_overlay: Option<(Segments, f32)>,
             bracket_match_segments: Segments,
+            /// Standard keys' extra cursors: (row, visual column) each.
+            extra_carets: Vec<(usize, usize)>,
             hlsearch_segments: Segments,
             caret: Option<(usize, usize)>,
             content_frac: f32,
@@ -19831,6 +20431,7 @@ impl App {
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
                     hlsearch_segments: Segments::new(),
+                    extra_carets: Vec::new(),
                     caret,
                     content_frac: 0.0,
                     gutter_px: 0.0,
@@ -19884,6 +20485,7 @@ impl App {
                         selection_segments: Segments::new(),
                         pulse_overlay: None,
                         bracket_match_segments: Segments::new(),
+                        extra_carets: Vec::new(),
                         hlsearch_segments: Segments::new(),
                         caret: None,
                         content_frac: 0.0,
@@ -19930,6 +20532,9 @@ impl App {
                 // The Search page's preview, which never had the focus
                 // long enough to follow its cursor.
                 self.search_reveal(pane, pane_visible_lines);
+            }
+            if !is_focused && self.reveal_panes.remove(&pane) {
+                self.reveal_cursor(pane, buffer_id, pane_visible_lines);
             }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
@@ -20095,9 +20700,27 @@ impl App {
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
             };
+            // Standard keys' extra cursors, and their selections.
+            let (extra_carets, extra_selections): (Vec<(usize, usize)>, Segments) = if is_focused && !folds_active {
+                let buffer = &self.open().buffer;
+                let mut segs = Segments::new();
+                let mut carets = Vec::new();
+                for c in self.extra_carets() {
+                    let (l, col) = buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 });
+                    if let Some(row) = l.checked_sub(render_base_line).filter(|&r| r <= pane_visible_lines) {
+                        carets.push((row, remap_col(row, col)));
+                    }
+                    if let Some(a) = c.anchor {
+                        segs.extend(remap_segments(self.range_to_segments(a.min(c.at)..a.max(c.at), pane_visible_lines + 1)));
+                    }
+                }
+                (carets, segs)
+            } else {
+                (Vec::new(), Segments::new())
+            };
             let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused && !folds_active {
                 (
-                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)),
+                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)).into_iter().chain(extra_selections).collect(),
                     self.pulse_overlay(pane_visible_lines + 1).map(|(segs, a)| (remap_segments(segs), a)),
                     remap_segments(self.bracket_match_segments(pane_visible_lines + 1)),
                     remap_segments(self.hlsearch_segments(pane_visible_lines + 1)),
@@ -20244,6 +20867,7 @@ impl App {
             // whitespace, the overview ruler, sticky scroll.
             if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
                 let tab_rows: HashSet<usize> = col_maps.keys().copied().collect();
+                let pane_caret_ats: Vec<usize> = self.pane_carets(pane, buffer_id).iter().map(|c| c.at).collect();
                 let view = polish::PaneView {
                     buffer: buffer_id,
                     lines: visible_document_lines,
@@ -20255,6 +20879,8 @@ impl App {
                     tab_rows: &tab_rows,
                     selection: &selection_segments,
                     remap_col: &remap_col,
+                    carets: &pane_caret_ats,
+                    pane,
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;
@@ -20296,6 +20922,7 @@ impl App {
                 pulse_overlay,
                 bracket_match_segments,
                 hlsearch_segments,
+                extra_carets,
                 caret: if is_dashboard || (is_focused && main_view == MainView::Picker) { None } else { caret },
                 content_frac: render_frac,
                 gutter_px,
@@ -20392,6 +21019,7 @@ impl App {
         // See `popup::PopupId::Prompt`'s own doc comment for why this
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
+        let prompt_selection = self.prompt_selection();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
         // The right click's menu.
         let context_menu_popup = overlays_here.then(|| self.context_menu_popup(window_width, window_height)).flatten();
@@ -21275,6 +21903,11 @@ impl App {
                     // just marking its position.
                     let (width, block_alpha) = if caret_is_block { (char_width, 0.6) } else { (2.0, 1.0) };
                     caret_rect.push_rect(gpu, caret_x, caret_y, width, line_height, [r, g, b, a * caret_alpha * block_alpha]);
+                    // The extra cursors, where they are (no glide).
+                    for &(row, col) in &focused.extra_carets {
+                        let (x, y) = caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
+                        caret_rect.push_rect(gpu, x, y, width, line_height, [r, g, b, a * caret_alpha * block_alpha]);
+                    }
                 }
             }
         }
@@ -21352,6 +21985,14 @@ impl App {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
             let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
             let sticky_h = if pane.extra.sticky.is_empty() { 0.0 } else { text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height };
+            // A mark's columns as x and width, cut to the pane's text: a
+            // problem at the end of a long line, scrolled sideways, mustn't
+            // be drawn over the pane beside it.
+            let span_x = |col_start: usize, col_end: usize| -> Option<(f32, f32)> {
+                let from = (content_x + col_start as f32 * char_width).max(content_x);
+                let to = (content_x + col_end as f32 * char_width).min(pane.rect.x + pane.rect.w);
+                (to > from).then_some((from, to - from))
+            };
             // An extension's underlines: a buffer's decorations, a canvas's
             // cells.
             for &(row, col_start, col_end, color) in pane.extra.underlines.iter().chain(&pane.home.underlines) {
@@ -21359,7 +22000,8 @@ impl App {
                 if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
                     continue;
                 }
-                overlay.push_rect(gpu, content_x + col_start as f32 * char_width, y, (col_end - col_start) as f32 * char_width, 1.0, color);
+                let Some((x, w)) = span_x(col_start, col_end) else { continue };
+                overlay.push_rect(gpu, x, y, w, 1.0, color);
             }
             // Struck through: a value the Ember Trail says was.
             for &(row, col_start, col_end, color) in &pane.extra.strikes {
@@ -21367,7 +22009,8 @@ impl App {
                 if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
                     continue;
                 }
-                overlay.push_rect(gpu, content_x + col_start as f32 * char_width, y, (col_end - col_start) as f32 * char_width, 1.0, color);
+                let Some((x, w)) = span_x(col_start, col_end) else { continue };
+                overlay.push_rect(gpu, x, y, w, 1.0, color);
             }
             // Problems, underlined with a wave.
             for &(row, col_start, col_end, color) in &pane.extra.squiggles {
@@ -21375,8 +22018,8 @@ impl App {
                 if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
                     continue;
                 }
-                let x = content_x + col_start as f32 * char_width;
-                overlay.push_wave(gpu, x, y - 1.0, (col_end - col_start) as f32 * char_width, 5.0, 6.0, 1.3, 1.2, color);
+                let Some((x, w)) = span_x(col_start, col_end) else { continue };
+                overlay.push_wave(gpu, x, y - 1.0, w, 5.0, 6.0, 1.3, 1.2, color);
             }
             // Sticky scroll's edge: a hairline and a soft shadow on the
             // text scrolling under it.
@@ -21403,6 +22046,8 @@ impl App {
                         motion_host::RulerMark::Search => (2.0, 4.0, 2.0, theme.search_match),
                         motion_host::RulerMark::Error => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_conflicted)),
                         motion_host::RulerMark::Warning => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_modified)),
+                        motion_host::RulerMark::Info => (5.0, 5.0, 2.0, glyphon_to_rgba(theme.git_untracked)),
+                        motion_host::RulerMark::Caret => (2.0, 7.0, 2.0, glyphon_to_rgba(theme.fg)),
                         motion_host::RulerMark::Added => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_staged)),
                         motion_host::RulerMark::Modified => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_modified)),
                         motion_host::RulerMark::Deleted => (1.0, 3.0, 2.0, glyphon_to_rgba(theme.git_conflicted)),
@@ -21783,6 +22428,17 @@ impl App {
                 // The completion popup's own selected-candidate row --
                 // `theme.selection`, not `theme.hl_line`: the popup has no
                 // caret of its own, so this has to stand out on its own.
+                // A rename prompt's prefilled name, selected.
+                if let (popup::PopupId::Prompt, Some(chars)) = (draw.id, prompt_selection.clone()) {
+                    let x = rect.x + text::PAD_LEFT + chars.start as f32 * char_width;
+                    let w = (chars.len() as f32 * char_width).min(rect.x + rect.w - x).max(0.0);
+                    popup_rect.push_box(gpu, x, rect.y + 4.0, w, line_height, crate::rect::BoxStyle {
+                        radius: 2.0,
+                        fill: with_alpha(theme.selection, alpha),
+                        border: 0.0,
+                        border_color: [0.0; 4],
+                    });
+                }
                 if matches!(draw.id, popup::PopupId::Completion | popup::PopupId::ContextMenu) {
                     if let Some(row) = draw.selected {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
@@ -22002,11 +22658,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.keep_compose_draft();
         // Agents' threads saved, their processes stopped.
         self.agents_shutdown();
+        // Connections to remote machines ended, and what ran over them.
+        self.remote_close_all();
         self.checkpoint_session();
         self.save_window_layout();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.follow_outside_edits();
         let _busy = crate::watchdog::enter(match &event {
             WindowEvent::RedrawRequested => "redraw",
             WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::Ime(_) => "a key",
@@ -22078,6 +22737,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                // Ctrl let go with the recent-buffer switcher up: its row.
+                if !self.modifiers.control_key() {
+                    self.recent_switch_released();
+                }
                 // Ctrl pressed or let go over a terminal's link.
                 self.terminal_hover(self.cursor_pos);
                 if let (Some(pos), Some((w, h))) = (self.cursor_pos, self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))) {
@@ -22098,6 +22761,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::Focused(false) => {
                 self.code_surface_release();
+                self.auto_save_all();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = (position.x as f32, position.y as f32);
@@ -22379,6 +23043,16 @@ impl ApplicationHandler<FenixUserEvent> for App {
             None => wait_until,
         };
         let wait_until = match self.hover_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // Auto-save: edits that have rested, or a buffer just left.
+        let wait_until = match self.auto_save_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // The daily look for a newer Fenix, when it's on.
+        let wait_until = match self.update_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
@@ -22904,7 +23578,7 @@ mod tests {
             body: fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 },
             close: fenix_window::Rect { x: 80.0, y: 0.0, w: 20.0, h: 20.0 },
         };
-        let geometry = FrameGeometry {
+        let geometry = FrameGeometry { split_buttons: Vec::new(),
             breadcrumb_panes: Vec::new(),
             pane_area: pane_rect,
             sidebar_rect: None,
@@ -22931,7 +23605,7 @@ mod tests {
             body: fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 },
             close: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
         };
-        let geometry = FrameGeometry {
+        let geometry = FrameGeometry { split_buttons: Vec::new(),
             breadcrumb_panes: Vec::new(),
             pane_area: pane_rect,
             sidebar_rect: Some(fenix_window::Rect { x: -200.0, y: 0.0, w: 200.0, h: 200.0 }),
@@ -22948,7 +23622,7 @@ mod tests {
         let app = App::with_file(None);
         let pane = app.focused_pane_id();
         let pane_rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
-        let geometry = FrameGeometry { breadcrumb_panes: Vec::new(), pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
+        let geometry = FrameGeometry { split_buttons: Vec::new(), breadcrumb_panes: Vec::new(), pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
         assert_eq!(cursor_icon_for(&geometry, (40.0, 50.0), 20.0), winit::window::CursorIcon::Text);
         // Within the title strip itself (not on a tab, since there are
         // none here) -- the plain arrow, not an I-beam.
@@ -22957,7 +23631,7 @@ mod tests {
 
     #[test]
     fn cursor_icon_for_empty_space_outside_every_region_is_the_plain_arrow() {
-        let geometry = FrameGeometry {
+        let geometry = FrameGeometry { split_buttons: Vec::new(),
             breadcrumb_panes: Vec::new(),
             pane_area: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             sidebar_rect: None,
@@ -27999,7 +28673,7 @@ configure_board stm32
         app.status_message = None;
         let (badge, rest) = app.modeline_pieces();
         assert_eq!(badge, "TERMINAL");
-        assert!(rest.contains("Ctrl-\\ back to the editor"), "{rest}");
+        assert!(rest.contains("C-\\ back to the editor"), "{rest}");
         app.terminal_focused = false;
         let (badge, rest) = app.modeline_pieces();
         assert_ne!(badge, "TERMINAL");
@@ -30207,8 +30881,8 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels[0], home_relative(&b), "outside a project: the whole path, from ~ when under it");
-                assert!(labels.contains(&home_relative(&a).as_str()));
+                assert_eq!(labels[0], crate::page::home_relative(&b), "outside a project: the whole path, from ~ when under it");
+                assert!(labels.contains(&crate::page::home_relative(&a).as_str()));
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
@@ -30232,8 +30906,8 @@ configure_board stm32
     fn picker_switch_buffer_lists_lookalikes_once() {
         // However the root and the file were spelt, a file in the project
         // is by its place in it.
-        assert_eq!(path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
-        assert_eq!(path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
+        assert_eq!(crate::page::path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
+        assert_eq!(crate::page::path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
         let mut homes = App::with_file(None);
         // A second Home, as a session restored with one a pane can have.
         let other = homes.new_home_buffer();
@@ -31204,6 +31878,17 @@ configure_board stm32
         let dock: String = app.debug_dock_spans(100).into_iter().map(|(text, _, _)| text).collect();
         let bottom = dock.lines().last().unwrap_or("");
         assert!(bottom.starts_with("› ") && bottom.contains("raw = b'"), "the selected value on the bottom line: {bottom}");
+    }
+
+    #[test]
+    fn the_debug_dock_says_the_standard_keys_with_standard_keys() {
+        let mut app = App::with_file(None);
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        debug_test_session(&mut app);
+        let dock: String = app.debug_dock_spans(200).into_iter().map(|(text, _, _)| text).collect();
+        assert!(!dock.contains("SPC ") && !dock.contains("K on a name"), "{dock}");
+        assert!(dock.contains("C-k u f") && dock.contains("C-k u e evaluates"), "{dock}");
     }
 
     fn debug_test_session(app: &mut App) {
@@ -35487,6 +36172,57 @@ name = \"orbit\"
         assert_eq!(app.buffers.get(b_id).unwrap().buffer.text(), "new\n");
         assert!(app.lsp_sessions[&a_key].pending.contains_key(&9));
         assert!(!app.lsp_sessions[&b_key].pending.contains_key(&9));
+    }
+
+    /// A server's whole-file format, as its answer arrives: the extra
+    /// cursor in a line it didn't change stays, the main one keeps its
+    /// line and column, and one undo takes it back.
+    #[test]
+    fn a_servers_format_keeps_the_cursors_in_lines_it_left_alone() {
+        let (_dir, path) = project_scope_fixture("lsp_format_cursors");
+        std::fs::write(&path, "fn a() {\n  b();\n}\nzz\n").unwrap();
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let id = app.focused_buffer_id();
+        let key = install_test_lsp(&mut app, &path);
+        let z = app.open().buffer.text().find("zz").unwrap() + 1;
+        app.toggle_caret_at(z);
+        app.focused_buffer_and_cursor_mut().1.char_idx = app.open().buffer.text().find("b()").unwrap() + 2;
+        let revision = app.open().buffer.edit_count();
+        app.lsp_sessions.get_mut(&key).unwrap().pending.insert(9, PendingLspRequest::Format { buffer: id, revision });
+        let generation = app.lsp_sessions[&key].generation;
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Response { id: 9, result: Ok(serde_json::json!([
+            {"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"newText":"fn a() {\n    b();\n}\nzz\n"}
+        ])) });
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), "fn a() {\n    b();\n}\nzz\n");
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (1, 4), "its line, its column");
+        let z = app.open().buffer.text().find("zz").unwrap() + 1;
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [z]);
+        app.press("C-z");
+        assert_eq!(app.open().buffer.text(), "fn a() {\n  b();\n}\nzz\n", "one undo");
+    }
+
+    /// Taking a side of a conflict changes only its lines: an extra
+    /// cursor below it stays, and one undo brings the markers back.
+    #[test]
+    fn resolving_a_conflict_keeps_the_cursors_outside_it() {
+        let dir = TempDir::new("conflict_resolve_cursors");
+        let text = "x\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nyy\n";
+        let file = dir.write("a.txt", text);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let y = text.find("yy").unwrap() + 1;
+        app.toggle_caret_at(y);
+        app.focused_buffer_and_cursor_mut().1.char_idx = text.find("a\n=").unwrap();
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), "x\na\nyy\n");
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), ["x\na\ny".len()], "where it was in yy");
+        app.press("C-z");
+        assert_eq!(app.open().buffer.text(), text, "one undo");
     }
 
     #[test]

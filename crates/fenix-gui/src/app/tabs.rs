@@ -111,6 +111,7 @@ impl App {
                 Some(P::Log(_)) => crate::icon::HISTORY,
                 Some(P::Hub(_)) | Some(P::Wizard(_)) | Some(P::Doctor(_)) => crate::icon::PROJECTS,
                 Some(P::Notifications(_)) => crate::icon::BELL,
+                Some(P::Welcome(_)) => crate::icon::HELP,
                 Some(P::Extensions(_)) | Some(P::ExtensionOutput(_)) => crate::icon::PUZZLE,
                 Some(P::Agent(_)) | Some(P::AgentReview(_)) | Some(P::AgentUsage(_)) => crate::icon::SPARK,
                 _ => return None,
@@ -156,6 +157,11 @@ impl App {
 
     /// Moves the focused pane along its tabs. A fixed panel (a titled
     /// Git, Docker or terminal pane) has no tabs, so it stays put.
+    /// `tab.next` and the like: `move_tab`, as a command.
+    pub(crate) fn move_tab_cmd(&mut self, mv: TabMove) {
+        self.move_tab(mv);
+    }
+
     pub(super) fn move_tab(&mut self, mv: TabMove) {
         let pane = self.focused_pane_id();
         if self.pane_titles.contains_key(&pane) {
@@ -296,6 +302,15 @@ impl App {
             return;
         }
         self.close_pane_tab(pane, id);
+        // Standard keys: a split pane goes with its last tab, as an IDE's
+        // editor group does. The last pane left shows Home.
+        if self.standard_keys() && self.windows().window_count() > 1 {
+            let home = self.workspaces.active_workspace().home;
+            if self.pane_tab_order(pane).into_iter().all(|b| Some(b) == home) {
+                self.windows_mut().focus(pane);
+                self.close_window();
+            }
+        }
         self.refresh_project_root();
         self.wake_caret();
     }

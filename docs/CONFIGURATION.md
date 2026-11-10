@@ -93,6 +93,23 @@ the rest of what's the project's own: its kind, group, pin and Jira key,
 and its tasks, language servers and debug launch (`.fenix/tools.json`).
 `p` switches the page between yours and the project's.
 
+**A project's programs wait for you.** `.fenix/tools.json` names
+programs: a language server, a debug adapter, tasks. So does
+`.fenix/lsp/<server>.json`, since some servers' settings are commands.
+Fenix starts a language server as soon as a file is opened, so for a
+project you didn't write (a repository just cloned, an archive just
+unpacked) those files would be a way to run something by opening a
+file. Until you've allowed them, Fenix treats such a project as naming
+nothing: your own settings and its defaults apply, and a notification
+says the project is waiting. `SPC p y` (`project.trust`) opens the file
+and asks; only a typed `yes` allows it, and `no` is remembered too. The
+answer is kept in Fenix's own state folder, never in the project, and
+for those files as they are: change them (a pull, an edit outside
+Fenix) and it asks again. What Fenix writes there for you (the new
+project wizard, the settings page, a doctor's fix) doesn't need
+allowing again. The projects you already used before this question
+existed go on working as they did.
+
 A project's MIBs and how it writes a telecommand are its own too; they
 take the place of yours there (`mib.include_yours` adds yours back), and
 a folder is relative to the project:
@@ -184,6 +201,9 @@ untracked = "#7aa2f7"
 ignored = "#929bb9"
 conflicted = "#f7768e"
 
+# [brackets]  # appearance.rainbow_brackets' colours, outermost first (one to six);
+# colors = ["#e0af68", "#bb9af7", "#7aa2f7"]   # left out: syntax.function, keyword, type
+
 # [terminal]  # a terminal's 16 ANSI colours; worked out from the above when left out
 # ansi = ["#4c5064", "#f7768e", "#9ece6a", "#ff9e64", "#7aa2f7", "#bb9af7", "#2ac3de", "#a2aad0",
 #         "#929bb9", "#ff97aa", "#b2e27f", "#ffb88d", "#9bbbff", "#d3bcfe", "#41d6f0", "#c0caf5"]
@@ -225,8 +245,8 @@ An extension is a `.fenixext` file -- a zip with an `extension.toml` at
 its root -- or, while you make one, the folder it's made from. For now
 Fenix installs extensions of data: themes, snippets, project templates,
 keys and language files, in `themes/`, `snippets/`, `templates/`,
-`keymaps/` and `languages/` folders laid out like your own (a keymap is a `.toml` of `[[leader]]` entries,
-as in `keybindings.toml`). They're read beside the built-in ones and
+`keymaps/` and `languages/` folders laid out like your own (a keymap is a `.toml` of `[[leader]]` and
+`[[keys]]` entries, as in `keybindings.toml`: see [Your keys](KEYBINDINGS.md#your-keys-keybindingstoml)). They're read beside the built-in ones and
 below yours: your theme, snippet, template or key of the same name wins.
 A `launch/` folder holds launch configurations for the debugger
 (`SPC u u` offers them in a project that has none of its own; see
@@ -404,9 +424,23 @@ A `policy.toml` in the same folder decides for everyone:
 ```toml
 store = false                                # no registry here: files only
 # registry = "https://mirror.example/index.json"   # or everyone uses this mirror
+update_check = false                         # no one here looks for a newer Fenix
 ```
 
-A `policy.toml` that can't be read keeps the store switched off.
+A `policy.toml` that can't be read keeps the store switched off, and
+the update check too.
+
+### Looking for a newer Fenix
+
+Fenix doesn't go on the network unasked. With `updates.check = true`
+(the Settings page's Windows & session) it asks GitHub once a day for
+the latest release of `tpedneault/fenix` -- a request to
+`api.github.com` with nothing about your files or settings in it -- and
+when there's a newer one, Home says so in a line under the date. `app.check_for_updates`
+(the palette) looks whenever you ask, the setting on or off. Nothing is
+downloaded or installed: get the new one from the releases page as you
+got this one. What it found last is kept in `updates.json` in Fenix's
+state folder, so a restart doesn't ask again.
 
 When an extension seems to be the trouble, `fenix --disable-extensions`
 starts in safe mode: the core alone, with nothing read from an installed
@@ -427,6 +461,11 @@ when it's out of date).
 | `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
+| `editor.keys` | vim / standard | vim | How you edit. Vim: Vim's modes and keys, and SPC for everything else. Standard: the keys of a traditional IDE -- typing at once, Shift+arrows to select, Ctrl+C/X/V, Alt+click for more cursors -- and Ctrl+K for the leader's menu. SPC t k switches. |
+| `keys.leader_chord` | text | C-k | With standard keys: the chord that opens the leader's menu, as SPC does with Vim keys (C-k, C-;, F1...). |
+| `keys.leader_hint` | true / false | on | With standard keys: the modeline says which chord opens the leader's menu, until you've used it a few times. |
+| `editor.multi_cursor_modifier` | alt / ctrl | alt | With standard keys: the key held while clicking to add a cursor. Ctrl, for desktops that move windows with Alt+drag; go to definition then moves to Alt+click. |
+| `editor.undo_pause_ms` | 0–10000 | 1000 | With standard keys: a pause this long, in milliseconds, between keys you type starts a new undo step; 0 never does. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
 | `terminal.shell` | text | PowerShell 7, else Windows PowerShell; $SHELL | The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. |
 | `search.smart_case` | true / false | on | A search in lower case matches any case; a capital letter makes it exact. For / and the Search page; Alt-c on the page, \C in /, match case anyway. |
@@ -442,7 +481,7 @@ when it's out of date).
 | `appearance.shadows` | true / false | on | Popups cast a soft shadow. |
 | `appearance.indent_guides` | true / false | on | A thin line for each indent level. |
 | `appearance.active_indent_guide` | true / false | on | The guide of the block the cursor is in is brighter. |
-| `appearance.overview_ruler` | true / false | on | A track on each code pane's right edge showing the visible part, search matches, problems, changes and the cursor. Click it to jump. |
+| `appearance.overview_ruler` | true / false | on | A track on each code pane's right edge showing the visible part, search matches, problems by severity, Git changes, the cursor and any extra cursors. A click on a mark goes to it; elsewhere, to that part of the file. |
 | `appearance.sticky_scroll` | true / false | on | The first lines of the function and class you're inside stay at the top of the pane. |
 | `appearance.sticky_lines` | 1–6 | 3 | How many enclosing lines sticky scroll keeps at most. |
 | `appearance.rounded_selection` | true / false | on | A Visual selection's outer corners are rounded, so it reads as one shape. |
@@ -451,7 +490,7 @@ when it's out of date).
 | `appearance.dim_amount` | 5–80 | 30 | How much dimmer, in percent. |
 | `which_key.delay_ms` | 0–2000 | 250 | Milliseconds a leader key (SPC, g, ...) waits before the menu of what comes next opens. Once open, deeper levels show at once. |
 | `which_key.order` | key / label | key | The key menu's order: by key, so a key never moves, or by what it does. |
-| `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested. |
+| `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested: the code's own, from its syntax tree, not those in strings and comments. The colours are the theme's [brackets] colors, or its function, keyword and type colours. |
 | `appearance.tabs` | auto / block / underline / off | auto | How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then. |
 | `appearance.panels` | framed / flat | framed | How the window's panes, sidebar, terminal and docks are drawn: rounded panels on a darker tray a gap apart, with an edge on the one that has the keyboard, or flat and edge to edge with lines between them, as before 1.4. |
 | `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |
@@ -490,6 +529,8 @@ when it's out of date).
 | `motion.splash` | true / false | on | While Fenix starts, the mark and a line that fills as it loads show until the editor is ready. It moves unless animations are off; only this setting hides it. |
 | **Files & explorer** | | | |
 | `editor.watch_files` | true / false | on | Notice when an open file changes on disk, and reload it when you haven't edited it. |
+| `editor.auto_save` | off / after_delay / on_focus_change | off | Save a file's edits for you: after a pause in editing (the delay below), or when you leave it for another buffer, pane or application. Never a file with no name yet or not yet on disk, one shown read-only, a remote project's, or one that changed on disk since it was read -- that, or a save that fails, waits until you save it yourself; it doesn't format. |
+| `editor.auto_save_delay_ms` | 100–600000 | 1000 | With auto-save after a delay: milliseconds without an edit before the file is saved. |
 | `editor.format_on_save` | true / false | off | Saving runs the formatter an extension gives for the file's language (a language pack's) first. |
 | `explorer.follow` | true / false | on | The explorer's sidebar shows the file being edited: its project, the folders down to it, the file selected. Off pins it where it is; SPC e r still shows the file. |
 | `explorer.width` | 120–2000 | 240 | The explorer sidebar's width in pixels. Dragging its edge sets it. |
@@ -523,6 +564,7 @@ when it's out of date).
 | **Windows & session** | | | |
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
+| `updates.check` | true / false | off | Once a day, ask GitHub whether there's a newer release of Fenix, and say so on Home. Nothing is downloaded. app.check_for_updates looks whenever you ask, this on or off. |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
 | **Extensions** | | | |
 | `extensions.store` | true / false | on | Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext). |
@@ -567,6 +609,7 @@ when it's out of date).
 | `notifications.rules` | source (agents, tasks, an extension's id, fenix.*) = mute, history, low, normal or critical | – | What to do with a source's notifications: mute them, keep them to the history, or show them at another urgency. A source ending in * matches every one it begins. |
 | `notifications.agents` | all / unfocused / never | unfocused | Notify when an agent's turn ends or it asks you something: always, only when its thread isn't in front of you, or never. |
 | `notifications.tasks` | all / long / failed / never | long | Notify when a task ends: every one, those that took 10 seconds or more, only those that failed, or never. |
+test app::settings_host::tests::print_the_settings_table ... ok
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

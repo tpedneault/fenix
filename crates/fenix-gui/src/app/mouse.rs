@@ -42,6 +42,9 @@ pub(super) struct MouseState {
     pub(super) hover: Option<MouseHover>,
     /// When a drag past the pane's edge last scrolled it.
     scrolled_at: Option<Instant>,
+    /// Alt+Shift held down in a pane's text (standard keys): the pane and
+    /// the line a column of cursors starts on.
+    column: Option<(fenix_window::WindowId, usize)>,
 }
 
 /// A selection the mouse is making in `pane`.
@@ -227,7 +230,7 @@ impl App {
     }
 
     /// Puts `pane`'s cursor on char `at`, its column remembered for `j`/`k`.
-    fn put_cursor(&mut self, pane: fenix_window::WindowId, at: usize) {
+    pub(super) fn put_cursor(&mut self, pane: fenix_window::WindowId, at: usize) {
         let Some(&buffer) = self.windows().content(pane) else { return };
         let Some(ob) = self.buffers.get(buffer) else { return };
         let at = at.min(ob.buffer.len_chars());
@@ -238,7 +241,15 @@ impl App {
 
     /// Leaves Insert (or Replace) the way Escape does, before a selection
     /// starts.
-    fn mouse_leave_insert(&mut self) {
+    pub(super) fn mouse_leave_insert(&mut self) {
+        // Standard keys don't leave Insert on Escape: out, where it is.
+        if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+            let id = self.focused_buffer_id();
+            if let Some(ob) = self.buffers.get_mut(id) {
+                self.vim.leave_insert_here(&mut ob.buffer);
+            }
+            return;
+        }
         if self.vim.is_inserting() {
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
             if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
@@ -257,6 +268,45 @@ impl App {
         self.completion = None;
         self.close_mouse_hover();
         let cursor = self.pane_state(pane).cursor;
+        // Standard keys: Alt+click (or Ctrl+click) adds a cursor, Alt+Shift
+        // starts a column of them, and the other one goes to a definition.
+        if self.standard_keys() && clicks == 1 {
+            let ctrl = self.modifiers.control_key();
+            let by_ctrl = self.config.text_value("editor.multi_cursor_modifier") == Some("ctrl");
+            let (adds, defines) = if by_ctrl { (ctrl, alt) } else { (alt, ctrl) };
+            let at = self.hit_char(&hit);
+            if alt && shift {
+                if self.vim.mode() == Mode::Visual {
+                    self.vim.exit_visual_mode(&cursor);
+                }
+                self.mouse.column = Some((pane, hit.line));
+                self.column_carets(hit.line, hit.line, hit.col);
+                return true;
+            }
+            if adds && !shift {
+                if self.vim.mode() == Mode::Visual {
+                    self.vim.exit_visual_mode(&cursor);
+                }
+                self.toggle_caret_at(at);
+                return true;
+            }
+            if defines && !shift {
+                // A file's name under it opens the file, as `gf` does;
+                // anything else goes to its definition.
+                self.clear_carets();
+                self.put_cursor(pane, at);
+                if self.link_under_cursor() {
+                    self.follow_link_under_cursor();
+                } else {
+                    self.request_goto_definition();
+                }
+                return true;
+            }
+        }
+        // A plain click: back to one cursor.
+        if !shift {
+            self.clear_carets();
+        }
         if shift && clicks == 1 {
             let (kind, anchor) = if self.vim.mode() == Mode::Visual { (self.vim.visual_kind(), self.vim.visual_anchor()) } else { (VisualKind::Char, cursor.char_idx) };
             self.mouse_leave_insert();
@@ -292,7 +342,10 @@ impl App {
                 let word = self.buffers.get(hit.buffer).map_or(at..at, |ob| fenix_vim::word_at(&ob.buffer, at, self.vim.iskeyword_extra()));
                 let (start, end) = if word.is_empty() { (at, at + 1) } else { (word.start, word.end) };
                 self.vim.select(VisualKind::Char, start);
-                self.put_cursor(pane, end - 1);
+                // Standard keys' selection ends before the cursor; Vim's
+                // takes the cursor's character.
+                let last = if self.vim.policy() == fenix_vim::EditPolicy::Standard { end } else { end - 1 };
+                self.put_cursor(pane, last);
                 self.mouse.drag = Some(TextDrag { pane, unit: Unit::Word, anchor: start, anchor_end: end, started: true });
             }
             _ => {
@@ -316,6 +369,16 @@ impl App {
         if let Some(divider) = self.mouse.split {
             if self.windows_mut().set_split_ratio(divider.index, divider.ratio_at(pos.0, pos.1)) {
                 self.wake_caret();
+            }
+            return;
+        }
+        if let Some((pane, from_line)) = self.mouse.column {
+            let geometry = self.geometry_at(window_width, window_height);
+            if let Some(&(_, rect)) = geometry.panes.iter().find(|(p, _)| *p == pane) {
+                if let Some(hit) = self.text_hit(pane, rect, pos) {
+                    self.column_carets(from_line, hit.line, hit.col);
+                    self.wake_caret();
+                }
             }
             return;
         }
@@ -351,12 +414,15 @@ impl App {
             Unit::Word => {
                 let word = self.buffers.get(hit.buffer).map_or(at..at + 1, |ob| fenix_vim::word_at(&ob.buffer, at, self.vim.iskeyword_extra()));
                 let (start, end) = if word.is_empty() { (at, at + 1) } else { (word.start, word.end) };
+                // Standard keys' selection doesn't take the cursor's
+                // character: its ends are one further out.
+                let inclusive = usize::from(self.vim.policy() != fenix_vim::EditPolicy::Standard);
                 if start < drag.anchor {
-                    self.vim.select(VisualKind::Char, drag.anchor_end - 1);
+                    self.vim.select(VisualKind::Char, drag.anchor_end - inclusive);
                     self.put_cursor(drag.pane, start);
                 } else {
                     self.vim.select(VisualKind::Char, drag.anchor);
-                    self.put_cursor(drag.pane, end.max(drag.anchor + 1) - 1);
+                    self.put_cursor(drag.pane, end.max(drag.anchor + 1) - inclusive);
                 }
             }
         }
@@ -365,6 +431,10 @@ impl App {
 
     /// The left button let go.
     pub(super) fn mouse_release(&mut self) {
+        self.mouse.column = None;
+        // Standard keys: typing where a click put you in a file, browsing
+        // where it put you in a listing.
+        self.settle_keys();
         self.terminal_mouse_release();
         self.mouse.drag = None;
         self.mouse.scrolled_at = None;
@@ -475,7 +545,7 @@ impl App {
     }
 
     /// `id`'s tab leaves `from` and opens in `to`, in front.
-    fn move_tab_to_pane(&mut self, from: fenix_window::WindowId, id: BufferId, to: fenix_window::WindowId) {
+    pub(super) fn move_tab_to_pane(&mut self, from: fenix_window::WindowId, id: BufferId, to: fenix_window::WindowId) {
         self.tab_leaves(from, id);
         self.windows_mut().focus(to);
         self.sidebar_focused = false;
@@ -563,8 +633,8 @@ impl App {
 
     /// The text menu, for the focused pane where its cursor is.
     pub(super) fn text_menu_items(&self) -> Vec<MenuItem<MenuAction>> {
-        let leader = crate::keymap::leader_keys();
-        let key = |id: &str| leader.get(id).cloned().unwrap_or_default();
+        // The keys in use, as the scheme says them.
+        let key = |id: &str| self.key_for(id).unwrap_or_default();
         let item = |label: &str, key: String, action| MenuItem { label: label.to_string(), key, action };
         let ob = self.open();
         let selecting = self.vim.mode() == Mode::Visual;
@@ -601,8 +671,8 @@ impl App {
 
     /// The menu for `buffer`'s tab in `pane`.
     fn tab_menu_items(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Vec<MenuItem<MenuAction>> {
-        let leader = crate::keymap::leader_keys();
-        let key = |id: &str| leader.get(id).cloned().unwrap_or_default();
+        // The keys in use, as the scheme says them.
+        let key = |id: &str| self.key_for(id).unwrap_or_default();
         let item = |label: &str, key: String, action| MenuItem { label: label.to_string(), key, action: MenuAction::Tab(action, pane, buffer) };
         let mut items = Vec::new();
         if self.workspaces.active_workspace().home != Some(buffer) {
@@ -777,7 +847,7 @@ impl App {
 
     /// Vim keys typed for a menu's row, the clipboard kept in step as
     /// typing them would.
-    fn mouse_vim_keys(&mut self, keys: &[KeyPress]) {
+    pub(super) fn mouse_vim_keys(&mut self, keys: &[KeyPress]) {
         for &key in keys {
             self.pull_clipboard_before_paste(key);
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
@@ -1284,4 +1354,106 @@ mod tests {
         let text: Vec<&str> = spans.iter().map(|(s, _, _)| s.as_str()).filter(|s| *s != "\n").collect();
         assert_eq!(text, ["expected `;`", "fn main()"]);
     }
+
+    fn standard(app: &mut App) {
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+    }
+
+    #[test]
+    fn standard_keys_a_double_click_selects_the_whole_word_and_ctrl_d_finds_whole_words() {
+        let mut app = app_with("foo for foobar foo");
+        standard(&mut app);
+        let at_pos = at(&app, 0, 1);
+        click(&mut app, at_pos);
+        click(&mut app, at_pos);
+        assert_eq!(selection(&app).as_deref(), Some("foo"), "the whole word, as standard keys select");
+        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 3)], "drawn as it is");
+        app.press("C-c");
+        assert_eq!(app.clipboard_text().unwrap_or_else(|| app.vim.register().0.to_string()), "foo", "copied whole");
+        app.press("C-d");
+        app.type_text("x");
+        assert_eq!(app.text(), "x for foobar x", "the next foo, whole: not for's fo nor foobar's");
+    }
+
+    #[test]
+    fn standard_keys_a_triple_click_then_ctrl_d_keeps_the_first_line_whole() {
+        let mut app = app_with("  }\nx\n  }\n");
+        standard(&mut app);
+        let at_pos = at(&app, 0, 2);
+        click(&mut app, at_pos);
+        click(&mut app, at_pos);
+        click(&mut app, at_pos);
+        app.press("C-d");
+        assert_eq!(app.extra_carets().len(), 1);
+        let extra = app.extra_carets()[0];
+        assert_eq!((extra.anchor, extra.at), (Some(0), 4), "line 1 and its break, as it was selected");
+        app.type_text("y");
+        assert_eq!(app.text(), "yx\ny", "both lines replaced whole");
+    }
+
+    #[test]
+    fn standard_keys_alt_click_adds_a_cursor_and_a_plain_click_goes_back_to_one() {
+        let mut app = app_with("ab\ncd\nef");
+        standard(&mut app);
+        app.modifiers = ModifiersState::ALT;
+        let at_pos = at(&app, 1, 1);
+        click(&mut app, at_pos);
+        assert_eq!(app.extra_carets().len(), 1);
+        assert_eq!(cursor_at(&app), (0, 0), "the primary stays");
+        app.modifiers = ModifiersState::empty();
+        app.type_text("x");
+        assert_eq!(app.text(), "xab\ncxd\nef");
+        let at_pos = at(&app, 2, 0);
+        click(&mut app, at_pos);
+        assert!(app.extra_carets().is_empty());
+        assert_eq!(app.vim.mode(), Mode::Insert, "a click keeps typing");
+    }
+
+    #[test]
+    fn standard_keys_alt_shift_drag_makes_a_column_of_cursors() {
+        let mut app = app_with("abcd\nefgh\nijkl");
+        standard(&mut app);
+        app.modifiers = ModifiersState::ALT | ModifiersState::SHIFT;
+        let at_pos = at(&app, 0, 2);
+        app.handle_click_at(at_pos, W, H);
+        let at_pos = at(&app, 2, 2);
+        app.mouse_drag_to(at_pos, W, H);
+        app.mouse_release();
+        assert_eq!(app.extra_carets().len(), 2);
+        app.modifiers = ModifiersState::empty();
+        app.type_text("|");
+        assert_eq!(app.text(), "ab|cd\nef|gh\nij|kl");
+    }
+
+    #[test]
+    fn standard_keys_ctrl_as_the_modifier_moves_definition_to_alt() {
+        let mut app = app_with("ab\ncd");
+        standard(&mut app);
+        app.config.set_value("editor.multi_cursor_modifier", Some(fenix_config::Value::Text("ctrl".into())));
+        app.modifiers = ModifiersState::CONTROL;
+        let at_pos = at(&app, 1, 1);
+        click(&mut app, at_pos);
+        assert_eq!(app.extra_carets().len(), 1, "Ctrl+click adds a cursor");
+        app.modifiers = ModifiersState::ALT;
+        let at_pos = at(&app, 1, 0);
+        click(&mut app, at_pos);
+        assert!(app.extra_carets().is_empty(), "Alt+click goes to a definition, with one cursor");
+        assert_eq!(cursor_at(&app), (1, 0));
+    }
+
+    #[test]
+    fn standard_keys_drag_selects_between_the_press_and_the_pointer() {
+        let mut app = app_with("hello world");
+        standard(&mut app);
+        let at_pos = at(&app, 0, 0);
+        app.handle_click_at(at_pos, W, H);
+        let at_pos = at(&app, 0, 5);
+        app.mouse_drag_to(at_pos, W, H);
+        app.mouse_release();
+        assert_eq!(selection(&app).as_deref(), Some("hello"), "the pointer's character isn't in it");
+        app.type_text("bye");
+        assert_eq!(app.text(), "bye world");
+    }
+
 }

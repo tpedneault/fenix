@@ -56,6 +56,7 @@ pub fn to_recycle_bin(paths: &[PathBuf]) -> Vec<Outcome> {
     paths
         .iter()
         .map(|path| match trash::delete(path) {
+            _ if fenix_vfs::is_remote(path) => crate::remote::no_recycle_bin(path),
             Ok(()) => Outcome::ok(path.clone()),
             Err(err) => Outcome::failed(path.clone(), describe(&err)),
         })
@@ -69,6 +70,9 @@ pub fn permanently(paths: &[PathBuf]) -> Vec<Outcome> {
     paths
         .iter()
         .map(|path| {
+            if fenix_vfs::is_remote(path) {
+                return crate::remote::permanently(path);
+            }
             // `symlink_metadata`, not `metadata`: deleting a link to a
             // directory must remove the link, never walk through it and
             // empty the directory it points at.

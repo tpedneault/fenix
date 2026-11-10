@@ -89,6 +89,10 @@ const KEY: &str = "known";
 /// is how one project came to be listed twice.
 pub fn plain_path(path: PathBuf) -> PathBuf {
     let Some(text) = path.to_str() else { return path };
+    // A project on a remote machine: its `\\?\` is what makes it one.
+    if fenix_vfs::path::is_remote_text(text) {
+        return path;
+    }
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {

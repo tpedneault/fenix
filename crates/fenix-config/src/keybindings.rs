@@ -1,5 +1,5 @@
 //! Writing your `keybindings.toml` from inside Fenix (rebinding from the
-//! palette): one `[[leader]]` entry set, everything else -- your other
+//! palette): one `[[leader]]` or `[[keys]]` entry set, everything else -- your other
 //! entries, your comments -- left as you wrote it. Reading it is the
 //! keymap's (fenix-gui's `keymap`).
 
@@ -10,19 +10,31 @@ use std::path::Path;
 /// `path`, made when there isn't one: an entry for the same keys is
 /// changed (and no longer unbinds), else one is added at the end.
 pub fn write_binding(path: &Path, keys: &str, command: &str) -> io::Result<()> {
+    write_entry(path, "leader", keys, command, None)
+}
+
+/// Binds the chord `keys` (`C-S-p`, `F12`) to `command` in a `[[keys]]`
+/// entry, for the key scheme `scheme` (`vim`, `standard`) -- the same way
+/// `write_binding` does a leader key's.
+pub fn write_chord(path: &Path, keys: &str, command: &str, scheme: &str) -> io::Result<()> {
+    write_entry(path, "keys", keys, command, Some(scheme))
+}
+
+fn write_entry(path: &Path, table: &str, keys: &str, command: &str, scheme: Option<&str>) -> io::Result<()> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
     };
     let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("keybindings.toml can't be read, so it wasn't written over: {}", e.message())))?;
-    if !doc.contains_key("leader") {
-        doc.insert("leader", toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    if !doc.contains_key(table) {
+        doc.insert(table, toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
     }
-    let Some(entries) = doc["leader"].as_array_of_tables_mut() else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "keybindings.toml's leader isn't a list of [[leader]] entries"));
+    let Some(entries) = doc[table].as_array_of_tables_mut() else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("keybindings.toml's {table} isn't a list of [[{table}]] entries")));
     };
-    let found = entries.iter().position(|t| t.get("keys").and_then(|k| k.as_str()) == Some(keys));
+    let same = |t: &toml_edit::Table| t.get("keys").and_then(|k| k.as_str()) == Some(keys) && t.get("scheme").and_then(|k| k.as_str()).unwrap_or("any") == scheme.unwrap_or("any");
+    let found = entries.iter().position(same);
     match found {
         Some(i) => {
             let entry = entries.get_mut(i).expect("just found");
@@ -33,6 +45,9 @@ pub fn write_binding(path: &Path, keys: &str, command: &str) -> io::Result<()> {
             let mut entry = toml_edit::Table::new();
             entry["keys"] = toml_edit::value(keys);
             entry["command"] = toml_edit::value(command);
+            if let Some(scheme) = scheme {
+                entry["scheme"] = toml_edit::value(scheme);
+            }
             entries.push(entry);
         }
     }
@@ -63,6 +78,12 @@ mod tests {
         assert!(!text.contains("unbind"), "a binding no longer unbinds: {text}");
         assert_eq!(text.matches("[[leader]]").count(), 3, "{text}");
         assert!(text.contains("command = \"agenda.board\"") && text.contains("keys = \"SPC o t\""), "{text}");
+
+        write_chord(&path, "C-S-p", "commands.palette", "standard").unwrap();
+        write_chord(&path, "C-S-p", "project.find_file", "standard").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("[[keys]]").count(), 1, "the same chord is changed: {text}");
+        assert!(text.contains("scheme = \"standard\"") && text.contains("command = \"project.find_file\""), "{text}");
 
         std::fs::write(&path, "leader = 3\n").unwrap();
         assert!(write_binding(&path, "SPC o s", "file.save").is_err(), "not written over");

@@ -123,6 +123,7 @@ pub fn surface_key(keypress: fenix_keymap::KeyPress, down: bool) -> Option<wit::
             N::End => wit::NamedKey::End,
             N::PageUp => wit::NamedKey::PageUp,
             N::PageDown => wit::NamedKey::PageDown,
+            N::F(_) => return None,
         }),
     };
     Some(wit::KeyEvent { key, down, mods: modifiers(keypress.mods) })
@@ -140,7 +141,9 @@ pub fn key_press(keypress: fenix_keymap::KeyPress, shift: bool, typing: bool) ->
     let take = match keypress.code {
         KeyCode::Named(N::PageUp | N::PageDown) if m.ctrl => false,
         KeyCode::Named(N::Tab) if m.ctrl => false,
-        KeyCode::Char(c) if m.ctrl && !m.alt && matches!(c.to_ascii_lowercase(), 'q' | '=' | '+' | '-' | '0' | 'i' | '\\') => false,
+        // The leader chord (standard keys') and the palette's are Fenix's.
+        KeyCode::Char(c) if m.ctrl && !m.alt && matches!(c.to_ascii_lowercase(), 'q' | '=' | '+' | '-' | '0' | 'i' | '\\' | 'k') => false,
+        KeyCode::Char(c) if m.ctrl && !m.alt && shift && c.eq_ignore_ascii_case(&'p') => false,
         KeyCode::Char(c) if m.ctrl && !m.alt && c.eq_ignore_ascii_case(&'o') && !typing => false,
         // `page-key`'s, as it has them.
         KeyCode::Char('c') if m.ctrl && !m.alt && !shift => false,

@@ -92,7 +92,7 @@ impl App {
     /// all of them, or the one called `NAME` (an additional server's name,
     /// a primary server's program, or a language). Each re-reads the
     /// project's tool configuration as it starts again.
-    pub(super) fn restart_project_lsp(&mut self, name: &str) {
+    pub(crate) fn restart_project_lsp(&mut self, name: &str) {
         let root = self.integration_root();
         let name = name.trim();
         let matches = |app: &App, key: &LspKey| {
@@ -183,7 +183,7 @@ impl App {
     /// `.fenix/lsp/<name>.json` over that, and what extensions gave
     /// (`language-server-settings`) over that. Null when nothing says
     /// anything.
-    pub(super) fn lsp_settings(&self, key: &LspKey) -> serde_json::Value {
+    pub(crate) fn lsp_settings(&self, key: &LspKey) -> serde_json::Value {
         let name = Self::lsp_settings_name(key);
         let mut settings = serde_json::Value::Null;
         if key.is_primary_for(fenix_syntax::LanguageId::Python) {
@@ -191,7 +191,10 @@ impl App {
             settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
         }
         let file = key.root.join(".fenix/lsp").join(format!("{name}.json"));
-        if let Some(own) = std::fs::read_to_string(&file).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).filter(|v| v.is_object()) {
+        // A server's settings can be commands it runs: the project's are
+        // given only once its user has allowed them (`trust`).
+        let allowed = self.project_is_trusted(&key.root).then_some(&file);
+        if let Some(own) = allowed.and_then(|file| std::fs::read_to_string(file).ok()).and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).filter(|v| v.is_object()) {
             settings = fenix_lsp::pull::merge(settings, own);
         }
         if let Some(given) = self.wasm.server_settings(&key.root, &name) {

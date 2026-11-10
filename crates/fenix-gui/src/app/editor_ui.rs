@@ -338,11 +338,19 @@ impl App {
     fn breadcrumb_parts(&self, id: BufferId, char_idx: usize) -> Vec<(String, BreadcrumbTarget)> {
         let Some(ob) = self.buffers.get(id) else { return Vec::new() };
         let mut parts = Vec::new();
-        if let Some(path) = ob.buffer.path() {
-            let root = self.project_root.as_deref().filter(|root| path.starts_with(root));
-            let relative = root.and_then(|root| path.strip_prefix(root).ok()).unwrap_or(path);
-            let mut target = root.map(Path::to_path_buf).unwrap_or_default();
-            for component in relative.components() {
+        // A file in the project from the project's root, however the two
+        // paths were spelt (the root is kept canonical, a file as opened).
+        let in_project = ob.buffer.path().and_then(|path| self.project_root.as_deref().and_then(|root| crate::page::path_within(root, path).map(|rel| (root.to_path_buf(), rel))));
+        if let Some((mut target, rel)) = in_project {
+            let names: Vec<&str> = rel.split('/').filter(|n| !n.is_empty()).collect();
+            for (i, name) in names.iter().enumerate() {
+                target.push(name);
+                let action = if i + 1 == names.len() { BreadcrumbTarget::Symbols } else { BreadcrumbTarget::Directory(target.clone()) };
+                parts.push((name.to_string(), action));
+            }
+        } else if let Some(path) = ob.buffer.path() {
+            let mut target = PathBuf::new();
+            for component in path.components() {
                 target.push(component);
                 // `C:\Users`: the drive, then `Users` -- the root's `\` is
                 // part of the drive, not a folder of its own.
@@ -423,6 +431,44 @@ mod tests {
 
     /// A file outside any project: its drive, then its folders -- no `\`
     /// between them as a folder of its own.
+    #[test]
+    fn a_project_file_starts_at_the_project_however_its_root_is_spelt() {
+        let dir = std::env::temp_dir().join(format!("fenix-crumb-project-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let file = dir.join("src").join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let mut app = App::with_file(None);
+        app.test_open_path(&file);
+        // The root as canonicalising spells it on Windows, the file as opened.
+        let root = if cfg!(windows) { PathBuf::from(format!(r"\\?\{}", dir.display()).to_lowercase()) } else { dir.clone() };
+        app.project_root = Some(root);
+        let id = app.focused_buffer_id();
+        let parts: Vec<String> = app.breadcrumb_parts(id, 0).into_iter().map(|(t, _)| t).take(2).collect();
+        assert_eq!(parts, ["src", "main.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder opened as the project from outside (`fenix <folder>`) stays
+    /// the project once a file in it is open, though nothing in it marks
+    /// a project -- so its files' breadcrumbs start there.
+    #[test]
+    fn a_folder_opened_from_outside_stays_the_project() {
+        let dir = std::env::temp_dir().join(format!("fenix-crumb-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "x
+").unwrap();
+        let mut app = App::with_file(None);
+        app.apply_startup(&[], Some(&dir));
+        app.active_picker = None;
+        app.open_file_from_picker(&file);
+        assert!(app.project_root.is_some(), "still the project");
+        let id = app.focused_buffer_id();
+        let parts: Vec<String> = app.breadcrumb_parts(id, 0).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(parts, ["notes.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_paths_root_is_not_a_breadcrumb_of_its_own() {
         let dir = std::env::temp_dir().join(format!("fenix-crumb-root-{}", std::process::id()));
@@ -562,3 +608,4 @@ mod tests {
     }
 
 }
+

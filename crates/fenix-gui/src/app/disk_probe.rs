@@ -95,6 +95,14 @@ fn run(request: ProbeRequest) -> ProbeResult {
     let _profile = crate::profile::Scope::new("disk probe");
     let mut result = ProbeResult::default();
     for (id, path) in request.buffers {
+        // A file on a remote machine: asked of the machine, which
+        // answers at once that it's away when it is.
+        if fenix_vfs::is_remote(&path) {
+            if let Some(looked) = DiskFingerprint::look(&path) {
+                result.buffers.insert(id, looked);
+            }
+            continue;
+        }
         if let Some(meta) = stat(&path) {
             result.buffers.insert(id, DiskFingerprint::from_meta(meta.ok()));
         }

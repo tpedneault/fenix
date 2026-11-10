@@ -10,6 +10,23 @@ its extension. The rest is built into Fenix.
 
 ## Editing
 
+- **Two key schemes.** Vim keys (the default): Vim's modes and editing
+  grammar, and the `SPC` leader for everything else. Standard keys
+  (`editor.keys = "standard"`, `SPC t k`, or the welcome's question): a
+  traditional IDE's, modelled on VS Code's on Windows and Linux -- a
+  file's text is typed into at once, Shift with a movement selects,
+  Ctrl+C/X/V/Z/S, Ctrl+F, F12, F2, Ctrl+/ and the rest, Alt+click and
+  Alt+Shift+drag, Ctrl+D, Ctrl+Shift+L and Ctrl+Alt+↑/↓ for more
+  cursors (Ctrl+U takes one back; they come back with the session), Ctrl+Shift+K, Ctrl+L, Ctrl+Enter,
+  Ctrl+T for the project's symbols and Ctrl+Shift+M for its problems,
+  and the whole leader menu, every
+  extension's included, on `Ctrl+K`. Both schemes run the same commands;
+  hints and menus say the keys of the one in use. See
+  [Standard keys](KEYBINDINGS.md#standard-keys).
+- **Your own keys**: `keybindings.toml`'s `[[leader]]` and `[[keys]]`
+  entries rebind or unbind any leader key or chord (Ctrl+S included), for
+  either scheme or both; the palette's `Tab` binds the command picked.
+
 - **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace/Command
   modes, the standard motion set (`h j k l w b e 0 ^ $ gg G f F t T ; , % { }`),
   operators (`d c y` composing with motions and text objects, plus the
@@ -150,6 +167,15 @@ its extension. The rest is built into Fenix.
   between a syntax capture and the glyph it becomes, several of them
   shared by every other language's own highlighting, for a purely
   cosmetic gain on one language -- more risk than the result was worth.
+- **Bracket pairs by colour** (`appearance.rainbow_brackets`, off
+  unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
+  it's nested, a pair the same colour. They're the code's own brackets,
+  read from its syntax tree, so one in a string or a comment is left
+  alone; in a file of no language, every bracket counts. Code another
+  grammar would read (an HTML page's `<script>`, a Markdown fence) is
+  one token to the file's own, so its brackets aren't coloured. The colours are
+  the theme's -- its `[brackets] colors`, one to six, or else its
+  function, keyword and type colours.
 - **Markdown list continuation**: pressing Enter or `o` on a `-`/`*`/`+`
   bullet or a `1.`/`1)` ordered item continues it onto the next line at
   the same indent -- an ordered marker increments by one (not renumbered
@@ -174,6 +200,49 @@ its extension. The rest is built into Fenix.
   "heading," in half the languages this editor highlights.
 
 ## Files and projects
+
+- **Remote projects (preview)**: `SPC p R` opens a folder on another
+  machine as a project, over SSH. Pick a host from `~/.ssh/config` or
+  type `user@host`; Fenix connects with the system's `ssh` (your config,
+  keys, agent and jump hosts as they are), asks on its prompt line
+  whatever `ssh` asks (a password, a passphrase, a new host's key) once,
+  and shows the machine's folders: `S` opens the one shown. From then on
+  it's a project: the explorer and sidebar list it, `SPC SPC` finds its
+  files (by the machine's own `git`), files open, edit and save there,
+  and a file changed there while you edited it isn't written over
+  (`:w!` keeps yours, `:e!` takes theirs). The modeline names the
+  machine. A connection that drops is made again by itself; meanwhile
+  your unsaved text stays, and a save says it couldn't. The explorer
+  creates, renames, copies and moves there, and between the machine and
+  this one; a delete there is for good (it has no Recycle Bin).
+
+  Fenix copies a small helper program to `~/.fenix/remote/` on the
+  machine the first time (Linux, x86_64 or aarch64; no administrator
+  rights). It runs as you, only while connected, and listens on nothing.
+
+  Not there yet on a remote project: terminals, Git, search, language
+  servers, tasks, the debugger and agents. Files that aren't text open
+  as text.
+
+  What a preview means for trust, so you can decide where to use it:
+
+  - Signing in is `ssh`'s. A new machine's key fingerprint is shown on
+    the prompt line for you to compare; a key that has *changed* is
+    refused by `ssh`, and Fenix says so.
+  - A password or passphrase you type is kept in memory, never on
+    disk, for as long as the connection is open, so that a reconnect
+    doesn't ask again. Keys in an agent need no question at all.
+  - The remote machine isn't given your SSH agent or your display,
+    whatever `~/.ssh/config` says for the host.
+  - The helper there is checked (SHA-256) when Fenix installs it, not
+    each time it runs. It runs as your account on that machine, and is
+    as trustworthy as that account: use this on machines you'd `ssh`
+    into and edit on anyway.
+  - A remote machine can't write outside a folder you copy from it to
+    this one. It can, like any machine, give you files that aren't what
+    they claim.
+  - A remote project's `.fenix/` (its settings, its `tools.json`) isn't
+    read at all yet.
 
 - **File explorer**: one page, drawn at three widths -- the sidebar
   pinned at the left (`SPC e t`: names and status), a pane (`SPC f j`:
@@ -448,6 +517,18 @@ its extension. The rest is built into Fenix.
   moment where being approximately right costs somebody their work.
   `[editor] watch_files = false` turns the whole thing off, for a
   working copy on a network share.
+- **Auto-save**, off unless you turn it on (`editor.auto_save` on the
+  Settings page): `after_delay` saves a file once its edits have rested
+  `editor.auto_save_delay_ms` (a second), `on_focus_change` when you
+  leave it for another buffer, pane or application. It saves the same
+  way `:w` does, with the same check first, so a file that changed on
+  disk since it was read is never written over -- the conflict is yours
+  to settle, and auto-save leaves that file alone until you have (`:w!`
+  or `:e!`), as it does one whose save failed. A buffer with no file
+  yet, a file that wasn't on disk when you opened it (its first save is
+  yours), one shown read-only and a remote project's file are left alone, and auto-saving doesn't run
+  `editor.format_on_save`'s formatter: text moving while you type is
+  worse than a file left unformatted until you save it yourself.
 - **Safe saves**: documents, settings, and recovery snapshots are staged beside
   their destination, explicitly flushed and synced, then replaced. Windows
   replacement preserves destination ACLs and refuses sharing violations; failed
@@ -643,7 +724,18 @@ its extension. The rest is built into Fenix.
   `Enter` opens, `1`-`9` open a numbered project or file directly. The
   columns reflow to two, then one, as the window narrows, and every
   colour comes from the active theme (the brand orange only marks a
-  running timer).
+  running timer). With `updates.check` on (it's off unless you turn it on),
+  a quiet line under the date says when a newer Fenix is out -- looked
+  for once a day; `app.check_for_updates` looks when asked. Nothing is
+  downloaded (see CONFIGURATION.md's Looking for a newer Fenix).
+- **Welcome** (`SPC h w`, and a fresh install's first screen): five
+  steps, one at a time -- what Fenix is; how you'd like to edit (Vim keys,
+  recommended, or standard keys); a theme and the text size, applied as
+  you pick them; the extension packs (`x` opens them to install); and
+  where to learn: the tutorial, the keys page, a folder to work in. Each
+  choice is a setting in use at once. `Enter` and `←` step through, `Esc`
+  skips the rest, and a click on a key's cap -- or on a choice -- presses
+  it. Finishing writes `settings.toml`, so the next start goes to Home.
 - **Tutorial** (`SPC h T`, and `t` on the welcome at first launch):
   vimtutor for all of Fenix, in sections of lessons. Editing: modes
   and moving; words, lines and counts; operators and text objects; Visual
@@ -1003,7 +1095,12 @@ the guide.
   A thread whose agent can't take it back is read-only; `C` continues it
   in a new session the same way.
 - **Threads** are kept: `SPC a t` lists the project's, and one picked up
-  again continues its session where the agent can (resume, or load).
+  again continues its session where the agent can (resume, or load). A
+  pipeline's run is one entry there -- what was asked, the pipeline, how
+  it ended, its steps folded under it -- whose summary and whole review
+  are a key away; `Alt+A` archives a thread or a run (put away, never
+  deleted; `Alt+H` shows them; `SPC a z` from anywhere), and `SPC a l`
+  (or `Alt+P`) lists every project's, by project.
   `SPC a i` continues a session started in the agent's own CLI. The
   panel comes back with the session after a restart, the prompt you
   hadn't sent included; the agent starts again when you look at it.
@@ -1218,6 +1315,17 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   last. Requires `pdfium.dll` (see [Optional external
   tools](BUILDING.md#optional-external-tools)) -- without it, opening a
   PDF says so.
+- **Jupyter notebooks**, from the Jupyter extension (`fenix.jupyter`,
+  in the welcome's Python pack): an `.ipynb` opens on a page of its cells
+  -- code highlighted with its `[n]`, markdown as it reads, outputs below
+  each with tracebacks and matplotlib's plots as pictures. Jupyter's
+  command-mode keys: `Enter` edits a cell in a pane beside,
+  `Shift+Enter` runs it and moves on, `R` runs them all, `a`/`b`/`dd`,
+  `m`/`y`, `ii`/`00`. Changes are edits of the notebook's buffer, written
+  as Jupyter writes it, so undo and saving are the buffer's. Cells run in
+  the notebook's folder on the project's `.venv` (or `jupyter.python`, uv,
+  `python3`): on ipykernel when it's installed, on that Python itself
+  when it isn't, `input()` asked in the modeline.
 
 ## Code intelligence, tasks and debugging
 
@@ -1394,8 +1502,9 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   or close. Popups get rounded corners and soft shadows; problems from
   language servers are underlined with a wave, with the cursor line's
   message at its end; an overview ruler down each code pane's right edge
-  shows the visible part, search matches, problems and changes (click
-  it to jump); sticky scroll pins the headers of the scopes you're
+  shows the visible part, search matches, problems by severity (errors,
+  warnings, information), Git changes, the cursor and extra cursors -- a
+  click on a mark goes to it, anywhere else to that part of the file; sticky scroll pins the headers of the scopes you're
   inside; a Visual selection is rounded and shows its whitespace;
   unfocused panes are dimmed; brackets can be coloured by depth.
   `motion.level` (`SPC t a`) sets how much moves, every animation and
@@ -1741,7 +1850,7 @@ LSP rename and edit-based code actions open a read-only multi-file preview.
 For a list of code actions, move to an action and press Enter to preview it.
 Press `a` or Enter to apply every proposed text edit in memory, or `q` / Escape
 to cancel. Files remain unsaved; use the usual save commands after review.
-`:undo-refactor` reverses the latest refactor across all affected buffers, provided
+`SPC c R` (`code.undo_refactor`, or `:undo-refactor`) reverses the latest refactor across all affected buffers, provided
 none has since been edited, renamed, or closed. Normal `u` undoes only one file.
 
 Edits validate document versions, exact UTF-16 ranges, overlapping ranges, and

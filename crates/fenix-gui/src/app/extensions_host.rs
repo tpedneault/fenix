@@ -24,9 +24,9 @@ impl App {
         self.open_extensions(false);
     }
 
-    /// `SPC h w`, and a fresh install's first screen: the page with the
-    /// bundles.
-    pub(crate) fn open_welcome_page(&mut self) {
+    /// The extensions' packs, alone: what the welcome's Extensions step
+    /// opens (`extensions.welcome`).
+    pub(crate) fn open_extension_packs(&mut self) {
         self.open_extensions(true);
     }
 
@@ -298,7 +298,6 @@ impl App {
             Action::None => {}
             Action::Close => self.close_page(id),
             Action::Say(text) => self.set_message(text),
-            Action::Tutorial => self.open_tutorial(),
             Action::Install(ext) => self.install_from_registry(ext),
             Action::UpdateAll(exts) => self.install_all(exts),
             Action::Details(target) => self.open_extension_details(id, target),
@@ -411,10 +410,10 @@ mod tests {
         app.set_setting("extensions.store", Some(fenix_config::Value::Bool(false))).unwrap();
         app.open_extensions_page();
         assert!(matches!(registry_of(&app), Registry::Off(e) if e.contains("extensions.store")));
-        app.open_welcome_page();
+        app.open_extension_packs();
         assert!(matches!(registry_of(&app), Registry::Off(_)), "nor the welcome, for its bundles");
         app.set_setting("extensions.store", Some(fenix_config::Value::Bool(true))).unwrap();
-        app.open_welcome_page();
+        app.open_extension_packs();
         assert!(matches!(registry_of(&app), Registry::Looking), "the welcome looks, for its bundles");
     }
 

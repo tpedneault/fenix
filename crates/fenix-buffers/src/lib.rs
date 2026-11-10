@@ -241,6 +241,12 @@ impl BufferList {
         self.insert(Buffer::empty(), None, BufferKind::Text)
     }
 
+    /// An unnamed buffer holding `text`, unchanged and with no file
+    /// behind it: a page Fenix writes for reading (the keys page).
+    pub fn open_text(&mut self, text: &str, syntax: Option<fenix_syntax::SyntaxState>) -> BufferId {
+        self.insert(Buffer::from_text(text), syntax, BufferKind::Text)
+    }
+
     /// A real buffer seeded with `text` up front (no undo history, via
     /// `Buffer::from_text`) and tagged `Dashboard` -- the startup
     /// dashboard, `SPC d d`. A real buffer like any other: splittable,
@@ -464,6 +470,11 @@ impl BufferList {
     /// A stable listing order for a buffer-switcher UI: by path (buffers
     /// with no path -- scratch buffers -- sort first, in creation order
     /// among themselves since `None < Some(_)`).
+    /// Every buffer's id, in no order.
+    pub fn ids(&self) -> impl Iterator<Item = BufferId> + '_ {
+        self.buffers.keys().copied()
+    }
+
     pub fn ids_sorted_by_path(&self) -> Vec<BufferId> {
         let mut ids: Vec<BufferId> = self.buffers.keys().copied().collect();
         ids.sort_by(|&a, &b| self.buffers[&a].buffer.path().cmp(&self.buffers[&b].buffer.path()));

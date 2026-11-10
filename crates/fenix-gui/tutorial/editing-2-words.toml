@@ -1,4 +1,5 @@
 id = "editing.words"
+scheme = "vim"
 track = "Editing"
 order = 2
 title = "Words, lines and counts"

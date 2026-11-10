@@ -1,4 +1,4 @@
-# Builds the test extensions to hello.wasm and counter.wasm, and the
+# Builds the test extensions to hello.wasm, counter.wasm and keys.wasm, and the
 # model hello-model.glb, which are
 # committed so the tests need no wasm toolchain. Needs rustup's 1.98.0
 # with wasm32-wasip2.
@@ -7,7 +7,7 @@ $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
 $rustup = Join-Path $env:USERPROFILE ".cargo\bin\rustup.exe"
 # That toolchain's own rustc, not one an installer put first on PATH.
 $env:RUSTC = & $rustup which rustc --toolchain 1.98.0
-foreach ($guest in "hello", "counter") {
+foreach ($guest in "hello", "counter", "keys") {
     Push-Location (Join-Path $here $guest)
     try {
         & $cargo +1.98.0 build --release --target wasm32-wasip2

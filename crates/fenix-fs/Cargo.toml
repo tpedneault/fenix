@@ -13,3 +13,7 @@ publish.workspace = true
 # the user already knows -- see `recycle` for why nothing here falls
 # back to permanent deletion on its own.
 trash = "5.2"
+fenix-vfs = { path = "../fenix-vfs" }
+
+[dev-dependencies]
+tempfile = "3"

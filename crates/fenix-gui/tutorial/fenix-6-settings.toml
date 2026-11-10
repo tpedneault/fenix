@@ -12,7 +12,7 @@ together; Tab moves along, or 1 to 4.
 
 [[step]]
 say = "SPC , opens the settings."
-hint = "Space, then a comma."
+hint = "{leader}, then a comma."
 page = "settings"
 
 [[step]]
@@ -22,7 +22,7 @@ closed = "settings"
 
 [[step]]
 say = "SPC h x opens the extensions."
-hint = "Space, h (help), x."
+hint = "{leader}, h (help), x."
 page = "extensions"
 
 [[step]]

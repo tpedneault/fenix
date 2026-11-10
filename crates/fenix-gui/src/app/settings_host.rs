@@ -329,6 +329,12 @@ impl App {
                 let width = self.effective_indent_width();
                 self.vim.set_indent_width(width);
             }
+            "editor.keys" => {
+                self.sync_key_policy();
+                self.leader_matcher = crate::keymap::leader_trie().matcher();
+                *self.leader_places.borrow_mut() = None;
+                self.key_scheme_changed();
+            }
             "editor.iskeyword_extra" => {
                 let chars = self.effective_iskeyword();
                 self.vim.set_iskeyword_extra(chars);

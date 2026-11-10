@@ -6,6 +6,186 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-10
+
+### Security
+
+- A project's own programs wait to be allowed. `.fenix/tools.json` (its
+  language servers, debug adapters and tasks) and `.fenix/lsp/*.json` (a
+  server's settings) are used only once you've said yes for that
+  project, with `SPC p y` (`project.trust`), which shows the file and
+  asks. Before, opening a file in a project started the language server
+  the project named, so a repository you had only just cloned could run
+  a program of its choosing. The answer is kept outside the project and
+  asked again when those files change. Projects you already used keep
+  working; what the wizard, the settings page and the doctor write for
+  you needs no allowing.
+
+### Added
+
+- Remote projects, a preview: `SPC p R` (`project.open_remote`) opens a
+  folder on another machine as a project, over SSH, with the system's
+  `ssh` and a small helper Fenix copies there (Linux; no administrator
+  rights). The explorer, the sidebar and the file picker list it; files
+  open, edit and save there, and aren't written over when they changed
+  there; a dropped connection is made again by itself. Terminals, Git,
+  search, language servers, tasks and the debugger don't work on a
+  remote project yet. See FEATURES.md's Files and projects.
+- A welcome for a first run (`SPC h w` brings it back): what Fenix is,
+  then a step each for how you'd like to edit (Vim keys, recommended, or
+  standard keys), a theme and the text size, the extension packs, and
+  where to learn -- the tutorial in the keys you picked, the keys page, a
+  folder to open. Every choice is in use as it's made; a click on a
+  choice picks it. The packs are on a view of their own
+  (`extensions.welcome`).
+- Standard keys: a traditional IDE's way to edit, beside Vim's
+  (`editor.keys = "standard"`, `SPC t k`, or the welcome's question). A
+  file's text is typed into at once; Shift with a movement selects, and
+  typing replaces the selection; Ctrl+C/X/V/Z/Y/S/A, Ctrl+F and Ctrl+H on
+  the Search page, Ctrl+P, Ctrl+Shift+P, F12, F2, Ctrl+/, Alt+↑/↓ and the
+  rest of VS Code's keys on Windows and Linux; undo a word or a line at a
+  time. The leader's menu, every extension's keys in it, opens on Ctrl+K
+  (`keys.leader_chord`). Home, Git, diffs and listings are browsed with
+  their own keys. Compose panes send on Ctrl+Enter; an agent's question is
+  answered with a click, or Alt and its key. See KEYBINDINGS.md's Standard
+  keys, and ADR 0004.
+- More cursors, with standard keys: Alt+click adds one (or takes it away),
+  Alt+Shift+drag makes a column; typing, deleting, Enter, Tab, the arrows
+  and pasting happen at each, as one undo step, and undo and redo bring
+  the cursors back (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click
+  instead).
+- More cursors from the keyboard, with standard keys: Ctrl+D selects the
+  word under the cursor, then adds a cursor on the selection's next
+  occurrence each time; Ctrl+Shift+L puts one on every occurrence;
+  Ctrl+Alt+↑/↓ add one on the line above or below. A selected whole word
+  finds whole words only. They're commands too
+  (`edit.add_next_occurrence`, `edit.select_all_occurrences`,
+  `edit.add_cursor_above`/`below`).
+- Chords are keymap data: `[[keys]]` in `keybindings.toml` and in
+  extensions' keymaps binds or unbinds a key with its modifiers (`C-s`,
+  `C-S-p`, `F12`) for a key scheme and a place; Ctrl+S, Ctrl+Z and the
+  rest can be rebound with Vim keys too. `SPC h b`, `SPC h k` and `SPC h K`
+  cover chords, and the palette's `Tab` binds one.
+- Commands for what only Vim keys, Ex or the right-click menu did:
+  `code.hover`, `code.goto_definition`, `code.references`,
+  `code.toggle_comment`, `edit.copy`/`cut`/`paste`/`select_all`, moving
+  and copying lines, the `:sort` variants, `lsp.restart`,
+  `nav.goto_line`, the bracket jumps (`nav.next_problem`…, on `SPC ]` and
+  `SPC [` too), panes by number, a tab to the next pane, the recent-buffer
+  switcher, and a keys page (`SPC h ?`).
+- Extra cursors come back with the session (without their selections,
+  as the main cursor's isn't kept) when the file's text is the one they
+  were left in; a file changed since gets its main cursor back only.
+- The thread list (`SPC a t`) groups a pipeline's run as one entry:
+  what was asked, the pipeline, how it ended and when, its steps folded
+  under it with their agent and state. `Enter` on a run shows its
+  summary, `Alt+R` reviews its changes as one; `Alt+A` archives a thread
+  or a whole run (it's never deleted; `Alt+H` shows archived ones), and
+  `SPC a l` (`agents.threads_everywhere`, or `Alt+P` in the list) shows
+  every project's threads by project; `SPC a z` (`agents.archive`)
+  archives the thread the panel shows. A step's thread keeps which run
+  and step it is; threads kept before are single entries.
+- Auto-save, off unless chosen on the Settings page: `editor.auto_save =
+  "after_delay"` saves a file a moment after its last edit
+  (`editor.auto_save_delay_ms`, a second), `"on_focus_change"` when you
+  leave it for another buffer, pane or application. It never writes over
+  a file that changed on disk (it waits until you've settled that), nor
+  a buffer with no file, a file not yet on disk, a read-only one or a
+  remote project's, and it doesn't format.
+- A newer Fenix, said on Home: with `updates.check` on (off unless you
+  turn it on, as Fenix goes on the network only when asked), GitHub's
+  latest release is looked for once a day; `app.check_for_updates` looks
+  now. Nothing is downloaded or installed. `update_check = false` in a
+  machine's `policy.toml` switches both off for everyone.
+- More of VS Code's keys, with standard keys: Ctrl+Shift+K deletes the
+  line, Ctrl+Enter and Ctrl+Shift+Enter open one below or above, Ctrl+L
+  selects the line (again, the next), Ctrl+U takes back the last cursor
+  move or added cursor, Ctrl+Shift+\ goes to the matching bracket,
+  Ctrl+] and Ctrl+[ indent and dedent, Ctrl+Shift+[ and Ctrl+Shift+] fold
+  and unfold, Ctrl+\ splits the pane, Ctrl+Shift+G opens Git. The F-keys
+  were already the debugger's.
+- Every problem in one list: `code.problems` (Ctrl+Shift+M, `SPC c p`),
+  errors first, the quickfix list too; and the project's symbols as the
+  language servers find them for what's typed: `code.project_symbols`
+  (Ctrl+T, `SPC c j`).
+- A split button after each pane's tabs.
+- Extensions: the welcome offers a Python pack -- the Python language pack, Jupyter
+  notebooks (`fenix.jupyter`, `.ipynb` files run on a kernel) and the CSV table.
+
+### Changed
+
+- Extra cursors stay through an edit made elsewhere -- a language
+  server's, an agent's, a format, the file reloaded, an undo or redo --
+  moving with the text, where they went back to one cursor. One in text
+  that was replaced or deleted goes. A language server's edits, a
+  format, a resolved conflict, a project replace and a reload replace
+  only the lines that changed, so cursors, marks and an extension's
+  decorations in the rest stay where they were.
+- The overview ruler down a code pane's right edge marks extra cursors
+  and information-level problems too, and a click on (or near) a mark
+  goes to that line exactly. It's still on by default, as it has been
+  since 1.0 (`appearance.overview_ruler`).
+- Rainbow brackets (`appearance.rainbow_brackets`) go by the syntax
+  tree: a bracket in a string or a comment isn't coloured, and a closing
+  bracket is its partner's colour. The colours are the theme's: a theme
+  file's `[brackets] colors`, or its function, keyword and type colours
+  (they were the mode colours).
+- `fenix/commands` reports the keys that run a command now: a chord
+  (`C-s`) over the leader's keys, which standard keys write with their
+  chord (`C-k g g`).
+- Hints, messages and toasts say the keys of the scheme in use.
+- The refactor preview (a rename, a code action) shows each change as its
+  own hunk, files named from the project root; `code.undo_refactor`
+  (`SPC c R`) undoes a refactor with either keys.
+- Rename (`F2`, `SPC c r`) starts from the whole name under the cursor --
+  selected, with standard keys, so typing replaces it; Ctrl+Backspace
+  deletes a word in one-line prompts.
+- A snippet's previous field is Shift+Tab (and Ctrl+K with Vim keys: with
+  standard keys Ctrl+K stays the leader).
+- The Search page fits a narrow pane: its toggles go under the field and
+  its scopes wrap.
+- Find references says how many there are and the key for the next.
+- The keys page is a buffer of its own, with no file behind it.
+
+### Fixed
+
+- Following the agent (`SPC a f`) goes to the line it changed, not only the
+  file, and scrolls there: the pane beside the dock moved its cursor but,
+  without the focus, never scrolled to it. When the agent writes -- through
+  Fenix, or to disk itself as Claude Code does -- it goes to the first line
+  the write changed; before that, to the line it last read there, as an
+  agent's edit seldom names one. A later update to the same edit doesn't
+  pull the view back. With the dock across the whole window, `SPC a f` says
+  there's no pane beside it to follow in, and follows in any pane that isn't
+  the dock's.
+- A folder opened as the project from outside (`fenix <folder>`,
+  `--project`, `fenix/openProject`) gets a workspace of its own, as `SPC p p`
+  gives it, and stays the project once a file in it is open -- a folder with
+  no `.git` or `Cargo.toml` stopped being the project then.
+- A file in the project has its breadcrumb from the project, however the
+  project's folder was spelt (`\\?\`, a drive letter's case), not its whole
+  path.
+- The agents' tool cards show a file in the project from the project, and
+  one elsewhere from `~`, not the whole path the agent gave.
+- `settings.toml` loses a table once its last setting is unset (no bare
+  `[appearance]` left behind); the comment at the top of the file stays
+  there.
+- Enter on an indented blank line kept no indent for the next.
+- Task Output could show a program's stdout before stderr it had written
+  earlier (`cargo test`'s `Running …`).
+- Completion opened when the cursor merely moved after a word; with
+  standard keys it followed every arrow, and Escape didn't close it.
+- The Search page went on following F3 after references replaced its list.
+- The sidebar's Git badges stayed as they were after a save, a commit or
+  a change made in a terminal.
+- A problem's underline at the end of a long line could be drawn over the
+  pane beside it.
+- Save and delete messages named files by their whole path, the question
+  cut off at the prompt's edge.
+- With standard keys, the debugger's drawer, the agents' dock titles, the
+  Git and review popups, notification cards and the modeline's Git
+  operation said Vim's keys (`SPC u e`, `K`, `]h`).
+
 ## [1.4.0] - 2026-11-08
 
 ### Changed
@@ -784,7 +964,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/tpedneault/fenix/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/tpedneault/fenix/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tpedneault/fenix/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0

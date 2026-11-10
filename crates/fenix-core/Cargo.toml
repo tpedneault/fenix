@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 encoding_rs = "0.8"
 fenix-storage = { path = "../fenix-storage" }
+fenix-vfs = { path = "../fenix-vfs" }
 ropey = "1"
 
 [dev-dependencies]
