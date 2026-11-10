@@ -129,9 +129,10 @@ its extension. The rest is built into Fenix.
   (at most half the pane); the line number, gutter marks and fold marker
   are on its first row, a problem's message and a fold's `⋯ N lines` at
   the end of its last. `SPC t w` (`Alt+Z` with standard keys) turns it on
-  or off for the buffer in front; `editor.wrap` is the default, Markdown
-  and plain text files wrap whatever it says (`editor.wrap_languages`,
-  `editor.nowrap_languages`), and an agent's prompt always does. `gj` /
+  or off for the buffer in front, until it's closed or Fenix restarts (it
+  isn't kept with the session); `editor.wrap` is the default, Markdown
+  and `.txt` files wrap whatever it says (`editor.wrap_languages`,
+  `editor.nowrap_languages`), and an agent's prompt wraps by default. `gj` /
   `gk` move by screen rows, as `↑` / `↓` do with standard keys and in
   Insert, where `End` stops first after the row's last word (or on its
   last char, when the row ends inside a word). Tables, diffs, Git pages, terminals, pages, Home and a side by

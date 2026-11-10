@@ -309,9 +309,19 @@ impl App {
         if ob.kind == BufferKind::Prompt {
             return true;
         }
+        // Its language's name; `text` only for a `.txt` or `.text` file
+        // (any case), not every file of no language Fenix knows, which
+        // follows `editor.wrap`. An extension in capitals counts here
+        // (`README.MD` is Markdown) whatever highlighting makes of it.
         let language = match (ob.syntax.as_ref().map(|s| s.language()), ob.buffer.path()) {
             (Some(language), _) => Some(language.name()),
-            (None, Some(path)) => Some(fenix_syntax::detect_language_from_path(path).map_or_else(|| "text".to_string(), |l| l.name())),
+            (None, Some(path)) => {
+                let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+                fenix_syntax::detect_language_from_path(path)
+                    .or_else(|| ext.as_deref().and_then(fenix_syntax::detect_language))
+                    .map(|l| l.name())
+                    .or_else(|| matches!(ext.as_deref(), Some("txt" | "text")).then(|| "text".to_string()))
+            }
             (None, None) => None,
         };
         if let Some(language) = language {
@@ -1166,9 +1176,17 @@ mod app_tests {
         };
         let none = |_: &mut App| {};
         assert!(wraps("a.md", &none));
+        assert!(wraps("README.MD", &none), "an extension in capitals");
         assert!(wraps("notes.txt", &none), "a plain text file");
-        assert!(wraps("README", &none), "a file of no language Fenix knows is text");
+        assert!(wraps("a.TXT", &none));
+        // A file of no language Fenix knows isn't text unless it's .txt:
+        // it follows editor.wrap, as in 1.5.
+        for name in ["README", "a.rb", "Makefile", "x.log", "a.csv", "Cargo.lock", "a.proto"] {
+            assert!(!wraps(name, &none), "{name}");
+        }
         assert!(!wraps("a.rs", &none));
+        let on_for_all = |app: &mut App| app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+        assert!(wraps("x.log", &on_for_all));
         let on = |app: &mut App| app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
         assert!(wraps("a.rs", &on));
         let not_md = |app: &mut App| app.config.set_value("editor.nowrap_languages", Some(fenix_config::Value::List(vec!["markdown".into()])));

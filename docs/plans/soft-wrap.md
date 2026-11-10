@@ -434,8 +434,10 @@ stage by stage.
 ### Stage 6: settings and keys
 
 - `editor.wrap` (default off), `editor.wrap_languages` (default
-  `markdown, text`; `text` is a file of no language Fenix knows, not a
-  buffer with no file) and `editor.nowrap_languages` (default none), read
+  `markdown, text`; `text` is a `.txt` or `.text` file, any case -- a
+  file of no language Fenix knows otherwise follows `editor.wrap`, as
+  in 1.5 -- and an extension in capitals counts for wrap, `README.MD`
+  being Markdown, though highlighting still goes by its own case) and `editor.nowrap_languages` (default none), read
   in that order of strength from the bottom: the nowrap list, then the
   wrap list, then `editor.wrap`. An agent's `Prompt` buffer wraps
   whatever they say; `view.toggle_wrap` for a buffer outranks them all.
@@ -456,3 +458,8 @@ stage by stage.
   the buffer's ends, an unfocused pane's `reveal_cursor` and
   `search_reveal`, the reload clamp, folds, tabs, decorations and wide
   chars inside a move by row.
+- After review: the settings page opens `editor.wrap_languages` with its
+  default to edit, and emptied it stores an empty list rather than the
+  default (`LISTED_DEFAULTS`); other list settings, whose unset is
+  empty, are as they were. The per-buffer toggle isn't kept with the
+  session and goes when its buffer closes.

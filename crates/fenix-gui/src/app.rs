@@ -20145,6 +20145,9 @@ impl App {
         self.agents_dock_sync();
         // The extensions' decorations, moved with the edits since.
         self.shift_code_decorations();
+        // A closed buffer's wrap, turned, goes with it.
+        let buffers = &self.buffers;
+        self.wrap_overrides.retain(|id, _| buffers.get(*id).is_some());
         // And theirs by rule, from a file's first frame.
         self.apply_decoration_rules();
         // An extension's grammar that didn't load, or its query, said once.
