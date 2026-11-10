@@ -905,6 +905,43 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "helper three\n");
     }
 
+    /// A replace in a file that's open edits only the lines it matched:
+    /// an extra cursor in another stays, and undoing the replace puts
+    /// the text back.
+    #[test]
+    fn a_replace_in_an_open_file_keeps_the_cursors_in_other_lines() {
+        let dir = TempDir::new("search_host_replace_open");
+        let a = dir.write("a.txt", "zebra one\nkeep me\nzebra two\n");
+        let mut app = app_in(&dir);
+        app.open_startup_file(&a);
+        // The project is the test's own folder, whatever opening the
+        // file made of it.
+        app.project_root = Some(dir.path().to_path_buf());
+        app.workspaces.active_workspace_mut().project = Some(dir.path().to_path_buf());
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let buffer = app.focused_buffer_id();
+        app.toggle_caret_at("zebra one\nkeep".len());
+        app.search_open(SearchOpen::Replace);
+        let id = app.search_page_id().unwrap();
+        type_into(&mut app, id, "zebra");
+        press(&mut app, id, Key::Tab);
+        type_into(&mut app, id, "horse");
+        press(&mut app, id, Key::Enter);
+        let page = app.search_page(id).unwrap();
+        assert!(page.files.len() == 1 && page.files[0].path == a, "only the test's file: {:?}", page.files.iter().map(|f| &f.path).collect::<Vec<_>>());
+        app.search_page_mut(id).unwrap().following = false;
+        press(&mut app, id, Key::Char('R'));
+        press(&mut app, id, Key::Char('y'));
+        assert_eq!(app.buffers.get(buffer).unwrap().buffer.text(), "horse one\nkeep me\nhorse two\n");
+        app.follow_outside_edits();
+        let pane = app.windows().windows().into_iter().find(|p| app.windows().content(*p) == Some(&buffer)).unwrap();
+        let carets = app.carets.get(&pane).map(|c| c.extra.iter().map(|c| c.at).collect::<Vec<_>>()).unwrap_or_default();
+        assert_eq!(carets, ["horse one\nkeep".len()], "its line wasn't touched");
+        app.search_undo();
+        assert_eq!(app.buffers.get(buffer).unwrap().buffer.text(), "zebra one\nkeep me\nzebra two\n");
+    }
+
     #[test]
     fn a_file_changed_since_the_search_is_left_alone() {
         let dir = TempDir::new("search_host_stale");
