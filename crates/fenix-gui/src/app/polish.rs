@@ -182,7 +182,10 @@ impl App {
                         continue;
                     }
                     edit_row_chars(cells, view.gutter_chars, |col, ch, color| match here.get(&col) {
-                        Some(depth) if !palette.is_empty() => (ch, palette[depth % palette.len()]),
+                        // Only a bracket: with the tree behind the text
+                        // (conflict markers stop it being read) a stale
+                        // place isn't coloured.
+                        Some(depth) if !palette.is_empty() && "()[]{}".contains(ch) => (ch, palette[depth % palette.len()]),
                         _ => (ch, color),
                     });
                 }
@@ -516,7 +519,10 @@ mod tests {
             let found: Vec<char> = depths.iter().map(|&(at, _)| text.chars().nth(at).unwrap()).collect();
             assert_eq!(found, ['(', ')', '{', '}'], "the string's ( isn't one");
             assert_eq!(depths.iter().map(|&(_, d)| d).collect::<Vec<_>>(), [0, 0, 0, 0]);
-            assert!(std::sync::Arc::ptr_eq(&depths, &app.bracket_depths(id)), "kept until it changes");
+            // A frame drawn between: the tree is looked at again, and
+            // nothing having changed, the depths are kept.
+            app.syntax_highlights_for_visible_range(id, 0, 10);
+            assert!(std::sync::Arc::ptr_eq(&depths, &app.bracket_depths(id)), "kept across frames until it changes");
         }
         assert_eq!(text_bracket_depths("a(b[c]) \"(\"".chars()), [(1, 0), (3, 1), (5, 1), (6, 0), (9, 0)], "plain text: every one");
     }

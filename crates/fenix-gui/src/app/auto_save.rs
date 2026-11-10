@@ -3,14 +3,19 @@
 //! or when you leave it -- another buffer, another pane, another
 //! application (`on_focus_change`). Off unless you turn it on.
 //!
-//! Only a file's own text is saved: not a buffer with no file yet, not
-//! one Fenix shows read-only, not a remote project's file (its machine
-//! can go away mid-write), and never one that changed on disk since it
-//! was read -- that's left for you to settle, as a save would refuse.
+//! Only a file's own text is saved: not a buffer with no file yet, nor a
+//! file that wasn't there when it was opened (its first save is yours),
+//! not one Fenix shows read-only, not a remote project's file (its
+//! machine can go away mid-write), and never one that changed on disk
+//! since it was read: that, once found, holds auto-save back for the
+//! buffer until you've settled it yourself (`:w!` or `:e!`). A save that
+//! fails says so once and holds it back the same way, until a save of
+//! yours goes through.
 //! Auto-saving doesn't format (`editor.format_on_save` is for the saves
 //! you make: text moving under you while you type is worse than an
 //! unformatted file).
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::{App, BufferId, DiskSweep};
@@ -30,12 +35,15 @@ const MIN_DELAY: Duration = Duration::from_millis(100);
 #[derive(Debug, Default)]
 pub(crate) struct AutoSaveState {
     /// Each dirty buffer's edit count, and when it was first seen at it.
-    edits: std::collections::HashMap<BufferId, (u64, Instant)>,
+    edits: HashMap<BufferId, (u64, Instant)>,
     /// The buffer that had the keyboard at the last look.
     focused: Option<BufferId>,
-    /// A buffer that couldn't be saved, at the edit count it failed at:
-    /// not tried again until it's edited again.
-    failed: std::collections::HashMap<BufferId, u64>,
+    /// Held back until you save (or reload) it yourself: it changed on
+    /// disk, or a save of it failed.
+    held: HashSet<BufferId>,
+    /// Edited by what its own save set off (an extension that formats on
+    /// save, say), at this edit count: not saved again for that.
+    settled_at: HashMap<BufferId, u64>,
 }
 
 impl App {
@@ -51,20 +59,32 @@ impl App {
         }
     }
 
+    /// A save of yours: whatever held auto-save back for `id` is settled.
+    pub(crate) fn auto_save_settled(&mut self, id: BufferId) {
+        self.auto_save.held.remove(&id);
+        self.auto_save.settled_at.remove(&id);
+    }
+
     /// Whether `id` is a buffer auto-save may write: a local file's text,
-    /// edited, that Fenix doesn't show read-only.
-    fn auto_saves(&self, id: BufferId) -> bool {
+    /// edited, that was on disk when it was read, that Fenix doesn't show
+    /// read-only, and that nothing holds back.
+    fn auto_saves(&mut self, id: BufferId) -> bool {
+        if self.externally_changed.contains(&id) {
+            // Found changed on disk: never auto-saved over until you say.
+            self.auto_save.held.insert(id);
+        }
         let Some(ob) = self.buffers.get(id) else { return false };
         let Some(path) = ob.buffer.path() else { return false };
         ob.buffer.is_dirty()
             && ob.kind.tracks_unsaved_changes()
+            && !self.auto_save.held.contains(&id)
+            && self.disk_state.contains_key(&id)
             && !self.buffer_edits_are_reverted(id, ob.kind)
             && !fenix_vfs::is_remote(path)
-            && !self.externally_changed.contains(&id)
             && !self.is_kept_compose(id)
             && self.code_scratch_name(id).is_none()
             && self.tutorial_buffer_name(id).is_none()
-            && self.auto_save.failed.get(&id) != Some(&ob.buffer.edit_count())
+            && self.auto_save.settled_at.get(&id) != Some(&ob.buffer.edit_count())
     }
 
     /// Writes `id` for auto-save, if the file on disk is still the one it
@@ -75,32 +95,41 @@ impl App {
         }
         let mut sweep = DiskSweep::default();
         self.check_one_file(id, &mut sweep, false, None);
-        if self.externally_changed.contains(&id) || !sweep.reloaded.is_empty() {
+        if self.externally_changed.contains(&id) {
+            self.auto_save.held.insert(id);
+            return false;
+        }
+        if !sweep.reloaded.is_empty() {
             return false;
         }
         let Some(ob) = self.buffers.get_mut(id) else { return false };
-        let edits = ob.buffer.edit_count();
         match ob.buffer.save() {
             Ok(()) => {
-                let path = ob.buffer.path().map(std::path::Path::to_path_buf);
-                self.note_disk_state(id);
-                self.discard_recovery_for(id);
-                self.refresh_gutter_hunks(id);
-                if let Some(path) = path {
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.editor_event("saved", fenix_wasm::host::Notice::Saved(name));
-                    self.code_file_saved(&path);
-                }
+                let Some(path) = ob.buffer.path().map(std::path::Path::to_path_buf) else { return true };
                 self.auto_save.edits.remove(&id);
+                // The same as a save of yours from here on, and the keys
+                // read again when it's your keybindings.toml.
+                self.after_saved(id, &path);
+                self.reload_keybindings_if(&path);
+                // What the save itself set off edited it again: not a
+                // reason to save it again, or a loop.
+                if let Some(ob) = self.buffers.get(id).filter(|ob| ob.buffer.is_dirty()) {
+                    self.auto_save.settled_at.insert(id, ob.buffer.edit_count());
+                }
                 true
             }
             Err(err) => {
-                self.auto_save.failed.insert(id, edits);
+                self.auto_save.held.insert(id);
                 let name = self.buffer_display_name(id);
-                self.set_error(format!("auto-save couldn't write {name}: {err}"));
+                self.set_error(format!("auto-save couldn't write {name}: {err} -- it waits until you save it yourself"));
                 false
             }
         }
+    }
+
+    /// The dirty buffers that could be auto-saved, in no order.
+    fn auto_save_candidates(&self) -> Vec<BufferId> {
+        self.buffers.ids().filter(|&id| self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty() && ob.buffer.path().is_some() && ob.kind.tracks_unsaved_changes())).collect()
     }
 
     /// Every buffer auto-save may write, written: the window has lost the
@@ -109,7 +138,7 @@ impl App {
         if self.auto_save_mode() != AutoSave::OnFocusChange {
             return;
         }
-        for id in self.dirty_tracked_buffer_ids() {
+        for id in self.auto_save_candidates() {
             self.auto_save_buffer(id);
         }
     }
@@ -122,6 +151,10 @@ impl App {
         let mode = self.auto_save_mode();
         let focused = Some(self.focused_buffer_id());
         let left = std::mem::replace(&mut self.auto_save.focused, focused).filter(|was| Some(*was) != focused);
+        // What a clean buffer held back is settled: :e!, or a save.
+        let clean = |app: &App, id: &BufferId| app.buffers.get(*id).is_none_or(|ob| !ob.buffer.is_dirty());
+        let settled: Vec<BufferId> = self.auto_save.held.iter().filter(|id| clean(self, id)).copied().collect();
+        settled.into_iter().for_each(|id| self.auto_save_settled(id));
         match mode {
             AutoSave::Off => {
                 self.auto_save.edits.clear();
@@ -134,11 +167,14 @@ impl App {
                 None
             }
             AutoSave::AfterDelay(delay) => {
-                let dirty = self.dirty_tracked_buffer_ids();
+                let dirty = self.auto_save_candidates();
                 self.auto_save.edits.retain(|id, _| dirty.contains(id));
                 let mut next: Option<Instant> = None;
                 for id in dirty {
                     if !self.auto_saves(id) {
+                        // Waiting on nothing: a held one is looked at
+                        // again only once it's settled.
+                        self.auto_save.edits.remove(&id);
                         continue;
                     }
                     let edits = self.buffers.get(id).map_or(0, |ob| ob.buffer.edit_count());
@@ -236,6 +272,99 @@ mod tests {
         app.press_all("i y Esc");
         app.auto_save_all();
         assert!(app.open().buffer.is_dirty());
+    }
+
+    /// Changes `path` on disk as another program would: other text, a
+    /// later time.
+    fn changed_elsewhere(path: &std::path::Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(later).unwrap();
+    }
+
+    #[test]
+    fn a_conflict_holds_auto_save_back_even_after_opening_the_file_again() {
+        let (mut app, f) = app_on_file("a.txt", "a\n");
+        auto_save(&mut app, "after_delay", Some(100));
+        app.press_all("i x Esc");
+        changed_elsewhere(&f.path, "theirs, longer\n");
+        app.poll_files_changed_on_disk();
+        assert!(app.externally_changed.contains(&app.focused_buffer_id()), "found");
+        let now = Instant::now();
+        app.auto_save_tick(now);
+        // Opened again -- a picker, a link -- in the same buffer.
+        app.open_text_file(&f.path, false);
+        assert!(app.externally_changed.contains(&app.focused_buffer_id()), "opening it again doesn't forget the conflict");
+        app.auto_save_tick(now + Duration::from_secs(1));
+        app.auto_save_tick(now + Duration::from_secs(2));
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), "theirs, longer\n", "theirs is kept");
+        assert!(app.open().buffer.is_dirty(), "and yours");
+        // Settled by you (:w!): auto-save goes on after that.
+        app.save_force();
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), "xa\n");
+        app.press_all("i y Esc");
+        app.auto_save_tick(now + Duration::from_secs(3));
+        app.auto_save_tick(now + Duration::from_secs(4));
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), "yxa\n");
+    }
+
+    #[test]
+    fn a_new_file_s_first_save_is_yours_and_one_made_meanwhile_is_kept() {
+        let (mut app, f) = app_on_file("a.txt", "");
+        let new = f.path.with_file_name("new.md");
+        app.open_text_file(&new, false);
+        auto_save(&mut app, "after_delay", Some(100));
+        app.press_all("i x Esc");
+        let now = Instant::now();
+        app.auto_save_tick(now);
+        app.auto_save_tick(now + Duration::from_secs(1));
+        assert!(!new.exists(), "not made by auto-save");
+        std::fs::write(&new, "from git pull\n").unwrap();
+        app.auto_save_tick(now + Duration::from_secs(2));
+        app.auto_save_tick(now + Duration::from_secs(3));
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "from git pull\n", "someone else's file, kept");
+    }
+
+    #[test]
+    fn a_save_that_fails_says_so_once_and_waits_for_yours() {
+        let (mut app, f) = app_on_file("a.txt", "a\n");
+        auto_save(&mut app, "after_delay", Some(100));
+        let latin = fenix_core::TextEncoding::choices().into_iter().find(|e| matches!(e, fenix_core::TextEncoding::Legacy(_))).unwrap();
+        app.open_mut().buffer.set_encoding(latin);
+        app.press_all("i");
+        app.type_text("€✓");
+        app.press("Esc");
+        let now = Instant::now();
+        app.auto_save_tick(now);
+        app.auto_save_tick(now + Duration::from_secs(1));
+        assert!(app.modeline_text().contains("auto-save couldn't write"), "{}", app.modeline_text());
+        assert!(app.auto_save.held.contains(&app.focused_buffer_id()));
+        app.set_message("");
+        app.press_all("i z Esc");
+        app.auto_save_tick(now + Duration::from_secs(2));
+        app.auto_save_tick(now + Duration::from_secs(3));
+        assert!(!app.modeline_text().contains("auto-save"), "not again after every pause: {}", app.modeline_text());
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), "a\n");
+    }
+
+    #[test]
+    fn a_remote_file_and_one_shown_read_only_are_left_alone() {
+        let (mut app, _f) = app_on_file("a.txt", "a\n");
+        auto_save(&mut app, "after_delay", Some(100));
+        app.press_all("i x Esc");
+        let id = app.focused_buffer_id();
+        assert!(app.auto_saves(id), "an ordinary file: yes");
+        app.ref_view_names.insert(id, "HEAD".into());
+        assert!(!app.auto_saves(id), "a file as it is at a ref: no");
+        app.ref_view_names.remove(&id);
+        // A remote project's file, as if it had been read from there: no.
+        let mut remote = fenix_core::Buffer::from_text_at(fenix_vfs::remote("host", "/srv/a.txt"), "a\n");
+        let mut c = fenix_core::Cursor::at_start();
+        remote.insert_char(&mut c, 'x');
+        let rid = app.buffers.insert_loaded_document(remote);
+        let seen = app.disk_state.get(&id).copied().unwrap();
+        app.disk_state.insert(rid, seen);
+        assert!(!app.auto_saves(rid), "a remote project's file: no");
     }
 
     #[test]

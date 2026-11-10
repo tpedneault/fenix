@@ -381,7 +381,12 @@ impl App {
     pub(crate) fn caret_mark(&self) -> Option<CaretMark> {
         let buffer = self.focused_buffer_id();
         let edits = self.buffers.get(buffer)?.buffer.edit_count();
-        Some(CaretMark { buffer, pane: self.focused_pane_id(), edits, primary: self.primary_caret(), extra: self.extra_carets().to_vec() })
+        // A linewise selection as the text it holds: carets are charwise.
+        let primary = match (self.vim.mode() == Mode::Visual && self.vim.visual_kind() == VisualKind::Line).then(|| self.selection_or_word()).flatten() {
+            Some((range, false)) => Caret { at: range.end, sticky: self.cursor().sticky_col, anchor: Some(range.start) },
+            _ => self.primary_caret(),
+        };
+        Some(CaretMark { buffer, pane: self.focused_pane_id(), edits, primary, extra: self.extra_carets().to_vec() })
     }
 
     /// After a key (or a click) that may have moved the cursors: where
@@ -409,8 +414,11 @@ impl App {
     /// before the last move, or before the last cursor was added.
     pub(crate) fn cmd_cursor_undo(&mut self) {
         let Some(now) = self.caret_mark() else { return };
-        while let Some(mark) = self.caret_marks.pop() {
-            if mark.buffer != now.buffer || mark.pane != now.pane || mark.edits != now.edits || (mark.primary, &mark.extra) == (now.primary, &now.extra) {
+        // The latest of this buffer's and pane's: the others' are kept for
+        // when you're back in them.
+        while let Some(i) = self.caret_marks.iter().rposition(|m| m.buffer == now.buffer && m.pane == now.pane) {
+            let mark = self.caret_marks.remove(i);
+            if mark.edits != now.edits || (mark.primary, &mark.extra) == (now.primary, &now.extra) {
                 continue;
             }
             self.caret_undoing = true;
@@ -467,8 +475,9 @@ impl App {
         if !self.carets_can_be_added() {
             return;
         }
-        let primary = self.primary_caret();
-        let selected = self.vim.mode() == Mode::Visual && primary.anchor.is_some_and(|a| a != primary.at);
+        // Selected: what the selection really holds (a whole line for a
+        // triple-click), not where its ends are.
+        let selected = matches!(self.selection_or_word(), Some((_, false)));
         if !selected {
             let Some((word, _)) = self.selection_or_word() else {
                 self.set_message("no word under the cursor to select");
@@ -495,7 +504,9 @@ impl App {
             self.set_message(format!("no other {}", one_line(&needle)));
             return;
         };
-        extra.push(primary);
+        // The old primary as the extra it becomes, its selection as it
+        // was (a whole line's, a word's) -- not its raw ends.
+        extra.push(Caret { at: range.end, sticky: self.col_of(range.end), anchor: Some(range.start) });
         let sticky = self.col_of(next.end);
         self.put_carets(Caret { at: next.end, sticky, anchor: Some(next.start) }, extra);
         self.say_carets();
@@ -516,7 +527,7 @@ impl App {
         let needle = buffer.text_range(range.start, range.end);
         let extra_kw = self.vim.iskeyword_extra();
         let whole = from_word || fenix_vim::is_whole_word(buffer, &range, extra_kw);
-        let found = match fenix_vim::occurrences(buffer, &needle, whole, extra_kw, MAX_CARETS) {
+        let found = match fenix_vim::occurrences_around(buffer, &needle, whole, extra_kw, MAX_CARETS, Some(&range)) {
             Ok(found) => found,
             Err(n) => {
                 self.set_error(format!("{n} of {} is more cursors than {MAX_CARETS}", one_line(&needle)));
@@ -557,6 +568,12 @@ impl App {
             _ => return,
         };
         let at = fenix_vim::at_column(buffer, target, edge.sticky);
+        // The old primary with its selection as it was, a linewise one
+        // whole.
+        let primary = match self.selection_or_word().filter(|(_, word)| !*word) {
+            Some((range, _)) => Caret { at: range.end, sticky: primary.sticky, anchor: Some(range.start) },
+            None => primary,
+        };
         extra.push(primary);
         self.put_carets(Caret { at, sticky: edge.sticky, anchor: None }, extra);
         self.say_carets();
