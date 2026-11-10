@@ -171,7 +171,9 @@ its extension. The rest is built into Fenix.
   unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
   it's nested, a pair the same colour. They're the code's own brackets,
   read from its syntax tree, so one in a string or a comment is left
-  alone; in a file of no language, every bracket counts. The colours are
+  alone; in a file of no language, every bracket counts. Code another
+  grammar would read (an HTML page's `<script>`, a Markdown fence) is
+  one token to the file's own, so its brackets aren't coloured. The colours are
   the theme's -- its `[brackets] colors`, one to six, or else its
   function, keyword and type colours.
 - **Markdown list continuation**: pressing Enter or `o` on a `-`/`*`/`+`

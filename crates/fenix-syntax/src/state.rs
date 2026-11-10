@@ -248,29 +248,35 @@ impl SyntaxState {
         let mut cursor = tree.walk();
         loop {
             let node = cursor.node();
-            if node.child_count() == 0 && !node.is_named() && !node.is_missing() {
-                let bracket = match node.kind() {
-                    "(" => Some(('(', true)),
-                    "[" => Some(('[', true)),
-                    "{" => Some(('{', true)),
-                    ")" => Some(('(', false)),
-                    "]" => Some(('[', false)),
-                    "}" => Some(('{', false)),
+            // An anonymous token's kind is its text. Brackets are tokens
+            // of their own, or end one that opens (`${` and `$(` in a
+            // template or a shell, `#{`), or are all of one that closes
+            // (`))`, `]]`). A token whose text isn't its kind (an alias)
+            // isn't one.
+            let kind = node.kind();
+            if node.child_count() == 0 && !node.is_named() && !node.is_missing() && kind.len() <= 4 && node.end_byte() == node.start_byte() + kind.len() {
+                let pair = |c: char| match c {
+                    '(' | ')' => Some('('),
+                    '[' | ']' => Some('['),
+                    '{' | '}' => Some('{'),
                     _ => None,
                 };
-                // A token that's a bracket by name but not by its text
-                // (an alias) isn't one.
-                if let Some((kind, opens)) = bracket.filter(|_| node.end_byte() == node.start_byte() + 1) {
-                    if opens {
-                        out.push((node.start_byte(), open.len()));
-                        open.push(kind);
-                    } else {
+                let opening = |c: char| matches!(c, '(' | '[' | '{');
+                let start = node.start_byte();
+                if kind.chars().all(|c| pair(c).is_some() && !opening(c)) {
+                    for (i, c) in kind.char_indices() {
+                        let Some(k) = pair(c) else { continue };
                         // Its partner's depth; one that closes nothing is
                         // as deep as what's open.
-                        if let Some(at) = open.iter().rposition(|k| *k == kind) {
+                        if let Some(at) = open.iter().rposition(|o| *o == k) {
                             open.truncate(at);
                         }
-                        out.push((node.start_byte(), open.len()));
+                        out.push((start + i, open.len()));
+                    }
+                } else if kind.ends_with(opening) && kind.trim_start_matches(['$', '#', '@', '%']).chars().all(opening) {
+                    for (i, c) in kind.char_indices().filter(|(_, c)| opening(*c)) {
+                        out.push((start + i, open.len()));
+                        open.extend(pair(c));
                     }
                 }
             }
@@ -398,8 +404,17 @@ impl SyntaxState {
                 tree.edit(&to_input_edit(source, edit));
             }
         }
+        let old = if edits.is_empty() { self.tree.clone() } else { None };
         self.tree = self.parser.parse(source, self.tree.as_ref());
-        self.revision += 1;
+        // The same tree as before (nothing applied, nothing different):
+        // what's worked out from it stands.
+        let same = match (&old, &self.tree) {
+            (Some(old), Some(new)) => old.root_node().byte_range() == new.root_node().byte_range() && new.changed_ranges(old).next().is_none(),
+            _ => false,
+        };
+        if !same {
+            self.revision += 1;
+        }
     }
 
     /// Highlight spans within `byte_range`, flattened into a non-
@@ -622,6 +637,30 @@ mod tests {
         assert_eq!(brackets(LanguageId::Rust, source), [('(', 0), ('[', 1), (']', 1), (')', 0), ('{', 0), ('(', 1), (')', 1), ('}', 0)]);
         let py = "x = {'a': [1, (2)]}  # ]]\ns = '((('\n";
         assert_eq!(brackets(LanguageId::Python, py), [('{', 0), ('[', 1), ('(', 2), (')', 2), (']', 1), ('}', 0)]);
+    }
+
+    #[test]
+    fn a_template_s_and_a_shell_s_two_character_openers_open() {
+        let js = "function f() { g(`a ${x} b`); h([1]); }\n";
+        let found = brackets(LanguageId::JavaScript, js);
+        assert_eq!(found, [('(', 0), (')', 0), ('{', 0), ('(', 1), ('{', 2), ('}', 2), (')', 1), ('(', 1), ('[', 2), (']', 2), (')', 1), ('}', 0)], "the ${{'s brace pairs with its own }}");
+        let sh = "f() { echo \"${HOME}\" $(ls); }\n";
+        let found = brackets(LanguageId::Bash, sh);
+        assert_eq!(found.first(), Some(&('(', 0)));
+        assert_eq!(found.last(), Some(&('}', 0)), "the function's brace still closes at 0: {found:?}");
+        assert!(found.iter().filter(|(c, _)| *c == '{').count() == found.iter().filter(|(c, _)| *c == '}').count(), "{found:?}");
+    }
+
+    #[test]
+    fn the_revision_stays_when_nothing_changed() {
+        let source = "fn a() {}\n";
+        let mut state = SyntaxState::new(LanguageId::Rust, source);
+        let at = state.revision();
+        state.apply_edits(source, &[]);
+        assert_eq!(state.revision(), at, "nothing applied: the same tree");
+        let changed = "fn ab() {}\n";
+        state.apply_edits(changed, &[RawEdit { start_char: 4, new_end_char: 5, removed: String::new() }]);
+        assert_ne!(state.revision(), at);
     }
 
     #[test]
