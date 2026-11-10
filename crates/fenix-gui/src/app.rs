@@ -1400,7 +1400,7 @@ enum PendingLspRequest {
     PullDiagnostics { path: PathBuf },
     /// `textDocument/semanticTokens/full` for `path` (canonical) as it
     /// was at `edit_count`.
-    SemanticTokens { path: PathBuf, edit_count: u64 },
+    SemanticTokens { path: PathBuf, edit_count: u64, request: i64 },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -7731,7 +7731,7 @@ impl App {
                     self.wake_caret();
                 }
             }
-            PendingLspRequest::SemanticTokens { path, edit_count } => self.semantic_tokens_answered(&key, path, edit_count, result),
+            PendingLspRequest::SemanticTokens { path, edit_count, request } => self.semantic_tokens_answered(&key, path, edit_count, request, result),
             PendingLspRequest::PullDiagnostics { path } => {
                 let name = self.lsp_server_name(&key);
                 let read = result.map_err(|e| (e.code, e.data)).and_then(|value| fenix_lsp::pull::report(value).map_err(|_| (0, None)));
@@ -18769,15 +18769,18 @@ impl App {
             return conflict_ranges;
         }
 
-        let windows = highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns);
         let Some(syntax) = &mut ob.syntax else {
             // No grammar: a language server's tokens are all the colour
             // there is.
-            return match windows {
-                Some(windows) if semantic => self.with_semantic_tokens(id, Vec::new(), &windows, &[]),
-                _ => Vec::new(),
+            if !semantic {
+                return Vec::new();
+            }
+            return match highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns) {
+                Some(windows) => self.with_semantic_tokens(id, Vec::new(), &windows, &[]),
+                None => Vec::new(),
             };
         };
+        let windows = highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns);
 
         let edits: Vec<fenix_syntax::RawEdit> = deltas
             .into_iter()
@@ -36742,6 +36745,62 @@ name = \"orbit\"
         let (id, _) = only_pending(&app, &key);
         answer_error(&mut app, &key, id, -32800);
         assert!(app.lsp_sessions[&key].semantic[&canonical].due.is_some(), "RequestCancelled is asked again");
+    }
+
+    #[test]
+    fn semantic_asks_follow_an_agent_s_sync_a_late_refresh_and_only_the_ask_that_s_out() {
+        let (_dir, mut app, path, key) = semantic_fixture("semantic_round3");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        app.ask_due_semantic_tokens();
+        let (first, _) = only_pending(&app, &key);
+        // A refresh while the ask is out: kept, and asked once it's answered.
+        app.refresh_semantic_tokens(&key);
+        let _ = colour_at(&mut app, 0);
+        assert!(app.lsp_sessions[&key].semantic[&canonical].stale, "kept while an ask is out");
+        answer(&mut app, &key, first, serde_json::json!({"data": MAIN_AND_X}));
+        let _ = colour_at(&mut app, 0);
+        app.ask_due_semantic_tokens();
+        let (second, _) = only_pending(&app, &key);
+        // An answer to an ask that isn't out any more: let go.
+        answer(&mut app, &key, first, serde_json::json!({"data": []}));
+        assert!(app.lsp_sessions[&key].semantic[&canonical].asking.is_some(), "the second still out");
+        answer(&mut app, &key, second, serde_json::json!({"data": MAIN_AND_X}));
+        // An edit an agent's sync sends first: asked again all the same.
+        app.test_insert_str(" ");
+        let (text, count) = (app.open().buffer.text(), app.open().buffer.edit_count());
+        app.sync_lsp_for(&path, &text, count, None);
+        assert!(app.semantic_wake().is_some(), "asked again after the pause");
+        // Refused while modified: asked again later each time, not every 250 ms.
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            app.ask_due_semantic_tokens();
+            let (id, _) = only_pending(&app, &key);
+            let before = Instant::now();
+            answer_error(&mut app, &key, id, -32801);
+            let due = app.lsp_sessions[&key].semantic[&canonical].due.unwrap();
+            waits.push(due.saturating_duration_since(before));
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        }
+        assert!(waits.windows(2).all(|w| w[1] > w[0]), "backing off: {waits:?}");
+    }
+
+    #[test]
+    fn semantic_tokens_are_let_go_when_turned_off_or_the_file_is_renamed() {
+        let (dir, mut app, _path, key) = semantic_fixture("semantic_letgo");
+        assert!(!app.lsp_sessions[&key].semantic.is_empty());
+        app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].semantic.is_empty() && app.semantic_of.is_empty(), "nothing held or asked");
+        app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        let old = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        // Saved under another name: the old path's tokens go.
+        let renamed = dir.path().join("renamed.rs");
+        app.open_mut().buffer.save_as(&renamed).unwrap();
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(!app.lsp_sessions[&key].semantic.contains_key(&old));
     }
 
     #[test]

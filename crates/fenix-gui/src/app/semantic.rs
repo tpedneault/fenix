@@ -19,6 +19,9 @@ use super::{App, BufferId, LspKey, LspSession, PendingLspRequest};
 /// How long typing pauses before a document's tokens are asked again.
 pub(super) const SEMANTIC_PAUSE: Duration = Duration::from_millis(250);
 
+/// The longest wait before asking again after a refusal.
+const SEMANTIC_MAX_RETRY: Duration = Duration::from_secs(4);
+
 /// How long an ask may go unanswered before it's cancelled.
 pub(super) const SEMANTIC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -40,6 +43,10 @@ pub(super) struct SemanticDoc {
     pub(super) timed_out: bool,
     /// When the next ask is due.
     pub due: Option<Instant>,
+    /// How long after a refusal to try again (`ContentModified` and the
+    /// cancellations): doubled each time, back to the pause after an
+    /// edit or an answer.
+    retry: Duration,
     /// The server said its tokens changed (a refresh) while this wasn't
     /// drawn: asked once it is.
     pub(super) stale: bool,
@@ -47,7 +54,7 @@ pub(super) struct SemanticDoc {
 
 impl SemanticDoc {
     fn new(buffer: BufferId) -> Self {
-        SemanticDoc { buffer, tokens: Vec::new(), stamp: None, asking: None, asked: None, timed_out: false, due: None, stale: false }
+        SemanticDoc { buffer, tokens: Vec::new(), stamp: None, asking: None, asked: None, timed_out: false, due: None, retry: SEMANTIC_PAUSE, stale: false }
     }
 }
 
@@ -113,9 +120,9 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
                 doc.stamp = None;
             }
             doc.timed_out = false;
-            if buffer.is_some() {
-                doc.due = Some(if newly_shown { now } else { now + SEMANTIC_PAUSE });
-            }
+            doc.retry = SEMANTIC_PAUSE;
+            // An agent's sync moved them as well: asked again too.
+            doc.due = Some(if newly_shown { now } else { now + SEMANTIC_PAUSE });
         }
         None if buffer.is_some() => doc.due = Some(now),
         None => {}
@@ -140,7 +147,7 @@ fn ask(session: &mut LspSession, canonical: &Path, now: Instant) {
     if let Ok(id) = session.client.request::<lsp_types::request::SemanticTokensFullRequest>(params) {
         doc.asking = Some(edit_count);
         doc.asked = Some((id, now));
-        session.pending.insert(id, PendingLspRequest::SemanticTokens { path: canonical.to_path_buf(), edit_count });
+        session.pending.insert(id, PendingLspRequest::SemanticTokens { path: canonical.to_path_buf(), edit_count, request: id });
     }
 }
 
@@ -243,13 +250,20 @@ impl App {
     /// those out too long cancelled, and what closed buffers held let go.
     pub(super) fn ask_due_semantic_tokens(&mut self) {
         let now = Instant::now();
+        // Turned off: nothing held, nothing asked.
+        if !self.semantic_highlighting_on() {
+            self.semantic_of.clear();
+        }
         let buffers = &self.buffers;
         self.semantic_of.retain(|b, _| buffers.get(*b).is_some());
-        for session in self.lsp_sessions.values_mut() {
+        let of = &self.semantic_of;
+        for (key, session) in self.lsp_sessions.iter_mut() {
             if session.semantic.is_empty() {
                 continue;
             }
-            session.semantic.retain(|_, d| buffers.get(d.buffer).is_some());
+            // Held only for a buffer showing it from this server now: not
+            // one closed, renamed away, or asked of another server since.
+            session.semantic.retain(|path, d| of.get(&d.buffer).is_some_and(|t| t.key == *key && t.path == *path));
             let paths: Vec<PathBuf> = session.semantic.keys().cloned().collect();
             for path in paths {
                 time_out(session, &path, now);
@@ -284,10 +298,15 @@ impl App {
 
     /// An answer to `PendingLspRequest::SemanticTokens`: kept when the
     /// document is still as it was asked, else asked again.
-    pub(super) fn semantic_tokens_answered(&mut self, key: &LspKey, path: PathBuf, edit_count: u64, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
+    pub(super) fn semantic_tokens_answered(&mut self, key: &LspKey, path: PathBuf, edit_count: u64, request: i64, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         let synced = session.open_documents.get(&path).map(|&(count, _)| count);
         let (Some(doc), Some(text)) = (session.semantic.get_mut(&path), session.synced_text.get(&path)) else { return };
+        // Not the ask that's out (one before the document was shown again,
+        // or cancelled): what it says isn't wanted.
+        if doc.asked.map(|(id, _)| id) != Some(request) {
+            return;
+        }
         doc.asking = None;
         doc.asked = None;
         let now = Instant::now();
@@ -300,7 +319,8 @@ impl App {
             // a pause. Any other refusal: not asked again until an edit.
             // RequestCancelled, ContentModified, ServerCancelled.
             Err(e) if (-32802..=-32800).contains(&e.code) => {
-                doc.due = Some(now + SEMANTIC_PAUSE);
+                doc.due = Some(now + doc.retry);
+                doc.retry = (doc.retry * 2).min(SEMANTIC_MAX_RETRY);
                 return;
             }
             Err(_) => return,
@@ -313,6 +333,7 @@ impl App {
         let Some(legend) = session.capabilities.as_ref().and_then(tokens::legend) else { return };
         doc.tokens = tokens::decode(&data, text, &tokens::Styles::new(legend));
         doc.stamp = Some(edit_count);
+        doc.retry = SEMANTIC_PAUSE;
         self.request_redraw_all();
     }
 
@@ -330,7 +351,9 @@ impl App {
     fn ask_if_stale(&mut self, id: BufferId) {
         let Some(target) = self.semantic_of.get(&id) else { return };
         let Some(doc) = self.lsp_sessions.get_mut(&target.key).and_then(|s| s.semantic.get_mut(&target.path)) else { return };
-        if std::mem::take(&mut doc.stale) && doc.asking.is_none() {
+        // Kept while an ask is out: asked once that's answered.
+        if doc.stale && doc.asking.is_none() {
+            doc.stale = false;
             doc.due = Some(Instant::now());
         }
     }

@@ -398,6 +398,19 @@ These supersede the table and rules above where they differ.
     `editor.wrap_languages` uses.
   - **Redraw.** An answer redraws every window.
   - **`lay_over` follows each token's layer.**
+- **Second review.**
+  - An agent's sync that moves held tokens also makes an ask due.
+  - A refresh that comes while an ask is out stays pending until an ask
+    is sent after it.
+  - An answer counts only if its request is the document's current ask;
+    any other is ignored.
+  - Refusals (cancelled, modified) back off from 250 ms, doubling each
+    time up to 4 s.
+  - Documents are dropped when their buffer closes, is renamed or saved
+    under another name, or is asked of another server, and all of them
+    when the setting goes off.
+  - A buffer with no grammar works out its windows only when it has
+    tokens to lay.
 - **Not yet:**
   - the theme keys and the modifier rules' underline (stage 3);
   - delta and range (stage 4).
