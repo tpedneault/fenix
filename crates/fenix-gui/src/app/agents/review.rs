@@ -45,10 +45,20 @@ impl App {
 
     /// `SPC a r`: the shown thread's changes.
     pub(crate) fn agents_open_review(&mut self) {
+        // From a pipeline run's summary: the run's changes.
+        if let Some(ledger) = self.agents.run_summaries.get(&self.focused_buffer_id()).cloned() {
+            self.agents.load_one(&ledger);
+            return self.agents_open_review_of(ledger);
+        }
         let Some(thread) = self.agents.shown(&self.pages).or_else(|| self.agents.hub.focused().cloned()) else {
             self.set_message("no agent thread open: SPC a a");
             return;
         };
+        self.agents_open_review_of(thread);
+    }
+
+    /// `thread`'s changes, hunk by hunk.
+    pub(crate) fn agents_open_review_of(&mut self, thread: ThreadId) {
         let files = self.agents_review_files(&thread);
         // It's about code: never in the dock, and the one already up is
         // the one shown.

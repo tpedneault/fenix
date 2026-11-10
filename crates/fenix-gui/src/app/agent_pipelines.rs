@@ -30,6 +30,9 @@ pub(crate) struct Running {
     /// The mode a step's session was in before it was put in the step's:
     /// where a later step with no mode of its own goes back to.
     pub usual_mode: Option<String>,
+    /// What each step's thread is told about the run it belongs to, kept
+    /// with it (the thread list groups by it).
+    pub tag: fenix_acp::hub::RunTag,
 }
 
 /// What a command step's output is kept to, from its end.
@@ -137,11 +140,15 @@ impl App {
     /// took the prompt.
     pub(super) fn pipeline_take_prompt(&mut self, input: &str) -> bool {
         let Some(spec) = self.pipelines.armed.take() else { return false };
+        let pipeline = spec.title.clone();
         let (run, next) = Run::start(spec, input);
         self.pipelines.next += 1;
         let id = self.pipelines.next;
         let root = self.agents_root();
-        self.pipelines.runs.insert(id, Running { run, root, threads: Vec::new(), ledger: None, usual_mode: None });
+        let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        // Unique across restarts: when, and which of this run of Fenix's.
+        let tag = fenix_acp::hub::RunTag { id: format!("run-{started}-{}-{id}", std::process::id()), pipeline, request: input.to_string(), started, ..Default::default() };
+        self.pipelines.runs.insert(id, Running { run, root, threads: Vec::new(), ledger: None, usual_mode: None, tag });
         self.pipeline_do(id, next);
         true
     }
@@ -182,6 +189,13 @@ impl App {
         for thread in &running.threads {
             self.pipelines.steps.remove(thread);
             self.pipelines.held.remove(thread);
+            // Each step is told how the run ended, and where its changes
+            // are, and kept so.
+            if let Some(tag) = self.agents.hub.meta_mut(thread).and_then(|m| m.run.as_mut()) {
+                tag.ended = Some(how.to_string());
+                tag.ledger = running.ledger.clone();
+            }
+            self.agents_keep_thread(thread);
         }
         let review = if running.ledger.is_some() { " -- SPC a r reviews what it changed" } else { "" };
         self.set_message(format!("{}: {how}{review}", running.run.spec.title));
@@ -309,6 +323,10 @@ impl App {
             return self.pipeline_finished(id, "stopped: no agent to run it");
         };
         let thread = self.agents.hub.new_thread(&agent, &root);
+        let tag = fenix_acp::hub::RunTag { step, step_name: spec.name.clone(), ..self.pipelines.runs[&id].tag.clone() };
+        if let Some(meta) = self.agents.hub.meta_mut(&thread) {
+            meta.run = Some(tag);
+        }
         if let Some(t) = self.agents.hub.thread_mut(&thread) {
             t.notice(fenix_acp::thread::NoticeKind::Info, format!("Pipeline {}: {progress}", self.pipelines.runs[&id].run.spec.title));
         }

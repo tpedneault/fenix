@@ -151,6 +151,33 @@ agent starts again when you look.
   in a new session the same way.
 - `SPC a D` deletes the thread, and its session where the agent can.
 
+### The thread list
+
+`SPC a t` (`Ctrl+K a t` with standard keys) lists the project's
+threads, those waiting on you first, then the most recently active. A
+pipeline's run is one entry: a heading with what was asked, the
+pipeline, how it ended and when, its steps under it in order with their
+agent and state. A run under way is open; a finished one folded. A
+thread started on its own is a row of its own. `SPC a l` lists every
+project's, under a heading each, the current project first.
+
+In the list, typing filters it (a run's heading matches what was asked,
+its pipeline and its steps), and with either keys:
+
+| Key | Does |
+|---|---|
+| `Enter` | Opens the thread or step; on a run, its summary: what was asked, each step and how it went, how it ended (`SPC a r` there reviews its changes) |
+| `Tab` | Folds or unfolds the run |
+| `Alt+R` | On a run: what it changed, every step's, as one review |
+| `Alt+A` | Archives the thread, or the whole run; on an archived one, brings it back |
+| `Alt+H` | Shows archived threads too, marked, or hides them |
+| `Alt+P` | This project's threads, or every project's |
+
+Archiving puts a thread away, never deletes it: it's stored as it was,
+can be found with `Alt+H`, opened, continued and brought back.
+`SPC a T` (threads at work, anywhere) is as it was. Threads kept before
+1.5 are single entries, unarchived.
+
 An agent with no thread open stops after `agents.idle_minutes`. One that
 crashes is started again (after 1, 2, then 4 seconds) and its thread
 resumed; after three crashes in a minute it stays down until

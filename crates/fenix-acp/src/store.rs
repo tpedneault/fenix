@@ -10,7 +10,7 @@
 //! block is a content block), so a file stays readable and an older
 //! Fenix skips what it doesn't know.
 
-use crate::hub::{ThreadId, ThreadMeta};
+use crate::hub::{RunTag, ThreadId, ThreadMeta};
 use crate::protocol::{ConfigOption, ContentBlock, Mode, Modes, PermissionKind, PermissionOption, PlanStatus, ToolCallFields, ToolContent, ToolKind, ToolStatus};
 use crate::thread::{Entry, Notice, NoticeKind, PermissionCard, PermissionState, Thread, ToolCall, Usage};
 use serde_json::{json, Value};
@@ -33,6 +33,10 @@ pub struct IndexEntry {
     pub title: String,
     /// Seconds since the Unix epoch.
     pub updated: u64,
+    /// The pipeline run it's a step of (1.5).
+    pub run: Option<RunTag>,
+    /// Put away (1.5).
+    pub archived: bool,
 }
 
 /// What's read back of a thread.
@@ -68,7 +72,7 @@ impl Store {
         let body = json!({ "version": VERSION, "meta": meta_value(meta), "updated": updated, "thread": thread_value(thread), "extra": extra });
         fenix_storage::write(&self.thread_path(&meta.id), &serde_json::to_vec(&body)?)?;
         let mut index = self.index();
-        let line = IndexEntry { id: meta.id.clone(), agent: meta.agent.clone(), root: meta.root.clone(), session_id: meta.session_id.clone(), title: thread.display_title(), updated };
+        let line = IndexEntry { id: meta.id.clone(), agent: meta.agent.clone(), root: meta.root.clone(), session_id: meta.session_id.clone(), title: thread.display_title(), updated, run: meta.run.clone(), archived: meta.archived };
         match index.iter_mut().find(|e| e.id == meta.id) {
             Some(e) => *e = line,
             None => index.push(line),
@@ -104,6 +108,8 @@ impl Store {
                             session_id: t.get("sessionId").and_then(Value::as_str).map(str::to_string),
                             title: t.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
                             updated: t.get("updated").and_then(Value::as_u64).unwrap_or(0),
+                            run: t.get("run").and_then(parse_run),
+                            archived: t.get("archived").and_then(Value::as_bool).unwrap_or(false),
                         })
                     })
                     .collect()
@@ -127,14 +133,44 @@ impl Store {
         std::fs::create_dir_all(&self.dir)?;
         let threads: Vec<Value> = index
             .iter()
-            .map(|e| json!({ "id": e.id.0, "agent": e.agent, "root": e.root.to_string_lossy(), "sessionId": e.session_id, "title": e.title, "updated": e.updated }))
+            .map(|e| {
+                let mut line = json!({ "id": e.id.0, "agent": e.agent, "root": e.root.to_string_lossy(), "sessionId": e.session_id, "title": e.title, "updated": e.updated });
+                add_run_and_archived(&mut line, e.run.as_ref(), e.archived);
+                line
+            })
             .collect();
         fenix_storage::write(&self.index_path(), &serde_json::to_vec_pretty(&json!({ "version": VERSION, "threads": threads }))?)
     }
 }
 
 fn meta_value(meta: &ThreadMeta) -> Value {
-    json!({ "id": meta.id.0, "agent": meta.agent, "root": meta.root.to_string_lossy(), "sessionId": meta.session_id, "handedOffFrom": meta.handed_off_from.as_ref().map(|t| &t.0) })
+    let mut v = json!({ "id": meta.id.0, "agent": meta.agent, "root": meta.root.to_string_lossy(), "sessionId": meta.session_id, "handedOffFrom": meta.handed_off_from.as_ref().map(|t| &t.0) });
+    add_run_and_archived(&mut v, meta.run.as_ref(), meta.archived);
+    v
+}
+
+/// `run` and `archived`, written only when there's something to say, so
+/// a thread that's neither reads as it did before 1.5.
+fn add_run_and_archived(v: &mut Value, run: Option<&RunTag>, archived: bool) {
+    if let Some(run) = run {
+        v["run"] = json!({ "id": run.id, "pipeline": run.pipeline, "request": run.request, "step": run.step, "stepName": run.step_name, "started": run.started, "ended": run.ended, "ledger": run.ledger.as_ref().map(|t| &t.0) });
+    }
+    if archived {
+        v["archived"] = json!(true);
+    }
+}
+
+fn parse_run(v: &Value) -> Option<RunTag> {
+    Some(RunTag {
+        id: v.get("id")?.as_str()?.to_string(),
+        pipeline: v.get("pipeline").and_then(Value::as_str).unwrap_or("").to_string(),
+        request: v.get("request").and_then(Value::as_str).unwrap_or("").to_string(),
+        step: v.get("step").and_then(Value::as_u64).unwrap_or(0) as usize,
+        step_name: v.get("stepName").and_then(Value::as_str).unwrap_or("").to_string(),
+        started: v.get("started").and_then(Value::as_u64).unwrap_or(0),
+        ended: v.get("ended").and_then(Value::as_str).map(str::to_string),
+        ledger: v.get("ledger").and_then(Value::as_str).map(|s| ThreadId(s.to_string())),
+    })
 }
 
 fn parse_meta(v: &Value) -> Option<ThreadMeta> {
@@ -144,6 +180,8 @@ fn parse_meta(v: &Value) -> Option<ThreadMeta> {
         root: PathBuf::from(v.get("root")?.as_str()?),
         session_id: v.get("sessionId").and_then(Value::as_str).map(str::to_string),
         handed_off_from: v.get("handedOffFrom").and_then(Value::as_str).map(|s| ThreadId(s.to_string())),
+        run: v.get("run").and_then(parse_run),
+        archived: v.get("archived").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -368,7 +406,7 @@ mod tests {
     }
 
     fn sample() -> (ThreadMeta, Thread) {
-        let meta = ThreadMeta { id: ThreadId("t-1".into()), agent: "claude".into(), root: PathBuf::from("/work/p"), session_id: Some("s1".into()), handed_off_from: None };
+        let meta = ThreadMeta { id: ThreadId("t-1".into()), agent: "claude".into(), root: PathBuf::from("/work/p"), session_id: Some("s1".into()), handed_off_from: None, run: None, archived: false };
         let mut t = Thread::default();
         t.push_user(vec![ContentBlock::text("fix it"), ContentBlock::ResourceLink { uri: "file:///work/p/a.rs".into(), name: "a.rs".into(), mime_type: None }], false);
         t.push_user(vec![ContentBlock::text("and then")], true);
@@ -394,6 +432,45 @@ mod tests {
         });
         t.notice(NoticeKind::Interrupted, "Cancelled.");
         (meta, t)
+    }
+
+    #[test]
+    fn a_step_s_run_and_its_being_archived_are_kept_in_the_thread_and_the_index() {
+        let dir = temp().join("run");
+        let store = Store::new(&dir);
+        let (mut meta, t) = sample();
+        let run = RunTag { id: "r1".into(), pipeline: "Review and fix".into(), request: "Fix the login test".into(), step: 1, step_name: "build".into(), started: 100, ended: Some("done: fixed".into()), ledger: Some(ThreadId("t-0".into())) };
+        meta.run = Some(run.clone());
+        meta.archived = true;
+        store.save(&meta, &t, &Value::Null, 5).unwrap();
+        let back = store.load(&meta.id).unwrap();
+        assert_eq!(back.meta, meta);
+        let line = &store.index()[0];
+        assert_eq!((line.run.as_ref(), line.archived), (Some(&run), true));
+        // Brought back, and not a step: nothing written for either.
+        meta.archived = false;
+        meta.run = None;
+        store.save(&meta, &t, &Value::Null, 6).unwrap();
+        let text = std::fs::read_to_string(dir.join("index.json")).unwrap();
+        assert!(!text.contains("archived") && !text.contains("\"run\""), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn threads_stored_before_runs_and_archiving_still_load() {
+        let dir = temp().join("old");
+        std::fs::create_dir_all(dir.join("threads")).unwrap();
+        // As 1.4 wrote them.
+        std::fs::write(dir.join("index.json"), r#"{"version":1,"threads":[{"id":"t-9","agent":"claude","root":"/work/p","sessionId":null,"title":"Old one","updated":42}]}"#).unwrap();
+        std::fs::write(dir.join("threads").join("t-9.json"), r#"{"version":1,"meta":{"id":"t-9","agent":"claude","root":"/work/p","sessionId":"s","handedOffFrom":null},"updated":42,"thread":{"title":"Old one","entries":[]},"extra":null}"#).unwrap();
+        let store = Store::new(&dir);
+        let index = store.index();
+        assert_eq!(index.len(), 1);
+        assert_eq!((index[0].run.as_ref(), index[0].archived), (None, false));
+        let saved = store.load(&ThreadId("t-9".into())).unwrap();
+        assert_eq!((saved.meta.run, saved.meta.archived), (None, false));
+        assert_eq!(saved.meta.session_id.as_deref(), Some("s"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

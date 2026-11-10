@@ -73,6 +73,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nav.goto_line`, the bracket jumps (`nav.next_problem`…, on `SPC ]` and
   `SPC [` too), panes by number, a tab to the next pane, the recent-buffer
   switcher, and a keys page (`SPC h ?`).
+- The thread list (`SPC a t`) groups a pipeline's run as one entry:
+  what was asked, the pipeline, how it ended and when, its steps folded
+  under it with their agent and state. `Enter` on a run shows its
+  summary, `Alt+R` reviews its changes as one; `Alt+A` archives a thread
+  or a whole run (it's never deleted; `Alt+H` shows archived ones), and
+  `SPC a l` (`agents.threads_everywhere`, or `Alt+P` in the list) shows
+  every project's threads by project. A step's thread keeps which run
+  and step it is; threads kept before are single entries.
 - Extra cursors come back with the session, selections and all, when
   the file's text is the one they were left in; a file changed since
   gets its main cursor back only.

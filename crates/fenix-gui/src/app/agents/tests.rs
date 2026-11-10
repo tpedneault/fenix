@@ -1727,3 +1727,87 @@ fn standard_keys_a_click_on_an_answer_gives_it() {
     assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n", "refused");
 }
+
+/// The thread list's rows as shown.
+fn list_rows(app: &App) -> Vec<String> {
+    match &app.active_picker {
+        Some(ActivePicker::Agents(state)) => state.visible_rows(0, 50).map(|(_, c)| c.label.clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A pipeline's run is one entry in the thread list, its steps under it;
+/// it folds, it's archived and brought back whole, by project it's under
+/// its project, and its steps keep all of that in the store.
+#[test]
+fn a_pipeline_run_is_one_entry_in_the_thread_list_and_is_archived_whole() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    let spec = "title = \"Plan and build\"\n[[steps]]\nname = \"plan\"\nprompt = \"{input}\"\n[[steps]]\nname = \"build\"\nprompt = \"{previous}\"\n";
+    f.app.pipelines.armed = Some(fenix_acp::pipeline::PipelineSpec::parse("p", spec).unwrap());
+    f.type_prompt("Fix the login test");
+    assert!(f.pump(|app| app.pipelines.runs.values().any(|r| r.threads.len() == 2)), "on to build");
+    let steps = f.app.pipelines.runs.values().next().unwrap().threads.clone();
+    assert!(f.pump(|app| app.pipelines.runs.is_empty()), "the run ends");
+    for (i, step) in steps.iter().enumerate() {
+        let tag = f.app.agents.hub.view(step).unwrap().meta.run.clone().expect("a step knows its run");
+        assert_eq!((tag.step, tag.step_name.as_str(), tag.request.as_str(), tag.pipeline.as_str()), (i, ["plan", "build"][i], "Fix the login test", "Plan and build"));
+        assert!(tag.ended.as_deref().is_some_and(|e| e.starts_with("done")), "{tag:?}");
+    }
+    let index = f.app.agents.store.as_ref().unwrap().index();
+    assert!(steps.iter().all(|s| index.iter().any(|e| &e.id == s && e.run.is_some())), "kept, run and all");
+
+    f.app.agents_pick_thread();
+    let rows = list_rows(&f.app);
+    assert_eq!(rows.len(), 1, "one entry, folded: {rows:?}");
+    assert!(rows[0].starts_with("▸ Fix the login test · Plan and build · done"), "{rows:?}");
+    f.app.press("Tab");
+    let rows = list_rows(&f.app);
+    assert_eq!(rows.len(), 3, "its steps under it: {rows:?}");
+    assert!(rows[1].contains("1 plan") && rows[2].contains("2 build"), "{rows:?}");
+
+    f.app.press("M-a");
+    assert!(list_rows(&f.app).is_empty(), "archived: out of the list");
+    assert!(steps.iter().all(|s| f.app.agents.hub.view(s).unwrap().meta.archived), "every step");
+    assert!(f.app.agents.store.as_ref().unwrap().index().iter().filter(|e| e.archived).count() == 2, "and kept so");
+    f.app.press("M-h");
+    let rows = list_rows(&f.app);
+    assert!(rows.first().is_some_and(|r| r.contains("archived")), "shown again, marked: {rows:?}");
+    f.app.press("M-a");
+    assert!(steps.iter().all(|s| !f.app.agents.hub.view(s).unwrap().meta.archived), "brought back");
+    assert!(f.app.agents.hub.view(&steps[0]).is_some(), "nothing deleted");
+
+    f.app.press("M-p");
+    let rows = list_rows(&f.app);
+    assert!(rows.first().is_some_and(|r| r.contains("(this project)")), "by project: {rows:?}");
+    f.app.press("M-p");
+
+    // Enter on the run: its summary.
+    f.app.press("Enter");
+    let text = f.app.open().buffer.text();
+    assert!(text.starts_with("# Plan and build") && text.contains("> Fix the login test") && text.contains("2. build"), "{text}");
+    assert!(text.contains("done"), "how it ended: {text}");
+}
+
+/// Typing in the thread list is its query: a letter isn't one of its keys.
+#[test]
+fn the_thread_list_s_keys_leave_typing_to_the_query_and_other_pickers_alone() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    f.type_prompt("hello there");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| !v.thread.entries.is_empty())));
+    f.app.agents_pick_thread();
+    assert_eq!(list_rows(&f.app).len(), 1, "a thread on its own: {:?}", list_rows(&f.app));
+    f.app.press("a");
+    match &f.app.active_picker {
+        Some(ActivePicker::Agents(state)) => assert_eq!(state.query(), "a"),
+        _ => panic!("still up"),
+    }
+    f.app.press("Esc");
+    // Another picker of the agents' afterwards: Tab and Alt+A aren't the
+    // list's there.
+    f.app.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new("x", Pick::Nothing)])));
+    assert!(!f.app.thread_list_key(KeyPress::char('a').with_alt()));
+}

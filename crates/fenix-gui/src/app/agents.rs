@@ -57,6 +57,10 @@ pub(crate) enum Pick {
     /// `SPC a h`: the thread goes on with this agent.
     HandOff(String),
     Delete(ThreadId),
+    /// The thread list: a pipeline run's heading (its id), and a
+    /// project's (by project).
+    Run(String),
+    Project(PathBuf),
     Nothing,
     /// The ACP registry's agents, to install one.
     Registry,
@@ -124,6 +128,11 @@ pub(crate) struct AgentHost {
     pub(super) form: Option<elicit::FormFill>,
     /// Where `Effect::Listed` goes: a picker to import from.
     listing: bool,
+    /// The thread list (`SPC a t`): how it's shown.
+    pub(super) list: list::ThreadList,
+    /// A pipeline run's summary page, by buffer: the thread whose ledger
+    /// `SPC a r` there reviews.
+    pub(super) run_summaries: HashMap<BufferId, ThreadId>,
     /// Files changed during a turn with nothing to compare them to.
     pub(super) unknown: HashMap<ThreadId, BTreeSet<PathBuf>>,
     /// What git said was changed when each running turn started.
@@ -210,6 +219,8 @@ impl AgentHost {
             held: None,
             form: None,
             listing: false,
+            list: Default::default(),
+            run_summaries: HashMap::new(),
             unknown: HashMap::new(),
             turn_start: HashMap::new(),
             turning: HashMap::new(),
@@ -529,38 +540,6 @@ impl App {
         self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
-    /// `SPC a t`: the project's threads.
-    pub(crate) fn agents_pick_thread(&mut self) {
-        self.agents_configure();
-        let root = self.agents_root();
-        self.agents.load_threads(&root, 200);
-        let mut candidates = Vec::new();
-        for id in self.agents.hub.thread_ids().iter().rev() {
-            let Some(view) = self.agents.hub.view(id) else { continue };
-            if view.meta.root != root {
-                continue;
-            }
-            let state = if view.is_waiting_on_you() {
-                "waiting on you"
-            } else if view.is_working() {
-                "working"
-            } else if matches!(view.link, Link::ReadOnly(_)) {
-                "read-only"
-            } else {
-                ""
-            };
-            let label = format!("{}   {}{}", view.thread.display_title(), view.meta.agent, if state.is_empty() { String::new() } else { format!(" · {state}") });
-            candidates.push(fenix_picker::Candidate::new(label, Pick::Thread(id.clone())));
-        }
-        // Waiting threads first.
-        candidates.sort_by_key(|c| !c.label.contains("waiting on you"));
-        if candidates.is_empty() {
-            self.set_message("no agent threads in this project yet: SPC a n starts one");
-            return;
-        }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
-    }
-
     /// `SPC a T`: every thread at work or waiting on you, in any project
     /// or workspace; the one picked is shown, in its workspace when one
     /// has it.
@@ -785,7 +764,9 @@ impl App {
                 let id = self.agents.hub.new_thread(&agent, &self.agents_root());
                 self.agents_show(id);
             }
-            Pick::Thread(id) => self.agents_show(id),
+            Pick::Thread(id) => self.thread_list_open_thread(id),
+            Pick::Run(id) => self.thread_list_open_run(id),
+            Pick::Project(_) => self.set_message("a project's threads are under it: pick one"),
             Pick::Running(id) => self.agents_go_to_running(id),
             Pick::Mode(mode) => {
                 if let Some(thread) = self.agents.shown(&self.pages) {
@@ -1593,6 +1574,7 @@ mod dock;
 mod review;
 mod terminals;
 pub(crate) mod threads;
+mod list;
 mod install;
 pub(crate) use elicit::FORM_PROMPT;
 pub(crate) use install::SECRET_PROMPT;

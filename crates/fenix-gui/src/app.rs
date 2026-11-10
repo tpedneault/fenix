@@ -14495,6 +14495,9 @@ impl App {
     /// No stashing needed -- same reasoning as `explorer_jump`, now that
     /// buffers live in `self.buffers` rather than direct `App` fields.
     fn enter_picker(&mut self, picker: ActivePicker) {
+        // Whatever opens it says what it is: the thread list sets its own
+        // mark after.
+        self.agents.list.open = false;
         self.active_picker = Some(picker);
         self.picker_scroll = 0;
         self.main_view = MainView::Picker;
@@ -15329,6 +15332,11 @@ impl App {
     /// the explorer's, so unrecognized keys just don't do anything
     /// rather than falling through to something else).
     fn picker_key(&mut self, key: KeyPress) {
+        // The thread list's own keys (`Tab`, `Alt+A`...), ahead of the query.
+        if self.thread_list_key(key) {
+            self.wake_caret();
+            return;
+        }
         // Tab in the palette: give the command under the cursor keys.
         if key == KeyPress::named(FenixNamedKey::Tab) && !self.palette_describes {
             if let Some(ActivePicker::Commands(state)) = &self.active_picker {
