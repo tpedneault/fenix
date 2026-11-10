@@ -171,7 +171,9 @@ its extension. The rest is built into Fenix.
   unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
   it's nested, a pair the same colour. They're the code's own brackets,
   read from its syntax tree, so one in a string or a comment is left
-  alone; in a file of no language, every bracket counts. The colours are
+  alone; in a file of no language, every bracket counts. Code another
+  grammar would read (an HTML page's `<script>`, a Markdown fence) is
+  one token to the file's own, so its brackets aren't coloured. The colours are
   the theme's -- its `[brackets] colors`, one to six, or else its
   function, keyword and type colours.
 - **Markdown list continuation**: pressing Enter or `o` on a `-`/`*`/`+`
@@ -521,8 +523,10 @@ its extension. The rest is built into Fenix.
   leave it for another buffer, pane or application. It saves the same
   way `:w` does, with the same check first, so a file that changed on
   disk since it was read is never written over -- the conflict is yours
-  to settle. A buffer with no file yet, one shown read-only and a
-  remote project's file are left alone, and auto-saving doesn't run
+  to settle, and auto-save leaves that file alone until you have (`:w!`
+  or `:e!`), as it does one whose save failed. A buffer with no file
+  yet, a file that wasn't on disk when you opened it (its first save is
+  yours), one shown read-only and a remote project's file are left alone, and auto-saving doesn't run
   `editor.format_on_save`'s formatter: text moving while you type is
   worse than a file left unformatted until you save it yourself.
 - **Safe saves**: documents, settings, and recovery snapshots are staged beside

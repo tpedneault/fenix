@@ -25,6 +25,8 @@ pub(super) struct PaneView<'a> {
     pub remap_col: &'a dyn Fn(usize, usize) -> usize,
     /// The pane's extra cursors (standard keys), for the ruler.
     pub carets: &'a [usize],
+    /// The pane it is, for what its ruler's click snaps to.
+    pub pane: fenix_window::WindowId,
 }
 
 /// What `polish_pane` hands back to draw.
@@ -182,7 +184,10 @@ impl App {
                         continue;
                     }
                     edit_row_chars(cells, view.gutter_chars, |col, ch, color| match here.get(&col) {
-                        Some(depth) if !palette.is_empty() => (ch, palette[depth % palette.len()]),
+                        // Only a bracket: with the tree behind the text
+                        // (conflict markers stop it being read) a stale
+                        // place isn't coloured.
+                        Some(depth) if !palette.is_empty() && "()[]{}".contains(ch) => (ch, palette[depth % palette.len()]),
                         _ => (ch, color),
                     });
                 }
@@ -287,7 +292,7 @@ impl App {
         let mut targets: Vec<usize> = marks.iter().map(|&(l, _)| l).collect();
         targets.sort_unstable();
         targets.dedup();
-        self.motion.ruler_targets.insert(view.buffer, targets);
+        self.motion.ruler_targets.insert(view.pane, targets);
         Some(Ruler { lines, first: view.rendered_scroll, visible: view.rows.saturating_sub(1) as f32, cursor: view.cursor_line, marks })
     }
 
@@ -321,9 +326,12 @@ impl App {
         let Some(ob) = self.buffers.get(buffer) else { return false };
         let lines = ob.buffer.line_count().max(1);
         let line = (((pos.1 - content.y) / content.h) * lines as f32).floor().clamp(0.0, (lines - 1) as f32) as usize;
-        // On a mark (within a few pixels of one): its line, exactly.
-        let per_pixel = lines as f32 / content.h;
-        let line = self.motion.ruler_targets.get(&buffer).and_then(|t| ruler_snap(t, line, (RULER_SNAP_PX * per_pixel).ceil() as usize)).unwrap_or(line);
+        // On a mark (a few pixels from where it's drawn): its line,
+        // exactly; anywhere else, the line the click fell on.
+        let y_of = |line: usize| content.y + (line as f32 / lines as f32) * content.h;
+        let line = self.motion.ruler_targets.get(&pane).and_then(|t| ruler_snap(t, pos.1, y_of, RULER_SNAP_PX)).unwrap_or(line);
+        // A click there is a click: back to one cursor.
+        self.carets.remove(&pane);
         let char_idx = ob.buffer.line_start_char(line);
         let from = JumpEntry { buffer, char_idx: self.pane_state(pane).cursor.char_idx };
         self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
@@ -473,10 +481,10 @@ pub(super) fn selection_corners(segments: &Segments, radius: f32) -> Vec<[f32; 4
 /// How near a mark, in pixels, a click on the ruler goes to it.
 const RULER_SNAP_PX: f32 = 3.0;
 
-/// The mark's line nearest `line`, if one is within `within` lines.
-fn ruler_snap(targets: &[usize], line: usize, within: usize) -> Option<usize> {
-    let i = targets.partition_point(|&t| t < line);
-    [i.checked_sub(1), Some(i)].into_iter().flatten().filter_map(|i| targets.get(i)).copied().filter(|t| t.abs_diff(line) <= within).min_by_key(|t| t.abs_diff(line))
+/// The mark whose line is drawn nearest the click at `y`, if one is
+/// within `within` pixels of it; `y_of` says where a line is drawn.
+fn ruler_snap(targets: &[usize], y: f32, y_of: impl Fn(usize) -> f32, within: f32) -> Option<usize> {
+    targets.iter().copied().map(|t| (t, (y_of(t) - y).abs())).filter(|(_, d)| *d <= within).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(t, _)| t)
 }
 
 /// Brackets by depth from the text alone, for a file of no language:
@@ -516,7 +524,10 @@ mod tests {
             let found: Vec<char> = depths.iter().map(|&(at, _)| text.chars().nth(at).unwrap()).collect();
             assert_eq!(found, ['(', ')', '{', '}'], "the string's ( isn't one");
             assert_eq!(depths.iter().map(|&(_, d)| d).collect::<Vec<_>>(), [0, 0, 0, 0]);
-            assert!(std::sync::Arc::ptr_eq(&depths, &app.bracket_depths(id)), "kept until it changes");
+            // A frame drawn between: the tree is looked at again, and
+            // nothing having changed, the depths are kept.
+            app.syntax_highlights_for_visible_range(id, 0, 10);
+            assert!(std::sync::Arc::ptr_eq(&depths, &app.bracket_depths(id)), "kept across frames until it changes");
         }
         assert_eq!(text_bracket_depths("a(b[c]) \"(\"".chars()), [(1, 0), (3, 1), (5, 1), (6, 0), (9, 0)], "plain text: every one");
     }
@@ -542,6 +553,7 @@ mod tests {
         let selection = Segments::new();
         let remap = |_row: usize, col: usize| col;
         let carets: Vec<usize> = app.extra_carets().iter().map(|c| c.at).collect();
+        let pane = app.focused_pane_id();
         let view = PaneView {
             buffer,
             lines: &lines,
@@ -554,6 +566,7 @@ mod tests {
             selection: &selection,
             remap_col: &remap,
             carets: &carets,
+            pane,
         };
         app.polish_pane(&view, spans, Instant::now())
     }
@@ -616,11 +629,18 @@ y = zed
         let ruler = polish(&mut app, &mut spans).ruler.expect("on");
         assert!(ruler.marks.contains(&(2, RulerMark::Caret)), "{:?}", ruler.marks);
         assert!(ruler.marks.contains(&(3, RulerMark::Error)));
-        assert_eq!(app.motion.ruler_targets.get(&app.focused_buffer_id()).cloned(), Some(vec![2, 3]));
-        assert_eq!(ruler_snap(&[2, 3, 40], 5, 2), Some(3), "the nearest within reach");
-        assert_eq!(ruler_snap(&[2, 3, 40], 20, 2), None, "none near: where it was clicked");
-        assert_eq!(ruler_snap(&[], 0, 2), None);
-        assert_eq!(ruler_snap(&[10], 9, 1), Some(10));
+        let pane = app.focused_pane_id();
+        assert_eq!(app.motion.ruler_targets.get(&pane).cloned(), Some(vec![2, 3]));
+        let y = |line: usize| line as f32 * 100.0;
+        assert_eq!(ruler_snap(&[2, 3, 40], 302.0, y, RULER_SNAP_PX), Some(3), "the nearest within reach");
+        assert_eq!(ruler_snap(&[2, 3, 40], 250.0, y, RULER_SNAP_PX), None, "a line away but 50 px: where it was clicked");
+        assert_eq!(ruler_snap(&[], 0.0, y, RULER_SNAP_PX), None);
+        // Through the click itself, on a tall pane: a click far from any
+        // mark goes where it fell, and back to one cursor.
+        let rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        assert!(app.ruler_click(pane, rect, (795.0, 590.0)));
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 4, "the last line, where it fell");
+        assert!(app.extra_carets().is_empty(), "a click is a click");
     }
 
     #[test]

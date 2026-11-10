@@ -1395,6 +1395,26 @@ fn is_tcl_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language) == Some(fenix_syntax::LanguageId::Tcl)
 }
 
+/// `buffer`'s text made `new` by replacing only the lines that differ,
+/// the last first, as one undo step -- so what's anchored in the lines
+/// that didn't change (extra cursors, marks, an extension's decorations)
+/// stays where it was. `cursor` is moved as the text around it moved.
+pub(crate) fn replace_text_by_lines(buffer: &mut Buffer, cursor: &mut Cursor, new: &str) {
+    let old = buffer.text();
+    let replacements = fenix_diff::replacements(&old, new);
+    if replacements.is_empty() {
+        return;
+    }
+    let logged = buffer.edits_logged();
+    buffer.begin_undo_group();
+    let mut scratch = *cursor;
+    for (range, text) in replacements.iter().rev() {
+        buffer.replace_range(&mut scratch, range.start, range.end, text);
+    }
+    buffer.end_undo_group();
+    cursor.char_idx = buffer.map_since(logged, cursor.char_idx).unwrap_or(scratch.char_idx);
+}
+
 /// The functions and methods a `workspace/symbol` answer names.
 fn functions_named(response: lsp_types::WorkspaceSymbolResponse) -> std::collections::HashSet<String> {
     let function = |kind: lsp_types::SymbolKind| matches!(kind, lsp_types::SymbolKind::FUNCTION | lsp_types::SymbolKind::METHOD);
@@ -2079,8 +2099,14 @@ impl App {
 
     /// After a save: your keybindings file, saved, is put in use.
     fn reload_keybindings_if_saved(&mut self) {
+        let Some(saved) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        self.reload_keybindings_if(&saved);
+    }
+
+    /// The keys read again when `saved` is your keybindings.toml.
+    pub(super) fn reload_keybindings_if(&mut self, saved: &Path) {
         let Some(path) = keymap::user_keymap_path() else { return };
-        if self.open().buffer.path() != Some(path.as_path()) {
+        if saved != path.as_path() {
             return;
         }
         let problems = keymap::reload_leader();
@@ -7956,8 +7982,7 @@ impl App {
         match fenix_lsp::workspace_edit::apply_text_edits(&ob.buffer.text(), &edits) {
             Ok(text) => {
                 if text != ob.buffer.text() {
-                    let end = ob.buffer.len_chars();
-                    ob.buffer.replace_range(&mut ob.cursor, 0, end, &text);
+                    replace_text_by_lines(&mut ob.buffer, &mut ob.cursor, &text);
                 }
             }
             Err(error) => self.set_error(format!("LSP edits rejected: {error}")),
@@ -8859,8 +8884,7 @@ impl App {
             Ok(formatted) => {
                 let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
                 let (line, col) = buffer.line_col(cursor);
-                let end = buffer.len_chars();
-                buffer.replace_range(cursor, 0, end, &formatted);
+                replace_text_by_lines(buffer, cursor, &formatted);
                 let line = line.min(buffer.line_count().saturating_sub(1));
                 cursor.char_idx = buffer.line_start_char(line) + col.min(buffer.line_len(line));
                 cursor.sticky_col = col;
@@ -8894,8 +8918,7 @@ impl App {
             return;
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
-        buffer.replace_range(cursor, 0, end, &formatted);
+        replace_text_by_lines(buffer, cursor, &formatted);
     }
 
     /// `SPC c f` -- reindents the active Visual selection's lines in
@@ -9091,24 +9114,7 @@ impl App {
         match ob.buffer.save() {
             Ok(()) => {
                 let path = ob.buffer.path().unwrap().to_path_buf();
-                // Recorded before the message: this is what stops the
-                // next sweep reporting Fenix's own write as somebody
-                // else's change.
-                self.note_disk_state(id);
-                // The work is on disk now, so the snapshot describes
-                // nothing that's lost -- and leaving it would offer to
-                // "recover" it on the next start.
-                self.discard_recovery_for(id);
-                self.refresh_gutter_hunks(id);
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.editor_event("saved", fenix_wasm::host::Notice::Saved(name));
-                self.code_file_saved(&path);
-                // A server's settings, edited (`.fenix/lsp/<name>.json`):
-                // it's told.
-                if let Some(project) = lsp_settings_file(&path) {
-                    let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    self.lsp_settings_changed(&project, Some(&server));
-                }
+                self.after_saved(id, &path);
                 match (self.xml_save_problem(&path), Self::snippet_save_note(&path)) {
                     (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", self.shown_path(&path))),
                     (None, Some(Ok(note))) => self.set_message(format!("saved -- {note}")),
@@ -9122,6 +9128,30 @@ impl App {
             Err(err) => self.set_error(format!("save failed: {err}")),
         }
         self.wake_caret();
+    }
+
+    /// What follows a buffer written to its file, however it was saved
+    /// (`:w`, auto-save).
+    pub(super) fn after_saved(&mut self, id: BufferId, path: &Path) {
+        // Recorded before anything else: this is what stops the next
+        // sweep reporting Fenix's own write as somebody else's change.
+        self.note_disk_state(id);
+        // The work is on disk now, so the snapshot describes nothing
+        // that's lost -- and leaving it would offer to "recover" it on
+        // the next start.
+        self.discard_recovery_for(id);
+        self.refresh_gutter_hunks(id);
+        // A save of yours settles what auto-save held back.
+        self.auto_save_settled(id);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.editor_event("saved", fenix_wasm::host::Notice::Saved(name));
+        self.code_file_saved(path);
+        // A server's settings, edited (`.fenix/lsp/<name>.json`): it's
+        // told.
+        if let Some(project) = lsp_settings_file(path) {
+            let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            self.lsp_settings_changed(&project, Some(&server));
+        }
     }
 
     /// Every open buffer whose kind can actually hold savable content
@@ -12915,14 +12945,11 @@ impl App {
             .map(|state| ob.buffer.line_col(&Cursor { char_idx: state.cursor.char_idx.min(old_len), sticky_col: 0 }).0)
             .collect();
 
-        // Only what changed is replaced, so what's anchored in the rest
-        // (extra cursors, an extension's decorations) stays where it was.
-        let old_text = ob.buffer.text();
-        let (from, to, middle) = fenix_core::changed_span(&old_text, on_disk);
+        // Only the lines that changed are replaced, so what's anchored
+        // in the rest (extra cursors, an extension's decorations) stays
+        // where it was.
         let mut scratch = Cursor::at_start();
-        if from != to || !middle.is_empty() {
-            ob.buffer.replace_range(&mut scratch, from, to, middle);
-        }
+        replace_text_by_lines(&mut ob.buffer, &mut scratch, on_disk);
         // A reload isn't user work: leaving it dirty would make every
         // touched file look unsaved and block `:qa`.
         ob.buffer.mark_saved();
@@ -13979,9 +14006,8 @@ impl App {
         let start_char = self.open().buffer.line_start_char(conflict.start);
 
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
         let mut scratch = Cursor::at_start();
-        buffer.replace_range(&mut scratch, 0, end, &resolved);
+        replace_text_by_lines(buffer, &mut scratch, &resolved);
         // Land on where the conflict was, so the next one is a `SPC g j`
         // away rather than needing the file re-navigated.
         cursor.char_idx = start_char.min(buffer.len_chars());
@@ -14907,8 +14933,16 @@ impl App {
                 }
             }
         }
+        let was_open = self.buffers.id_for_path(path);
         let id = self.buffers.open_path(path);
-        self.note_disk_state(id);
+        // Opened again, a buffer with edits of its own (or one already
+        // found changed on disk) keeps what's known of the disk: looking
+        // afresh would take the other side's change for its own and let
+        // a save write over it.
+        let keep_disk_state = was_open == Some(id) && (self.externally_changed.contains(&id) || self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()));
+        if !keep_disk_state {
+            self.note_disk_state(id);
+        }
         self.open_buffer_in_focused_pane_as(id, preview);
         self.refresh_project_root();
         self.record_recent_file(path);
@@ -16688,6 +16722,9 @@ impl App {
         // Shift+Tab keeps its Shift for a snippet: it goes back a field.
         let snippet_key = if full == KeyPress::named(FenixNamedKey::Tab).with_shift() { full } else { keypress };
         if self.snippet_key(snippet_key) || self.completion_key(keypress) {
+            // A completion taken or a snippet's field moved to is the
+            // primary's alone: the others go, as for any other key.
+            self.clear_carets();
             self.wake_caret();
             return;
         }
@@ -18659,8 +18696,16 @@ impl App {
         match self.vim.visual_kind() {
             VisualKind::Char => {
                 let cursor_idx = self.cursor().char_idx;
-                let (lo, hi) =
-                    if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+                // Standard keys select between the anchor and the cursor,
+                // the cursor's character not in it -- drawn so, as the
+                // extra cursors' selections are.
+                let (lo, hi) = if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+                    (anchor.min(cursor_idx), anchor.max(cursor_idx))
+                } else if anchor <= cursor_idx {
+                    (anchor, cursor_idx + 1)
+                } else {
+                    (cursor_idx, anchor + 1)
+                };
                 let hi = hi.min(self.open().buffer.len_chars());
                 segments = self.range_to_segments(lo..hi, visible_lines);
             }
@@ -19627,6 +19672,13 @@ impl App {
     /// (which no headless test ever constructs), so it's directly
     /// testable the same way `frame_geometry` already is.
     fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        // A click that moves the cursors is a move Ctrl+U takes back.
+        let before = self.caret_mark();
+        self.handle_click_at_inner(pos, window_width, window_height);
+        self.note_caret_move(before);
+    }
+
+    fn handle_click_at_inner(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         if self.click_breadcrumb(&geometry, pos) { return }
@@ -20788,6 +20840,7 @@ impl App {
                     selection: &selection_segments,
                     remap_col: &remap_col,
                     carets: &pane_caret_ats,
+                    pane,
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;

@@ -73,6 +73,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nav.goto_line`, the bracket jumps (`nav.next_problem`…, on `SPC ]` and
   `SPC [` too), panes by number, a tab to the next pane, the recent-buffer
   switcher, and a keys page (`SPC h ?`).
+- Extra cursors come back with the session (without their selections,
+  as the main cursor's isn't kept) when the file's text is the one they
+  were left in; a file changed since gets its main cursor back only.
 - The thread list (`SPC a t`) groups a pipeline's run as one entry:
   what was asked, the pipeline, how it ended and when, its steps folded
   under it with their agent and state. `Enter` on a run shows its
@@ -88,8 +91,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "after_delay"` saves a file a moment after its last edit
   (`editor.auto_save_delay_ms`, a second), `"on_focus_change"` when you
   leave it for another buffer, pane or application. It never writes over
-  a file that changed on disk, a buffer with no file, a read-only one or
-  a remote project's, and it doesn't format.
+  a file that changed on disk (it waits until you've settled that), nor
+  a buffer with no file, a file not yet on disk, a read-only one or a
+  remote project's, and it doesn't format.
 - A newer Fenix, said on Home: with `updates.check` on (off unless you
   turn it on, as Fenix goes on the network only when asked), GitHub's
   latest release is looked for once a day; `app.check_for_updates` looks
@@ -113,11 +117,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Extra cursors stay through an edit made elsewhere -- a language
-  server's, an agent's, the file reloaded, an undo or redo -- moving
-  with the text, where they went back to one cursor. One whose text was
-  deleted goes to where it was. A reload replaces only what changed in
-  the file, so cursors and an extension's decorations in the rest stay
-  where they were.
+  server's, an agent's, a format, the file reloaded, an undo or redo --
+  moving with the text, where they went back to one cursor. One in text
+  that was replaced or deleted goes. A language server's edits, a
+  format, a resolved conflict, a project replace and a reload replace
+  only the lines that changed, so cursors, marks and an extension's
+  decorations in the rest stay where they were.
 - The overview ruler down a code pane's right edge marks extra cursors
   and information-level problems too, and a click on (or near) a mark
   goes to that line exactly. It's still on by default, as it has been

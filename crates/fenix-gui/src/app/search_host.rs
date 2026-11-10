@@ -642,8 +642,7 @@ impl App {
                 Some(b) => {
                     let Some(ob) = self.buffers.get_mut(b) else { continue };
                     let mut scratch = Cursor::at_start();
-                    let end = ob.buffer.len_chars();
-                    ob.buffer.replace_range(&mut scratch, 0, end, &after);
+                    super::replace_text_by_lines(&mut ob.buffer, &mut scratch, &after);
                     undo.push(UndoFile { path: file.path.clone(), before: text, after, buffer: Some((b, ob.buffer.edit_count())) });
                     unsaved += 1;
                 }
@@ -697,8 +696,7 @@ impl App {
                 Some((b, edits)) if self.buffers.get(b).is_some_and(|ob| ob.buffer.edit_count() == edits && ob.buffer.text() == file.after) => {
                     let Some(ob) = self.buffers.get_mut(b) else { continue };
                     let mut scratch = Cursor::at_start();
-                    let end = ob.buffer.len_chars();
-                    ob.buffer.replace_range(&mut scratch, 0, end, &file.before);
+                    super::replace_text_by_lines(&mut ob.buffer, &mut scratch, &file.before);
                     restored += 1;
                 }
                 Some(_) => kept += 1,
