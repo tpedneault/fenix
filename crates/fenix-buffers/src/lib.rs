@@ -470,6 +470,11 @@ impl BufferList {
     /// A stable listing order for a buffer-switcher UI: by path (buffers
     /// with no path -- scratch buffers -- sort first, in creation order
     /// among themselves since `None < Some(_)`).
+    /// Every buffer's id, in no order.
+    pub fn ids(&self) -> impl Iterator<Item = BufferId> + '_ {
+        self.buffers.keys().copied()
+    }
+
     pub fn ids_sorted_by_path(&self) -> Vec<BufferId> {
         let mut ids: Vec<BufferId> = self.buffers.keys().copied().collect();
         ids.sort_by(|&a, &b| self.buffers[&a].buffer.path().cmp(&self.buffers[&b].buffer.path()));

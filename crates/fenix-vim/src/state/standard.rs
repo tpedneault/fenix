@@ -213,9 +213,8 @@ impl VimState {
     /// dedented, the selection kept on them.
     fn indent_selection(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, indent: bool) {
         let anchor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
-        let (a, _) = buffer.line_col(&anchor);
-        let (b, _) = buffer.line_col(cursor);
-        let (lo, hi) = (a.min(b), a.max(b));
+        // The selection's lines: not one it ends at the very start of.
+        let (lo, hi) = self.standard_lines(buffer, cursor);
         let (anchor_line, anchor_col) = buffer.line_col(&anchor);
         let (cursor_line, cursor_col) = buffer.line_col(cursor);
         let before: Vec<usize> = (lo..=hi).map(|l| buffer.line_len(l)).collect();
@@ -229,7 +228,8 @@ impl VimState {
         }
         // Each end stays on its character, moved as its line was.
         let shifted = |line: usize, col: usize, buffer: &Buffer| {
-            let delta = buffer.line_len(line) as isize - before[line - lo] as isize;
+            // A line the selection only ends at the start of wasn't touched.
+            let delta = before.get(line.wrapping_sub(lo)).map_or(0, |&was| buffer.line_len(line) as isize - was as isize);
             let col = (col as isize + delta).max(0) as usize;
             buffer.line_start_char(line) + col.min(buffer.line_len(line))
         };
@@ -294,7 +294,9 @@ impl VimState {
         }
         let (lo, hi) = (self.visual_anchor.min(cursor.char_idx), self.visual_anchor.max(cursor.char_idx));
         let (first, mut last) = (line_of(lo), line_of(hi));
-        if last > first && hi == buffer.line_start_char(last) {
+        // A charwise selection ending at a line's very start doesn't take
+        // it; a linewise one always has its last line whole.
+        if self.visual_kind == VisualKind::Char && last > first && hi == buffer.line_start_char(last) {
             last -= 1;
         }
         (first, last)
@@ -499,6 +501,27 @@ mod tests {
     }
 
     #[test]
+    fn a_line_selected_whole_is_one_line_to_the_line_commands() {
+        let (mut vim, mut b, mut c) = setup("ab\ncd\n");
+        vim.select_line(&mut b, &mut c);
+        assert_eq!(vim.standard_lines(&b, &c), (0, 0), "Ctrl+L: its line, though the cursor's on the next");
+        vim.indent_lines(&mut b, &mut c, true);
+        assert_eq!(b.text(), "    ab\ncd\n", "one line indented");
+        let (mut vim, mut b, mut c) = setup("ab\n");
+        vim.select_line(&mut b, &mut c);
+        vim.indent_lines(&mut b, &mut c, true);
+        assert_eq!(b.text(), "    ab\n", "nothing on the empty line after the last break");
+        // Linewise (Ctrl+A, a triple-click): its last line is in it.
+        let (mut vim, mut b, mut c) = setup("a\nb");
+        vim.leave_insert_here(&mut b);
+        vim.select(VisualKind::Line, 0);
+        c.char_idx = 2;
+        assert_eq!(vim.standard_lines(&b, &c), (0, 1));
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "", "both lines");
+    }
+
+    #[test]
     fn indent_lines_keeps_the_cursor_on_its_text() {
         let (mut vim, mut b, mut c) = setup("ab\ncd");
         c.char_idx = 1;
@@ -616,11 +639,17 @@ mod tests {
     fn tab_indents_the_selected_lines_and_keeps_them_selected() {
         let (mut vim, mut b, mut c) = setup("a\nb\nc");
         press(&mut vim, &mut b, &mut c, named(NamedKey::Down).with_shift());
+        press(&mut vim, &mut b, &mut c, named(NamedKey::Right).with_shift());
         press(&mut vim, &mut b, &mut c, named(NamedKey::Tab));
-        assert_eq!(b.rope().to_string(), "    a\n    b\nc");
+        assert_eq!(b.rope().to_string(), "    a\n    b\nc", "into b: both");
         assert!(vim.is_selecting());
         press(&mut vim, &mut b, &mut c, named(NamedKey::Tab).with_shift());
         assert_eq!(b.rope().to_string(), "a\nb\nc");
+        // To b's very start: a's line only, as an IDE has it.
+        let (mut vim, mut b, mut c) = setup("a\nb\nc");
+        press(&mut vim, &mut b, &mut c, named(NamedKey::Down).with_shift());
+        press(&mut vim, &mut b, &mut c, named(NamedKey::Tab));
+        assert_eq!(b.rope().to_string(), "    a\nb\nc");
     }
 
     #[test]

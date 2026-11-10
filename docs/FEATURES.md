@@ -521,8 +521,10 @@ its extension. The rest is built into Fenix.
   leave it for another buffer, pane or application. It saves the same
   way `:w` does, with the same check first, so a file that changed on
   disk since it was read is never written over -- the conflict is yours
-  to settle. A buffer with no file yet, one shown read-only and a
-  remote project's file are left alone, and auto-saving doesn't run
+  to settle, and auto-save leaves that file alone until you have (`:w!`
+  or `:e!`), as it does one whose save failed. A buffer with no file
+  yet, a file that wasn't on disk when you opened it (its first save is
+  yours), one shown read-only and a remote project's file are left alone, and auto-saving doesn't run
   `editor.format_on_save`'s formatter: text moving while you type is
   worse than a file left unformatted until you save it yourself.
 - **Safe saves**: documents, settings, and recovery snapshots are staged beside

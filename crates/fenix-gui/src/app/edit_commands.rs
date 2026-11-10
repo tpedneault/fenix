@@ -34,6 +34,11 @@ impl App {
         let Some(state) = self.workspaces.active_pane_states().get(&pane) else { return (0, 0) };
         let buffer = &self.open().buffer;
         let (line, _) = buffer.line_col(&state.cursor);
+        // Standard keys: a selection that ends at a line's very start
+        // doesn't take that line.
+        if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+            return self.vim.standard_lines(buffer, &state.cursor);
+        }
         if self.vim.mode() == Mode::Visual {
             let anchor = self.vim.visual_anchor().min(buffer.rope().len_chars());
             let anchor_line = buffer.rope().char_to_line(anchor);
@@ -360,7 +365,12 @@ impl App {
                 self.put_cursor(pane, at - 1);
             }
         }
+        let (buffer, from) = (self.focused_buffer_id(), self.cursor().char_idx);
         self.vim_keys_from_normal(&[KeyPress::char('%')]);
+        // A jump, as `%` is: Ctrl+O comes back.
+        if self.cursor().char_idx != from {
+            self.record_jump(super::JumpEntry { buffer, char_idx: from });
+        }
     }
 
     /// `code.fold` / `code.unfold` (Ctrl+Shift+[ / Ctrl+Shift+]): the
@@ -369,7 +379,7 @@ impl App {
         if self.vim.mode() == Mode::Visual {
             self.leave_visual();
         }
-        self.vim_keys_from_normal(&[KeyPress::char('z'), KeyPress::char(if close { 'c' } else { 'o' })]);
+        self.fold_command(if close { fenix_vim::FoldCommand::Close { recursive: false } } else { fenix_vim::FoldCommand::Open { recursive: false } });
     }
 
     /// `edit.select_all`.
