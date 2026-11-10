@@ -25,6 +25,7 @@ mod git_page;
 mod git_editor;
 mod git_compare_page;
 mod side_by_side;
+mod rows;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -84,6 +85,7 @@ mod control_host;
 mod startup;
 use tool_sessions::{LspKey, LspServer};
 use wasm_host::Happened;
+use rows::FocusedOverlays;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -2360,6 +2362,10 @@ struct CompletionState {
 
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
 type Segments = Vec<(usize, usize, usize)>;
+
+/// Highlight segments in the text: (buffer line, start char column, end
+/// char column), put on rows by the pane's `rows::RowMap`.
+type LineSegments = Vec<(usize, usize, usize)>;
 
 /// A content or sidebar row's rich-text spans: (text, color, use_icon_font).
 type RowSpans = Vec<(String, glyphon::Color, bool)>;
@@ -5329,9 +5335,6 @@ pub struct App {
     indent_steps: std::cell::RefCell<HashMap<BufferId, (u64, Option<usize>)>>,
     /// Open side-by-side diffs (`SPC g v`) -- see `side_by_side`.
     side_by_sides: Vec<side_by_side::SideBySide>,
-    /// While a folded or side-by-side pane's overlays are worked out:
-    /// the buffer line `render_base_line` stands for (see its comment).
-    render_base_override: std::cell::Cell<Option<usize>>,
     merge_session: Option<MergeSession>,
     compose: Option<ComposeSession>,
     /// Each file-backed buffer's file as Fenix last saw it. Absent for a
@@ -6227,7 +6230,6 @@ impl App {
             ref_view_names: HashMap::new(),
             indent_steps: std::cell::RefCell::new(HashMap::new()),
             side_by_sides: Vec::new(),
-            render_base_override: std::cell::Cell::new(None),
             merge_session: None,
             compose: None,
             disk_state,
@@ -17659,20 +17661,11 @@ impl App {
         }
     }
 
-    /// The focused pane's line rendering starts from -- `rendered_scroll`
-    /// rounded down. Content, caret, hl-line, selection, and pulse all
-    /// anchor their row math to this (not `scroll_line`, which is only
+    /// The focused pane's display line rendering starts from --
+    /// `rendered_scroll` rounded down (not `scroll_line`, which is only
     /// the *target* `rendered_scroll` is easing toward).
-    ///
-    /// In a pane whose rows aren't its lines one for one -- a scope
-    /// folded, or a side-by-side's filler rows -- the overlays (selection,
-    /// search matches, brackets) are worked out against a buffer line set
-    /// in `render_base_override` and then moved to the rows those lines
-    /// are on.
+    #[cfg(test)]
     fn render_base_line(&self) -> usize {
-        if let Some(line) = self.render_base_override.get() {
-            return line;
-        }
         self.pane_state(self.focused_pane_id()).rendered_scroll.floor().max(0.0) as usize
     }
 
@@ -18714,23 +18707,23 @@ impl App {
         }
     }
 
-    /// Per-visible-line (view_row, col_start, col_end) segments of the
-    /// active Visual-mode selection, for highlighting. Empty outside Visual
+    /// The (line, col_start, col_end) segments of the active Visual-mode
+    /// selection on `lines`, for highlighting. Empty outside Visual
     /// mode. Shape depends on `visual_kind()`: Char is a single charwise
     /// span, Line highlights whole lines regardless of column, Block is a
     /// column-range rectangle across lines (clamped per ragged line, like
     /// the Block operators themselves).
-    fn visual_selection_segments(&self, visible_lines: usize) -> Segments {
+    fn visual_selection_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         if self.snippet_is_valid() {
             if let Some(range) = self.snippet.as_ref().and_then(|s| s.session.selection()) {
-                return self.range_to_segments(range, visible_lines);
+                return self.range_to_segments(range, lines);
             }
         }
         if self.vim.mode() != Mode::Visual {
             return Vec::new();
         }
         let anchor = self.vim.visual_anchor();
-        let last_visible = (self.render_base_line() + visible_lines).min(self.open().buffer.line_count());
+        let (first_visible, last_visible) = (lines.start, lines.end.min(self.open().buffer.line_count()));
         let mut segments = Vec::new();
 
         match self.vim.visual_kind() {
@@ -18747,14 +18740,14 @@ impl App {
                     (cursor_idx, anchor + 1)
                 };
                 let hi = hi.min(self.open().buffer.len_chars());
-                segments = self.range_to_segments(lo..hi, visible_lines);
+                segments = self.range_to_segments(lo..hi, lines);
             }
             VisualKind::Line => {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
-                for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
+                for line in first_visible.max(line_lo)..last_visible.min(line_hi + 1) {
                     // at least 1 col wide so an empty line still shows a sliver
                     let width = self.open().buffer.line_len(line).max(1);
-                    segments.push((line - self.render_base_line(), 0, width));
+                    segments.push((line, 0, width));
                 }
             }
             VisualKind::Block => {
@@ -18767,12 +18760,12 @@ impl App {
                 } else {
                     (cursor_col, anchor_col + 1)
                 };
-                for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
+                for line in first_visible.max(line_lo)..last_visible.min(line_hi + 1) {
                     let len = self.open().buffer.line_len(line);
                     let seg_start = col_lo.min(len);
                     let seg_end = col_hi.min(len);
                     if seg_start < seg_end {
-                        segments.push((line - self.render_base_line(), seg_start, seg_end));
+                        segments.push((line, seg_start, seg_end));
                     }
                 }
             }
@@ -18788,20 +18781,27 @@ impl App {
         if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) }
     }
 
-    /// Per-visible-line (view_row, col_start, col_end) segments a plain
-    /// char range covers -- shared by Char-kind Visual selection and the
+    /// The (line, col_start, col_end) segments a plain char range covers
+    /// on `lines` -- shared by Char-kind Visual selection and the
     /// yank/paste pulse, which are both "highlight this contiguous span"
-    /// even though they come from different sources.
-    fn range_to_segments(&self, range: std::ops::Range<usize>, visible_lines: usize) -> Segments {
-        let last_visible = (self.render_base_line() + visible_lines).min(self.open().buffer.line_count());
+    /// even though they come from different sources. Only the lines the
+    /// range is on are looked at.
+    fn range_to_segments(&self, range: std::ops::Range<usize>, lines: std::ops::Range<usize>) -> LineSegments {
+        let buffer = &self.open().buffer;
+        let len = buffer.len_chars();
         let mut segments = Vec::new();
-        for line in self.render_base_line()..last_visible {
-            let line_start = self.open().buffer.line_start_char(line);
-            let line_end = line_start + self.open().buffer.line_len(line);
+        if range.start >= range.end {
+            return segments;
+        }
+        let first = buffer.rope().char_to_line(range.start.min(len)).max(lines.start);
+        let last = (buffer.rope().char_to_line(range.end.min(len)) + 1).min(lines.end).min(buffer.line_count());
+        for line in first..last {
+            let line_start = buffer.line_start_char(line);
+            let line_end = line_start + buffer.line_len(line);
             let seg_start = range.start.max(line_start);
             let seg_end = range.end.min(line_end);
             if seg_start < seg_end {
-                segments.push((line - self.render_base_line(), seg_start - line_start, seg_end - line_start));
+                segments.push((line, seg_start - line_start, seg_end - line_start));
             }
         }
         segments
@@ -18813,29 +18813,29 @@ impl App {
     /// bracket at all). Reuses `range_to_segments` for the "char range
     /// -> view segments" conversion, called once per bracket rather
     /// than over a combined range since the two are rarely adjacent.
-    fn bracket_match_segments(&self, visible_lines: usize) -> Segments {
+    fn bracket_match_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         let cursor_idx = self.cursor().char_idx;
         let Some(match_idx) = fenix_vim::find_matching_bracket(&self.open().buffer, cursor_idx) else {
             return Vec::new();
         };
-        let mut segments = self.range_to_segments(cursor_idx..cursor_idx + 1, visible_lines);
-        segments.extend(self.range_to_segments(match_idx..match_idx + 1, visible_lines));
+        let mut segments = self.range_to_segments(cursor_idx..cursor_idx + 1, lines.clone());
+        segments.extend(self.range_to_segments(match_idx..match_idx + 1, lines));
         segments
     }
 
     /// `hlsearch`'s persistent match-highlight segments -- every
-    /// occurrence of the last confirmed search pattern within the
-    /// visible range, empty whenever `VimState::hlsearch_active` is
+    /// occurrence of the last confirmed search pattern on `lines`,
+    /// empty whenever `VimState::hlsearch_active` is
     /// false. Converts the visible line range to a byte range (`Buffer::
     /// char_to_byte` at each line boundary) for `VimState::hlsearch_
     /// matches`, then each match's byte range back to view segments via
     /// `range_to_segments`, the same "windowed, computed fresh each
     /// frame" discipline `bracket_match_segments`/`syntax_highlights_
     /// for_visible_range` already use.
-    fn hlsearch_segments(&self, visible_lines: usize) -> Segments {
+    fn hlsearch_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         let buffer = &self.open().buffer;
-        let last_visible = (self.render_base_line() + visible_lines).min(buffer.line_count());
-        let start_char = buffer.line_start_char(self.render_base_line());
+        let last_visible = lines.end.min(buffer.line_count());
+        let start_char = buffer.line_start_char(lines.start.min(last_visible));
         let end_char = if last_visible < buffer.line_count() {
             buffer.line_start_char(last_visible)
         } else {
@@ -18843,21 +18843,21 @@ impl App {
         };
         let byte_range = buffer.char_to_byte(start_char)..buffer.char_to_byte(end_char);
 
-        let mut segments = Segments::new();
+        let mut segments = LineSegments::new();
         for m in self.vim.hlsearch_matches(buffer, byte_range) {
             let start = buffer.byte_to_char(m.start);
             let end = buffer.byte_to_char(m.end);
-            segments.extend(self.range_to_segments(start..end, visible_lines));
+            segments.extend(self.range_to_segments(start..end, lines.clone()));
         }
         // What a `:s` being typed would replace, and the match its `c`
         // flag is asking about.
         if let Some(Ok(preview)) = self.vim.substitute_preview(buffer, &self.cursor()) {
             for m in preview.matches.into_iter().filter(|m| m.end >= start_char && m.start <= end_char) {
-                segments.extend(self.range_to_segments(m, visible_lines));
+                segments.extend(self.range_to_segments(m, lines.clone()));
             }
         }
         if let Some(m) = self.vim.substitute_confirm_match() {
-            segments.extend(self.range_to_segments(m, visible_lines));
+            segments.extend(self.range_to_segments(m, lines));
         }
         segments
     }
@@ -18888,33 +18888,21 @@ impl App {
         Some((current, starts.len()))
     }
 
-    /// The focused pane's caret position for this frame: normally
-    /// `hl_row`/the real cursor's column, but during `Mode::Search`
-    /// previews where the in-progress query would jump to instead
+    /// The focused pane's caret position for this frame, as (line,
+    /// col): normally the real cursor's (`line`, `col`), but during
+    /// `Mode::Search` where the in-progress query would jump to instead
     /// (incsearch) -- the real `Cursor`/`last_search` are untouched
     /// until Enter confirms (see `VimState::preview_match`'s own doc
-    /// comment). The preview is only shown when it falls inside the
-    /// currently-fetched `[render_base_line, render_base_line +
-    /// pane_visible_lines]` window; a match outside it shows no caret
-    /// this frame rather than auto-scrolling to reveal it (a disclosed
+    /// comment). A preview on a line not shown draws no caret this
+    /// frame rather than auto-scrolling to reveal it (a disclosed
     /// simplification -- real incsearch also pans the viewport).
-    fn focused_caret(
-        &self,
-        hl_row: Option<usize>,
-        col: usize,
-        render_base_line: usize,
-        pane_visible_lines: usize,
-    ) -> Option<(usize, usize)> {
+    fn focused_caret(&self, line: usize, col: usize) -> Option<(usize, usize)> {
         if self.vim.mode() != Mode::Search {
-            return hl_row.map(|row| (row, col));
+            return Some((line, col));
         }
-        self.vim.preview_match(&self.open().buffer, &self.cursor()).and_then(|idx| {
+        self.vim.preview_match(&self.open().buffer, &self.cursor()).map(|idx| {
             let preview_cursor = Cursor { char_idx: idx, sticky_col: 0 };
-            let (preview_line, preview_col) = self.open().buffer.line_col(&preview_cursor);
-            preview_line
-                .checked_sub(render_base_line)
-                .filter(|&row| row <= pane_visible_lines)
-                .map(|row| (row, preview_col))
+            self.open().buffer.line_col(&preview_cursor)
         })
     }
 
@@ -18922,14 +18910,14 @@ impl App {
     /// `None` when there isn't one. Fades quickly at first then lingers
     /// faintly, via the same ease-out curve as the caret (inverted: pulses
     /// start bright and fade, blink fades in toward its target instead).
-    fn pulse_overlay(&self, visible_lines: usize) -> Option<(Segments, f32)> {
+    fn pulse_overlay(&self, lines: std::ops::Range<usize>) -> Option<(LineSegments, f32)> {
         let pulse = self.pulse.as_ref()?;
         let t = Instant::now().duration_since(pulse.started).as_secs_f32() / self.motion().pulse_d.as_secs_f32().max(1e-3);
         let alpha = PULSE_PEAK_ALPHA * (1.0 - ease_out_cubic(t));
         if alpha <= 0.0 {
             return None;
         }
-        Some((self.range_to_segments(pulse.range.clone(), visible_lines), alpha))
+        Some((self.range_to_segments(pulse.range.clone(), lines), alpha))
     }
 
     /// Whichever prompt/confirmation `active_prompt_text` says is
@@ -20570,6 +20558,10 @@ impl App {
             let display_lines = self.pane_display_lines(pane, buffer_id);
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
+            // What is on each row: the one translation between a place in
+            // the text and a cell in the pane, for everything drawn over
+            // the text below.
+            let row_map = rows::RowMap::lines(&visible_document_lines[..visible_document_lines.len().min(pane_visible_lines + 1)], shown_scroll_col);
             let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
             let render_frac = rendered_scroll - rendered_scroll.floor();
             // Computed here (rather than at its previous spot, further
@@ -20596,72 +20588,19 @@ impl App {
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
             let syntax_highlights = self.syntax_highlights_from_column(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col);
             let tab_stops = self.tab_stops_for(buffer_id);
-            // Char-column -> visual-column map for every visible row
-            // whose line actually contains a `\t` -- absent (not an
-            // identity `Vec`) for every other row, so caret/selection
-            // math below falls back to the raw char column unchanged.
-            // Recomputed independently of `content_spans`'s own tab
-            // expansion (a small amount of duplicated line-text reading,
-            // paid only by tab-containing lines) so `content_spans`'s
-            // signature/return type -- and its several existing direct
-            // test call sites -- didn't need to change shape just to
-            // additionally hand back this map.
-            let mut col_maps: HashMap<usize, Vec<usize>> = HashMap::new();
-            // Indentation guides (row, column) pairs -- computed in this
-            // same loop since it already fetches/tab-expands every
-            // visible row's raw text for `col_maps`, and this needs
-            // exactly that same (display-column) text to count each
-            // row's own leading whitespace correctly on a tab-indented
-            // file.
-            let mut indent_guides: Vec<(usize, usize)> = Vec::new();
-            // The file's own step (three spaces a level is three), not the
-            // setting's alone: a guide on every column otherwise, or none.
-            let indent_width = self.guide_indent_width(buffer_id);
-            // The extensions' decorations of it, laid out line by line: the
-            // text drawn and the columns it moves (`col_maps`), by line.
-            let decorations = if is_dashboard { Vec::new() } else { self.code_decorations(buffer_id) };
-            let mut decorated: HashMap<usize, crate::decorations::LineLayout> = HashMap::new();
-            let mut decoration_rows: Vec<(usize, crate::decorations::LineLayout)> = Vec::new();
-            if let Some(ob) = self.buffers.get(buffer_id) {
-                let visual_lines = ob.buffer.visual_line_count();
-                for r in 0..=pane_visible_lines {
-                    let Some(&buffer_line) = visible_document_lines.get(r) else { continue };
-                    if buffer_line >= visual_lines {
-                        continue;
-                    }
-                    let start = ob.buffer.line_start_char(buffer_line);
-                    let len = ob.buffer.line_len(buffer_line);
-                    let line_text = ob.buffer.text_range(start, start + len);
-                    let here: Vec<&crate::decorations::Decoration> = decorations.iter().copied().filter(|d| d.start <= start + len && d.end >= start).collect();
-                    if !here.is_empty() {
-                        let layout = crate::decorations::layout_line(&line_text, start, &here, &tab_stops, buffer_line == line);
-                        col_maps.insert(r, layout.col_map.clone());
-                        decoration_rows.push((r, layout.clone()));
-                        decorated.insert(buffer_line, layout);
-                    }
-                    let leading_columns = if decorated.contains_key(&buffer_line) {
-                        line_text.chars().take_while(|&c| c == ' ').count()
-                    } else if line_text.contains('\t') {
-                        let (display, col_map) = tabstops::expand_line(&line_text, &tab_stops);
-                        col_maps.insert(r, col_map);
-                        display.chars().take_while(|&c| c == ' ').count()
-                    } else {
-                        line_text.chars().take_while(|&c| c == ' ').count()
-                    };
-                    // Home's leading spaces are layout, not indentation.
-                    if !is_dashboard {
-                        indent_guides.extend(indent_guide_columns(leading_columns, indent_width).map(|col| (r, col)));
-                    }
-                }
-            }
+            // Each line's columns (tabs, decorations) and the indent
+            // guides, by `row_map`: what everything drawn over the text
+            // below is placed through.
+            let mut layout = self.pane_layout(buffer_id, row_map, line, is_dashboard);
+            let row_map = &layout.map;
             let content_spans = match self.buffers.get(buffer_id) {
                 Some(ob) if folds_active => self.folded_content_spans(
                     ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
-                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &decorated,
+                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &layout.decorated,
                 ),
                 Some(ob) => self.content_spans_decorated(
                     ob, render_base_line, pane_visible_lines + 1, gutter_chars, dashboard_pad.as_deref(),
-                    &syntax_highlights, line, &tab_stops, shown_scroll_col, &decorated,
+                    &syntax_highlights, line, &tab_stops, shown_scroll_col, &layout.decorated,
                 ),
                 None => Vec::new(),
             };
@@ -20674,131 +20613,55 @@ impl App {
             // part of the transition (it hasn't panned into view yet) --
             // `None` means "don't draw the hl-line/caret this frame," not
             // a bug.
-            let hl_row = visible_document_lines.iter().position(|&row| row == line).filter(|&row| row <= pane_visible_lines);
+            let hl_row = row_map.first_row(line);
 
-            // Char column -> visual column, via this row's `col_maps`
-            // entry when it has one (a line with a tab), else unchanged
-            // -- applied here, once, to every kind of column-bearing
-            // value (selection/pulse/bracket/hlsearch segments, the
-            // caret) rather than at the final pixel-rect-building loop
-            // further down, so that loop's `col_start as f32 *
-            // char_width` math needs no changes at all: by the time
-            // anything lands in `PaneRender`, its columns are already
-            // real visual columns. Also subtracts `scroll_col` here, for
-            // the same reason -- `content_spans` already sliced away the
-            // first `scroll_col` visual columns of each row's *rendered
-            // text*, so every column-bearing value referring to a
-            // position in that same text needs the same offset removed
-            // to stay aligned with what's actually on screen.
-            // `saturating_sub` rather than a bounds check: a
-            // selection/highlight starting before the current scroll
-            // position clamps to column 0 (still drawn, just from the
-            // pane's left edge) instead of underflowing.
-            let remap_col = |row: usize, col: usize| -> usize {
-                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(shown_scroll_col)
-            };
-            let remap_segments = |segments: Segments| -> Segments {
-                segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
-            };
-            // Standard keys' extra cursors, and their selections.
-            let (extra_carets, extra_selections): (Vec<(usize, usize)>, Segments) = if is_focused && !folds_active {
-                let buffer = &self.open().buffer;
-                let mut segs = Segments::new();
-                let mut carets = Vec::new();
-                for c in self.extra_carets() {
-                    let (l, col) = buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 });
-                    if let Some(row) = l.checked_sub(render_base_line).filter(|&r| r <= pane_visible_lines) {
-                        carets.push((row, remap_col(row, col)));
-                    }
-                    if let Some(a) = c.anchor {
-                        segs.extend(remap_segments(self.range_to_segments(a.min(c.at)..a.max(c.at), pane_visible_lines + 1)));
-                    }
-                }
-                (carets, segs)
-            } else {
-                (Vec::new(), Segments::new())
-            };
-            let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused && !folds_active {
-                (
-                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)).into_iter().chain(extra_selections).collect(),
-                    self.pulse_overlay(pane_visible_lines + 1).map(|(segs, a)| (remap_segments(segs), a)),
-                    remap_segments(self.bracket_match_segments(pane_visible_lines + 1)),
-                    remap_segments(self.hlsearch_segments(pane_visible_lines + 1)),
-                    self.focused_caret(hl_row, col, render_base_line, pane_visible_lines).map(|(row, col)| (row, remap_col(row, col))),
-                )
-            } else if is_focused {
-                // Rows aren't lines one for one here: work the overlays
-                // out from the first line shown, then move each to the
-                // row its line is on.
-                let (first, last) = (shown_lines.first().copied(), shown_lines.last().copied());
-                match (first, last) {
-                    (Some(first), Some(last)) => {
-                        let span = last - first + 1;
-                        let to_rows = |segments: Segments| -> Segments {
-                            segments
-                                .into_iter()
-                                .filter_map(|(r, s, e)| {
-                                    let row = visible_document_lines.iter().position(|&l| l == first + r)?;
-                                    (row <= pane_visible_lines).then_some((row, s, e))
-                                })
-                                .collect()
-                        };
-                        self.render_base_override.set(Some(first));
-                        let overlays = (
-                            remap_segments(to_rows(self.visual_selection_segments(span))),
-                            self.pulse_overlay(span).map(|(segs, a)| (remap_segments(to_rows(segs)), a)),
-                            remap_segments(to_rows(self.bracket_match_segments(span))),
-                            remap_segments(to_rows(self.hlsearch_segments(span))),
-                            hl_row.map(|row| (row, remap_col(row, col))),
-                        );
-                        self.render_base_override.set(None);
-                        overlays
-                    }
-                    _ => (Segments::new(), None, Segments::new(), Segments::new(), hl_row.map(|row| (row, remap_col(row, col)))),
-                }
-            } else {
-                (Segments::new(), None, Segments::new(), Segments::new(), None)
-            };
+            let (vcol, locate, to_rows) = (|l, c| layout.vcol(l, c), |l, c| layout.locate(l, c), |segs| layout.to_rows(segs));
+            let shown_span = row_map.span();
+            let FocusedOverlays { extra_carets, selection: selection_segments, pulse: pulse_overlay, brackets: bracket_match_segments, hlsearch: hlsearch_segments, caret } =
+                if is_focused { self.focused_overlays(&layout, line, col) } else { FocusedOverlays::default() };
 
             // A soft tint behind each TODO-style keyword, in its own
             // kind's color, so they stand out while scrolling past --
             // the glyphs alone are easy to lose in a comment-colored
             // line.
-            let (side_tints, side_words) = self.side_by_side_tints(pane, &visible_document_lines[..visible_document_lines.len().min(pane_visible_lines + 1)]);
+            let (side_tints, side_words) = self.side_by_side_tints(pane, &row_map.lines_by_row());
             let mut todo_bg_segments: Vec<(usize, usize, usize, [f32; 4])> = match (self.todo_spans.get(&buffer_id), self.buffers.get(buffer_id)) {
                 (Some(spans), Some(ob)) => spans
                     .iter()
-                    .filter_map(|(range, kind)| {
+                    .flat_map(|(range, kind)| {
                         let start = ob.buffer.byte_to_char(range.start);
                         let len = ob.buffer.byte_to_char(range.end) - start;
                         let (line, col) = ob.buffer.line_col(&Cursor { char_idx: start, sticky_col: 0 });
-                        let row = visible_document_lines.iter().position(|&l| l == line).filter(|&r| r <= pane_visible_lines)?;
                         let [r, g, b, _] = glyphon_to_rgba(theme.todo_color(*kind));
-                        Some((row, remap_col(row, col), remap_col(row, col + len), [r, g, b, 0.18]))
+                        to_rows(vec![(line, col, col + len)]).into_iter().map(move |(row, s, e)| (row, s, e, [r, g, b, 0.18]))
                     })
                     .collect(),
                 _ => Vec::new(),
             };
-            todo_bg_segments.extend(side_words.into_iter().map(|(row, s, e, color)| (row, remap_col(row, s), remap_col(row, e), color)));
+            todo_bg_segments.extend(side_words.into_iter().filter_map(|(row, s, e, color)| {
+                let line = row_map.row(row).filter(|r| r.kind == rows::RowKind::Text)?.line;
+                Some(to_rows(vec![(line, s, e)]).into_iter().map(move |(row, s, e)| (row, s, e, color)))
+            }).flatten());
             // The decorations' swatches and tints behind the text, their
             // underlines under it -- already in visual columns.
             let mut decoration_underlines = Vec::new();
             let mut decoration_strikes = Vec::new();
             let mut decoration_chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>)> = Vec::new();
-            for (row, layout) in &decoration_rows {
-                for (cols, mark) in &layout.marks {
-                    let (a, b) = (cols.start.saturating_sub(shown_scroll_col), cols.end.saturating_sub(shown_scroll_col));
-                    if a >= b {
-                        continue;
-                    }
-                    match mark {
-                        crate::decorations::Mark::Swatch((r, g, b2)) => todo_bg_segments.push((*row, a, b, [*r as f32 / 255.0, *g as f32 / 255.0, *b2 as f32 / 255.0, 1.0])),
-                        crate::decorations::Mark::Tint(shade) => todo_bg_segments.push((*row, a, b, pages::shade_color(theme, *shade))),
-                        crate::decorations::Mark::Underline(role) => decoration_underlines.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
-                        crate::decorations::Mark::Strike(role) => decoration_strikes.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
-                        crate::decorations::Mark::Chip(role) => {
-                            let [r, g, b2, _] = glyphon_to_rgba(pages::role_color(theme, *role));
-                            decoration_chips.push((*row, a, b, [r, g, b2, 0.13], None));
+            for (line, decorated) in &layout.decoration_rows {
+                for (cols, mark) in &decorated.marks {
+                    for (row, a, b) in row_map.segments(*line, cols.clone()) {
+                        if a >= b {
+                            continue;
+                        }
+                        match mark {
+                            crate::decorations::Mark::Swatch((r, g, b2)) => todo_bg_segments.push((row, a, b, [*r as f32 / 255.0, *g as f32 / 255.0, *b2 as f32 / 255.0, 1.0])),
+                            crate::decorations::Mark::Tint(shade) => todo_bg_segments.push((row, a, b, pages::shade_color(theme, *shade))),
+                            crate::decorations::Mark::Underline(role) => decoration_underlines.push((row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
+                            crate::decorations::Mark::Strike(role) => decoration_strikes.push((row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
+                            crate::decorations::Mark::Chip(role) => {
+                                let [r, g, b2, _] = glyphon_to_rgba(pages::role_color(theme, *role));
+                                decoration_chips.push((row, a, b, [r, g, b2, 0.13], None));
+                            }
                         }
                     }
                 }
@@ -20829,10 +20692,7 @@ impl App {
                 .map(|marks| {
                     marks
                         .iter()
-                        .filter_map(|mark| {
-                            let row = visible_document_lines.iter().position(|&line| line == mark.line.saturating_sub(1))?;
-                            (row <= pane_visible_lines).then_some((row, mark.kind))
-                        })
+                        .filter_map(|mark| Some((row_map.first_row(mark.line.saturating_sub(1))?, mark.kind)))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -20846,8 +20706,9 @@ impl App {
 
             // The debugger's breakpoints and stop beside the rows in view;
             // the stopped row tinted across the pane.
-            let debug_marks = self.debug_marks(buffer_id, visible_document_lines, pane_visible_lines);
-            let trail_marks = self.debug_trail_marks(buffer_id, visible_document_lines, pane_visible_lines);
+            let gutter_lines = row_map.gutter_lines();
+            let debug_marks = self.debug_marks(buffer_id, &gutter_lines, pane_visible_lines);
+            let trail_marks = self.debug_trail_marks(buffer_id, &gutter_lines, pane_visible_lines);
             let mut row_tints = side_tints;
             if let Some(&(row, _)) = debug_marks.iter().find(|(_, m)| matches!(m, debug_host::DebugMark::Stop | debug_host::DebugMark::StopOnBreakpoint(_))) {
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_modified);
@@ -20866,19 +20727,19 @@ impl App {
             // A code pane's polish: problems, brackets, selection
             // whitespace, the overview ruler, sticky scroll.
             if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
-                let tab_rows: HashSet<usize> = col_maps.keys().copied().collect();
+                let tab_lines: HashSet<usize> = layout.col_maps.keys().copied().collect();
                 let pane_caret_ats: Vec<usize> = self.pane_carets(pane, buffer_id).iter().map(|c| c.at).collect();
                 let view = polish::PaneView {
                     buffer: buffer_id,
-                    lines: visible_document_lines,
+                    map: row_map,
                     rows: pane_visible_lines + 1,
                     gutter_chars,
                     scroll_col: shown_scroll_col,
                     rendered_scroll,
                     cursor_line: line,
-                    tab_rows: &tab_rows,
+                    tab_lines: &tab_lines,
                     selection: &selection_segments,
-                    remap_col: &remap_col,
+                    vcol: &vcol,
                     carets: &pane_caret_ats,
                     pane,
                 };
@@ -20889,15 +20750,21 @@ impl App {
                     extra.sticky = self.sticky_rows(buffer_id, render_base_line, hl_row, gutter_chars, &tab_stops, line);
                 }
             }
-            if let Some(flash) = self.beacon_row(buffer_id, visible_document_lines, pane_visible_lines, now) {
+            if let Some(flash) = self.beacon_row(buffer_id, &gutter_lines, pane_visible_lines, now) {
                 extra.row_flashes.push(flash);
             }
-            if is_focused && !folds_active {
-                let (added, seams) = self.change_overlays(buffer_id, pane_visible_lines + 1, now);
+            if is_focused {
+                let (added, seams) = self.change_overlays(buffer_id, shown_span.clone(), now);
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_staged);
-                extra.cell_flashes = added.into_iter().map(|(row, s, e, a)| (row, remap_col(row, s), remap_col(row, e), [r, g, b, 0.35 * a])).collect();
+                extra.cell_flashes = added.into_iter().flat_map(|(line, s, e, a)| to_rows(vec![(line, s, e)]).into_iter().map(move |(row, s, e)| (row, s, e, [r, g, b, 0.35 * a]))).collect();
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_conflicted);
-                extra.seams = seams.into_iter().map(|(row, col, lines, a)| (row, if lines { 0 } else { remap_col(row, col) }, lines, [r, g, b, 0.9 * a])).collect();
+                extra.seams = seams
+                    .into_iter()
+                    .filter_map(|(line, col, lines, a)| {
+                        let (row, x) = if lines { (row_map.first_row(line)?, 0) } else { locate(line, col)? };
+                        Some((row, x, lines, [r, g, b, 0.9 * a]))
+                    })
+                    .collect();
             }
             if let Some((first, count, shown)) = self.reveal_cover(motion_host::RevealTarget::Buffer(buffer_id), now) {
                 if first + count > render_base_line {
@@ -20936,7 +20803,7 @@ impl App {
                 gutter_marks,
                 debug_marks,
                 trail_marks,
-                indent_guides,
+                indent_guides: std::mem::take(&mut layout.indent_guides),
                 row_accents,
                 home: {
                     home_overlay.chips.extend(decoration_chips.into_iter().map(|(r, a, b, f, o)| (r, a, b, f, o, false)));
@@ -24657,13 +24524,13 @@ index 0000000..1111111 100644
             app.test_vim_key(KeyPress::char('l'));
         }
         // anchor 0, cursor now at 4 ("hello"[0..5))
-        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 5)]);
+        assert_eq!(app.visual_selection_segments(0..10), vec![(0, 0, 5)]);
     }
 
     #[test]
     fn visual_selection_segments_empty_outside_visual_mode() {
         let app = App::with_file(None);
-        assert!(app.visual_selection_segments(10).is_empty());
+        assert!(app.visual_selection_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24671,7 +24538,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
         app.test_set_cursor(Cursor::at_start()); // on the opening '('
-        assert_eq!(app.bracket_match_segments(10), vec![(0, 0, 1), (0, 6, 7)]);
+        assert_eq!(app.bracket_match_segments(0..10), vec![(0, 0, 1), (0, 6, 7)]);
     }
 
     #[test]
@@ -24679,7 +24546,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
         app.test_set_cursor(Cursor { char_idx: 6, sticky_col: 6 }); // on the ')'
-        assert_eq!(app.bracket_match_segments(10), vec![(0, 6, 7), (0, 0, 1)]);
+        assert_eq!(app.bracket_match_segments(0..10), vec![(0, 6, 7), (0, 0, 1)]);
     }
 
     #[test]
@@ -24687,7 +24554,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
         app.test_set_cursor(Cursor { char_idx: 3, sticky_col: 3 }); // on 'l'
-        assert!(app.bracket_match_segments(10).is_empty());
+        assert!(app.bracket_match_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24695,7 +24562,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello");
         app.test_set_cursor(Cursor::at_start());
-        assert!(app.bracket_match_segments(10).is_empty());
+        assert!(app.bracket_match_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24708,14 +24575,14 @@ index 0000000..1111111 100644
         }
         app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
 
-        assert_eq!(app.hlsearch_segments(10), vec![(0, 0, 3), (0, 8, 11), (0, 16, 19)]);
+        assert_eq!(app.hlsearch_segments(0..10), vec![(0, 0, 3), (0, 8, 11), (0, 16, 19)]);
     }
 
     #[test]
     fn hlsearch_segments_is_empty_before_any_search_is_confirmed() {
         let mut app = App::with_file(None);
         app.test_insert_str("foo bar foo");
-        assert!(app.hlsearch_segments(10).is_empty());
+        assert!(app.hlsearch_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24727,14 +24594,14 @@ index 0000000..1111111 100644
             app.test_vim_key(KeyPress::char(ch));
         }
         app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
-        assert!(!app.hlsearch_segments(10).is_empty());
+        assert!(!app.hlsearch_segments(0..10).is_empty());
 
         app.test_vim_key(KeyPress::char('x')); // a real edit, in Normal mode
-        assert!(!app.hlsearch_segments(10).is_empty(), "kept, as in Vim");
+        assert!(!app.hlsearch_segments(0..10).is_empty(), "kept, as in Vim");
         // `x` took the second match's `f`: one is left.
         assert_eq!(app.search_count(), Some((1, 1)), "[1/1] in the modeline");
         app.test_vim_key(KeyPress::named(FenixNamedKey::Escape));
-        assert!(app.hlsearch_segments(10).is_empty());
+        assert!(app.hlsearch_segments(0..10).is_empty());
         assert_eq!(app.search_count(), None);
     }
 
@@ -24747,7 +24614,7 @@ index 0000000..1111111 100644
             app.test_vim_key(KeyPress::char(ch));
         }
         // The second "foo" starts at char 8, still line 0 -- row 0, col 8.
-        assert_eq!(app.focused_caret(None, 0, 0, 10), Some((0, 8)));
+        assert_eq!(app.focused_caret(0, 0), Some((0, 8)));
         assert_eq!(app.test_cursor().char_idx, 0, "the real cursor must not move during preview");
     }
 
@@ -24755,7 +24622,7 @@ index 0000000..1111111 100644
     fn focused_caret_falls_back_to_hl_row_outside_search_mode() {
         let mut app = App::with_file(None);
         app.test_insert_str("hello");
-        assert_eq!(app.focused_caret(Some(0), 3, 0, 10), Some((0, 3)));
+        assert_eq!(app.focused_caret(0, 3), Some((0, 3)));
     }
 
     #[test]
@@ -24816,7 +24683,7 @@ index 0000000..1111111 100644
         }
         app.test_set_cursor(Cursor { char_idx: 5, sticky_col: 1 }); // column 1 of "two"
         app.test_vim_key(KeyPress::char('V'));
-        assert_eq!(app.visual_selection_segments(10), vec![(1, 0, 3)]);
+        assert_eq!(app.visual_selection_segments(0..10), vec![(1, 0, 3)]);
     }
 
     #[test]
@@ -24830,7 +24697,7 @@ index 0000000..1111111 100644
         for ch in ['j', 'j', 'l'] {
             app.test_vim_key(KeyPress::char(ch));
         }
-        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
+        assert_eq!(app.visual_selection_segments(0..10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
     }
 
     #[test]
@@ -24905,7 +24772,7 @@ index 0000000..1111111 100644
     #[test]
     fn no_pulse_by_default() {
         let app = App::with_file(None);
-        assert!(app.pulse_overlay(10).is_none());
+        assert!(app.pulse_overlay(0..10).is_none());
     }
 
     #[test]
@@ -24915,7 +24782,7 @@ index 0000000..1111111 100644
             app.test_insert(ch);
         }
         app.pulse = Some(Pulse { range: 0..5, started: Instant::now() });
-        let (segments, alpha) = app.pulse_overlay(10).expect("pulse should be active");
+        let (segments, alpha) = app.pulse_overlay(0..10).expect("pulse should be active");
         assert_eq!(segments, vec![(0, 0, 5)]);
         assert!(alpha > 0.0 && alpha <= PULSE_PEAK_ALPHA);
     }
@@ -24927,7 +24794,7 @@ index 0000000..1111111 100644
             app.test_insert(ch);
         }
         app.pulse = Some(Pulse { range: 0..5, started: Instant::now() - PULSE_DURATION * 2 });
-        assert!(app.pulse_overlay(10).is_none());
+        assert!(app.pulse_overlay(0..10).is_none());
     }
 
     // App::handle_key itself needs a real winit KeyEvent/ActiveEventLoop,
@@ -24950,7 +24817,7 @@ index 0000000..1111111 100644
         let event = app.test_vim_key(KeyPress::char('w'));
         let fenix_vim::VimEvent::Pulse(range) = event else { panic!("expected a Pulse event from yw") };
         app.pulse = Some(Pulse { range, started: Instant::now() });
-        assert!(app.pulse_overlay(10).is_some());
+        assert!(app.pulse_overlay(0..10).is_some());
     }
 
     #[test]
@@ -36988,7 +36855,7 @@ FIVE
 ").unwrap();
         app.reload_buffers_changed_on_disk();
         assert_eq!(app.vim.mode(), Mode::Normal);
-        assert!(app.visual_selection_segments(10).is_empty());
+        assert!(app.visual_selection_segments(0..10).is_empty());
     }
 
     #[test]

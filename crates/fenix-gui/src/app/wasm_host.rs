@@ -2325,11 +2325,13 @@ impl App {
         let Some(window) = self.windows().windows().into_iter().find(|w| w.number() as u64 == pane.id) else { return false };
         let Some(&buffer) = self.windows().content(window) else { return false };
         let Some(sets) = self.wasm.decorations.get(&buffer).filter(|sets| sets.iter().any(|(_, set)| set.iter().any(|d| d.id.is_some()))) else { return false };
+        // `base_line` is the display row at the pane's top, `scroll_col`
+        // the sideways scroll it was drawn at.
         let display = self.pane_display_lines(window, buffer);
-        let base = display.iter().position(|&l| l >= pane.base_line).unwrap_or(0);
         let row = ((pos.1 - pane.text_y) / lh).floor() as usize;
-        let col = ((pos.0 - pane.text_x) / cw).floor() as usize + pane.scroll_col;
-        let Some(&line) = display.get(base + row) else { return false };
+        let from = pane.base_line.min(display.len());
+        let map = super::rows::RowMap::lines(&display[from..from.saturating_add(row + 1).min(display.len())], pane.scroll_col);
+        let Some((line, col)) = map.at(row, ((pos.0 - pane.text_x) / cw).floor() as usize) else { return false };
         let Some(ob) = self.buffers.get(buffer) else { return false };
         if line >= ob.buffer.line_count() {
             return false;

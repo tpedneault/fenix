@@ -14,7 +14,7 @@ use super::*;
 use fenix_diff::{Alignment, BlockKind, Side};
 
 /// A filler row in a pane's display lines: no buffer line, blank space.
-pub(crate) const FILLER: usize = usize::MAX;
+pub(crate) const FILLER: usize = super::rows::NO_LINE;
 
 /// `lines` (a pane's display lines, folds applied) with filler rows
 /// inserted: `fillers` is (before which buffer line, how many). A filler

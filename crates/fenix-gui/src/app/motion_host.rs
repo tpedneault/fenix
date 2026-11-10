@@ -572,9 +572,10 @@ impl App {
         Some((row, [r, g, b, 0.45 * (1.0 - beacon.anim.eased(now))]))
     }
 
-    /// The change pulses in the focused pane: added text as segments,
-    /// removals as seams `(row, col, whole_lines)`, each with its alpha.
-    pub(super) fn change_overlays(&self, buffer: BufferId, visible: usize, now: Instant) -> (Vec<(usize, usize, usize, f32)>, Vec<(usize, usize, bool, f32)>) {
+    /// The change pulses in the focused pane on `lines`: added text as
+    /// segments `(line, from, to)`, removals as seams `(line, col,
+    /// whole_lines)`, each with its alpha.
+    pub(super) fn change_overlays(&self, buffer: BufferId, lines: std::ops::Range<usize>, now: Instant) -> (Vec<(usize, usize, usize, f32)>, Vec<(usize, usize, bool, f32)>) {
         let mut added = Vec::new();
         let mut seams = Vec::new();
         let Some(ob) = self.buffers.get(buffer) else { return (added, seams) };
@@ -584,15 +585,17 @@ impl App {
             match &mark.change {
                 Change::Added(range) => {
                     let range = range.start.min(len)..range.end.min(len);
-                    for (row, s, e) in self.range_to_segments(range, visible) {
-                        added.push((row, s, e, alpha));
+                    for (line, s, e) in self.range_to_segments(range, lines.clone()) {
+                        added.push((line, s, e, alpha));
                     }
                 }
-                Change::Removed { at, lines } => {
+                Change::Removed { at, lines: whole } => {
                     let at = (*at).min(len);
                     let (line, col) = ob.buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
-                    let Some(row) = line.checked_sub(self.render_base_line()).filter(|&r| r <= visible) else { continue };
-                    seams.push((row, if *lines { 0 } else { col }, *lines, alpha));
+                    if !lines.contains(&line) {
+                        continue;
+                    }
+                    seams.push((line, if *whole { 0 } else { col }, *whole, alpha));
                 }
             }
         }

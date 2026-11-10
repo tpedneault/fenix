@@ -166,3 +166,46 @@ lines. A wrapped pane's vertical scroll snaps (no easing) at first.
    long-line path, a million-line file with wrap on; a
    `RowKind::Virtual` row above a line that scrolling, hit-testing and
    the caret step over, ready for code lens.
+
+## 5. As built
+
+Where the implementation differs from the plan above, and why. Kept up
+stage by stage.
+
+### Stage 1: the row map
+
+- `app/rows.rs` has `RowKind`, `Row` and `RowMap` as §3 has them, and
+  two more things the per-pane block of `redraw` was doing inline:
+  `PaneLayout` (the `RowMap`, each shown line's char-to-visual column
+  map, its decorations laid out, the indent guides), built by
+  `App::pane_layout`, and `FocusedOverlays` (the caret, the extra
+  cursors, the selections, the pulse, the bracket pair, the search's
+  matches), worked out by `App::focused_overlays`. Both are plain
+  functions of the app, so tests ask them what a frame would draw
+  (`focused_layout`, `focused_overlays_now`) instead of going through
+  `redraw`, which needs a GPU.
+- `col_maps` is keyed by line, not row: a wrapped line's rows share one.
+- The segment functions take a range of lines and return line-space
+  segments (`LineSegments`: line, char columns); `PaneLayout::to_rows`
+  maps them once. `render_base_override` and the three branches by
+  folds are gone: there is one path. The overlays are worked out on
+  each run of consecutive lines shown (`RowMap::runs`), so the search
+  doesn't look inside a closed fold; `range_to_segments` looks only at
+  the lines its range is on.
+- With a fold closed, the extra cursors, their selections, the change
+  pulse and the search preview's caret are now drawn (1.5 dropped them).
+  Nothing else is different with wrap off.
+- The gutter's debug marks and stripe take `RowMap::gutter_lines` (a
+  line on its first row, `NO_LINE` elsewhere) and skip `NO_LINE`; in
+  1.5 a side-by-side filler row (`usize::MAX`) overflowed `line + 1`
+  there.
+- `decoration_click` read the layers' `base_line` (a display row) as a
+  buffer line, which was wrong with a fold closed above; it now goes
+  through a `RowMap` from that display row. `layers::Geometry::resolve`
+  (an extension's `Anchor::Text`) has the same mistake and is left for
+  stage 3, with the layers' geometry.
+- `fold_marker_click` counts from `scroll_line`, not `rendered_scroll`:
+  the same as 1.5, noted for stage 4.
+- Still per row, for stage 2: `content_spans_decorated` /
+  `folded_content_spans`, the indent guides, rainbow brackets (by
+  `scroll_col`), sticky headers, Home's and pages' backgrounds.
