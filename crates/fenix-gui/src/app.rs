@@ -1398,21 +1398,48 @@ fn is_tcl_path(path: &Path) -> bool {
 /// `buffer`'s text made `new` by replacing only the lines that differ,
 /// the last first, as one undo step -- so what's anchored in the lines
 /// that didn't change (extra cursors, marks, an extension's decorations)
-/// stays where it was. `cursor` is moved as the text around it moved.
+/// stays where it was. `cursor` is moved as the text around it moved;
+/// in a line that was replaced, it keeps its line and column (or the
+/// line's end). The syntax tree hears of it as one edit.
 pub(crate) fn replace_text_by_lines(buffer: &mut Buffer, cursor: &mut Cursor, new: &str) {
     let old = buffer.text();
     let replacements = fenix_diff::replacements(&old, new);
     if replacements.is_empty() {
         return;
     }
-    let logged = buffer.edits_logged();
-    buffer.begin_undo_group();
+    let at = cursor_through_replacements(&old, &replacements, cursor.char_idx);
     let mut scratch = *cursor;
-    for (range, text) in replacements.iter().rev() {
-        buffer.replace_range(&mut scratch, range.start, range.end, text);
+    buffer.replace_ranges(&mut scratch, &replacements);
+    cursor.char_idx = at.min(buffer.len_chars());
+    cursor.sticky_col = buffer.line_col(cursor).1;
+}
+
+/// Where `at` in `old` is once `replacements` (in order, char ranges of
+/// `old`) are made: moved by those before it; in one, on the same line of
+/// what replaced it (or its last) at the same column, or the line's end.
+fn cursor_through_replacements(old: &str, replacements: &[(std::ops::Range<usize>, String)], at: usize) -> usize {
+    let mut moved: isize = 0;
+    for (range, text) in replacements {
+        if at <= range.start {
+            break;
+        }
+        let new_len = text.chars().count();
+        if at >= range.end {
+            moved += new_len as isize - range.len() as isize;
+            continue;
+        }
+        let start = (range.start as isize + moved) as usize;
+        let before: String = old.chars().skip(range.start).take(at - range.start).collect();
+        let line = before.matches('\n').count();
+        let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let Some(last) = lines.len().checked_sub(1) else { return start };
+        let line = line.min(last);
+        let ahead: usize = lines[..line].iter().map(|l| l.chars().count()).sum();
+        let width = lines[line].trim_end_matches(['\n', '\r']).chars().count();
+        return start + ahead + column.min(width);
     }
-    buffer.end_undo_group();
-    cursor.char_idx = buffer.map_since(logged, cursor.char_idx).unwrap_or(scratch.char_idx);
+    (at as isize + moved).max(0) as usize
 }
 
 /// The functions and methods a `workspace/symbol` answer names.
@@ -16689,6 +16716,11 @@ impl App {
         // (e.g. `format_selection`) reads them.
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
+                // As by its chord: the extra cursors stay only for what
+                // works at each of them.
+                if !carets::keeps_carets(id) {
+                    self.clear_carets();
+                }
                 self.run_command_with(event_loop, id);
             }
             return;
@@ -16701,6 +16733,9 @@ impl App {
                 KeyPress::char(' ')
             };
             if let Step::Matched(&id) = self.leader_matcher.feed(fed) {
+                if !carets::keeps_carets(id) {
+                    self.clear_carets();
+                }
                 self.run_command_with(event_loop, id);
             }
             self.wake_caret();
@@ -16713,10 +16748,14 @@ impl App {
 
         // Shift+Tab keeps its Shift for a snippet: it goes back a field.
         let snippet_key = if full == KeyPress::named(FenixNamedKey::Tab).with_shift() { full } else { keypress };
+        let before = (self.open().buffer.edit_count(), self.cursor().char_idx);
         if self.snippet_key(snippet_key) || self.completion_key(keypress) {
             // A completion taken or a snippet's field moved to is the
-            // primary's alone: the others go, as for any other key.
-            self.clear_carets();
+            // primary's alone: the others go, as for any other key that
+            // edits. Moving in the completion menu leaves them be.
+            if (self.open().buffer.edit_count(), self.cursor().char_idx) != before {
+                self.clear_carets();
+            }
             self.wake_caret();
             return;
         }
