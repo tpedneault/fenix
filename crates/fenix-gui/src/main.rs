@@ -87,6 +87,19 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use app::FenixUserEvent;
 
 fn main() -> anyhow::Result<()> {
+    // Two runs that aren't Fenix the editor, and whose stdio is spoken
+    // for, so they come before anything that prints or opens a window.
+    // `ssh`, started by a Fenix connecting to a remote machine, runs this
+    // program to put a question (a password, a new host's key) to that
+    // Fenix; and a remote project's programs (`git`, a language server)
+    // are run as `fenix --remote-exec`, a stand-in that passes them
+    // through the connection that Fenix has open.
+    if let Some(code) = fenix_ssh::askpass::answer_if_asked() {
+        std::process::exit(code);
+    }
+    if let Some(code) = fenix_ssh::bridge::stand_in_if_asked() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `--mcp`: an MCP server on stdio for a coding agent, talking to the
     // Fenix that's running. Before anything that opens a console or a

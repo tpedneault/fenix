@@ -435,7 +435,7 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                         if let Some(health) = item.health {
                             g.put(y, x + col_width - 1, "●", Role::Health(health));
                         }
-                        let under = item.branch.clone().unwrap_or_else(|| item.root.display().to_string());
+                        let under = item.branch.clone().unwrap_or_else(|| fenix_vfs::display(&item.root));
                         g.put(y + 1, x + 9, &fit(&under, col_width.saturating_sub(9)), Role::Muted);
                         slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number, entry: HomeEntry::Project(item.root.clone()) });
                         y += 2;

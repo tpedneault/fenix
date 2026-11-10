@@ -402,8 +402,17 @@ impl App {
                 Some(path) => match Buffer::from_path(path) {
                     Ok(buffer) => Some(buffer),
                     Err(error) => {
-                        warnings.push(format!("{}: {error}", path.display()));
-                        doc.text.as_ref().map(|text| Buffer::from_text(text))
+                        // A file on a machine that isn't connected yet is
+                        // no trouble to report: it opens when it is.
+                        if fenix_vfs::is_remote(path) && doc.text.is_none() {
+                            self.remote_reopen_later(path.clone());
+                        } else {
+                            warnings.push(format!("{}: {error}", fenix_vfs::display(path)));
+                        }
+                        // Unsaved text for a file on a machine that isn't
+                        // connected yet stays that file's: it's saved
+                        // there once the machine is back.
+                        doc.text.as_ref().map(|text| if fenix_vfs::is_remote(path) { Buffer::from_text_at(path, text) } else { Buffer::from_text(text) })
                     }
                 },
                 None => Some(Buffer::from_text(doc.text.as_deref().unwrap_or(""))),
@@ -430,7 +439,7 @@ impl App {
                     self.unnamed_snapshots.insert(id, snapshot.snapshot.clone());
                 }
             }
-            if doc.dirty && (doc.conflict || doc.path.as_ref().is_some_and(|p| DiskFingerprint::of(p) != doc.disk)) {
+            if doc.dirty && (doc.conflict || doc.path.as_ref().is_some_and(|p| DiskFingerprint::look(p).is_some_and(|seen| seen != doc.disk))) {
                 self.externally_changed.insert(id);
                 warnings.push("a restored document changed on disk; review the conflict before saving".into());
             }

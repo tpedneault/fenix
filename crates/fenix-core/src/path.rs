@@ -40,10 +40,16 @@ pub fn plain_path(path: &Path) -> PathBuf {
 /// What two spellings of one file have in common: `plain_path`, and on
 /// Windows, where names don't differ by case, in one case. For comparing
 /// only: never shown, and never opened.
+///
+/// A file on a remote machine (`fenix_vfs::remote`) keeps its case
+/// wherever Fenix runs: `Makefile` and `makefile` are two files there.
 pub fn path_key(path: &Path) -> PathBuf {
     let plain = plain_path(path);
     #[cfg(windows)]
     {
+        if fenix_vfs::is_remote(&plain) {
+            return plain;
+        }
         PathBuf::from(plain.to_string_lossy().to_lowercase())
     }
     #[cfg(not(windows))]
@@ -90,6 +96,15 @@ mod tests {
             assert_eq!(path_key(Path::new(spelling)), key, "{spelling}");
         }
         assert_ne!(path_key(Path::new(r"C:\src\b.rs")), key);
+    }
+
+    #[test]
+    fn a_remote_path_stays_as_it_is_and_keeps_its_case() {
+        let upper = fenix_vfs::remote("devbox", "/src/Makefile");
+        assert_eq!(plain_path(&upper), upper);
+        assert_eq!(path_key(&upper), upper);
+        assert_ne!(path_key(&upper), path_key(&fenix_vfs::remote("devbox", "/src/makefile")));
+        assert_ne!(path_key(&upper), path_key(&fenix_vfs::remote("other", "/src/Makefile")));
     }
 
     #[cfg(not(windows))]

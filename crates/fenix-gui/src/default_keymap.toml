@@ -398,6 +398,11 @@ keys = "SPC p d"
 label = "delete project"
 command = "project.delete"
 
+[[leader]]
+keys = "SPC p R"
+label = "remote project"
+command = "project.open_remote"
+
 # `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
 # so the build/task runner nests under `SPC p` instead --
 # Doom Emacs' own `SPC p c` ("project compile") convention,

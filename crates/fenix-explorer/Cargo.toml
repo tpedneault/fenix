@@ -8,5 +8,6 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+fenix-vfs = { path = "../fenix-vfs" }
 fenix-fs = { path = "../fenix-fs" }
 fenix-keymap = { path = "../fenix-keymap" }

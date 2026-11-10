@@ -3716,6 +3716,16 @@ impl App {
     pub(crate) fn code_prompt_key(&mut self, keypress: KeyPress) -> bool {
         let Some(prompt) = &mut self.wasm.prompt else { return false };
         match keypress.code {
+            // `ssh`'s question, connecting to a remote machine: Escape is
+            // no answer, and it gives up on that way in.
+            KeyCode::Named(FenixNamedKey::Escape) if prompt.ext == super::remote::PROMPT => {
+                self.wasm.prompt = None;
+                self.remote_answered(None);
+            }
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::remote::PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.remote_answered(Some(p.input));
+            }
             KeyCode::Named(FenixNamedKey::Escape) => {
                 let p = self.wasm.prompt.take().unwrap();
                 self.code_deliver(&p.ext, Notice::Prompted((p.id, None)));
@@ -3740,6 +3750,8 @@ impl App {
             KeyCode::Char(c) if !keypress.mods.ctrl => prompt.input.push(c),
             _ => {}
         }
+        // The line is free again: `ssh` may have been waiting for it.
+        self.remote_ask_next();
         self.wake_caret();
         true
     }

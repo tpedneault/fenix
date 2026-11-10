@@ -41,8 +41,8 @@ pub fn conflicts_in(sources: &[PathBuf], dest: &Path) -> Vec<PathBuf> {
     sources
         .iter()
         .filter_map(|src| {
-            let candidate = dest.join(src.file_name()?);
-            candidate.exists().then_some(candidate)
+            let candidate = fenix_vfs::child(dest, &src.file_name()?.to_string_lossy());
+            fenix_vfs::exists(&candidate).then_some(candidate)
         })
         .collect()
 }
@@ -124,6 +124,11 @@ pub fn copy_into_reporting(
     cancel: &impl Fn() -> bool,
     report: &mut impl FnMut(&Progress),
 ) -> Vec<Outcome> {
+    // To, from or within a remote machine: `remote`'s way, which counts
+    // nothing ahead (a count would be a walk over the network).
+    if fenix_vfs::is_remote(dest) || crate::remote::any_remote(sources) {
+        return crate::remote::transfer(sources, dest, on_conflict, cancel, false);
+    }
     let (files_total, bytes_total) = measure(sources, cancel);
     let mut progress = Progress { files_total, bytes_total, ..Progress::default() };
     run_reporting(sources, dest, on_conflict, cancel, |src, target| {
@@ -144,6 +149,9 @@ pub fn move_into_reporting(
     cancel: &impl Fn() -> bool,
     report: &mut impl FnMut(&Progress),
 ) -> Vec<Outcome> {
+    if fenix_vfs::is_remote(dest) || crate::remote::any_remote(sources) {
+        return crate::remote::transfer(sources, dest, on_conflict, cancel, true);
+    }
     let (files_total, bytes_total) = measure(sources, cancel);
     let mut progress = Progress { files_total, bytes_total, ..Progress::default() };
     run_reporting(sources, dest, on_conflict, cancel, |src, target| {
@@ -325,6 +333,14 @@ fn copy_link(src: &Path, dest: &Path) -> io::Result<()> {
 /// asked for and cannot easily reconstruct. The one-at-a-time path
 /// stays best-effort, because there each rename really is independent.
 pub fn rename_all(renames: &[(PathBuf, PathBuf)], via_temporaries: bool) -> Vec<Outcome> {
+    // On a remote machine each rename is its own, in order: names that
+    // swap would need a third name there, and are refused as taken.
+    if renames.iter().any(|(from, to)| fenix_vfs::is_remote(from) || fenix_vfs::is_remote(to)) {
+        return renames
+            .iter()
+            .map(|(from, to)| Outcome { path: from.clone(), error: fenix_vfs::rename(from, to, false).err().map(|error| error.to_string()) })
+            .collect();
+    }
     if !via_temporaries {
         return renames
             .iter()

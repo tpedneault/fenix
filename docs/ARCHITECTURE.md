@@ -50,6 +50,7 @@ use.
 | `fenix-explorer` | Directory listing, marking, file operations, git-status — no GPU/rendering |
 | `fenix-picker` | Generic fuzzy matching + live-filtered candidate list, used by every fuzzy-finder |
 | `fenix-project` | Project-root detection, ripgrep/fd shelling, known-projects/recent-files persistence |
+| `fenix-vfs` | Where a file is: this machine or one Fenix is connected to. Remote paths (a `PathBuf` under a root no local file has), and the file calls that take either kind. Knows nothing of how a machine is reached |
 
 ## Language tooling and processes
 
@@ -61,6 +62,8 @@ use.
 | `fenix-dap` | A Debug Adapter Protocol client on the same transport |
 | `fenix-acp` | The Agent Client Protocol (ACP v1) client for coding agents -- see [AGENTS.md](AGENTS.md) and [ADR 0002](adr/0002-agents-acp.md). Lenient protocol types; `AcpClient`, a threaded JSON-RPC connection over a process tree's stdio; `Thread`, the reducer that turns `session/update`s into a conversation; `Hub`, the sans-I/O sessions hub (connections per agent and project, new/resume/load/read-only, queued prompts, permissions, crash backoff, idle stop), which takes inputs and gives back `Effect`s; the thread store; the catalog of agents (built-in, yours, the registry's, extensions'); the ACP registry's installs; and a mock agent (`fenix:mock` in process, `fake-agent` as a binary) that plays Claude Code's adapter, against which the conformance suite runs |
 | `fenix-tasks` | Project task discovery, output parsing, `path:line:col` reading (shared with the command line), and process-tree supervision (`ProcessTree`: a child and everything it starts, killed together) |
+| `fenix-remote` | Remote projects, the far end: the helper Fenix copies to a machine and runs over SSH (`fenix-remote`, a static Linux program), and the framed protocol the two speak -- files in pieces, programs with their output as it's written. See [the plan](plans/remote-ssh.md) |
+| `fenix-ssh` | Remote projects, this end: one system `ssh` per host, the helper installed and started, `ssh`'s questions answered by Fenix (`SSH_ASKPASS`), reconnecting, the machine's files mounted into `fenix-vfs`, and a stand-in process (`fenix --remote-exec`) that makes a remote program look like a local one. Tested against `fake-ssh`, and against a real `sshd` by `dev/remote-ssh/check.sh` |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) and terminal-query replies for both terminal surfaces — no thread/event-loop knowledge of its own |
 
 ## Git

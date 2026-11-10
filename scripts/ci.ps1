@@ -44,7 +44,7 @@ try {
         $testArgs += '--workspace'
     } else {
         # No display, container engine, network service, or language server needed.
-        foreach ($package in @('fenix-storage', 'fenix-extensions', 'fenix-core', 'fenix-snippets', 'fenix-project', 'fenix-config', 'fenix-recovery', 'fenix-tasks', 'fenix-rpc', 'fenix-control', 'fenix-lsp', 'fenix-dap', 'fenix-vim')) {
+        foreach ($package in @('fenix-storage', 'fenix-extensions', 'fenix-core', 'fenix-snippets', 'fenix-project', 'fenix-config', 'fenix-recovery', 'fenix-tasks', 'fenix-rpc', 'fenix-control', 'fenix-lsp', 'fenix-dap', 'fenix-vim', 'fenix-vfs', 'fenix-remote', 'fenix-ssh')) {
             $testArgs += @('-p', $package)
         }
     }
@@ -57,7 +57,7 @@ try {
     if ($Suite -eq 'Workspace') {
         $clippyArgs += '--workspace'
     } else {
-        foreach ($package in @('fenix-storage', 'fenix-extensions', 'fenix-tasks', 'fenix-lsp', 'fenix-project', 'fenix-rpc', 'fenix-control')) {
+        foreach ($package in @('fenix-storage', 'fenix-extensions', 'fenix-tasks', 'fenix-lsp', 'fenix-project', 'fenix-rpc', 'fenix-control', 'fenix-vfs', 'fenix-remote', 'fenix-ssh')) {
             $clippyArgs += @('-p', $package)
         }
     }

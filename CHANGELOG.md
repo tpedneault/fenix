@@ -10,6 +10,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Remote projects, a preview: `SPC p R` (`project.open_remote`) opens a
+  folder on another machine as a project, over SSH, with the system's
+  `ssh` and a small helper Fenix copies there (Linux; no administrator
+  rights). The explorer, the sidebar and the file picker list it; files
+  open, edit and save there, and aren't written over when they changed
+  there; a dropped connection is made again by itself. Terminals, Git,
+  search, language servers, tasks and the debugger don't work on a
+  remote project yet. See FEATURES.md's Files and projects.
 - A welcome for a first run (`SPC h w` brings it back): what Fenix is,
   then a step each for how you'd like to edit (Vim keys, recommended, or
   standard keys), a theme and the text size, the extension packs, and

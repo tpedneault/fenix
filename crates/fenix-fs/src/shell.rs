@@ -21,6 +21,7 @@ use std::process::Command;
 /// A directory opens in Explorer, which is what asking the shell to
 /// open a folder means everywhere else too.
 pub fn open_with_default(path: &Path) -> io::Result<()> {
+    crate::remote::local_only(path, "Opening it with its own program")?;
     if !path.exists() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not there", path.display())));
     }
@@ -43,6 +44,7 @@ pub fn open_with_default(path: &Path) -> io::Result<()> {
 /// somewhere, use a shell extension -- and landing in the right folder
 /// with the wrong thing highlighted is half an answer.
 pub fn reveal(path: &Path) -> io::Result<()> {
+    crate::remote::local_only(path, "Showing it in the system's file manager")?;
     if !path.exists() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not there", path.display())));
     }

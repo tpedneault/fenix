@@ -1201,6 +1201,7 @@ version = "1.5.0"
 dependencies = [
  "encoding_rs",
  "fenix-storage",
+ "fenix-vfs",
  "ropey",
  "tempfile",
 ]
@@ -1227,6 +1228,7 @@ version = "1.5.0"
 dependencies = [
  "fenix-fs",
  "fenix-keymap",
+ "fenix-vfs",
 ]
 
 [[package]]
@@ -1265,6 +1267,8 @@ version = "1.5.0"
 name = "fenix-fs"
 version = "1.5.0"
 dependencies = [
+ "fenix-vfs",
+ "tempfile",
  "trash",
 ]
 
@@ -1305,11 +1309,13 @@ dependencies = [
  "fenix-project",
  "fenix-recovery",
  "fenix-snippets",
+ "fenix-ssh",
  "fenix-storage",
  "fenix-syntax",
  "fenix-table",
  "fenix-tasks",
  "fenix-terminal",
+ "fenix-vfs",
  "fenix-vim",
  "fenix-wasm",
  "fenix-window",
@@ -1387,6 +1393,7 @@ dependencies = [
  "fenix-extensions",
  "fenix-picker",
  "fenix-storage",
+ "fenix-vfs",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
@@ -1407,8 +1414,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-remote"
+version = "1.5.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fenix-rpc"
 version = "1.5.0"
+dependencies = [
+ "fenix-vfs",
+]
 
 [[package]]
 name = "fenix-snippets"
@@ -1416,6 +1436,18 @@ version = "1.5.0"
 dependencies = [
  "chrono",
  "fenix-core",
+ "tempfile",
+]
+
+[[package]]
+name = "fenix-ssh"
+version = "1.5.0"
+dependencies = [
+ "fenix-remote",
+ "fenix-vfs",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -1486,6 +1518,13 @@ dependencies = [
  "fenix-rpc",
  "portable-pty",
  "vt100",
+]
+
+[[package]]
+name = "fenix-vfs"
+version = "1.5.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

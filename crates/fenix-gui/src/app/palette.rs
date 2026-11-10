@@ -784,6 +784,7 @@ pub(super) fn picker_name(picker: &ActivePicker) -> &'static str {
         ActivePicker::Places(_) => "Places",
         ActivePicker::Agents(_) => "Agents",
         ActivePicker::DeleteProject(_) => "Remove a project",
+        ActivePicker::RemoteHost(_) => "A project on another machine",
         ActivePicker::Theme(_) => "Themes",
         ActivePicker::Encoding(_) => "Encodings",
         ActivePicker::Snippet(_) => "Snippets",
@@ -811,6 +812,7 @@ macro_rules! with_state {
             ActivePicker::Places($s) => $body,
             ActivePicker::Agents($s) => $body,
             ActivePicker::DeleteProject($s) => $body,
+            ActivePicker::RemoteHost($s) => $body,
             ActivePicker::Encoding($s) => $body,
             ActivePicker::Theme($s) => $body,
             ActivePicker::Commands($s) => $body,
@@ -1016,6 +1018,8 @@ impl App {
     /// The first lines of `path`, read once per selection and kept; at
     /// most `PREVIEW_BYTES` of it, and nothing of a binary file.
     fn preview_lines(&self, path: &Path) -> Vec<String> {
+        /// The largest remote file read for a preview.
+        const REMOTE_PREVIEW_MOST: u64 = 256 * 1024;
         if let Some((p, lines)) = &*self.palette_preview.borrow() {
             if p == path {
                 return lines.clone();
@@ -1024,7 +1028,18 @@ impl App {
         let lines = (|| -> Option<Vec<String>> {
             use std::io::Read;
             let mut bytes = Vec::new();
-            std::fs::File::open(path).ok()?.take(PREVIEW_BYTES).read_to_end(&mut bytes).ok()?;
+            if fenix_vfs::is_remote(path) {
+                // Asked of its machine once per file looked at (the
+                // answer is kept below), and only when it's small: the
+                // helper sends whole files.
+                if fenix_vfs::metadata(path).ok()?.len > REMOTE_PREVIEW_MOST {
+                    return Some(vec!["(too large to preview from here)".to_string()]);
+                }
+                bytes = fenix_vfs::read(path).ok()?;
+                bytes.truncate(PREVIEW_BYTES as usize);
+            } else {
+                std::fs::File::open(path).ok()?.take(PREVIEW_BYTES).read_to_end(&mut bytes).ok()?;
+            }
             if bytes.contains(&0) {
                 return Some(vec!["(a binary file)".to_string()]);
             }
@@ -1057,6 +1072,13 @@ impl App {
         let footer = vec![("Enter".to_string(), "pick".to_string()), ("C-n C-p".to_string(), "move".to_string()), ("C-v".to_string(), "paste".to_string()), ("Esc".to_string(), "close".to_string())];
         let mut view = View { prompt: "›".to_string(), prompt_is_key: false, query: query.clone(), placeholder: "Type to filter".to_string(), chips: Vec::new(), body: Body::List(Vec::new()), side: None, footer, empty: "Nothing matches".to_string() };
         match picker {
+            ActivePicker::RemoteHost(state) => {
+                view.placeholder = "A machine: one listed, or user@host".to_string();
+                view.footer[0].1 = "connect".to_string();
+                view.empty = if query.trim().is_empty() { "No machines yet: type user@host".to_string() } else { format!("Enter connects to {}", query.trim()) };
+                let rows = state.visible_rows(offset, per_view).map(|(sel, c)| Row { title: c.label.clone(), title_hits: state.positions(&c.label), selected: sel, ..Row::default() }).collect();
+                view.body = Body::List(rows);
+            }
             ActivePicker::FindFile(state) => {
                 if let Some(root) = &self.project_root {
                     chips.push((root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), false));
@@ -1078,8 +1100,14 @@ impl App {
                 }
                 if let Some(path) = state.selected().map(|c| c.payload.clone()) {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    // A file on a remote machine: where it is, not a size
+                    // that would be asked of the machine at every draw.
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    let about = if size < 1024 { format!("{size} B") } else { format!("{:.1} KB", size as f64 / 1024.0) };
+                    let about = match fenix_vfs::host_of(&path) {
+                        Some(host) => host,
+                        None if size < 1024 => format!("{size} B"),
+                        None => format!("{:.1} KB", size as f64 / 1024.0),
+                    };
                     let rel = self.project_root.as_ref().and_then(|r| path.strip_prefix(r).ok()).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or(name.clone());
                     view.side = Some(Side::Preview { icon: Some((icon::file_icon(&name), theme.icon_file)), title: rel, about, lines: self.preview_lines(&path) });
                 }

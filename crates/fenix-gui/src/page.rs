@@ -355,6 +355,10 @@ pub fn path_within(root: &Path, path: &Path) -> Option<String> {
 
 /// `path` whole, its home folder as `~`: a file outside the project.
 pub fn home_relative(path: &Path) -> String {
+    // A file on a remote machine, as that machine names it.
+    if fenix_vfs::is_remote(path) {
+        return fenix_vfs::display(path);
+    }
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
     match home.and_then(|h| path_within(&h, path)) {
         Some(rest) => format!("~/{rest}"),
