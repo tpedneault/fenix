@@ -53,6 +53,9 @@ extension's keys come with it.
 |---|---|
 | `Alt`+click | Add a cursor there; on one, take it away |
 | `Alt+Shift`+drag | A column of cursors, one a line (at most 10,000) |
+| `Ctrl+D` | Select the word under the cursor; again, add a cursor on the next occurrence of the selection |
+| `Ctrl+Shift+L` | A cursor on every occurrence of the selection (or of the word under the cursor) |
+| `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | Add a cursor on the line above / below, at the same column |
 | `Esc`, a plain click | Back to one cursor |
 
 Typing, deleting, `Enter`, `Tab`, the arrows and Shift with them happen at
@@ -60,6 +63,13 @@ every cursor, as one undo step; `Ctrl+Z` and `Ctrl+Y` put the cursors back
 as they were. `Ctrl+V` pastes a line at each cursor when
 the clipboard has as many lines as there are cursors. Any other key, or an
 edit made elsewhere (a language server's, an agent's), goes back to one.
+A selected whole word finds only whole words; other text is found
+wherever it is, matching case. The newest cursor is the one the view
+follows. The keyboard's ways have commands of their own
+(`edit.add_next_occurrence`, `edit.select_all_occurrences`,
+`edit.add_cursor_above`, `edit.add_cursor_below`); some desktops take
+`Ctrl+Alt+↑/↓` to switch workspaces, so rebind them in
+`keybindings.toml` there.
 `editor.multi_cursor_modifier = "ctrl"` makes it `Ctrl`+click, for
 desktops that move windows with `Alt`+drag; go to definition then moves to
 `Alt`+click.

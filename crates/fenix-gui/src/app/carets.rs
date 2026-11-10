@@ -340,6 +340,157 @@ impl App {
         let fit = |c: Caret| Caret { at: c.at.min(len), anchor: c.anchor.map(|a| a.min(len)), ..c };
         self.put_carets(fit(primary), extra.into_iter().map(fit).collect());
     }
+
+    /// The primary as a caret: where the cursor is, and where its
+    /// selection starts when it has one.
+    fn primary_caret(&self) -> Caret {
+        let cursor = self.cursor();
+        let anchor = (self.vim.mode() == Mode::Visual).then(|| self.vim.visual_anchor());
+        Caret { at: cursor.char_idx, sticky: cursor.sticky_col, anchor }
+    }
+
+    /// Whether more cursors can be added here: standard keys, in a buffer
+    /// you type in. With Vim's keys, says so.
+    fn carets_can_be_added(&mut self) -> bool {
+        if !self.standard_keys() {
+            self.set_message("more cursors are standard keys' -- SPC t k switches to them");
+            return false;
+        }
+        self.focused_takes_typing()
+    }
+
+    /// The primary's selection, else the word under the cursor (`true`
+    /// when it's the word: then only whole words are its occurrences).
+    fn selection_or_word(&self) -> Option<(std::ops::Range<usize>, bool)> {
+        let buffer = &self.open().buffer;
+        if self.vim.mode() == Mode::Visual {
+            let (range, _) = self.vim.visual_selection_range(buffer, &self.cursor())?;
+            if !range.is_empty() {
+                return Some((range, false));
+            }
+        }
+        fenix_vim::word_to_select(buffer, self.cursor().char_idx, self.vim.iskeyword_extra()).map(|r| (r, true))
+    }
+
+    /// `edit.add_next_occurrence` (Ctrl+D): with nothing selected, the
+    /// word under the cursor selected; then, each time, a cursor on the
+    /// next occurrence of the selection, which it selects. The newest is
+    /// the primary, so the view goes with it.
+    pub(crate) fn cmd_add_next_occurrence(&mut self) {
+        if !self.carets_can_be_added() {
+            return;
+        }
+        let primary = self.primary_caret();
+        let selected = self.vim.mode() == Mode::Visual && primary.anchor.is_some_and(|a| a != primary.at);
+        if !selected {
+            let Some((word, _)) = self.selection_or_word() else {
+                self.set_message("no word under the cursor to select");
+                return;
+            };
+            let extra = self.extra_carets().to_vec();
+            let sticky = self.col_of(word.end);
+            self.put_carets(Caret { at: word.end, sticky, anchor: Some(word.start) }, extra);
+            return;
+        }
+        let Some((range, _)) = self.selection_or_word() else { return };
+        let mut extra = self.extra_carets().to_vec();
+        if extra.len() + 1 >= MAX_CARETS {
+            self.set_error(format!("{MAX_CARETS} cursors is as many as there can be"));
+            return;
+        }
+        let buffer = &self.open().buffer;
+        let needle = buffer.text_range(range.start, range.end);
+        let extra_kw = self.vim.iskeyword_extra();
+        let whole = fenix_vim::is_whole_word(buffer, &range, extra_kw);
+        let mut taken: Vec<std::ops::Range<usize>> = extra.iter().filter_map(|c| c.anchor.map(|a| a.min(c.at)..a.max(c.at))).collect();
+        taken.push(range.clone());
+        let Some(next) = fenix_vim::next_occurrence(buffer, &needle, whole, extra_kw, range.end, &taken) else {
+            self.set_message(format!("no other {}", one_line(&needle)));
+            return;
+        };
+        extra.push(primary);
+        let sticky = self.col_of(next.end);
+        self.put_carets(Caret { at: next.end, sticky, anchor: Some(next.start) }, extra);
+        self.say_carets();
+    }
+
+    /// `edit.select_all_occurrences` (Ctrl+Shift+L): a cursor on every
+    /// occurrence of the selection (or of the word under the cursor),
+    /// each selecting it.
+    pub(crate) fn cmd_select_all_occurrences(&mut self) {
+        if !self.carets_can_be_added() {
+            return;
+        }
+        let Some((range, from_word)) = self.selection_or_word() else {
+            self.set_message("no word under the cursor to select");
+            return;
+        };
+        let buffer = &self.open().buffer;
+        let needle = buffer.text_range(range.start, range.end);
+        let extra_kw = self.vim.iskeyword_extra();
+        let whole = from_word || fenix_vim::is_whole_word(buffer, &range, extra_kw);
+        let found = match fenix_vim::occurrences(buffer, &needle, whole, extra_kw, MAX_CARETS) {
+            Ok(found) => found,
+            Err(n) => {
+                self.set_error(format!("{n} of {} is more cursors than {MAX_CARETS}", one_line(&needle)));
+                return;
+            }
+        };
+        let Some(own) = found.iter().position(|r| r.start == range.start).or((!found.is_empty()).then_some(0)) else { return };
+        let carets: Vec<Caret> = found.iter().map(|r| Caret { at: r.end, sticky: self.col_of(r.end), anchor: Some(r.start) }).collect();
+        let primary = carets[own];
+        let extra = carets.into_iter().enumerate().filter(|&(i, _)| i != own).map(|(_, c)| c).collect();
+        self.put_carets(primary, extra);
+        self.say_carets();
+    }
+
+    /// `edit.add_cursor_above` / `_below` (Ctrl+Alt+Up/Down): a cursor on
+    /// the line above the topmost (or below the bottommost), at its
+    /// column. The new one is the primary.
+    pub(crate) fn cmd_add_cursor_vertically(&mut self, down: bool) {
+        if !self.carets_can_be_added() {
+            return;
+        }
+        let mut extra = self.extra_carets().to_vec();
+        if extra.len() + 1 >= MAX_CARETS {
+            self.set_error(format!("{MAX_CARETS} cursors is as many as there can be"));
+            return;
+        }
+        let primary = self.primary_caret();
+        let buffer = &self.open().buffer;
+        let line_of = |c: &Caret| buffer.rope().char_to_line(c.at.min(buffer.len_chars()));
+        let all = extra.iter().chain(std::iter::once(&primary));
+        let edge = if down { all.max_by_key(|c| (line_of(c), c.at)) } else { all.min_by_key(|c| (line_of(c), c.at)) };
+        let Some(edge) = edge.copied() else { return };
+        let line = line_of(&edge);
+        let last = buffer.line_count().saturating_sub(1);
+        let target = match (down, line) {
+            (true, l) if l < last => l + 1,
+            (false, l) if l > 0 => l - 1,
+            _ => return,
+        };
+        let at = fenix_vim::at_column(buffer, target, edge.sticky);
+        extra.push(primary);
+        self.put_carets(Caret { at, sticky: edge.sticky, anchor: None }, extra);
+        self.say_carets();
+    }
+}
+
+/// Whether command `id`, run from a chord, keeps the extra carets: the
+/// clipboard's (at every caret) and those that add carets.
+pub(crate) fn keeps_carets(id: &str) -> bool {
+    matches!(id, "edit.copy" | "edit.paste" | "edit.add_next_occurrence" | "edit.select_all_occurrences" | "edit.add_cursor_above" | "edit.add_cursor_below")
+}
+
+/// `text` on one line, short, for a message.
+fn one_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("");
+    let short: String = line.chars().take(40).collect();
+    if short.len() < text.len() {
+        format!("\"{short}…\"")
+    } else {
+        format!("\"{short}\"")
+    }
 }
 
 /// Whether a key happens at every caret: typing, deleting, Enter, Tab and
@@ -458,6 +609,73 @@ mod tests {
         let mut c = *cursor;
         buffer.insert_char(&mut c, 'z');
         assert!(app.extra_carets().is_empty());
+    }
+
+    #[test]
+    fn ctrl_d_selects_the_word_then_adds_its_next_occurrences() {
+        let (mut app, _f) = app_on_file("a.txt", "foo bar foobar foo\nfoo");
+        standard(&mut app);
+        app.press("C-d");
+        assert!(app.extra_carets().is_empty(), "the first press only selects");
+        assert_eq!(app.vim.visual_selection_range(&app.open().buffer, &app.cursor()).map(|(r, _)| r), Some(0..3));
+        app.press("C-d");
+        assert_eq!(app.extra_carets().len(), 1);
+        assert_eq!(app.cursor().char_idx, 18, "the newest is the primary; foobar isn't the word");
+        app.press_all("C-d C-d");
+        assert_eq!(app.extra_carets().len(), 2, "all three taken: nothing more");
+        app.type_text("x");
+        assert_eq!(app.text(), "x bar foobar x\nx", "typing replaces each selection");
+        app.press("C-z");
+        assert_eq!(app.text(), "foo bar foobar foo\nfoo", "one undo");
+    }
+
+    #[test]
+    fn ctrl_d_on_a_selection_finds_it_anywhere_and_in_multi_byte_text() {
+        let (mut app, _f) = app_on_file("a.txt", "été xété été");
+        standard(&mut app);
+        app.press_all("Right S-Right S-Right");
+        app.press_all("C-d C-d");
+        assert_eq!(app.extra_carets().len(), 2, "té, not a word, is found inside words");
+        app.type_text("e");
+        assert_eq!(app.text(), "ée xée ée");
+    }
+
+    #[test]
+    fn ctrl_shift_l_puts_a_cursor_on_every_occurrence() {
+        let (mut app, _f) = app_on_file("a.txt", "ab x ab\nab abc");
+        standard(&mut app);
+        app.press("C-S-l");
+        assert_eq!(app.extra_carets().len(), 2, "the word under the cursor, whole");
+        app.type_text("Z");
+        assert_eq!(app.text(), "Z x Z\nZ abc");
+        assert_eq!(app.line_col(), (0, 1), "the primary is the one it started on");
+    }
+
+    #[test]
+    fn ctrl_alt_arrows_add_a_cursor_above_and_below_at_the_column() {
+        let (mut app, _f) = app_on_file("a.txt", "abc\nd\nefg");
+        standard(&mut app);
+        app.press_all("Right Right");
+        app.press_all("C-M-Down C-M-Down C-M-Down");
+        assert_eq!(app.extra_carets().len(), 2, "the last line is as far as it goes");
+        app.type_text("!");
+        assert_eq!(app.text(), "ab!c\nd!\nef!g", "a short line's end; the last line without a newline");
+        app.press("Esc");
+        app.press("C-M-Up");
+        assert_eq!(app.extra_carets().len(), 1);
+        app.type_text("?");
+        assert_eq!(app.text(), "ab!c\nd!?\nef!?g");
+    }
+
+    #[test]
+    fn the_cursor_commands_are_standard_keys_and_say_so_with_vim_s() {
+        let (mut app, _f) = app_on_file("a.txt", "foo foo\n");
+        app.run_cmd("edit.add_next_occurrence");
+        app.run_cmd("edit.add_cursor_below");
+        assert!(app.extra_carets().is_empty());
+        assert!(app.modeline_text().contains("standard keys"), "{}", app.modeline_text());
+        app.press("C-d");
+        assert!(app.extra_carets().is_empty(), "Ctrl+D is still Vim's");
     }
 
     #[test]

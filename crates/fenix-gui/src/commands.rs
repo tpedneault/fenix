@@ -309,6 +309,10 @@ impl CommandRegistry {
         registry.register("edit.cut", "Cut the selection, or the cursor's line, to the clipboard", |ctx| ctx.app.cmd_cut());
         registry.register("edit.paste", "Paste the clipboard at the cursor, or over the selection", |ctx| ctx.app.cmd_paste());
         registry.register("edit.select_all", "Select the whole buffer", |ctx| ctx.app.cmd_select_all());
+        registry.register("edit.add_next_occurrence", "Select the word under the cursor; again, add a cursor on the next occurrence of the selection (standard keys)", |ctx| ctx.app.cmd_add_next_occurrence());
+        registry.register("edit.select_all_occurrences", "A cursor on every occurrence of the selection, or of the word under the cursor (standard keys)", |ctx| ctx.app.cmd_select_all_occurrences());
+        registry.register("edit.add_cursor_above", "Add a cursor on the line above (standard keys)", |ctx| ctx.app.cmd_add_cursor_vertically(false));
+        registry.register("edit.add_cursor_below", "Add a cursor on the line below (standard keys)", |ctx| ctx.app.cmd_add_cursor_vertically(true));
         registry.register("edit.move_lines_up", "Move the cursor's line, or the selected lines, up one", |ctx| ctx.app.cmd_move_lines(false));
         registry.register("edit.move_lines_down", "Move the cursor's line, or the selected lines, down one", |ctx| ctx.app.cmd_move_lines(true));
         registry.register("edit.copy_lines_up", "Copy the cursor's line, or the selected lines, above them", |ctx| ctx.app.cmd_copy_lines(false));

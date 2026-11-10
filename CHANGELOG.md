@@ -54,6 +54,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and pasting happen at each, as one undo step, and undo and redo bring
   the cursors back (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click
   instead).
+- More cursors from the keyboard, with standard keys: Ctrl+D selects the
+  word under the cursor, then adds a cursor on the selection's next
+  occurrence each time; Ctrl+Shift+L puts one on every occurrence;
+  Ctrl+Alt+↑/↓ add one on the line above or below. A selected whole word
+  finds whole words only. They're commands too
+  (`edit.add_next_occurrence`, `edit.select_all_occurrences`,
+  `edit.add_cursor_above`/`below`).
 - Chords are keymap data: `[[keys]]` in `keybindings.toml` and in
   extensions' keymaps binds or unbinds a key with its modifiers (`C-s`,
   `C-S-p`, `F12`) for a key scheme and a place; Ctrl+S, Ctrl+Z and the

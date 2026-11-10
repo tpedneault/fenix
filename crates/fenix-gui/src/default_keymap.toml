@@ -1626,6 +1626,31 @@ command = "nav.goto_line"
 scheme = "standard"
 when = "text"
 
+# More cursors
+[[keys]]
+keys = "C-d"
+command = "edit.add_next_occurrence"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-S-l"
+command = "edit.select_all_occurrences"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-M-Up"
+command = "edit.add_cursor_above"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-M-Down"
+command = "edit.add_cursor_below"
+scheme = "standard"
+when = "text"
+
 # Finding
 [[keys]]
 keys = "C-f"

@@ -884,6 +884,14 @@ Where the implementation differs from the plan above, and why:
   made elsewhere -- a language server's, an agent's, a reload, an undo --
   goes back to one cursor. Mapping them would have meant draining the
   buffer's anchor edits, which extensions' decorations already drain.
+- **Keyboard cursors** (§2.6's follow-up) are built: `Ctrl+D` selects
+  the word, then adds the next occurrence (the newest is the primary, so
+  the view follows it); `Ctrl+Shift+L` every occurrence;
+  `Ctrl+Alt+↑/↓` a cursor above or below. A selection that is a whole
+  word finds whole words, as VS Code does when `Ctrl+D` picked the word;
+  other text matches anywhere, case and all. Where to put them is
+  `fenix-vim`'s `occurrence` module; Vim keys get a message, since only
+  standard keys have extra cursors.
 - **Tabs already had a ×** (§2.8); the split button is the new part. It
   sits right after the tabs.
 - **The keys page** is `SPC h ?` (`help.keys_sheet`), a Markdown page of

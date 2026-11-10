@@ -16,7 +16,8 @@ its extension. The rest is built into Fenix.
   traditional IDE's, modelled on VS Code's on Windows and Linux -- a
   file's text is typed into at once, Shift with a movement selects,
   Ctrl+C/X/V/Z/S, Ctrl+F, F12, F2, Ctrl+/ and the rest, Alt+click and
-  Alt+Shift+drag for more cursors, and the whole leader menu, every
+  Alt+Shift+drag, Ctrl+D, Ctrl+Shift+L and Ctrl+Alt+↑/↓ for more
+  cursors, and the whole leader menu, every
   extension's included, on `Ctrl+K`. Both schemes run the same commands;
   hints and menus say the keys of the one in use. See
   [Standard keys](KEYBINDINGS.md#standard-keys).

@@ -16550,8 +16550,9 @@ impl App {
         let composing = self.standard_keys() && self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id());
         let in_leader = in_leader || (composing && (full.chord() == KeyPress::named(FenixNamedKey::Enter).with_ctrl() || full.chord() == KeyPress::char('a').with_ctrl().with_shift()));
         if let Some(id) = self.chord_command(full).filter(|_| !in_leader) {
-            // Only the clipboard's own work at every caret.
-            if !matches!(id, "edit.copy" | "edit.paste") {
+            // Only the clipboard's own work at every caret, and the
+            // commands that add carets keep those there are.
+            if !carets::keeps_carets(id) {
                 self.clear_carets();
             }
             self.run_command_with(event_loop, id);
