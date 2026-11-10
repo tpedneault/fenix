@@ -8,6 +8,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.5.0] - 2026-11-09
 
+### Security
+
+- A project's own programs wait to be allowed. `.fenix/tools.json` (its
+  language servers, debug adapters and tasks) and `.fenix/lsp/*.json` (a
+  server's settings) are used only once you've said yes for that
+  project, with `SPC p y` (`project.trust`), which shows the file and
+  asks. Before, opening a file in a project started the language server
+  the project named, so a repository you had only just cloned could run
+  a program of its choosing. The answer is kept outside the project and
+  asked again when those files change. Projects you already used keep
+  working; what the wizard, the settings page and the doctor write for
+  you needs no allowing.
+
 ### Added
 
 - Remote projects, a preview: `SPC p R` (`project.open_remote`) opens a

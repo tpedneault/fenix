@@ -69,6 +69,7 @@ use crate::page::Key as PageKey;
 use explorer_host::{is_bare_server, is_unc, PromptKind};
 mod disk_probe;
 mod remote;
+mod trust;
 mod extensions_host;
 mod welcome_host;
 mod wasm_host;
@@ -5062,6 +5063,8 @@ pub struct App {
     disk_probe_out: Option<Instant>,
     /// The remote machines Fenix is connected to (`remote`).
     remote: remote::Remotes,
+    /// Which projects may have the programs they name run (`trust`).
+    trust: trust::ProjectTrust,
     disk_probe_basis: HashMap<BufferId, DiskFingerprint>,
     /// Home's recent files as last looked at, when, and when the look now
     /// out was sent (`home::request_recent_probe`).
@@ -5802,6 +5805,9 @@ impl App {
         let mut app = Self::with_file(file_arg.clone());
         app.event_proxy = Some(event_proxy);
         app.session.path = fenix_storage::paths::state_file("session.json");
+        // From here a project's own programs wait to be allowed: before
+        // the session comes back, which opens files and starts servers.
+        app.project_trust_begin(fenix_storage::paths::state_file("trusted-projects.json"));
         app.restore_session(file_arg.is_some());
         // What was open on other machines: connected to again.
         app.remote_resume_session();
@@ -6075,6 +6081,7 @@ impl App {
             file_index: Default::default(),
             disk_probe_out: None,
             remote: remote::Remotes::default(),
+            trust: trust::ProjectTrust::default(),
             disk_probe_basis: HashMap::new(),
             recent_seen: HashMap::new(),
             recent_probed: None,
@@ -6983,6 +6990,8 @@ impl App {
         }
         self.refresh_project_settings(false);
         self.tell_extensions(Happened::FocusChanged);
+        // Said before its servers would have started: they won't, yet.
+        self.project_trust_notice();
         self.sync_lsp_for_focused_buffer();
     }
 
@@ -7091,11 +7100,12 @@ impl App {
     fn additional_lsp_servers(&mut self, root: &Path, language: fenix_syntax::LanguageId) -> Vec<fenix_project::tools::AdditionalServer> {
         // The project's own, then those extensions added.
         let added = self.wasm.added_servers(root);
-        let all = self.lsp_additional.entry(root.to_path_buf()).or_insert_with(|| {
-            let mut all = fenix_project::tools::ProjectTools::read(root).map(|tools| tools.lsp.additional).unwrap_or_default();
+        if !self.lsp_additional.contains_key(root) {
+            let mut all = self.project_tools(root).map(|tools| tools.lsp.additional).unwrap_or_default();
             all.extend(added);
-            all
-        });
+            self.lsp_additional.insert(root.to_path_buf(), all);
+        }
+        let all = &self.lsp_additional[root];
         let name = crate::lsp::language_config_name(language);
         all.iter().filter(|server| server.serves(&name)).cloned().collect()
     }
@@ -7180,7 +7190,7 @@ impl App {
     fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
         let key = LspKey::primary(language, fenix_lsp::normalize(refactor::identity(cwd)));
         if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) || self.lsp_starting.contains_key(&key) { return; }
-        let configured = match fenix_project::tools::ProjectTools::read(&key.root) {
+        let configured = match self.project_tools(&key.root) {
             Ok(config) => config,
             Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
         };
@@ -10279,7 +10289,7 @@ impl App {
             self.set_error(format!("no known tasks for {}", root.display()));
             return;
         }
-        let own = fenix_project::tools::ProjectTools::read(&root).map(|tools| tools.tasks).unwrap_or_default();
+        let own = self.project_tools(&root).map(|tools| tools.tasks).unwrap_or_default();
         let candidates = tasks
             .into_iter()
             .map(|t| {
@@ -10353,7 +10363,7 @@ impl App {
         // An extension's first; core's defaults only where they add a
         // name and a command line it doesn't have (#35).
         let mut tasks = fenix_tasks::merge_tasks(self.wasm.tasks(root), fenix_tasks::discover_tasks(root));
-        let tools = fenix_project::tools::ProjectTools::read(root)?;
+        let tools = self.project_tools(root)?;
         for (name, spec) in tools.tasks {
             tasks.retain(|task| task.name != name);
             tasks.push(fenix_tasks::TaskDef { name, command: spec.executable, args: spec.args });
@@ -10414,7 +10424,7 @@ impl App {
         if self.task_session.as_ref().is_some_and(|s| s.runner.is_some() && s.root != root) {
             self.set_error("a task is running in another project; cancel it from its task panel first"); return false;
         }
-        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return false; } };
+        let tools = match self.project_tools(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return false; } };
         // The project's own first, then an extension's as it gave it (with
         // its environment), then the task as it is.
         let given = given.or_else(|| self.wasm.task_spec(&root, &task.name).filter(|s| s.executable == task.command && s.args == task.args));
@@ -10706,7 +10716,7 @@ impl App {
             return;
         };
         let root = self.integration_root();
-        let tools = match fenix_project::tools::ProjectTools::read(&root) {
+        let tools = match self.project_tools(&root) {
             Ok(tools) => tools,
             Err(error) => { self.set_error(error); return; }
         };
@@ -10787,7 +10797,7 @@ impl App {
             return;
         };
         let root = self.integration_root();
-        let tools = match fenix_project::tools::ProjectTools::read(&root) {
+        let tools = match self.project_tools(&root) {
             Ok(tools) => tools,
             Err(error) => { self.set_error(error); return; }
         };
@@ -11588,7 +11598,7 @@ impl App {
             .filter_map(|key| match key.server { LspServer::Primary(language) => Some(language), LspServer::Additional(_) => None })
             .collect();
         let root = self.integration_root();
-        let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
+        let tools = match self.project_tools(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
         let dap_language = self.debug_session.as_ref().filter(|s| s.root == root).map(|s| s.language);
         let configured_command = |spec: &fenix_project::tools::CommandSpec| {
             spec.command(&root).ok().map(|command| (command.get_program().to_string_lossy().into_owned(), spec.args.clone()))

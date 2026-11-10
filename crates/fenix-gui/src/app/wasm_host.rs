@@ -3540,7 +3540,7 @@ impl App {
     /// The buffer showing extension `ext`'s page `page`, if one does.
     /// The language servers running for the project at `root`, stopped
     /// and started again as its files need them.
-    fn restart_language_servers_in(&mut self, root: &Path) {
+    pub(super) fn restart_language_servers_in(&mut self, root: &Path) {
         let root = fenix_lsp::normalize(refactor::identity(root));
         self.lsp_unavailable.retain(|key| key.root != root);
         let running: Vec<_> = self.lsp_sessions.keys().chain(self.lsp_starting.keys()).filter(|key| key.root == root).cloned().collect();
@@ -3718,6 +3718,16 @@ impl App {
         match keypress.code {
             // `ssh`'s question, connecting to a remote machine: Escape is
             // no answer, and it gives up on that way in.
+            // `SPC p y`: whether a project may run what it names. Only a
+            // typed yes allows it.
+            KeyCode::Named(FenixNamedKey::Escape) if prompt.ext == super::trust::PROMPT => {
+                self.wasm.prompt = None;
+                self.project_trust_answered(None);
+            }
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::trust::PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.project_trust_answered(Some(p.input));
+            }
             KeyCode::Named(FenixNamedKey::Escape) if prompt.ext == super::remote::PROMPT => {
                 self.wasm.prompt = None;
                 self.remote_answered(None);

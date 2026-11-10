@@ -1449,6 +1449,9 @@ impl App {
             }
         }
         let steps = wizard.run.as_ref().map(|r| r.steps.len()).unwrap_or(0);
+        // Made here, from a template its user picked: what it names is
+        // theirs already.
+        self.trust_project_as_written(&dir);
         self.open_project(dir.clone(), plan.file_to_open(), wizard.register);
         self.close_page(id);
         self.refresh_home_data(false);
@@ -1686,9 +1689,13 @@ impl App {
             FixAction::Editor(fix) => {
                 match fix {
                     EditorFix::UseLanguageServer { language, executable, args } => {
-                        let result = fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
-                            tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
-                            tools.write(&root)
+                        // The doctor's fix is the user's change, made here:
+                        // a project that was trusted stays so.
+                        let result = self.keeping_project_trust(&root, |_| {
+                            fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
+                                tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
+                                tools.write(&root)
+                            })
                         });
                         if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
                             d.last_fix = Some(("use it for this project".to_string(), result.clone()));
@@ -1771,7 +1778,8 @@ impl App {
         use project_settings::Action;
         match action {
             Action::None | Action::Close => {}
-            Action::SaveTools(tools) => match tools.write(&root) {
+            // Edited on the settings page: the user's change, made here.
+            Action::SaveTools(tools) => match self.keeping_project_trust(&root, |_| tools.write(&root)) {
                 Ok(()) => self.set_message("saved .fenix/tools.json"),
                 Err(e) => self.set_error(e),
             },

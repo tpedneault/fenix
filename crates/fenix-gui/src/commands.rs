@@ -153,6 +153,7 @@ impl CommandRegistry {
         registry.external("project.doctor", "Check the project's toolchain and offer fixes", |app| app.cmd_project_doctor());
         registry.external("project.settings", "The project's tasks, servers, launch and kind", |app| app.cmd_project_settings());
         registry.external("project.add", "Register a project in the switch-project list", |app| app.picker_add_project_prompt());
+        registry.register("project.trust", "Look at the programs this project names (its language servers, tasks, debugger) and allow or refuse them", cmd_project_trust);
         registry.external("project.open_remote", "Open a project on another machine, over SSH", |app| app.cmd_project_open_remote());
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.external("task.run", "Fuzzy-pick and run a discovered project task", |app| app.picker_tasks());
@@ -619,6 +620,10 @@ fn cmd_quickfix_next(ctx: &mut CommandCtx) {
 
 fn cmd_quickfix_prev(ctx: &mut CommandCtx) {
     ctx.app.quickfix_prev();
+}
+
+fn cmd_project_trust(ctx: &mut CommandCtx) {
+    ctx.app.cmd_project_trust();
 }
 
 fn cmd_project_delete(ctx: &mut CommandCtx) {

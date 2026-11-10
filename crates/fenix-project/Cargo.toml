@@ -15,6 +15,8 @@ fenix-picker = { path = "../fenix-picker" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# A project's trust is kept against a hash of the files that name programs.
+sha2 = "0.10"
 toml = "1"
 grep-searcher = "0.1.17"
 grep-regex = "0.1.14"

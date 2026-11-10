@@ -24,3 +24,4 @@ pub use root::{find_project_root, is_sketch, set_extension_markers};
 
 pub mod template;
 pub mod tools;
+pub mod trust;
