@@ -442,23 +442,38 @@ impl App {
         let top = walk.clamp((state.scroll_line, state.scroll_row));
         let cursor = self.cursor_row_pos(&mut walk, pane, buffer);
         let visible = visible.max(1);
-        let held = if cursor < top {
-            Some(top)
+        // Held to the top row: the first char starting on it (a tab or a
+        // decoration it begins inside starts on the row above), else the
+        // next line's first. Held to the bottom row: the last char
+        // starting on it or before (one it ends inside started there).
+        let (index, row, top_side) = if cursor < top {
+            (top.0, top.1, true)
         } else if walk.distance(top, cursor, visible - 1).is_none() {
-            Some(walk.step(top, visible as isize - 1))
+            let bottom = walk.step(top, visible as isize - 1);
+            (bottom.0, bottom.1, false)
         } else {
-            None
+            return true;
         };
-        let Some((index, row)) = held else { return true };
+        let cols = walk.rows_upto(index, row + 1).get(row).cloned().unwrap_or(0..0);
+        let next_line = walk.lines.get(index + 1).copied();
         let line = walk.lines.get(index).copied().unwrap_or(0);
-        // Only as far as that row.
-        let vcol = walk.rows_upto(index, row + 1).get(row).map_or(0, |r| r.start);
         drop(walk);
         let Some(ob) = self.buffers.get(buffer) else { return true };
-        // The first char that starts on the row: a tab or a decoration
-        // the row begins inside starts on the row above.
         let col_map = self.line_col_map(buffer, line, line);
-        let col = col_map[..col_map.len().saturating_sub(1)].partition_point(|&v| v < vcol);
+        let len = col_map.len().saturating_sub(1);
+        let (line, col) = if top_side {
+            let col = col_map[..len].partition_point(|&v| v < cols.start);
+            match next_line {
+                // No char of this line starts on the row: the next line's first.
+                Some(next) if col >= len && len > 0 => (next, 0),
+                _ => (line, col),
+            }
+        } else {
+            (line, crate::mouse::char_col_at(&col_map, cols.end.saturating_sub(1).max(cols.start)).0)
+        };
+        // Where a click would put it: on a char, past the last only in Insert.
+        let len = ob.buffer.line_len(line);
+        let col = if self.vim.is_inserting() { col.min(len) } else { col.min(len.saturating_sub(1)) };
         let at = ob.buffer.line_start_char(line) + col;
         self.pane_state_mut(pane).cursor = Cursor { char_idx: at, sticky_col: col };
         self.vim.forget_row_goals();
@@ -706,6 +721,48 @@ mod tests {
         assert_eq!(app.line_col(), (0, 9), "on `x`, not the tab above");
         app.ensure_cursor_visible(5);
         assert_eq!(top(&app), (0, 1), "and the view stays");
+    }
+
+    /// After the wheel's hold, the cursor's row is in view: following it
+    /// moves nothing.
+    fn held_in_view(app: &mut App, visible: usize) {
+        let before = top(app);
+        app.ensure_cursor_visible(visible);
+        assert_eq!(top(app), before, "the held cursor is in view");
+    }
+
+    #[test]
+    fn the_wheel_s_hold_on_a_row_inside_a_tab_stays_in_view_and_on_a_char() {
+        // `abcdefgh` and a tab to sixteen: row 1 is all tab, no char
+        // starts on it; the hold goes to the next line's first char.
+        let text = format!("abcdefgh\t\n{}", "more\n".repeat(40));
+        let (mut app, _f) = app_on_file("a.txt", &text);
+        if !app.buffer_wraps(app.focused_buffer_id()) {
+            app.run_cmd("view.toggle_wrap");
+        }
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 10);
+        assert!(app.scroll_focused_by_rows(pane, buffer, 1, 5));
+        assert_eq!(top(&app), (0, 1));
+        assert_eq!(app.line_col(), (1, 0), "a char, not the newline");
+        held_in_view(&mut app, 5);
+        // Up a row at a time from below a row inside a tab: never stuck.
+        let text = format!("{}a\tb\n{}", "x\n".repeat(4), "m\n".repeat(40));
+        let (mut app, _f) = app_on_file("a.txt", &text);
+        if !app.buffer_wraps(app.focused_buffer_id()) {
+            app.run_cmd("view.toggle_wrap");
+        }
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 4);
+        app.press_all("1 5 G");
+        app.ensure_cursor_visible(5);
+        let mut tops = Vec::new();
+        for _ in 0..20 {
+            assert!(app.scroll_focused_by_rows(pane, buffer, -1, 5));
+            held_in_view(&mut app, 5);
+            tops.push(top(&app));
+        }
+        assert_eq!(tops.last(), Some(&(0, 0)), "up to the top: {tops:?}");
     }
 
     #[test]
