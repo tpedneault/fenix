@@ -21,6 +21,9 @@ pub(crate) struct UpdateState {
     /// A look under way, and whether it was asked for (then what it finds
     /// is said, whatever it is).
     pub(crate) looking: Option<bool>,
+    /// The machine's policy, in place of `policy.toml`'s, for tests.
+    #[cfg(test)]
+    pub(crate) policy: Option<fenix_extensions::Policy>,
 }
 
 /// A look's answer, from its thread.
@@ -33,6 +36,9 @@ pub(crate) struct UpdateAnswer {
 impl App {
     /// Whether this machine's policy lets anyone here look.
     fn updates_allowed(&self) -> Result<(), String> {
+        #[cfg(test)]
+        let policy = self.updates.policy.clone().unwrap_or_default();
+        #[cfg(not(test))]
         let policy = crate::installed::machine().map(|m| m.policy()).transpose()?.unwrap_or_default();
         if policy.update_check == Some(false) {
             return Err("looking for a newer Fenix is switched off on this machine by its administrator".into());
@@ -64,6 +70,13 @@ impl App {
             self.set_error(why);
             return;
         }
+        // The daily look under way already: what it finds is said, as if
+        // asked.
+        if let Some(asked) = self.updates.looking.as_mut() {
+            *asked = true;
+            self.set_message("looking for a newer Fenix…");
+            return;
+        }
         if self.start_update_check(true) {
             self.set_message("looking for a newer Fenix…");
         }
@@ -90,6 +103,9 @@ impl App {
 
     /// A look's answer: kept, shown on Home, and said when it was asked.
     pub(crate) fn apply_update_answer(&mut self, answer: UpdateAnswer) {
+        // Asked for while it was under way counts as asked.
+        let asked = answer.asked || self.updates.looking == Some(true);
+        let answer = UpdateAnswer { asked, ..answer };
         self.updates.looking = None;
         match answer.result {
             Ok(seen) => {
@@ -113,10 +129,15 @@ impl App {
                 if answer.asked {
                     self.set_error(format!("couldn't look for a newer Fenix: {why}"));
                 }
-                // Not looked again for a day either way.
+                // Not looked again for a day either way -- kept, so a
+                // machine that's offline doesn't ask at every start.
                 let checked = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
                 let latest = self.update_seen().latest.clone();
-                self.updates.seen = Some(Seen { checked, latest });
+                let seen = Seen { checked, latest };
+                if let Some(file) = &self.updates.file {
+                    let _ = seen.write(file);
+                }
+                self.updates.seen = Some(seen);
             }
         }
     }
@@ -180,6 +201,37 @@ mod tests {
         app.updates.seen = Some(Seen { checked, latest: None });
         let next = app.update_tick(Instant::now()).expect("a day away");
         assert!(next > Instant::now() + std::time::Duration::from_secs(23 * 60 * 60));
+    }
+
+    #[test]
+    fn a_machine_s_policy_switches_it_off_for_everyone() {
+        let mut app = app_with(Seen { checked: 1, latest: Some("v99.0.0".into()) });
+        app.config.set_value("updates.check", Some(fenix_config::Value::Bool(true)));
+        app.updates.policy = Some(fenix_extensions::Policy { update_check: Some(false), ..Default::default() });
+        assert_eq!(app.update_notice(), None, "nothing on Home");
+        app.cmd_check_for_updates();
+        assert!(app.modeline_text().contains("switched off on this machine"), "{}", app.modeline_text());
+        app.updates.seen = Some(Seen::default());
+        app.update_tick(Instant::now());
+        assert!(app.updates.looking.is_none(), "no daily look");
+    }
+
+    #[test]
+    fn asked_while_the_daily_look_is_under_way_its_answer_is_said() {
+        let mut app = app_with(Seen::default());
+        app.updates.looking = Some(false);
+        app.cmd_check_for_updates();
+        assert_eq!(app.updates.looking, Some(true));
+        app.apply_update_answer(UpdateAnswer { asked: false, result: Ok(Seen { checked: 5, latest: Some(format!("v{}", crate::installed::release())) }) });
+        assert!(app.modeline_text().contains("is the newest"), "{}", app.modeline_text());
+    }
+
+    #[test]
+    fn a_failed_look_is_kept_so_a_restart_doesn_t_ask_again() {
+        let mut app = app_with(Seen::default());
+        app.apply_update_answer(UpdateAnswer { asked: false, result: Err("offline".into()) });
+        let file = app.updates.file.clone().unwrap();
+        assert!(!Seen::read(&file).due(SystemTime::now()), "on disk too");
     }
 
     #[test]
