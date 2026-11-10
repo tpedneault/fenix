@@ -14,6 +14,8 @@ pub(super) struct PaneView<'a> {
     /// What is on each screen row.
     pub map: &'a super::rows::RowMap,
     pub rows: usize,
+    /// Whether its lines wrap: the ruler's band is then the lines shown.
+    pub wrapped: bool,
     pub gutter_chars: usize,
     pub scroll_col: usize,
     pub rendered_scroll: f32,
@@ -304,7 +306,8 @@ impl App {
         targets.sort_unstable();
         targets.dedup();
         self.motion.ruler_targets.insert(view.pane, targets);
-        Some(Ruler { lines, first: view.rendered_scroll, visible: view.rows.saturating_sub(1) as f32, cursor: view.cursor_line, marks })
+        let visible = if view.wrapped { view.map.text_lines().count() as f32 } else { view.rows.saturating_sub(1) as f32 };
+        Some(Ruler { lines, first: view.rendered_scroll, visible, cursor: view.cursor_line, marks })
     }
 
     /// How pane tabs are drawn, or `None` for no tab strip:
@@ -570,6 +573,7 @@ mod tests {
             buffer,
             map: &map,
             rows: lines.len(),
+            wrapped: false,
             gutter_chars: 0,
             scroll_col: 0,
             rendered_scroll: 0.0,
@@ -636,7 +640,7 @@ y = zed
         let tab_lines = HashSet::new();
         let selection = Segments::new();
         let vcol = |line: usize, col: usize| layout.vcol(line, col);
-        let view = PaneView { buffer, map: &layout.map, rows: 6, gutter_chars: 0, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 1, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
+        let view = PaneView { buffer, map: &layout.map, rows: 6, wrapped: true, gutter_chars: 0, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 1, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
         let out = app.polish_pane(&view, &mut spans, Instant::now());
         // `y = zed + ` / `other_name_h` / `ere`.
         let squiggles: Vec<(usize, usize, usize)> = out.squiggles.iter().map(|&(r, s, e, _)| (r, s, e)).collect();
