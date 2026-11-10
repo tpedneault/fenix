@@ -1245,6 +1245,10 @@ impl App {
     /// `workspace_per_project = false` it's the old behaviour: the file,
     /// or a find-file picker in the root.
     pub(super) fn open_project(&mut self, root: PathBuf, file: Option<PathBuf>, register: bool) {
+        // On a machine that isn't connected: that first, then this.
+        if self.remote_must_connect(&root, remote::Then::OpenProject { root: root.clone(), file: file.clone() }) {
+            return;
+        }
         let root = std::fs::canonicalize(&root).map(fenix_lsp::normalize).unwrap_or(root);
         if register {
             self.known_projects.add(root.clone());

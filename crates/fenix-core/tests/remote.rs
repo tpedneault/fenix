@@ -22,6 +22,12 @@ impl Machine {
 }
 
 impl Remote for Machine {
+    fn home(&self) -> String {
+        "/home/tom".into()
+    }
+    fn run(&self, _: &str, _: fenix_vfs::Run<'_>) -> io::Result<fenix_vfs::Ran> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
     fn stat(&self, path: &str) -> io::Result<Meta> {
         self.files.lock().unwrap().get(path).map(|bytes| Machine::meta(path, bytes)).ok_or_else(|| io::ErrorKind::NotFound.into())
     }

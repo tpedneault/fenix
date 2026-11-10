@@ -207,6 +207,36 @@ fn run() -> Outcome {
     check(count(&session, "fenix-remote --stdio")? == 1, "and only this connection's helper is left")?;
     let _ = began;
 
+    println!("== as Fenix sees it: remote paths");
+    let root = fenix_vfs::remote("spike", dir);
+    check(fenix_vfs::home("spike")? == fenix_vfs::remote("spike", &hello.home), "the machine's home is a remote path")?;
+    let listed = fenix_vfs::list(&root)?;
+    check(listed.iter().any(|entry| entry.name == ".git" && entry.is_dir()), &format!("a remote folder lists through its path ({} entries)", listed.len()))?;
+    let tracked = fenix_vfs::run_there(&root, fenix_vfs::Run { program: "git", args: &["ls-files", "-z"], ..Default::default() }).expect("a remote folder")?;
+    let tracked: Vec<String> = String::from_utf8_lossy(&tracked.stdout).split('\0').filter(|name| !name.is_empty()).map(str::to_string).collect();
+    check(!tracked.is_empty(), &format!("the machine's git lists the project's files ({})", tracked.len()))?;
+    let first = fenix_vfs::join(&root, &tracked[0]);
+    let (bytes, meta) = fenix_vfs::read_with_meta(&first)?;
+    check(meta.is_file() && meta.len == bytes.len() as u64, &format!("{} reads through its path ({} bytes)", fenix_vfs::display(&first), bytes.len()))?;
+    // Names this machine would misread, made there and found again.
+    let odd = fenix_vfs::child(&root, ".fenix-check a:b");
+    fenix_vfs::write(&odd, b"odd", fenix_vfs::Over::Nothing)?;
+    check(fenix_vfs::list(&root)?.iter().any(|entry| entry.name == ".fenix-check a:b") && fenix_vfs::read(&odd)? == b"odd", "a name with a colon and a space is a file there")?;
+    let refused = fenix_vfs::write(&odd, b"again", fenix_vfs::Over::Version(fenix_vfs::Version { len: 99, mtime: 0 })).unwrap_err();
+    check(fenix_vfs::changed(&refused), "a save held against another version is refused as changed")?;
+    // Up to the machine and back down.
+    let here = std::env::temp_dir().join(format!("fenix-ssh-check-{}", std::process::id()));
+    std::fs::create_dir_all(here.join("up/deep"))?;
+    std::fs::write(here.join("up/deep/file.txt"), b"went up")?;
+    let up = fenix_vfs::child(&root, ".fenix-check-up");
+    fenix_vfs::copy(&here.join("up"), &up, &|| true)?;
+    fenix_vfs::copy(&up, &here.join("down"), &|| true)?;
+    check(std::fs::read(here.join("down/deep/file.txt"))? == b"went up", "a folder copies to the machine and back")?;
+    fenix_vfs::remove(&up, true)?;
+    fenix_vfs::remove(&odd, false)?;
+    std::fs::remove_dir_all(&here)?;
+    check(!sh(&session, &format!("ls -a '{dir}'"))?.contains(".fenix-check"), "and nothing of the check is left there")?;
+
     println!("== a connection that drops");
     let began = Instant::now();
     session.sever();

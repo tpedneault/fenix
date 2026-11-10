@@ -189,6 +189,29 @@ its extension. The rest is built into Fenix.
 
 ## Files and projects
 
+- **Remote projects (preview)**: `SPC p R` opens a folder on another
+  machine as a project, over SSH. Pick a host from `~/.ssh/config` or
+  type `user@host`; Fenix connects with the system's `ssh` (your config,
+  keys, agent and jump hosts as they are), asks on its prompt line
+  whatever `ssh` asks (a password, a passphrase, a new host's key) once,
+  and shows the machine's folders: `S` opens the one shown. From then on
+  it's a project: the explorer and sidebar list it, `SPC SPC` finds its
+  files (by the machine's own `git`), files open, edit and save there,
+  and a file changed there while you edited it isn't written over
+  (`:w!` keeps yours, `:e!` takes theirs). The modeline names the
+  machine. A connection that drops is made again by itself; meanwhile
+  your unsaved text stays, and a save says it couldn't. The explorer
+  creates, renames, copies and moves there, and between the machine and
+  this one; a delete there is for good (it has no Recycle Bin).
+
+  Fenix copies a small helper program to `~/.fenix/remote/` on the
+  machine the first time (Linux, x86_64 or aarch64; no administrator
+  rights). It runs as you, only while connected, and listens on nothing.
+
+  Not there yet on a remote project: terminals, Git, search, language
+  servers, tasks, the debugger and agents. Files that aren't text open
+  as text.
+
 - **File explorer**: one page, drawn at three widths -- the sidebar
   pinned at the left (`SPC e t`: names and status), a pane (`SPC f j`:
   names, status, size and age; splittable, closable with `q` or `SPC b

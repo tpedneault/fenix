@@ -153,6 +153,7 @@ impl CommandRegistry {
         registry.external("project.doctor", "Check the project's toolchain and offer fixes", |app| app.cmd_project_doctor());
         registry.external("project.settings", "The project's tasks, servers, launch and kind", |app| app.cmd_project_settings());
         registry.external("project.add", "Register a project in the switch-project list", |app| app.picker_add_project_prompt());
+        registry.external("project.open_remote", "Open a project on another machine, over SSH", |app| app.cmd_project_open_remote());
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
         registry.external("task.run", "Fuzzy-pick and run a discovered project task", |app| app.picker_tasks());
         registry.external("task.rerun_last", "Rerun the most recently run task", |app| app.rerun_last_task());

@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -659,14 +658,14 @@ impl ExplorerState {
         let Some(entry) = self.selected_entry() else {
             return Err(io::Error::new(io::ErrorKind::NotFound, "no entry selected"));
         };
-        let new_path = entry.path.parent().unwrap_or(&self.cwd).join(new_name);
-        if new_path.exists() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", new_path.display())));
+        let new_path = fenix_vfs::join(entry.path.parent().unwrap_or(&self.cwd), new_name);
+        if fenix_vfs::exists(&new_path) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", fenix_vfs::display(&new_path))));
         }
         if let Some(parent) = new_path.parent() {
-            fs::create_dir_all(parent)?;
+            fenix_vfs::create_dir_all(parent)?;
         }
-        fs::rename(&entry.path, &new_path)?;
+        fenix_vfs::rename(&entry.path, &new_path, false)?;
         Ok(new_path)
     }
 }
@@ -677,22 +676,22 @@ impl ExplorerState {
 /// `AlreadyExists` rather than silently truncating an existing file,
 /// unlike `fs::File::create`.
 pub fn create_file_in(dir: &Path, name: &str) -> io::Result<PathBuf> {
-    let path = dir.join(name);
+    let path = fenix_vfs::join(dir, name);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        fenix_vfs::create_dir_all(parent)?;
     }
-    fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+    fenix_vfs::write(&path, b"", fenix_vfs::Over::Nothing)?;
     Ok(path)
 }
 
 /// Creates a directory at `name` in `dir`, including any missing
 /// parents. Fails with `AlreadyExists` when it's there already.
 pub fn create_dir_in(dir: &Path, name: &str) -> io::Result<PathBuf> {
-    let path = dir.join(name);
-    if path.exists() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", path.display())));
+    let path = fenix_vfs::join(dir, name);
+    if fenix_vfs::exists(&path) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", fenix_vfs::display(&path))));
     }
-    fs::create_dir_all(&path)?;
+    fenix_vfs::create_dir_all(&path)?;
     Ok(path)
 }
 

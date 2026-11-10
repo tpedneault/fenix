@@ -68,6 +68,7 @@ use crate::page::Key as PageKey;
 #[cfg(test)]
 use explorer_host::{is_bare_server, is_unc, PromptKind};
 mod disk_probe;
+mod remote;
 mod extensions_host;
 mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
@@ -414,7 +415,21 @@ impl DiskFingerprint {
     /// `None` when the path can't be stat'd at all -- it was deleted,
     /// replaced by a directory, or was never there.
     fn of(path: &Path) -> Option<Self> {
-        Self::from_meta(std::fs::metadata(path).ok())
+        Self::look(path).flatten()
+    }
+
+    /// `of`, telling a file that isn't there (`Some(None)`) from one
+    /// that couldn't be looked at (`None`): a file on a remote machine
+    /// that isn't answering is not a file that's gone.
+    fn look(path: &Path) -> Option<Option<Self>> {
+        if !fenix_vfs::is_remote(path) {
+            return Some(Self::from_meta(std::fs::metadata(path).ok()));
+        }
+        match fenix_vfs::metadata(path) {
+            Ok(meta) => Some(meta.is_file().then(|| DiskFingerprint { mtime: Some(meta.modified()), len: meta.len })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+            Err(_) => None,
+        }
     }
 
     /// `of`, from a stat already made (off the UI thread, by the disk probe).
@@ -1836,6 +1851,13 @@ pub enum FenixUserEvent {
     ExplorerListed { target: ExplorerTarget, request: u64, result: Result<fenix_explorer::Listing, String> },
     /// What the disk poll's worker saw of the open files (`disk_probe`).
     DiskProbed(Box<disk_probe::ProbeResult>),
+    /// `ssh`, connecting to a remote machine, has a question (`remote`).
+    RemoteQuestion(remote::RemoteQuestion),
+    /// A connection to a remote machine was made, or couldn't be.
+    RemoteConnected(Box<remote::RemoteConnected>),
+    /// A remote machine's connection changed: lost, being tried again,
+    /// back.
+    RemoteStatus(String, fenix_ssh::Status),
     /// What Home's recent files looked like, looked at off the UI thread.
     RecentProbed(HashMap<PathBuf, home::RecentSeen>),
     /// The extension registry read, or an install from it done, for the
@@ -2226,6 +2248,9 @@ impl FenixUserEvent {
             Self::TerminalOutput { .. } => "TerminalOutput",
             Self::ExplorerListed { .. } => "ExplorerListed",
             Self::DiskProbed { .. } => "DiskProbed",
+            Self::RemoteQuestion { .. } => "RemoteQuestion",
+            Self::RemoteConnected { .. } => "RemoteConnected",
+            Self::RemoteStatus { .. } => "RemoteStatus",
             Self::RecentProbed { .. } => "RecentProbed",
             Self::Registry { .. } => "Registry",
             Self::Wasm { .. } => "Wasm",
@@ -2383,6 +2408,9 @@ enum ActivePicker {
     /// removes the selected root from `known_projects` instead of
     /// switching to it.
     DeleteProject(fenix_picker::PickerState<PathBuf>),
+    /// `SPC p R`: a machine to open a project on -- the ones connected,
+    /// the hosts of `~/.ssh/config`, or whatever is typed.
+    RemoteHost(fenix_picker::PickerState<String>),
     /// `SPC t p`: jump straight to a specific theme by name, fuzzy-
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
@@ -2473,6 +2501,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Places(s) => s.push_char(c),
         ActivePicker::Agents(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
+        ActivePicker::RemoteHost(s) => s.push_char(c),
         ActivePicker::Encoding(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Commands(s) => s.push_char(c),
@@ -2508,6 +2537,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.backspace(),
         ActivePicker::Agents(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
+        ActivePicker::RemoteHost(s) => s.backspace(),
         ActivePicker::Encoding(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Commands(s) => s.backspace(),
@@ -2543,6 +2573,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Places(s) => s.move_selection(delta),
         ActivePicker::Agents(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
+        ActivePicker::RemoteHost(s) => s.move_selection(delta),
         ActivePicker::Encoding(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Commands(s) => s.move_selection(delta),
@@ -2581,6 +2612,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.toggle_mark(),
         ActivePicker::Agents(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
+        ActivePicker::RemoteHost(s) => s.toggle_mark(),
         ActivePicker::Encoding(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Commands(s) => s.toggle_mark(),
@@ -2616,6 +2648,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Places(s) => s.query(),
         ActivePicker::Agents(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
+        ActivePicker::RemoteHost(s) => s.query(),
         ActivePicker::Encoding(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Commands(s) => s.query(),
@@ -2651,6 +2684,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.len(),
         ActivePicker::Agents(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
+        ActivePicker::RemoteHost(s) => s.len(),
         ActivePicker::Encoding(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Commands(s) => s.len(),
@@ -2686,6 +2720,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.selected_row(),
         ActivePicker::Agents(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
+        ActivePicker::RemoteHost(s) => s.selected_row(),
         ActivePicker::Encoding(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Commands(s) => s.selected_row(),
@@ -2726,6 +2761,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Places(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Agents(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::RemoteHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Encoding(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Commands(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -3226,6 +3262,10 @@ fn path_within(root: &Path, path: &Path) -> Option<String> {
 
 /// `path` whole, its home folder as `~`: a file outside the project.
 fn home_relative(path: &Path) -> String {
+    // A file on a remote machine, as that machine names it.
+    if fenix_vfs::is_remote(path) {
+        return fenix_vfs::display(path);
+    }
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
     match home.and_then(|h| path_within(&h, path)) {
         Some(rest) => format!("~/{rest}"),
@@ -5014,6 +5054,8 @@ pub struct App {
     /// When the disk probe now out was sent, and what each buffer's file
     /// looked like then (`disk_probe`).
     disk_probe_out: Option<Instant>,
+    /// The remote machines Fenix is connected to (`remote`).
+    remote: remote::Remotes,
     disk_probe_basis: HashMap<BufferId, DiskFingerprint>,
     /// Home's recent files as last looked at, when, and when the look now
     /// out was sent (`home::request_recent_probe`).
@@ -5755,6 +5797,8 @@ impl App {
         app.event_proxy = Some(event_proxy);
         app.session.path = fenix_storage::paths::state_file("session.json");
         app.restore_session(file_arg.is_some());
+        // What was open on other machines: connected to again.
+        app.remote_resume_session();
         // Recording lives here, not inside `with_file` -- `with_file` is
         // what the test suite calls directly to simulate "opened with
         // this file," and recording there would mean every such test
@@ -6023,6 +6067,7 @@ impl App {
             home_project_data: HashMap::new(),
             file_index: Default::default(),
             disk_probe_out: None,
+            remote: remote::Remotes::default(),
             disk_probe_basis: HashMap::new(),
             recent_seen: HashMap::new(),
             recent_probed: None,
@@ -6973,6 +7018,11 @@ impl App {
     /// Starts `path`'s language servers if they aren't running, and tells
     /// those that are its text, if `edit_count` says that's changed.
     fn sync_lsp_for(&mut self, path: &Path, text: &str, edit_count: u64) {
+        // Language servers for a remote project run on its machine, which
+        // isn't done yet: none are started here for its files.
+        if fenix_vfs::is_remote(path) {
+            return;
+        }
         let path = path.to_path_buf();
         let language = fenix_syntax::detect_language_from_path(&path);
         let cwd = tool_sessions::lsp_root_for_path(&path);
@@ -8895,11 +8945,15 @@ impl App {
             return;
         }
         let path = PathBuf::from(input);
-        let path = if path.is_absolute() { path } else {
-            self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))).join(path)
+        let path = if path.is_absolute() {
+            path
+        } else {
+            // In the project, wherever that is: a remote one's paths
+            // aren't joined as this machine's are.
+            fenix_vfs::join(&self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))), input)
         };
         // Naming a scratch document must never overwrite another document.
-        if path.exists() || self.buffers.id_for_path(&path).is_some() {
+        if fenix_vfs::exists(&path) || self.buffers.id_for_path(&path).is_some() {
             self.set_error("destination already exists or is open; choose a new file name");
             return;
         }
@@ -8954,8 +9008,8 @@ impl App {
         let unformatted = if self.config.format_on_save == Some(true) { self.run_extension_formatter().and_then(Result::err) } else { None };
         // A new file (`SPC f f src/new/mod.rs`) in folders that aren't
         // there yet: they're made.
-        if let Some(parent) = self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
-            if let Err(err) = std::fs::create_dir_all(parent) {
+        if let Some(parent) = self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty() && !fenix_vfs::exists(p)) {
+            if let Err(err) = fenix_vfs::create_dir_all(parent) {
                 self.set_error(format!("save failed: couldn't create {}: {err}", fenix_core::plain_path(parent).display()));
                 self.wake_caret();
                 return;
@@ -9362,6 +9416,10 @@ impl App {
     pub(crate) fn open_terminal_buffer(&mut self) {
         let cwd = self.terminal_start_dir();
         self.open_terminal_buffer_in(cwd);
+        // Said, because the shell that just opened looks like any other.
+        if self.project_root.as_deref().is_some_and(fenix_vfs::is_remote) {
+            self.set_message("this shell is on this machine: terminals on a remote project's machine aren't there yet");
+        }
     }
 
     /// Where a shell starts unless asked to start somewhere: the project
@@ -9779,7 +9837,7 @@ impl App {
         self.known_projects
             .roots()
             .iter()
-            .map(|root| fenix_picker::Candidate::new(root.to_string_lossy().into_owned(), root.clone()))
+            .map(|root| fenix_picker::Candidate::new(fenix_vfs::display(root), root.clone()))
             .collect()
     }
 
@@ -12689,7 +12747,12 @@ impl App {
 
         let fingerprint = match seen {
             Some(seen) => seen,
-            None => DiskFingerprint::of(&path),
+            None => match DiskFingerprint::look(&path) {
+                Some(looked) => looked,
+                // Its machine isn't answering: nothing is known, and
+                // nothing is concluded.
+                None => return,
+            },
         };
         let Some(fingerprint) = fingerprint else {
             // Gone, or no longer a regular file. Never reloaded to
@@ -12818,13 +12881,15 @@ impl App {
     /// somebody else's change.
     fn note_disk_state(&mut self, id: BufferId) {
         let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return };
-        match DiskFingerprint::of(&path) {
-            Some(fingerprint) => {
+        match DiskFingerprint::look(&path) {
+            Some(Some(fingerprint)) => {
                 self.disk_state.insert(id, fingerprint);
             }
-            None => {
+            Some(None) => {
                 self.disk_state.remove(&id);
             }
+            // Not looked at: what was known stands.
+            None => return,
         }
         self.externally_changed.remove(&id);
     }
@@ -14453,6 +14518,15 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.explorer_open_path(&path);
             }
+            Some(ActivePicker::RemoteHost(state)) => {
+                // A name that matches none of the listed is a machine
+                // too: `user@host`, as typed.
+                let typed = Some(state.query().trim().to_string()).filter(|typed| !typed.is_empty());
+                let Some(host) = state.selected().map(|c| c.payload.clone()).or(typed) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.remote_host_picked(&host);
+            }
             Some(ActivePicker::DeleteProject(state)) => {
                 let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -14708,6 +14782,12 @@ impl App {
     }
 
     fn open_file_as(&mut self, path: &Path, preview: bool) {
+        // A file on a remote machine is text to edit: the extensions that
+        // open files, and the look at its first bytes, read this
+        // machine's disk.
+        if fenix_vfs::is_remote(path) {
+            return self.open_text_file(path, preview);
+        }
         if let Some(open) = self.opener_for(path) {
             open(self, path, preview);
             return;
@@ -14730,6 +14810,22 @@ impl App {
     }
 
     fn open_text_file(&mut self, path: &Path, preview: bool) {
+        // A remote file that can't be read is not opened as an empty one
+        // (which a save would then put in its place): it says why.
+        if fenix_vfs::is_remote(path) && self.buffers.id_for_path(path).is_none() {
+            match Buffer::from_path(path) {
+                Ok(buffer) => {
+                    self.buffers.insert_loaded_document(buffer);
+                }
+                // Not there yet: a new file, named, as for a local one.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.set_error(format!("couldn't open {}: {error}", fenix_vfs::display(path)));
+                    self.wake_caret();
+                    return;
+                }
+            }
+        }
         let id = self.buffers.open_path(path);
         self.note_disk_state(id);
         self.open_buffer_in_focused_pane_as(id, preview);
@@ -16046,6 +16142,9 @@ impl App {
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
             FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
             FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
+            FenixUserEvent::RemoteQuestion(question) => self.remote_question(question),
+            FenixUserEvent::RemoteConnected(connected) => self.remote_connected(*connected),
+            FenixUserEvent::RemoteStatus(host, status) => self.remote_status(host, status),
             FenixUserEvent::RecentProbed(seen) => self.apply_recent_probed(seen),
             FenixUserEvent::Registry(event) => self.apply_registry_event(event),
             FenixUserEvent::Wasm { ext, event } => self.apply_wasm_event(ext, event),
@@ -17525,6 +17624,9 @@ impl App {
                         ExplorerPurpose::FindFrom => {
                             format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
                         }
+                        ExplorerPurpose::PickRemoteProject => {
+                            format!("{}   S to open this folder as a project, q to cancel ", fenix_vfs::display(&explorer.cwd))
+                        }
                     }
                 }
                 None => String::new(),
@@ -17535,6 +17637,7 @@ impl App {
                 ExplorerPurpose::PickWizardParent => "NEWIN",
                 ExplorerPurpose::PickSettingPath { .. } => "PICK",
                 ExplorerPurpose::FindFrom => "FINDFROM",
+                ExplorerPurpose::PickRemoteProject => "REMOTE",
             };
             return (badge, suffix);
         }
@@ -17548,6 +17651,7 @@ impl App {
                 Some(picker @ ActivePicker::Places(_)) => ("PLACES", picker_len(picker)),
                 Some(picker @ ActivePicker::Agents(_)) => ("AGENTS", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
+                Some(picker @ ActivePicker::RemoteHost(_)) => ("REMOTE", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::Encoding(_)) => ("ENCODING", picker_len(picker)),
                 Some(picker @ ActivePicker::Commands(_)) => (if self.palette_describes { "DESCRIBE" } else { "COMMAND" }, picker_len(picker)),
@@ -17662,6 +17766,7 @@ impl App {
         let feature_indicators: String = self.code_statuses().concat();
         let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.agents_usage_segment() + &self.notifications_segment();
         let git_indicator = self.chrome_git_segment();
+        let remote_indicator = self.remote_indicator();
         let search_indicator = match self.search_count() {
             Some((_, 0)) | None => String::new(),
             Some((i, n)) => format!("   [{i}/{n}]"),
@@ -17676,7 +17781,7 @@ impl App {
         };
         let place = if on_page { String::new() } else { format!("   Ln {}, Col {}", line + 1, col + 1) };
         let suffix = format!(
-            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}{place}   {details} "
+            "{filename}{modified}{terminal_hint}{workspace_indicator}{remote_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}{place}   {details} "
         );
         (mode_label, suffix)
     }
@@ -22284,6 +22389,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.keep_compose_draft();
         // Agents' threads saved, their processes stopped.
         self.agents_shutdown();
+        // Connections to remote machines ended, and what ran over them.
+        self.remote_close_all();
         self.checkpoint_session();
         self.save_window_layout();
     }

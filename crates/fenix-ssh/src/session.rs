@@ -16,7 +16,7 @@ use fenix_remote::{Entry, Exec, Exit, Failure, Frame, Hello, Kind, Request, Vers
 /// How long the helper may say nothing to a request before the
 /// connection is taken for dead. Nothing waits on a remote machine
 /// without a limit. A large file moves in pieces, each within it.
-pub const DEADLINE: Duration = Duration::from_secs(30);
+pub const DEADLINE: Duration = Duration::from_secs(10);
 
 /// How much a shell may print before the helper's first line.
 const MOST_PREAMBLE: usize = 1024 * 1024;
@@ -249,7 +249,16 @@ impl Session {
                     Some(frame) => frame,
                     None => match answers.recv_timeout(DEADLINE) {
                         Ok(frame) => frame,
-                        Err(RecvTimeoutError::Timeout) => return Err(Error::TimedOut),
+                        Err(RecvTimeoutError::Timeout) => {
+                            // A machine that has stopped answering won't
+                            // answer the next request either: the
+                            // connection is cut, so what follows fails at
+                            // once and a new one is made, instead of each
+                            // request waiting its turn to time out.
+                            self.sever();
+                            self.shared.lost.store(true, Ordering::SeqCst);
+                            return Err(Error::TimedOut);
+                        }
                         Err(RecvTimeoutError::Disconnected) => return Err(Error::Lost),
                     },
                 };

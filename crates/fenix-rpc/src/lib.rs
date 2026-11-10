@@ -100,6 +100,11 @@ pub fn normalize(path: std::path::PathBuf) -> std::path::PathBuf {
 /// `normalize` on the text of a path: `None` when there's nothing to
 /// change. `windows` also makes every `/` a `\`.
 fn plain_text(text: &str, windows: bool) -> Option<String> {
+    // A file on a remote machine: its `\\?\` is what makes it one, and
+    // a `/` in it is part of a name there.
+    if fenix_vfs::path::is_remote_text(text) {
+        return None;
+    }
     let stripped = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         format!(r"\\{rest}")
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {

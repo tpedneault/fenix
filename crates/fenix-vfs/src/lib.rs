@@ -19,6 +19,7 @@
 //! came from a remote machine onto one: see [`path::child`].
 
 pub mod path;
+pub mod testing;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -27,7 +28,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use path::{child, display, host_of, is_remote, remote, split};
+pub use path::{child, display, host_of, is_remote, join, remote, split};
 
 /// What tells one state of a file from the next: what a save is held
 /// against, to not write over someone else's.
@@ -104,11 +105,43 @@ pub fn changed(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|inner| inner.is::<Changed>())
 }
 
-/// A machine's files. Paths are the machine's own: absolute, with `/`.
+/// What a program run to its end gave.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ran {
+    /// Its exit code; `None` when a signal ended it.
+    pub code: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl Ran {
+    pub fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+/// A program to run on a machine, to its end.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Run<'a> {
+    pub program: &'a str,
+    pub args: &'a [&'a str],
+    /// Variables set over the machine's own.
+    pub env: &'a [(&'a str, &'a str)],
+    pub stdin: Option<&'a [u8]>,
+}
+
+/// A machine's files and programs. Paths are the machine's own:
+/// absolute, with `/`.
 ///
-/// Every call may take as long as the network does, and fails rather
-/// than wait without end; none belongs on a thread that draws.
+/// Every file call may take as long as the network does, and fails
+/// rather than wait without end; none belongs on a thread that draws.
 pub trait Remote: Send + Sync {
+    /// The user's home folder there.
+    fn home(&self) -> String;
+    /// Runs a program in `cwd` there and waits for it, however long it
+    /// takes: an error only if it couldn't be started or the connection
+    /// went.
+    fn run(&self, cwd: &str, run: Run<'_>) -> io::Result<Ran>;
     fn stat(&self, path: &str) -> io::Result<Meta>;
     fn list(&self, path: &str) -> io::Result<Vec<Meta>>;
     /// A file's contents, and the file as it was when read.
@@ -152,7 +185,27 @@ fn resolve(path: &Path) -> io::Result<Option<(Arc<dyn Remote>, String)>> {
     }
 }
 
-fn local_meta(path: &Path, name: String) -> io::Result<Meta> {
+/// Runs a program in `dir`, when `dir` is on a remote machine: `None`
+/// for a local folder, which the caller runs its own way.
+pub fn run_there(dir: &Path, run: Run<'_>) -> Option<io::Result<Ran>> {
+    match resolve(dir) {
+        Ok(Some((remote, there))) => Some(remote.run(&there, run)),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+/// The home folder of the machine `host` is mounted for, as a remote
+/// path.
+pub fn home(host: &str) -> io::Result<std::path::PathBuf> {
+    let mounted = mounts().read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(host).cloned();
+    match mounted {
+        Some(machine) => Ok(remote(host, &machine.home())),
+        None => Err(io::Error::new(io::ErrorKind::NotConnected, format!("not connected to {host}"))),
+    }
+}
+
+pub(crate) fn local_meta(path: &Path, name: String) -> io::Result<Meta> {
     let own = std::fs::symlink_metadata(path)?;
     let symlink = own.file_type().is_symlink();
     let (meta, dangling) = match symlink.then(|| std::fs::metadata(path)) {
@@ -286,57 +339,42 @@ pub fn remove(path: &Path, recursive: bool) -> io::Result<()> {
     }
 }
 
+/// Copies a file, or a folder and all in it, to a place where nothing
+/// is. Within one remote machine it's done there; between machines, or
+/// between one and this one, each file is read from the one and written
+/// to the other. `go_on` is asked before each file, and stops the copy
+/// with what's done left as it is.
+pub fn copy(from: &Path, to: &Path, go_on: &dyn Fn() -> bool) -> io::Result<()> {
+    if let (Some((host, there)), Some((to_host, to_there))) = (split(from), split(to)) {
+        if host == to_host {
+            return match resolve(from)? {
+                Some((machine, _)) => machine.copy(&there, &to_there),
+                None => unreachable!("a remote path resolves to its machine"),
+            };
+        }
+    }
+    if !go_on() {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
+    let meta = metadata(from)?;
+    if !meta.is_dir() {
+        let bytes = read(from)?;
+        return write(to, &bytes, Over::Nothing).map(drop);
+    }
+    if exists(to) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} is already there", display(to))));
+    }
+    create_dir_all(to)?;
+    for entry in list(from)? {
+        copy(&child(from, &entry.name), &child(to, &entry.name), go_on)?;
+    }
+    Ok(())
+}
+
 pub fn create_dir_all(path: &Path) -> io::Result<()> {
     match resolve(path)? {
         Some((remote, there)) => remote.create_dir(&there, true),
         None => std::fs::create_dir_all(path),
-    }
-}
-
-#[cfg(test)]
-pub(crate) mod testing {
-    use super::*;
-    use std::sync::Mutex;
-
-    /// A machine that is a folder on this one.
-    pub struct Folder {
-        pub root: std::path::PathBuf,
-        pub calls: Mutex<Vec<String>>,
-    }
-
-    impl Folder {
-        fn local(&self, path: &str) -> std::path::PathBuf {
-            self.calls.lock().unwrap().push(path.to_string());
-            self.root.join(path.trim_start_matches('/'))
-        }
-    }
-
-    impl Remote for Folder {
-        fn stat(&self, path: &str) -> io::Result<Meta> {
-            let local = self.local(path);
-            local_meta(&local, name_of(&local))
-        }
-        fn list(&self, path: &str) -> io::Result<Vec<Meta>> {
-            super::list(&self.local(path))
-        }
-        fn read(&self, path: &str) -> io::Result<(Vec<u8>, Meta)> {
-            super::read_with_meta(&self.local(path))
-        }
-        fn write(&self, path: &str, contents: &[u8], over: Over) -> io::Result<Meta> {
-            super::write(&self.local(path), contents, over)
-        }
-        fn rename(&self, from: &str, to: &str, replace: bool) -> io::Result<()> {
-            super::rename(&self.local(from), &self.local(to), replace)
-        }
-        fn remove(&self, path: &str, recursive: bool) -> io::Result<()> {
-            super::remove(&self.local(path), recursive)
-        }
-        fn create_dir(&self, path: &str, _parents: bool) -> io::Result<()> {
-            std::fs::create_dir_all(self.local(path))
-        }
-        fn copy(&self, from: &str, to: &str) -> io::Result<()> {
-            std::fs::copy(self.local(from), self.local(to)).map(drop)
-        }
     }
 }
 
@@ -346,9 +384,20 @@ mod tests {
 
     fn mounted_folder(host: &str) -> (tempfile::TempDir, Arc<testing::Folder>) {
         let dir = tempfile::tempdir().unwrap();
-        let folder = Arc::new(testing::Folder { root: dir.path().to_path_buf(), calls: Default::default() });
-        mount(host, folder.clone());
+        let folder = testing::Folder::mount(host, dir.path());
         (dir, folder)
+    }
+
+    #[test]
+    fn a_program_runs_on_the_machine_its_folder_is_on() {
+        let (dir, _folder) = mounted_folder("box-run");
+        std::fs::write(dir.path().join("here.txt"), b"x").unwrap();
+        assert!(run_there(dir.path(), Run::default()).is_none(), "a local folder is the caller's to run in");
+        let (program, args): (&str, &[&str]) = if cfg!(windows) { ("cmd", &["/C", "dir /b"]) } else { ("ls", &[]) };
+        let ran = run_there(&remote("box-run", "/"), Run { program, args, ..Run::default() }).unwrap().unwrap();
+        assert!(ran.success() && String::from_utf8_lossy(&ran.stdout).contains("here.txt"), "{ran:?}");
+        assert_eq!(home("box-run").unwrap(), remote("box-run", "/"));
+        assert_eq!(run_there(&remote("nobody", "/"), Run::default()).unwrap().unwrap_err().kind(), io::ErrorKind::NotConnected);
     }
 
     #[test]
@@ -394,6 +443,23 @@ mod tests {
         assert!(!exists(&file));
         // And `std::fs` finds nothing under the reserved root.
         assert_eq!(std::fs::read(&file).unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_folder_is_copied_to_a_machine_and_back() {
+        let (dir, _folder) = mounted_folder("box-copy");
+        let here = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(here.path().join("proj/src")).unwrap();
+        std::fs::write(here.path().join("proj/src/main.rs"), b"fn main() {}").unwrap();
+        std::fs::write(here.path().join("proj/a:b"), b"odd").ok();
+
+        copy(&here.path().join("proj"), &remote("box-copy", "/up"), &|| true).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("up/src/main.rs")).unwrap(), b"fn main() {}");
+        assert_eq!(copy(&here.path().join("proj"), &remote("box-copy", "/up"), &|| true).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        copy(&remote("box-copy", "/up"), &remote("box-copy", "/beside"), &|| true).unwrap();
+        copy(&remote("box-copy", "/beside"), &here.path().join("back"), &|| true).unwrap();
+        assert_eq!(std::fs::read(here.path().join("back/src/main.rs")).unwrap(), b"fn main() {}");
+        assert_eq!(copy(&remote("box-copy", "/up"), &here.path().join("stopped"), &|| false).unwrap_err().kind(), io::ErrorKind::Interrupted);
     }
 
     #[test]

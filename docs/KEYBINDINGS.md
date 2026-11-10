@@ -192,6 +192,7 @@ keys'; the palette has the commands).
 | `SPC p h` | Project doctor |
 | `SPC p ,` | Project settings |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
+| `SPC p R` | A project on another machine, over SSH: pick a host of `~/.ssh/config` or type `user@host`, then `S` on its folder |
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |

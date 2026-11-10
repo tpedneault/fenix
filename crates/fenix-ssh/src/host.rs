@@ -14,7 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use fenix_remote::{Entry, FailureCode, FileKind};
-use fenix_vfs::{Kind, Meta, Over};
+use fenix_remote::Exec;
+use fenix_vfs::{Kind, Meta, Over, Ran, Run};
 
 use crate::askpass::Askpass;
 use crate::bridge::Bridge;
@@ -42,6 +43,8 @@ pub enum Status {
 struct State {
     session: Option<Arc<Session>>,
     status: Status,
+    /// The user's home there, as the helper last said.
+    home: String,
 }
 
 type Watcher = Box<dyn Fn(&Status) + Send + Sync>;
@@ -64,7 +67,8 @@ impl Host {
     /// `fenix_vfs::remote`). `ask` answers what `ssh` asks; an answer is
     /// asked for once and remembered for the host's life.
     pub fn connect(name: &str, target: Target, helpers: Helpers, ask: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Result<Arc<Host>, ConnectError> {
-        if !fenix_vfs::path::host_is_valid(name) {
+        // A name that starts with `-` would be read by `ssh` as an option.
+        if !fenix_vfs::path::host_is_valid(name) || name.starts_with('-') || target.host.starts_with('-') {
             return Err(ConnectError::Io(io::Error::new(io::ErrorKind::InvalidInput, format!("{name:?} can't name a host"))));
         }
         let askpass = Askpass::start(ask)?;
@@ -75,7 +79,7 @@ impl Host {
             target,
             helpers,
             askpass,
-            state: Mutex::new(State { session: Some(session), status: Status::Connected }),
+            state: Mutex::new(State { home: session.hello().home.clone(), session: Some(session), status: Status::Connected }),
             watchers: Mutex::default(),
             bridge: Mutex::new(None),
             wake: Mutex::new(wake),
@@ -135,6 +139,9 @@ impl Host {
     fn set(&self, session: Option<Arc<Session>>, status: Status) {
         {
             let mut state = self.state.lock().unwrap();
+            if let Some(session) = &session {
+                state.home = session.hello().home.clone();
+            }
             state.session = session;
             if state.status == status {
                 return;
@@ -227,6 +234,31 @@ fn io_error(error: Error) -> io::Error {
 }
 
 impl fenix_vfs::Remote for Host {
+    fn home(&self) -> String {
+        self.state.lock().unwrap().home.clone()
+    }
+
+    fn run(&self, cwd: &str, run: Run<'_>) -> io::Result<Ran> {
+        let exec = Exec {
+            program: run.program.to_string(),
+            args: run.args.iter().map(|arg| arg.to_string()).collect(),
+            cwd: Some(cwd.to_string()),
+            env: run.env.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect(),
+            stdin: run.stdin.is_some(),
+        };
+        let process = self.session().and_then(|session| session.exec(exec)).map_err(io_error)?;
+        if let Some(bytes) = run.stdin {
+            let input = process.input();
+            // In pieces, so a large patch doesn't hold the connection.
+            for piece in bytes.chunks(fenix_remote::PIECE) {
+                input.write(piece).map_err(io_error)?;
+            }
+            input.close().map_err(io_error)?;
+        }
+        let finished = process.finish().map_err(io_error)?;
+        Ok(Ran { code: finished.code, stdout: finished.stdout, stderr: finished.stderr })
+    }
+
     fn stat(&self, path: &str) -> io::Result<Meta> {
         self.session().and_then(|session| session.stat(path)).map(|entry| meta(entry, Some(path))).map_err(io_error)
     }

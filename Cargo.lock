@@ -1228,6 +1228,7 @@ version = "1.5.0"
 dependencies = [
  "fenix-fs",
  "fenix-keymap",
+ "fenix-vfs",
 ]
 
 [[package]]
@@ -1266,6 +1267,8 @@ version = "1.5.0"
 name = "fenix-fs"
 version = "1.5.0"
 dependencies = [
+ "fenix-vfs",
+ "tempfile",
  "trash",
 ]
 
@@ -1312,6 +1315,7 @@ dependencies = [
  "fenix-table",
  "fenix-tasks",
  "fenix-terminal",
+ "fenix-vfs",
  "fenix-vim",
  "fenix-wasm",
  "fenix-window",
@@ -1389,6 +1393,7 @@ dependencies = [
  "fenix-extensions",
  "fenix-picker",
  "fenix-storage",
+ "fenix-vfs",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
@@ -1421,6 +1426,9 @@ dependencies = [
 [[package]]
 name = "fenix-rpc"
 version = "1.5.0"
+dependencies = [
+ "fenix-vfs",
+]
 
 [[package]]
 name = "fenix-snippets"

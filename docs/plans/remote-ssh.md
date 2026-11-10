@@ -1,10 +1,13 @@
 # Remote projects over SSH
 
-Status, 2026-11-09, on `claude/remote-ssh-spike`: Phase 0 (the spike)
-and Phase 1 (the foundation) are done. See
-[Phase 0: what the spike found](#phase-0-what-the-spike-found) and
-[Phase 1: what's built](#phase-1-whats-built). Nothing a person can use
-yet: Phase 2 is next.
+Status, 2026-11-09, on `claude/remote-ssh-spike`: Phase 0 (the spike),
+Phase 1 (the foundation) and Phase 2 (files) are done. See
+[Phase 0: what the spike found](#phase-0-what-the-spike-found),
+[Phase 1: what's built](#phase-1-whats-built) and
+[Phase 2: what's built](#phase-2-whats-built). `SPC p R` opens a remote
+project to browse and edit; Phase 3 (terminal, Git, search) is next.
+Phase 2 was tested in the app's own tests against a machine that is a
+folder, not yet by hand in the window against a real one.
 
 The aim: open a folder on another machine as a Fenix project, over SSH,
 and work in it as in a local one. Files first (browse, open, edit, save),
@@ -168,6 +171,56 @@ Where it left the plan as first written:
 
 Checked on Windows 11 and, in containers, on Debian with Rust 1.99; the
 `aarch64` helper builds but has not been run.
+
+## Phase 2: what's built
+
+`SPC p R` (`project.open_remote`): a picker of machines (those
+connected, then `~/.ssh/config`'s hosts, or a name typed), the
+connection made on a thread with `ssh`'s questions on the prompt line,
+then the machine's folders in the folder picker, where `S` opens the one
+shown as a project.
+
+What works on a remote project, and where it's done:
+
+| What | How |
+|---|---|
+| Explorer, sidebar, folder picker | `fenix_fs::list_dir` lists a remote folder; the listing was already read off the UI thread |
+| Create, rename, delete, copy, move | `fenix-explorer` and `fenix-fs` go through `fenix-vfs` for a remote path; copies and moves work within a machine and between it and this one. A delete there is for good: the Recycle Bin refuses and says so |
+| `SPC SPC`, `SPC p f` | `fenix_project::list_project_files` asks the machine's own `git ls-files`, else its `find` |
+| Open | `open_text_file` reads first: a file that can't be read is not opened as an empty one |
+| Save, and a file changed there | The disk fingerprint is taken through `fenix-vfs`, so the existing watch does the rest: the poll every few seconds, the refusal to write over a change, `:w!` and `:e!` |
+| A machine that's away | A file that can't be looked at is "not looked at", never "gone"; a save fails and says so; the text stays |
+| Known projects, the hub, `SPC p P` | A remote root is kept as it is; opening one connects first |
+| Modeline | `[host]`, and `: reconnecting` or `: not connected` when it isn't simply there |
+| Session | A remote project's machine is connected to again at startup; a remote file with unsaved text keeps its path and its text |
+
+Found on the way, and fixed: two functions that tidy a Windows path by
+taking its `\\?\` off (`fenix_rpc::normalize`, `fenix_project`'s
+`plain_path`) turned a remote path into a relative local one. Both now
+leave it alone. `ssh` is never given a host that starts with `-`.
+
+Where it left the plan:
+
+- **Opening and saving a remote file happen on the UI thread**, not on
+  a worker with a "loading" state. On a LAN that is a few milliseconds.
+  What bounds a bad link: a machine known to be away fails at once, and
+  one that stops answering is cut off after 10 s (once: the connection
+  is then dropped and made again, so the next call doesn't wait too).
+  Moving these onto a worker is still to do before this leaves preview.
+- **A save checks, then writes** (as for a local file), rather than
+  asking the helper to do both at once: the helper can
+  (`Over::Version`), the buffer just doesn't carry the version yet.
+- **No file watching in the helper**: open files are polled, as local
+  ones are. The explorer's listing refreshes when you ask (`r`).
+- **Off on a remote project, saying nothing rather than failing**:
+  language servers aren't started for its files; Git badges, branch and
+  panels see no repository; extensions that open files (the PDF reader,
+  the hex view) aren't offered them. A terminal opened there is a local
+  one. These are Phases 3 and 4.
+- Binary files open as text: telling needs the first bytes, and the
+  helper only reads whole files.
+- The settings a project keeps in `.fenix/` aren't read from a remote
+  one.
 
 ## The design
 

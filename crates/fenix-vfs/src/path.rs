@@ -91,6 +91,16 @@ pub fn split(path: &Path) -> Option<(String, String)> {
     Some((host.to_string_lossy().into_owned(), format!("/{}", names.join("/"))))
 }
 
+/// Whether `text` is a remote path, without parsing it: for code that
+/// tidies paths as text, and must leave these as they are.
+pub fn is_remote_text(text: &str) -> bool {
+    #[cfg(windows)]
+    let root = format!(r"\\?\{ROOT}\");
+    #[cfg(not(windows))]
+    let root = format!("/{ROOT}/");
+    text.starts_with(&root)
+}
+
 pub fn is_remote(path: &Path) -> bool {
     host_of(path).is_some()
 }
@@ -107,6 +117,15 @@ pub fn child(folder: &Path, name: &str) -> PathBuf {
     match split(folder) {
         Some((host, there)) => remote(&host, &format!("{there}/{name}")),
         None => folder.join(name),
+    }
+}
+
+/// `relative` under `folder`, where `relative` is what a person typed:
+/// one name or several, with `/` (or, on Windows, `\`) between them.
+pub fn join(folder: &Path, relative: &str) -> PathBuf {
+    match split(folder) {
+        Some((host, there)) => remote(&host, &format!("{there}/{}", relative.replace('\\', "/"))),
+        None => folder.join(relative),
     }
 }
 
@@ -129,6 +148,7 @@ mod tests {
         assert_eq!(split(&path), Some(("tom@devbox".into(), "/home/tom/proj/src/main.rs".into())));
         assert_eq!(display(&path), "tom@devbox:/home/tom/proj/src/main.rs");
         assert!(is_remote(&path));
+        assert!(is_remote_text(path.to_str().unwrap()) && !is_remote_text("/home/tom") && !is_remote_text(r"\\?\C:\src"));
         assert!(path.is_absolute());
         assert_eq!(path.file_name().unwrap(), "main.rs");
         assert_eq!(path.extension().unwrap(), "rs");
@@ -164,6 +184,14 @@ mod tests {
         }
         // Two names that differ by case are two files there.
         assert_ne!(child(&folder, "Makefile"), child(&folder, "makefile"));
+    }
+
+    #[test]
+    fn a_typed_path_lands_under_its_folder() {
+        let folder = remote("devbox", "/srv");
+        assert_eq!(split(&join(&folder, "docs/notes.md")), Some(("devbox".into(), "/srv/docs/notes.md".into())));
+        assert_eq!(split(&join(&folder, r"docs\notes.md")), Some(("devbox".into(), "/srv/docs/notes.md".into())));
+        assert_eq!(join(Path::new("here"), "a.txt"), Path::new("here").join("a.txt"));
     }
 
     #[test]

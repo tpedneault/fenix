@@ -12,6 +12,11 @@ use crate::entry::{Entry, GitStatus};
 /// or without `git` on `PATH`; git status is an annotation on top of the
 /// listing, not something the listing should fail over.
 pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
+    // Git on a remote machine isn't read yet: no badges there, rather
+    // than a `git` started here in a folder this machine doesn't have.
+    if fenix_vfs::is_remote(dir) {
+        return HashMap::new();
+    }
     let mut git = Command::new("git");
     #[cfg(windows)]
     {
