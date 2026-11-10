@@ -201,6 +201,9 @@ untracked = "#7aa2f7"
 ignored = "#929bb9"
 conflicted = "#f7768e"
 
+# [brackets]  # appearance.rainbow_brackets' colours, outermost first (one to six);
+# colors = ["#e0af68", "#bb9af7", "#7aa2f7"]   # left out: syntax.function, keyword, type
+
 # [terminal]  # a terminal's 16 ANSI colours; worked out from the above when left out
 # ansi = ["#4c5064", "#f7768e", "#9ece6a", "#ff9e64", "#7aa2f7", "#bb9af7", "#2ac3de", "#a2aad0",
 #         "#929bb9", "#ff97aa", "#b2e27f", "#ffb88d", "#9bbbff", "#d3bcfe", "#41d6f0", "#c0caf5"]
@@ -487,7 +490,7 @@ when it's out of date).
 | `appearance.dim_amount` | 5–80 | 30 | How much dimmer, in percent. |
 | `which_key.delay_ms` | 0–2000 | 250 | Milliseconds a leader key (SPC, g, ...) waits before the menu of what comes next opens. Once open, deeper levels show at once. |
 | `which_key.order` | key / label | key | The key menu's order: by key, so a key never moves, or by what it does. |
-| `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested. |
+| `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested: the code's own, from its syntax tree, not those in strings and comments. The colours are the theme's [brackets] colors, or its function, keyword and type colours. |
 | `appearance.tabs` | auto / block / underline / off | auto | How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then. |
 | `appearance.panels` | framed / flat | framed | How the window's panes, sidebar, terminal and docks are drawn: rounded panels on a darker tray a gap apart, with an edge on the one that has the keyboard, or flat and edge to edge with lines between them, as before 1.4. |
 | `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |

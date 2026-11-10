@@ -166,6 +166,11 @@ pub struct Theme {
     pub git_untracked: glyphon::Color,
     pub git_ignored: glyphon::Color,
     pub git_conflicted: glyphon::Color,
+    /// Brackets by how deeply they're nested
+    /// (`appearance.rainbow_brackets`), the outermost first: the theme
+    /// file's `[brackets] colors`, else its function, keyword and type
+    /// colours.
+    pub brackets: Vec<glyphon::Color>,
 }
 
 impl Theme {
@@ -345,6 +350,8 @@ struct ThemeFile {
     surfaces: Surfaces,
     #[serde(default)]
     terminal: Option<TerminalColors>,
+    #[serde(default)]
+    brackets: Option<BracketColors>,
     text: Text,
     modes: Modes,
     syntax: Syntax,
@@ -382,6 +389,13 @@ struct Surfaces {
 #[serde(deny_unknown_fields)]
 struct TerminalColors {
     ansi: Vec<ColorSpec>,
+}
+
+/// `[brackets] colors`: one to six, the outermost first.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BracketColors {
+    colors: Vec<ColorSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -681,7 +695,17 @@ pub fn parse(text: &str) -> Result<Theme, String> {
             )
         }
     };
+    let brackets = match &f.brackets {
+        Some(b) => {
+            if b.colors.is_empty() || b.colors.len() > 6 {
+                return Err(format!("brackets.colors: one to six colours, the outermost first, not {}", b.colors.len()));
+            }
+            b.colors.iter().enumerate().map(|(i, c)| c.text(&format!("brackets.colors[{i}]"))).collect::<Result<Vec<_>, _>>()?
+        }
+        None => vec![f.syntax.function.text("syntax.function")?, f.syntax.keyword.text("syntax.keyword")?, f.syntax.ty.text("syntax.type")?],
+    };
     Ok(Theme {
+        brackets,
         ansi,
         name: leak(f.name.trim().to_string()),
         font_family: f.font_family.filter(|s| !s.trim().is_empty()).map(leak),
@@ -1278,6 +1302,13 @@ mod tests {
         let tabs = mine.replace("tabs = \"underline\"", "tabs = \"round\"");
         assert!(parse(&tabs).err().unwrap().contains("underline or block"));
         assert!(parse(&mine.replace("[git]", "[gits]")).is_err(), "an unknown section is an error, not ignored");
+        // Brackets: the theme's function, keyword and type colours, unless
+        // it says.
+        assert_eq!(theme.brackets, [theme.syntax_function, theme.syntax_keyword, theme.syntax_type]);
+        let own = format!("{mine}\n[brackets]\ncolors = [\"#ff0000\", \"#00ff00\"]\n");
+        assert_eq!(parse(&own).unwrap().brackets, [glyphon::Color::rgb(255, 0, 0), glyphon::Color::rgb(0, 255, 0)]);
+        let none = format!("{mine}\n[brackets]\ncolors = []\n");
+        assert!(parse(&none).err().unwrap().starts_with("brackets.colors: one to six"));
     }
 
     /// Every theme's panels sit on a tray they stand out from: darker

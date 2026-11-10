@@ -298,7 +298,7 @@ pub(super) struct MotionState {
     pub ruler_search: HashMap<BufferId, (u64, String, Vec<usize>)>,
     /// Bracket depths for rainbow brackets, by buffer: the edit count
     /// they're for, and each bracket's char index and depth.
-    pub brackets: HashMap<BufferId, (u64, Vec<(usize, usize)>)>,
+    pub brackets: HashMap<BufferId, ((u64, Option<u64>), std::sync::Arc<Vec<(usize, usize)>>)>,
     /// When the focused buffer was last typed into, for holding new
     /// diagnostics back while typing.
     pub last_typed: Option<Instant>,

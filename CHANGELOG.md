@@ -104,6 +104,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Rainbow brackets (`appearance.rainbow_brackets`) go by the syntax
+  tree: a bracket in a string or a comment isn't coloured, and a closing
+  bracket is its partner's colour. The colours are the theme's: a theme
+  file's `[brackets] colors`, or its function, keyword and type colours
+  (they were the mode colours).
 - `fenix/commands` reports the keys that run a command now: a chord
   (`C-s`) over the leader's keys, which standard keys write with their
   chord (`C-k g g`).
