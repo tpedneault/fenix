@@ -176,8 +176,9 @@ impl RowMap {
     /// `None` when the line isn't shown, or that part of it is above the
     /// top or below the bottom. A column at the end of a row that isn't
     /// the line's last is the next row's start. A wrapped row is never
-    /// wider than the pane, so the cell is in it; the hold to its last
-    /// column is a guard.
+    /// wider than the pane, and a line's last is narrower, so even the
+    /// place after its last char has a cell; the hold to the last column
+    /// is a guard.
     pub(crate) fn locate(&self, line: usize, col: usize) -> Option<(usize, usize)> {
         let rows = self.rows_of(line);
         if rows.is_empty() || col < self.rows[rows.start].cols.start {
@@ -218,6 +219,18 @@ impl RowMap {
         let col = r.cols.start + (x + self.scroll_col).saturating_sub(indent);
         Some((r.line, if r.last { col } else { col.min(r.cols.end.saturating_sub(1).max(r.cols.start)) }))
     }
+}
+
+/// The char columns of `line` its rows shown cover, `col_map` taking
+/// their visual columns to chars (none: one to one): the first shown
+/// row's start to the last's end, one char on to take a char a break is
+/// inside. A row that runs to the end of its line (`cols.end` is
+/// `usize::MAX`, as a line past the buffer's is) runs to the end here.
+pub(super) fn shown_char_columns(map: &RowMap, line: usize, col_map: Option<&Vec<usize>>) -> Option<(usize, usize)> {
+    let shown = map.rows_of(line);
+    let (a, b) = (map.row(shown.start)?, map.row(shown.end.checked_sub(1)?)?);
+    let char_of = |v: usize| col_map.map_or(v, |m| crate::mouse::char_col_at(m, v).0);
+    Some((char_of(a.cols.start), char_of(b.cols.end).saturating_add(1)))
 }
 
 /// A pane's text as a frame lays it out: its rows, and the lines whose
@@ -652,6 +665,19 @@ mod tests {
     }
 
     #[test]
+    fn the_columns_a_line_s_rows_show_never_overflow() {
+        // A row running to its line's end, as past the buffer's last line.
+        let map = RowMap::lines(&[0], 0).wrapped_at(10);
+        assert_eq!(shown_char_columns(&map, 0, None), Some((0, usize::MAX)));
+        let map = RowMap::from_rows(wrapped(3, &[0..8, 8..14], 0), 0);
+        assert_eq!(shown_char_columns(&map, 3, None), Some((0, 15)));
+        // Visual columns to chars: a tab at 0 is columns 0 to 7.
+        let col_map: Vec<usize> = std::iter::once(0).chain(8..=20).collect();
+        assert_eq!(shown_char_columns(&map, 3, Some(&col_map)), Some((0, 8)));
+        assert_eq!(shown_char_columns(&map, 4, None), None);
+    }
+
+    #[test]
     fn a_closed_fold_splits_the_runs_and_its_lines_have_no_rows() {
         let map = RowMap::lines(&[0, 1, 9, 10], 0);
         assert_eq!(map.runs(), vec![0..2, 9..11]);
@@ -914,8 +940,10 @@ mod app_tests {
         app.line_number_mode = LineNumberMode::Off;
         let pane = app.focused_pane_id();
         assert_eq!(drawn(&app, 3), vec!["word word ", "word word ", "word word "]);
+        // Its last blank has a row of its own (the caret after it needs a
+        // cell): twenty-one rows.
         app.pane_state_mut(pane).scroll_row = 19;
-        assert_eq!(drawn(&app, 3), vec!["word word ", "next", "~"]);
+        assert_eq!(drawn(&app, 3), vec!["word word", " ", "next"]);
         // Rows above the top hold nothing a caret could be drawn on.
         assert_eq!(app.focused_overlays_now(3).caret, None);
     }

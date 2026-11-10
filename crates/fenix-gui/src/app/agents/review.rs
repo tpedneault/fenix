@@ -318,6 +318,7 @@ impl App {
             }
         }
         // Buffers that had tints and have none now lose them.
+        self.wasm.decorations_rev += 1;
         for sets in self.wasm.decorations.values_mut() {
             sets.retain(|(owner, _)| owner != MARKS);
         }

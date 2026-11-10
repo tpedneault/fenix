@@ -273,6 +273,9 @@ stage by stage.
   column of a wrapped line has a cell of its own, and `break_line_rows`'
   first k rows are the first k of the whole break whatever k is (a
   property test checks it over blank runs, tabs, wide chars and marks).
+  A blank that would fill a line's last row goes to a row of its own,
+  so the place after the line's last char always has a cell (a row of
+  `abcd ` at five columns is `abcd` / ` `).
   `locate` and `at` are each other's inverse on every cell but two: a
   click in a continuation row's indent is its first column, and a click
   right of a row that the line goes on from is that row's last column
@@ -404,9 +407,13 @@ stage by stage.
   `.` that goes to another pane moves by that pane's rows. In a
   picker, the sidebar or a terminal they're a row a line. The rows'
   copy of the buffer's decorations is shared from key to key while
-  `decorations_rev` (bumped wherever an extension's or the debugger's
-  decorations change) says they haven't, and a line is broken only as
-  far as the rows a move needs.
+  `decorations_rev` says they haven't changed: it's bumped wherever an
+  extension's, the debugger's or the agents' decorations are set, and
+  by the shift ahead of a frame only when an edit moved them or a
+  buffer went. A line is broken only as far as the rows a move needs.
+- A move by row reads only the cells the last key kept, never this
+  key's: with extra cursors, one moved first may land on another's
+  char. A cursor put by a click or the wheel's hold forgets them.
 - PageUp/PageDown in a wrapped pane move the cursor by the pane's rows
   less one (`VimState::move_rows`; twenty rows without a window).
 - Adding a cursor above or below (Ctrl+Alt+Up/Down) stays by line; the

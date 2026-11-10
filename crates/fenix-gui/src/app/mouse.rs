@@ -295,6 +295,7 @@ impl App {
         let mut cursor = Cursor { char_idx: at, sticky_col: 0 };
         cursor.sticky_col = ob.buffer.line_col(&cursor).1;
         self.pane_state_mut(pane).cursor = cursor;
+        self.vim.forget_row_goals();
     }
 
     /// Leaves Insert (or Replace) the way Escape does, before a selection

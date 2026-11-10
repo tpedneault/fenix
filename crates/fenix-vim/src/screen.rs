@@ -50,9 +50,11 @@ pub(crate) struct Screen<'a> {
 
 impl Screen<'_> {
     /// Where `delta` rows from `at` is, at the cell the cursor on `at`
-    /// kept: the char and the cell. `None` when a row is a line.
+    /// kept by the last key: the char and the cell. `None` when a row is
+    /// a line. Not this key's: another cursor moved first may have just
+    /// landed on `at`.
     pub(crate) fn step(&self, buffer: &Buffer, at: usize, delta: isize) -> Option<(usize, usize)> {
-        let x = self.goals.keeping.borrow().iter().chain(self.goals.kept.borrow().iter()).find(|(was, _)| *was == at).map(|&(_, x)| x);
+        let x = self.goals.kept.borrow().iter().find(|(was, _)| *was == at).map(|&(_, x)| x);
         self.rows.row_move(buffer, at, delta, x)
     }
 
