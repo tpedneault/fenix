@@ -235,6 +235,65 @@ impl SyntaxState {
         }
     }
 
+    /// Every bracket the code itself has -- `(`, `)`, `[`, `]`, `{`, `}`
+    /// as tokens of their own, not inside a string or a comment, which
+    /// are tokens whole -- as `(byte, depth)`, in order. An opening
+    /// bracket's depth is how many are open around it; its closing
+    /// bracket's is the same. `None` with no tree to read (a file of no
+    /// language): the caller decides.
+    pub fn bracket_depths(&self) -> Option<Vec<(usize, usize)>> {
+        let tree = self.tree.as_ref()?;
+        let mut out = Vec::new();
+        let mut open: Vec<char> = Vec::new();
+        let mut cursor = tree.walk();
+        loop {
+            let node = cursor.node();
+            // An anonymous token's kind is its text. Brackets are tokens
+            // of their own, or end one that opens (`${` and `$(` in a
+            // template or a shell, `#{`), or are all of one that closes
+            // (`))`, `]]`). A token whose text isn't its kind (an alias)
+            // isn't one.
+            let kind = node.kind();
+            if node.child_count() == 0 && !node.is_named() && !node.is_missing() && kind.len() <= 4 && node.end_byte() == node.start_byte() + kind.len() {
+                let pair = |c: char| match c {
+                    '(' | ')' => Some('('),
+                    '[' | ']' => Some('['),
+                    '{' | '}' => Some('{'),
+                    _ => None,
+                };
+                let opening = |c: char| matches!(c, '(' | '[' | '{');
+                let start = node.start_byte();
+                if kind.chars().all(|c| pair(c).is_some() && !opening(c)) {
+                    for (i, c) in kind.char_indices() {
+                        let Some(k) = pair(c) else { continue };
+                        // Its partner's depth; one that closes nothing is
+                        // as deep as what's open.
+                        if let Some(at) = open.iter().rposition(|o| *o == k) {
+                            open.truncate(at);
+                        }
+                        out.push((start + i, open.len()));
+                    }
+                } else if kind.ends_with(opening) && kind.trim_start_matches(['$', '#', '@', '%']).chars().all(opening) {
+                    for (i, c) in kind.char_indices().filter(|(_, c)| opening(*c)) {
+                        out.push((start + i, open.len()));
+                        open.extend(pair(c));
+                    }
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return Some(out);
+                }
+            }
+        }
+    }
+
     /// Scope headers for an explicitly requested document navigation picker.
     pub fn scope_lines(&self) -> Vec<usize> {
         self.scope_ranges().into_iter().map(|(start, _)| start).collect()
@@ -345,8 +404,17 @@ impl SyntaxState {
                 tree.edit(&to_input_edit(source, edit));
             }
         }
+        let old = if edits.is_empty() { self.tree.clone() } else { None };
         self.tree = self.parser.parse(source, self.tree.as_ref());
-        self.revision += 1;
+        // The same tree as before (nothing applied, nothing different):
+        // what's worked out from it stands.
+        let same = match (&old, &self.tree) {
+            (Some(old), Some(new)) => old.root_node().byte_range() == new.root_node().byte_range() && new.changed_ranges(old).next().is_none(),
+            _ => false,
+        };
+        if !same {
+            self.revision += 1;
+        }
     }
 
     /// Highlight spans within `byte_range`, flattened into a non-
@@ -556,6 +624,52 @@ impl SyntaxState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `(text, depth)` of each bracket `bracket_depths` finds.
+    fn brackets(lang: LanguageId, source: &str) -> Vec<(char, usize)> {
+        let state = SyntaxState::new(lang, source);
+        state.bracket_depths().unwrap().into_iter().map(|(at, d)| (source[at..].chars().next().unwrap(), d)).collect()
+    }
+
+    #[test]
+    fn brackets_are_the_code_s_not_a_string_s_or_a_comment_s() {
+        let source = "fn f(a: [u8; 2]) { g(\"(]\"); } // ) {\n";
+        assert_eq!(brackets(LanguageId::Rust, source), [('(', 0), ('[', 1), (']', 1), (')', 0), ('{', 0), ('(', 1), (')', 1), ('}', 0)]);
+        let py = "x = {'a': [1, (2)]}  # ]]\ns = '((('\n";
+        assert_eq!(brackets(LanguageId::Python, py), [('{', 0), ('[', 1), ('(', 2), (')', 2), (']', 1), ('}', 0)]);
+    }
+
+    #[test]
+    fn a_template_s_and_a_shell_s_two_character_openers_open() {
+        let js = "function f() { g(`a ${x} b`); h([1]); }\n";
+        let found = brackets(LanguageId::JavaScript, js);
+        assert_eq!(found, [('(', 0), (')', 0), ('{', 0), ('(', 1), ('{', 2), ('}', 2), (')', 1), ('(', 1), ('[', 2), (']', 2), (')', 1), ('}', 0)], "the ${{'s brace pairs with its own }}");
+        let sh = "f() { echo \"${HOME}\" $(ls); }\n";
+        let found = brackets(LanguageId::Bash, sh);
+        assert_eq!(found.first(), Some(&('(', 0)));
+        assert_eq!(found.last(), Some(&('}', 0)), "the function's brace still closes at 0: {found:?}");
+        assert!(found.iter().filter(|(c, _)| *c == '{').count() == found.iter().filter(|(c, _)| *c == '}').count(), "{found:?}");
+    }
+
+    #[test]
+    fn the_revision_stays_when_nothing_changed() {
+        let source = "fn a() {}\n";
+        let mut state = SyntaxState::new(LanguageId::Rust, source);
+        let at = state.revision();
+        state.apply_edits(source, &[]);
+        assert_eq!(state.revision(), at, "nothing applied: the same tree");
+        let changed = "fn ab() {}\n";
+        state.apply_edits(changed, &[RawEdit { start_char: 4, new_end_char: 5, removed: String::new() }]);
+        assert_ne!(state.revision(), at);
+    }
+
+    #[test]
+    fn a_bracket_that_closes_nothing_is_as_deep_as_what_s_open() {
+        let found = brackets(LanguageId::Rust, "fn f() { ) }\n");
+        assert_eq!(found.first(), Some(&('(', 0)));
+        assert!(found.iter().all(|(_, d)| *d <= 1), "{found:?}");
+        assert_eq!(SyntaxState::new(LanguageId::Rust, "").bracket_depths(), Some(Vec::new()), "an empty file");
+    }
 
     #[test]
     fn tcl_document_scopes_include_procedures() {

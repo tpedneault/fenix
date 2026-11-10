@@ -167,6 +167,15 @@ its extension. The rest is built into Fenix.
   between a syntax capture and the glyph it becomes, several of them
   shared by every other language's own highlighting, for a purely
   cosmetic gain on one language -- more risk than the result was worth.
+- **Bracket pairs by colour** (`appearance.rainbow_brackets`, off
+  unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
+  it's nested, a pair the same colour. They're the code's own brackets,
+  read from its syntax tree, so one in a string or a comment is left
+  alone; in a file of no language, every bracket counts. Code another
+  grammar would read (an HTML page's `<script>`, a Markdown fence) is
+  one token to the file's own, so its brackets aren't coloured. The colours are
+  the theme's -- its `[brackets] colors`, one to six, or else its
+  function, keyword and type colours.
 - **Markdown list continuation**: pressing Enter or `o` on a `-`/`*`/`+`
   bullet or a `1.`/`1)` ordered item continues it onto the next line at
   the same indent -- an ordered marker increments by one (not renumbered

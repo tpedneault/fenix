@@ -165,7 +165,7 @@ impl App {
         // Brackets by depth.
         if polish.rainbow_brackets == Some(true) {
             let depths = self.bracket_depths(view.buffer);
-            let palette = [rgba_to_glyphon(self.theme.mode_visual), rgba_to_glyphon(self.theme.mode_insert), rgba_to_glyphon(self.theme.mode_normal)];
+            let palette = self.theme.brackets.clone();
             if let Some(ob) = self.buffers.get(view.buffer) {
                 for (row, cells) in rows.iter_mut().enumerate().take(view.rows) {
                     let Some(&line) = view.lines.get(row) else { continue };
@@ -180,8 +180,11 @@ impl App {
                         continue;
                     }
                     edit_row_chars(cells, view.gutter_chars, |col, ch, color| match here.get(&col) {
-                        Some(depth) => (ch, palette[depth % palette.len()]),
-                        None => (ch, color),
+                        // Only a bracket: with the tree behind the text
+                        // (conflict markers stop it being read) a stale
+                        // place isn't coloured.
+                        Some(depth) if !palette.is_empty() && "()[]{}".contains(ch) => (ch, palette[depth % palette.len()]),
+                        _ => (ch, color),
                     });
                 }
             }
@@ -211,34 +214,27 @@ impl App {
     }
 
     /// Every bracket in `buffer` with its nesting depth, by char index --
-    /// worked out again only when the buffer changes, and not at all for
-    /// a very large file.
-    fn bracket_depths(&mut self, buffer: BufferId) -> Vec<(usize, usize)> {
-        let Some(ob) = self.buffers.get(buffer) else { return Vec::new() };
-        let edits = ob.buffer.edit_count();
-        if let Some((at, depths)) = self.motion.brackets.get(&buffer) {
-            if *at == edits {
+    /// from the syntax tree, so a bracket in a string or a comment isn't
+    /// one; by the text in a file of no language. Worked out again only
+    /// when the buffer (or its tree) changes, and not at all for a very
+    /// large file.
+    fn bracket_depths(&mut self, buffer: BufferId) -> std::sync::Arc<Vec<(usize, usize)>> {
+        let Some(ob) = self.buffers.get(buffer) else { return Default::default() };
+        let at = (ob.buffer.edit_count(), ob.syntax.as_ref().map(|s| s.revision()));
+        if let Some((seen, depths)) = self.motion.brackets.get(&buffer) {
+            if *seen == at {
                 return depths.clone();
             }
         }
-        let mut depths = Vec::new();
-        if ob.buffer.len_chars() <= 2_000_000 {
-            let mut depth: usize = 0;
-            for (i, ch) in ob.buffer.rope().chars().enumerate() {
-                match ch {
-                    '(' | '[' | '{' => {
-                        depths.push((i, depth));
-                        depth += 1;
-                    }
-                    ')' | ']' | '}' => {
-                        depth = depth.saturating_sub(1);
-                        depths.push((i, depth));
-                    }
-                    _ => {}
-                }
+        let depths = std::sync::Arc::new(if ob.buffer.len_chars() > 2_000_000 {
+            Vec::new()
+        } else {
+            match ob.syntax.as_ref().and_then(|s| s.bracket_depths()) {
+                Some(by_byte) => by_byte.into_iter().map(|(byte, depth)| (ob.buffer.byte_to_char(byte), depth)).collect(),
+                None => text_bracket_depths(ob.buffer.rope().chars()),
             }
-        }
-        self.motion.brackets.insert(buffer, (edits, depths.clone()));
+        });
+        self.motion.brackets.insert(buffer, (at, depths.clone()));
         depths
     }
 
@@ -459,9 +455,50 @@ pub(super) fn selection_corners(segments: &Segments, radius: f32) -> Vec<[f32; 4
         .collect()
 }
 
+/// Brackets by depth from the text alone, for a file of no language:
+/// `(char index, depth)`.
+fn text_bracket_depths(chars: impl Iterator<Item = char>) -> Vec<(usize, usize)> {
+    let mut depths = Vec::new();
+    let mut depth: usize = 0;
+    for (i, ch) in chars.enumerate() {
+        match ch {
+            '(' | '[' | '{' => {
+                depths.push((i, depth));
+                depth += 1;
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                depths.push((i, depth));
+            }
+            _ => {}
+        }
+    }
+    depths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brackets_go_by_the_syntax_tree_and_by_the_text_with_no_language() {
+        let path = temp_file("a.rs", "fn f() { let s = \"(\"; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        assert!(app.open().syntax.is_some(), "a Rust file has a tree");
+        {
+            let depths = app.bracket_depths(id);
+            let text = app.open().buffer.text();
+            let found: Vec<char> = depths.iter().map(|&(at, _)| text.chars().nth(at).unwrap()).collect();
+            assert_eq!(found, ['(', ')', '{', '}'], "the string's ( isn't one");
+            assert_eq!(depths.iter().map(|&(_, d)| d).collect::<Vec<_>>(), [0, 0, 0, 0]);
+            // A frame drawn between: the tree is looked at again, and
+            // nothing having changed, the depths are kept.
+            app.syntax_highlights_for_visible_range(id, 0, 10);
+            assert!(std::sync::Arc::ptr_eq(&depths, &app.bracket_depths(id)), "kept across frames until it changes");
+        }
+        assert_eq!(text_bracket_depths("a(b[c]) \"(\"".chars()), [(1, 0), (3, 1), (5, 1), (6, 0), (9, 0)], "plain text: every one");
+    }
 
     fn span(t: &str) -> (String, glyphon::Color, bool) {
         (t.to_string(), glyphon::Color::rgb(1, 2, 3), false)
