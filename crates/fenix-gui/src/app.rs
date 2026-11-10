@@ -20061,7 +20061,17 @@ impl App {
                         state.session.scroll(lines);
                     }
                 } else if pane == self.focused_pane_id() {
-                    self.scroll_focused_pane(lines);
+                    // A wrapped pane's view goes by rows, the cursor only
+                    // as far as keeps it in view.
+                    let wrapped = self.main_view == MainView::Editor
+                        && geometry.panes.iter().find(|(id, _)| *id == pane).is_some_and(|(_, rect)| {
+                            let visible = text::lines_that_fit(pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height);
+                            let buffer = self.focused_buffer_id();
+                            self.scroll_focused_by_rows(pane, buffer, -lines, visible)
+                        });
+                    if !wrapped {
+                        self.scroll_focused_pane(lines);
+                    }
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
                     // Match `redraw`'s own chrome shrink for this pane so
                     // `max_scroll` agrees with what's actually visible.

@@ -113,6 +113,7 @@ fn place(lines: &mut Vec<String>, current: &mut String, current_len: &mut usize,
 /// the row ends, never between a char and a mark drawn on it. The rows
 /// after the first are `indent` columns narrower (they're drawn that far
 /// in), never narrower than one column. An empty line is one empty row.
+#[cfg(test)]
 pub fn break_line(display: &str, width: usize, indent: usize) -> Vec<std::ops::Range<usize>> {
     break_line_rows(display, width, indent, usize::MAX).0
 }
