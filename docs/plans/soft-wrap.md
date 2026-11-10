@@ -273,6 +273,9 @@ stage by stage.
   column of a wrapped line has a cell of its own, and `break_line_rows`'
   first k rows are the first k of the whole break whatever k is (a
   property test checks it over blank runs, tabs, wide chars and marks).
+  A blank that would fill a line's last row goes to a row of its own,
+  so the place after the line's last char always has a cell (a row of
+  `abcd ` at five columns is `abcd` / ` `).
   `locate` and `at` are each other's inverse on every cell but two: a
   click in a continuation row's indent is its first column, and a click
   right of a row that the line goes on from is that row's last column
