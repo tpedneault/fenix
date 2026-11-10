@@ -187,7 +187,12 @@ From anywhere, `SPC a z` (`agents.archive`) archives the thread the
 agents' panel shows, or brings it back; `agents.threads_archived` opens
 the list with archived threads shown.
 `SPC a T` (threads at work, anywhere) is as it was. Threads kept before
-1.5 are single entries, unarchived.
+1.5 are single entries, unarchived. A Fenix before 1.5, run once on the
+same threads, rewrites the list without runs and archiving (the threads
+themselves keep both, and come back grouped and archived once each is
+saved again by 1.5). Two Fenix windows open on the same threads: the
+last to save one is what's kept, archived or not, as for everything else
+in a thread.
 
 An agent with no thread open stops after `agents.idle_minutes`. One that
 crashes is started again (after 1, 2, then 4 seconds) and its thread
