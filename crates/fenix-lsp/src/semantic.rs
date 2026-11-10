@@ -247,7 +247,8 @@ pub fn read_answer(value: serde_json::Value) -> Result<Option<Answer>, serde_jso
 /// token's length stops at its line's end (nor for multi-line ones).
 pub fn decode(data: &[u32], text: &str, styles: &Styles) -> Vec<Token> {
     let mut out = Vec::with_capacity(data.len() / 5);
-    let mut lines = Lines::new(text);
+    let rope = ropey::Rope::from_str(text);
+    let mut lines = Lines::new(&rope);
     let (mut line, mut start) = (0u32, 0u32);
     for t in data.chunks_exact(5) {
         let [delta_line, delta_start, length, ty, modifiers] = [t[0], t[1], t[2], t[3], t[4]];
@@ -280,10 +281,14 @@ pub fn decode(data: &[u32], text: &str, styles: &Styles) -> Vec<Token> {
 }
 
 /// Walks `text` a line at a time, turning UTF-16 columns into chars.
-/// Tokens come in order, so each line is read once (a server that goes
-/// back on a line just costs a fresh walk of it).
-struct Lines {
-    rope: ropey::Rope,
+/// Tokens come in order, so lines are read in order, once each (a server
+/// that goes back on a line just costs a fresh walk to it).
+struct Lines<'a> {
+    rope: &'a ropey::Rope,
+    iter: ropey::iter::Lines<'a>,
+    /// The line `iter` gives next, and its first char's offset.
+    next_line: usize,
+    next_first: usize,
     /// The line read, its chars without its break, and its first char's
     /// offset.
     line: Option<usize>,
@@ -293,9 +298,9 @@ struct Lines {
     at: (usize, usize),
 }
 
-impl Lines {
-    fn new(text: &str) -> Self {
-        Lines { rope: ropey::Rope::from_str(text), line: None, chars: Vec::new(), first_char: 0, at: (0, 0) }
+impl<'a> Lines<'a> {
+    fn new(rope: &'a ropey::Rope) -> Self {
+        Lines { rope, iter: rope.lines(), next_line: 0, next_first: 0, line: None, chars: Vec::new(), first_char: 0, at: (0, 0) }
     }
 
     /// Chars `[from, to)` of line `line`, given in UTF-16 units, the end
@@ -306,11 +311,25 @@ impl Lines {
             if line >= self.rope.len_lines() {
                 return None;
             }
-            let slice = self.rope.line(line);
+            if line < self.next_line {
+                self.iter = self.rope.lines_at(line);
+                self.next_line = line;
+                self.next_first = self.rope.line_to_char(line);
+            }
+            while self.next_line < line {
+                self.next_first += self.iter.next()?.len_chars();
+                self.next_line += 1;
+            }
+            let slice = self.iter.next()?;
+            self.first_char = self.next_first;
+            self.next_first += slice.len_chars();
+            self.next_line += 1;
             let len = crate::position::line_content_char_len(slice);
             self.chars.clear();
-            self.chars.extend(slice.chars().take(len));
-            self.first_char = self.rope.line_to_char(line);
+            match slice.as_str() {
+                Some(text) => self.chars.extend(text.chars().take(len)),
+                None => self.chars.extend(slice.chars().take(len)),
+            }
             self.line = Some(line);
             self.at = (0, 0);
         }
