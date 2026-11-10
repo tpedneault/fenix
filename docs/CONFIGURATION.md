@@ -526,7 +526,7 @@ when it's out of date).
 | `motion.splash` | true / false | on | While Fenix starts, the mark and a line that fills as it loads show until the editor is ready. It moves unless animations are off; only this setting hides it. |
 | **Files & explorer** | | | |
 | `editor.watch_files` | true / false | on | Notice when an open file changes on disk, and reload it when you haven't edited it. |
-| `editor.auto_save` | off / after_delay / on_focus_change | off | Save a file's edits for you: after a pause in editing (the delay below), or when you leave it for another buffer, pane or application. Never a file with no name yet, one shown read-only, a remote project's, or one that changed on disk since it was read; it doesn't format. |
+| `editor.auto_save` | off / after_delay / on_focus_change | off | Save a file's edits for you: after a pause in editing (the delay below), or when you leave it for another buffer, pane or application. Never a file with no name yet or not yet on disk, one shown read-only, a remote project's, or one that changed on disk since it was read -- that, or a save that fails, waits until you save it yourself; it doesn't format. |
 | `editor.auto_save_delay_ms` | 100–600000 | 1000 | With auto-save after a delay: milliseconds without an edit before the file is saved. |
 | `editor.format_on_save` | true / false | off | Saving runs the formatter an extension gives for the file's language (a language pack's) first. |
 | `explorer.follow` | true / false | on | The explorer's sidebar shows the file being edited: its project, the folders down to it, the file selected. Off pins it where it is; SPC e r still shows the file. |
