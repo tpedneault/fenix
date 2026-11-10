@@ -51,6 +51,12 @@ impl KeptEdit {
             self.start
         }
     }
+
+    /// `map`, but `None` for a position strictly inside what was
+    /// replaced: something placed there (a cursor) has no place after.
+    pub fn map_kept(&self, at: usize) -> Option<usize> {
+        (at <= self.start || at >= self.start + self.removed).then(|| self.map(at))
+    }
 }
 
 /// The span of `old` that `new` differs in: `(chars both start with,
@@ -425,6 +431,14 @@ impl Buffer {
     /// when the edits between aren't all kept.
     pub fn map_since(&self, logged: u64, at: usize) -> Option<usize> {
         Some(self.edits_since(logged)?.fold(at, |at, edit| edit.map(at)).min(self.len_chars()))
+    }
+
+    /// `at`, as of `edits_logged` being `logged`, where it is now: `None`
+    /// when the edits between aren't all kept, `Some(None)` when one of
+    /// them replaced the text around it.
+    pub fn map_since_kept(&self, logged: u64, at: usize) -> Option<Option<usize>> {
+        let mut edits = self.edits_since(logged)?;
+        Some(edits.try_fold(at, |at, edit| edit.map_kept(at)).map(|at| at.min(self.len_chars())))
     }
 
     /// From now on, keeps every edit for `take_anchor_edits` as well.
@@ -1021,6 +1035,21 @@ mod tests {
         let insert = KeptEdit { start: 2, removed: 0, new_end: 4 };
         assert_eq!(insert.map(2), 2, "an insertion at a position: it stays before the new text");
         assert_eq!(insert.map(3), 5);
+    }
+
+    #[test]
+    fn a_position_inside_replaced_text_has_no_place_after() {
+        let e = KeptEdit { start: 5, removed: 3, new_end: 6 };
+        assert_eq!(e.map_kept(5), Some(5), "at its start");
+        assert_eq!(e.map_kept(6), None, "inside");
+        assert_eq!(e.map_kept(8), Some(6), "at its end");
+        let mut b = Buffer::from_text("one two three");
+        let logged = b.edits_logged();
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.replace_range(&mut c, 4, 7, "2");
+        assert_eq!(b.map_since_kept(logged, 5), Some(None));
+        assert_eq!(b.map_since_kept(logged, 10), Some(Some(8)));
+        assert_eq!(b.map_since_kept(logged + 9, 1), None, "from the future");
     }
 
     #[test]

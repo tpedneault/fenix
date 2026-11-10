@@ -887,12 +887,16 @@ Where the implementation differs from the plan above, and why:
   read without draining: the last 4,096 edits as positions and lengths
   (`edits_since`, `map_since`), with a count of edits logged that each
   pane's carets remember. They follow what's happened since at each key,
-  window event and frame; a caret in deleted text goes to the edit's
-  start, carets that meet are one, and edits too many to have been kept
-  go back to one cursor. Undo and redo keep the carets now (a step typed
-  at every caret still brings back its own). A reload replaces only the
-  part of the file that changed, so carets -- and decorations -- in the
-  rest stay put.
+  window event and frame; a caret strictly inside replaced or deleted
+  text goes (it has no place there), carets that meet are one, one on
+  its pane's own cursor is that cursor, and edits too many to have been
+  kept go back to one cursor. Undo and redo keep the carets now (a step
+  typed at every caret still brings back its own). A language server's
+  edits, a format, a resolved conflict, a project replace and a reload
+  replace only the lines that differ (`fenix_diff::replacements`), as
+  one undo step, so carets -- and decorations -- in the rest stay put.
+  A completion taken or a snippet's field moved to, the primary's own,
+  goes back to one cursor.
 - **Keyboard cursors** (§2.6's follow-up) are built: `Ctrl+D` selects
   the word, then adds the next occurrence (the newest is the primary, so
   the view follows it); `Ctrl+Shift+L` every occurrence;

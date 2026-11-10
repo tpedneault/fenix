@@ -1395,6 +1395,26 @@ fn is_tcl_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language) == Some(fenix_syntax::LanguageId::Tcl)
 }
 
+/// `buffer`'s text made `new` by replacing only the lines that differ,
+/// the last first, as one undo step -- so what's anchored in the lines
+/// that didn't change (extra cursors, marks, an extension's decorations)
+/// stays where it was. `cursor` is moved as the text around it moved.
+pub(crate) fn replace_text_by_lines(buffer: &mut Buffer, cursor: &mut Cursor, new: &str) {
+    let old = buffer.text();
+    let replacements = fenix_diff::replacements(&old, new);
+    if replacements.is_empty() {
+        return;
+    }
+    let logged = buffer.edits_logged();
+    buffer.begin_undo_group();
+    let mut scratch = *cursor;
+    for (range, text) in replacements.iter().rev() {
+        buffer.replace_range(&mut scratch, range.start, range.end, text);
+    }
+    buffer.end_undo_group();
+    cursor.char_idx = buffer.map_since(logged, cursor.char_idx).unwrap_or(scratch.char_idx);
+}
+
 /// The functions and methods a `workspace/symbol` answer names.
 fn functions_named(response: lsp_types::WorkspaceSymbolResponse) -> std::collections::HashSet<String> {
     let function = |kind: lsp_types::SymbolKind| matches!(kind, lsp_types::SymbolKind::FUNCTION | lsp_types::SymbolKind::METHOD);
@@ -7962,8 +7982,7 @@ impl App {
         match fenix_lsp::workspace_edit::apply_text_edits(&ob.buffer.text(), &edits) {
             Ok(text) => {
                 if text != ob.buffer.text() {
-                    let end = ob.buffer.len_chars();
-                    ob.buffer.replace_range(&mut ob.cursor, 0, end, &text);
+                    replace_text_by_lines(&mut ob.buffer, &mut ob.cursor, &text);
                 }
             }
             Err(error) => self.set_error(format!("LSP edits rejected: {error}")),
@@ -8865,8 +8884,7 @@ impl App {
             Ok(formatted) => {
                 let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
                 let (line, col) = buffer.line_col(cursor);
-                let end = buffer.len_chars();
-                buffer.replace_range(cursor, 0, end, &formatted);
+                replace_text_by_lines(buffer, cursor, &formatted);
                 let line = line.min(buffer.line_count().saturating_sub(1));
                 cursor.char_idx = buffer.line_start_char(line) + col.min(buffer.line_len(line));
                 cursor.sticky_col = col;
@@ -8900,8 +8918,7 @@ impl App {
             return;
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
-        buffer.replace_range(cursor, 0, end, &formatted);
+        replace_text_by_lines(buffer, cursor, &formatted);
     }
 
     /// `SPC c f` -- reindents the active Visual selection's lines in
@@ -12928,14 +12945,11 @@ impl App {
             .map(|state| ob.buffer.line_col(&Cursor { char_idx: state.cursor.char_idx.min(old_len), sticky_col: 0 }).0)
             .collect();
 
-        // Only what changed is replaced, so what's anchored in the rest
-        // (extra cursors, an extension's decorations) stays where it was.
-        let old_text = ob.buffer.text();
-        let (from, to, middle) = fenix_core::changed_span(&old_text, on_disk);
+        // Only the lines that changed are replaced, so what's anchored
+        // in the rest (extra cursors, an extension's decorations) stays
+        // where it was.
         let mut scratch = Cursor::at_start();
-        if from != to || !middle.is_empty() {
-            ob.buffer.replace_range(&mut scratch, from, to, middle);
-        }
+        replace_text_by_lines(&mut ob.buffer, &mut scratch, on_disk);
         // A reload isn't user work: leaving it dirty would make every
         // touched file look unsaved and block `:qa`.
         ob.buffer.mark_saved();
@@ -13992,9 +14006,8 @@ impl App {
         let start_char = self.open().buffer.line_start_char(conflict.start);
 
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
         let mut scratch = Cursor::at_start();
-        buffer.replace_range(&mut scratch, 0, end, &resolved);
+        replace_text_by_lines(buffer, &mut scratch, &resolved);
         // Land on where the conflict was, so the next one is a `SPC g j`
         // away rather than needing the file re-navigated.
         cursor.char_idx = start_char.min(buffer.len_chars());
@@ -16701,6 +16714,9 @@ impl App {
         // Shift+Tab keeps its Shift for a snippet: it goes back a field.
         let snippet_key = if full == KeyPress::named(FenixNamedKey::Tab).with_shift() { full } else { keypress };
         if self.snippet_key(snippet_key) || self.completion_key(keypress) {
+            // A completion taken or a snippet's field moved to is the
+            // primary's alone: the others go, as for any other key.
+            self.clear_carets();
             self.wake_caret();
             return;
         }
