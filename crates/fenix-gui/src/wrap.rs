@@ -152,7 +152,9 @@ pub fn break_line_rows(display: &str, width: usize, indent: usize, max_rows: usi
         let soft = (start + 1..=edge).rev().find(|&end| !blank(end - 1) && blank(end));
         let end = match soft {
             Some(mut end) => {
-                while end < n && end < start + cols && blank(end) {
+                // Not so far that the line ends with the row full: the
+                // place after its last char needs a cell of its own.
+                while end < n && end < start + cols && blank(end) && (end + 1 < n || end + 1 < start + cols) {
                     end += 1;
                 }
                 end
@@ -220,6 +222,10 @@ mod tests {
         assert_eq!(rows("aaa      bbb", 5, 0), vec!["aaa  ", "    ", "bbb"], "a word that fits isn't broken");
         assert_eq!(rows("ab  cd", 3, 0), vec!["ab ", " ", "cd"]);
         assert_eq!(rows("ab   ", 3, 0), vec!["ab ", "  "]);
+        // A blank that would fill the line's last row goes to a row of its
+        // own, so the caret after it has a cell.
+        assert_eq!(rows("abcd ", 5, 0), vec!["abcd", " "]);
+        assert_eq!(rows("ab ", 3, 0), vec!["ab", " "]);
         assert_eq!(rows("ab", 2, 0), vec!["a", "b"], "two columns: one of text");
     }
 
@@ -247,6 +253,10 @@ mod tests {
                 for (i, row) in full.iter().enumerate() {
                     let cols = row.len() + if i > 0 { indent } else { 0 };
                     assert!(cols <= width.max(1) || row.len() == 1, "{line:?} at {width}: row {i} is {cols} wide");
+                    // The line's end: a cell for the caret after its last char.
+                    if i + 1 == full.len() && width > 1 {
+                        assert!(cols < width, "{line:?} at {width}: its last row is full");
+                    }
                 }
                 for k in 1..=full.len() + 1 {
                     let (rows, whole) = break_line_rows(&line, width, indent, k);
