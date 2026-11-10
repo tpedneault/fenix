@@ -219,6 +219,44 @@ grammar took for a variable, a type it took for a function). The
 setting is there for anyone who prefers the grammar alone. The
 per-language list covers a server whose tokens are poor.
 
+### Revised after review
+
+These supersede the table and rules above where they differ.
+
+- **Plain names keep the grammar's colour.** `variable`, `property`,
+  `namespace` and `lifetime` map to none, so the grammar's colour stays.
+  In themes where the variable colour isn't the text colour, colouring
+  every local and field would change most of a file. A path like
+  `std::collections` isn't a type. A modifier still counts: readonly or
+  constant makes a constant, deprecated makes a comment, and mutable
+  underlines the name in its grammar colour.
+- **Layers.** Each type says how it's laid.
+  - `Over`, for what only the server knows (types, parameters,
+    functions, macros, enum members and the like): over the grammar,
+    but never inside its comments and strings.
+  - `Fill`, for what the grammar knows as well (keywords, strings,
+    numbers, operators): only where the grammar coloured nothing, as in
+    a language with a server but no grammar.
+  - `Wins`, for `comment`: over everything. clangd marks an inactive
+    `#if` region with comment tokens, and that region greys whole,
+    literals and all.
+- **Enum members take the constant colour.** That's intended: the
+  grammar's `constructor` guess gave them the attribute colour.
+- **Numbers are Fill**, so the grammar's colour for a literal stays.
+- **Lines in `decode`** are ropey's, measured with
+  `position::line_content_char_len`. That's the same pair every position
+  sent with `didChange` uses: LF, CR and CRLF, plus VT, FF, NEL, LS and
+  PS with ropey's default features. So the two can't disagree.
+- **Overlap.** Tokens out of order are sorted, and of two that overlap,
+  the first is kept.
+- **Answers stay raw.** They're read as plain numbers
+  (`semantic::Answer`, `read_answer`). A delta's edits apply to that
+  array at any index, and only the result must be whole tokens.
+- **`provider` copies no legend**, and `legend` borrows it.
+- **`range: {}`** (allowed by the spec, refused by lsp-types) is
+  rewritten to `true` before an `initialize` result is read
+  (`normalize_initialize_result`).
+
 ### What's not done
 
 - Partial results (`partialResultToken`): answers are taken whole.
