@@ -612,6 +612,18 @@ mod tests {
     }
 
     #[test]
+    fn a_macro_that_edits_then_moves_by_row_goes_by_the_rows_its_edit_made() {
+        let (mut app, _f) = wrapped("aaaa\naaaa\nend\n", 10);
+        app.press_all("q a A");
+        app.type_text(" bbbb cccc");
+        app.press_all("Esc 0 g j q");
+        assert_eq!(app.line_col(), (0, 10), "the append made a second row");
+        // One key, `@a`: the append, then gj on the rows it made.
+        app.press_all("j @ a");
+        assert_eq!(app.line_col(), (1, 10));
+    }
+
+    #[test]
     fn page_down_in_a_wrapped_pane_goes_by_rows() {
         let line = "word ".repeat(60);
         let (mut app, _f) = wrapped(&format!("{line}\nnext\n"), 10);

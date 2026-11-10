@@ -835,9 +835,10 @@ mod app_tests {
         app.press_all("Esc g g");
         standard(&mut app);
         app.press_all("Home C-M-Down");
-        // End goes to the first row's end, then the line's.
+        // End goes to the first row's last char (`abcd`'s `d`), then the
+        // line's end.
         app.press_all("End");
-        assert_eq!(app.focused_overlays_now(6).caret, Some((2, 4)));
+        assert_eq!(app.focused_overlays_now(6).caret, Some((2, 3)));
         app.press_all("End");
         let o = app.focused_overlays_now(6);
         // Both ends of the lines, on their second rows.

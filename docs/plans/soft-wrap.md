@@ -366,3 +366,13 @@ stage by stage.
   extra cursors then each move by their own rows.
 - One stage 2 test changed: End now stops at a row's end first, so the
   test presses it twice.
+- The rows a key moves by can't go stale within it: `PaneRows` holds
+  only the pane's width, tab stops and decorations, and lays each line
+  out from the buffer as it is when asked, so a macro, `.`, an operator
+  whose motion is `gj` after an edit, or the extra cursors' replay
+  (each caret's edit moving the text under the next) see the text as
+  edited. What it holds can lag within one key: decorations an edit
+  moves are moved by their extension later, so a key that edits and
+  then moves by row on a decorated line goes by where they were; and
+  the cursor's line, whose decorations are laid out as on it, is the
+  one the key started on.
