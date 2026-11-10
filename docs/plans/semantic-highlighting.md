@@ -448,11 +448,13 @@ These supersede the table and rules above where they differ.
 - **Measured** (`measure_decoding_a_million_lines` in `fenix-lsp`,
   ignored; run with `--release -- --ignored --nocapture`), on 1M lines
   with 5M tokens:
-  - decode: 158 ms;
+  - decode: 340 ms (158 ms before decoding went through ropey's lines,
+    so its lines match the positions `didChange` sends);
   - moving all tokens through one edit: 86 ms;
   - 1000 window lookups: 1.8 ms.
   The whole-document path stops at 50 000 lines (about 250 000 tokens),
-  so an edit there moves tokens in about 4 ms. A larger document is
+  so an answer there decodes in about 17 ms and an edit moves tokens in
+  about 4 ms. A larger document is
   asked by range and holds only what's in view. Moving tokens is still
   O(tokens) per edit; a tree or gap structure would fix that if it
   shows up.
