@@ -227,9 +227,14 @@ These supersede the table and rules above where they differ.
   `namespace` and `lifetime` map to none, so the grammar's colour stays.
   In themes where the variable colour isn't the text colour, colouring
   every local and field would change most of a file. A path like
-  `std::collections` isn't a type. A modifier still counts: readonly or
-  constant makes a constant, deprecated makes a comment, and mutable
-  underlines the name in its grammar colour.
+  `std::collections` isn't a type. A modifier still counts:
+  - a constant is a `variable` or `property` with rust-analyzer's
+    `constant` modifier (its `const` and `static` items), or with
+    `readonly` together with `static` (a `static final`, a C# `const`,
+    a TypeScript `static readonly`). `readonly` alone (every TypeScript
+    `const` local) keeps the grammar's colour;
+  - deprecated makes a comment;
+  - mutable underlines the name in its grammar colour.
 - **Layers.** Each type says how it's laid.
   - `Over`, for what only the server knows (types, parameters,
     functions, macros, enum members and the like): over the grammar,
