@@ -17607,22 +17607,22 @@ impl App {
                         if explorer.marks.is_empty() { String::new() } else { format!(" [{} marked]", explorer.marks.len()) };
                     match purpose {
                         ExplorerPurpose::Browse => {
-                            format!("{}{marked}   {} items ", explorer.cwd.display(), explorer.entries.len())
+                            format!("{}{marked}   {} items ", fenix_vfs::display(&explorer.cwd), explorer.entries.len())
                         }
                         ExplorerPurpose::PickProjectDir => {
-                            format!("{}   S to add as a project, q to cancel ", explorer.cwd.display())
+                            format!("{}   S to add as a project, q to cancel ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickWizardParent => {
-                            format!("{}   S to create the project here, q to go back ", explorer.cwd.display())
+                            format!("{}   S to create the project here, q to go back ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickSettingPath { folder: true } => {
-                            format!("{}   S to pick this folder, q to go back ", explorer.cwd.display())
+                            format!("{}   S to pick this folder, q to go back ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickSettingPath { folder: false } => {
-                            format!("{}   Enter to pick a file, S this folder, q to go back ", explorer.cwd.display())
+                            format!("{}   Enter to pick a file, S this folder, q to go back ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::FindFrom => {
-                            format!("{}{marked}   Enter to open, S to search here, q to cancel ", explorer.cwd.display())
+                            format!("{}{marked}   Enter to open, S to search here, q to cancel ", fenix_vfs::display(&explorer.cwd))
                         }
                         ExplorerPurpose::PickRemoteProject => {
                             format!("{}   S to open this folder as a project, q to cancel ", fenix_vfs::display(&explorer.cwd))

@@ -7,7 +7,9 @@ Phase 1 (the foundation) and Phase 2 (files) are done. See
 [Phase 2: what's built](#phase-2-whats-built). `SPC p R` opens a remote
 project to browse and edit; Phase 3 (terminal, Git, search) is next.
 Phase 2 was tested in the app's own tests against a machine that is a
-folder, not yet by hand in the window against a real one.
+folder, and by hand in the window against an `sshd` in a container (see
+the end of Phase 2's section), not yet against a machine across a
+network.
 
 The aim: open a folder on another machine as a Fenix project, over SSH,
 and work in it as in a local one. Files first (browse, open, edit, save),
@@ -221,6 +223,38 @@ Where it left the plan:
   helper only reads whole files.
 - The settings a project keeps in `.fenix/` aren't read from a remote
   one.
+
+### Tried in the window
+
+On 2026-11-09, the debug build on Windows 11 against the container of
+`dev/remote-ssh` on `127.0.0.1:22`, signing in with a password:
+`SPC p R`, `tom@127.0.0.1` typed, the new host's key and the password
+asked on the prompt line (the password as dots, and once for the
+install and the start together), the folder picker on `/home/tom`, `S`
+on `project`; `SPC SPC` listing the two files; a file opened, edited and
+saved (seen in the container, `git status` there showing it changed); a
+line added in the container appearing in the clean buffer within
+seconds; a save over a change made there refused, and `:w!` going
+through; the helper killed in the container and the connection back by
+itself with no question; the window closed, leaving no helper and no
+`ssh` session behind; Fenix started again, asking the password and
+reopening the project and its file.
+
+What that found, fixed since:
+
+- The explorer's breadcrumb, its modeline and Home's project list showed
+  the path's reserved root (`\?enix-ssh`). They show the machine
+  now (`tom@127.0.0.1:/home/tom/project`).
+- The file picker's preview was empty and said `0 B` for a remote file.
+  It reads small ones now, once per file looked at.
+- A restored session connected again but didn't reopen the remote files
+  that had no unsaved text. They open once the machine is back.
+- The prompt named the machine twice; the picker said "Nothing matches"
+  for a name about to be used.
+
+Not tried in the window: the explorer's create, rename, copy, move and
+delete (covered by tests), declining a question, a key with a
+passphrase, a connection that stays down.
 
 ## The design
 

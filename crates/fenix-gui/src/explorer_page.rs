@@ -366,6 +366,18 @@ pub fn breadcrumb(cwd: &Path, project: Option<&Project>) -> Vec<(String, PathBuf
             return parts;
         }
     }
+    // On a remote machine: the machine, then its folders. (The path's own
+    // first part is the root every remote path has, which names nothing.)
+    if let Some((host, there)) = fenix_vfs::split(cwd) {
+        let mut at = String::new();
+        let mut parts = vec![(host.clone(), fenix_vfs::remote(&host, "/"))];
+        for name in there.split('/').filter(|name| !name.is_empty()) {
+            at.push('/');
+            at.push_str(name);
+            parts.push((name.to_string(), fenix_vfs::remote(&host, &at)));
+        }
+        return parts;
+    }
     let mut at = PathBuf::new();
     let mut parts = Vec::new();
     for part in cwd.components() {
@@ -697,6 +709,15 @@ mod tests {
         assert_eq!(age_text(Some(now - Duration::from_secs(5 * 3600)), now), "5 h");
         assert_eq!(age_text(Some(now - Duration::from_secs(3 * 86400)), now), "3 d");
         assert_eq!(age_text(None, now), "");
+    }
+
+    #[test]
+    fn a_remote_folders_breadcrumb_starts_at_its_machine() {
+        let crumbs = breadcrumb(&fenix_vfs::remote("tom@devbox", "/home/tom"), None);
+        let names: Vec<&str> = crumbs.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["tom@devbox", "home", "tom"]);
+        assert_eq!(crumbs[0].1, fenix_vfs::remote("tom@devbox", "/"));
+        assert_eq!(crumbs[1].1, fenix_vfs::remote("tom@devbox", "/home"));
     }
 
     #[test]

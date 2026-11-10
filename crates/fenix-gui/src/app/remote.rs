@@ -72,6 +72,9 @@ pub(crate) struct Remotes {
     statuses: HashMap<String, fenix_ssh::Status>,
     /// `ssh`'s questions; the first is the one on the prompt line.
     questions: VecDeque<RemoteQuestion>,
+    /// Files a restored session had open on a machine that wasn't
+    /// connected yet: opened once it is.
+    reopen: Vec<PathBuf>,
 }
 
 /// A question as one line for the prompt, and whether what's typed is
@@ -84,6 +87,10 @@ fn prompt_line(host: &str, prompt: &str) -> (String, bool) {
     if prompt.contains("(yes/no") {
         let fingerprint = lines.iter().find(|line| line.contains("fingerprint")).copied().unwrap_or("");
         return (format!("{host} is new here. {fingerprint} Type yes to trust it"), false);
+    }
+    // `ssh` usually names the machine or the key itself.
+    if question.contains(host) {
+        return (question.to_string(), true);
     }
     (format!("{host}: {question}"), true)
 }
@@ -227,6 +234,11 @@ impl App {
             },
             Then::OpenProject { root, file } => self.open_project(root, file, true),
             Then::Resume => {
+                let (here, later): (Vec<PathBuf>, Vec<PathBuf>) = std::mem::take(&mut self.remote.reopen).into_iter().partition(|path| fenix_vfs::host_of(path).as_deref() == Some(host));
+                self.remote.reopen = later;
+                for path in here {
+                    self.open_file_from_picker(&path);
+                }
                 self.refresh_project_root();
                 self.start_disk_probe();
             }
@@ -300,12 +312,21 @@ impl App {
         format!("   [{host}{state}]")
     }
 
+    /// A file the session had open on a machine that isn't connected:
+    /// to open when it is (`Then::Resume`).
+    pub(crate) fn remote_reopen_later(&mut self, path: PathBuf) {
+        if !self.remote.reopen.contains(&path) {
+            self.remote.reopen.push(path);
+        }
+    }
+
     /// After a session is restored: connects again to each machine a
     /// workspace's project, or an open file, is on.
     pub(crate) fn remote_resume_session(&mut self) {
         let projects = self.workspaces.workspaces.iter().filter_map(|workspace| workspace.project.as_deref().and_then(fenix_vfs::host_of));
         let files = self.buffers.ids_sorted_by_path().into_iter().filter_map(|id| self.buffers.get(id)?.buffer.path().and_then(fenix_vfs::host_of));
-        let mut hosts: Vec<String> = projects.chain(files).collect();
+        let waiting = self.remote.reopen.iter().filter_map(|path| fenix_vfs::host_of(path));
+        let mut hosts: Vec<String> = projects.chain(files).chain(waiting).collect();
         hosts.sort();
         hosts.dedup();
         for host in hosts {
@@ -349,7 +370,8 @@ mod tests {
         app.remote_question(RemoteQuestion { host: "devbox".into(), prompt: new_host.into(), answer: second });
 
         let prompt = app.wasm.prompt.clone().unwrap();
-        assert_eq!((prompt.label.as_str(), prompt.masked), ("devbox: tom@devbox's password", true));
+        assert_eq!((prompt.label.as_str(), prompt.masked), ("tom@devbox's password", true));
+        assert_eq!(prompt_line("devbox", "Enter passphrase for key 'C:\\Users\\tom\\.ssh\\id_ed25519': ").0, "devbox: Enter passphrase for key 'C:\\Users\\tom\\.ssh\\id_ed25519'");
         for c in "s3cret".chars() {
             assert!(app.code_prompt_key(KeyPress::char(c)));
         }
@@ -474,6 +496,21 @@ mod tests {
         assert!(app.modeline_pieces().1.contains("nobody-there"), "{}", app.modeline_pieces().1);
         assert_ne!(app.project_root.as_deref(), Some(root.as_path()));
         assert_eq!(app.workspaces.active_workspace().project, None);
+    }
+
+    #[test]
+    fn a_sessions_remote_files_open_again_once_their_machine_is_back() {
+        let (mut app, _dir, machine) = app_and_machine("resume-box");
+        let file = fenix_vfs::remote("resume-box", "/home/tom/proj/src/main.rs");
+        // As a restore leaves it: the machine not there, the file noted.
+        machine.set_away(true);
+        app.remote_reopen_later(file.clone());
+        app.remote_reopen_later(fenix_vfs::remote("another-box", "/x"));
+        machine.set_away(false);
+        app.remote_ready("resume-box", Then::Resume);
+        assert_eq!(app.open().buffer.path(), Some(file.as_path()));
+        assert_eq!(app.open().buffer.text(), "fn main() {}\n");
+        assert_eq!(app.remote.reopen, [fenix_vfs::remote("another-box", "/x")], "another machine's wait for it");
     }
 
     #[test]

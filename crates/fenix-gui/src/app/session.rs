@@ -402,7 +402,13 @@ impl App {
                 Some(path) => match Buffer::from_path(path) {
                     Ok(buffer) => Some(buffer),
                     Err(error) => {
-                        warnings.push(format!("{}: {error}", fenix_vfs::display(path)));
+                        // A file on a machine that isn't connected yet is
+                        // no trouble to report: it opens when it is.
+                        if fenix_vfs::is_remote(path) && doc.text.is_none() {
+                            self.remote_reopen_later(path.clone());
+                        } else {
+                            warnings.push(format!("{}: {error}", fenix_vfs::display(path)));
+                        }
                         // Unsaved text for a file on a machine that isn't
                         // connected yet stays that file's: it's saved
                         // there once the machine is back.
