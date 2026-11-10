@@ -212,6 +212,26 @@ its extension. The rest is built into Fenix.
   servers, tasks, the debugger and agents. Files that aren't text open
   as text.
 
+  What a preview means for trust, so you can decide where to use it:
+
+  - Signing in is `ssh`'s. A new machine's key fingerprint is shown on
+    the prompt line for you to compare; a key that has *changed* is
+    refused by `ssh`, and Fenix says so.
+  - A password or passphrase you type is kept in memory, never on
+    disk, for as long as the connection is open, so that a reconnect
+    doesn't ask again. Keys in an agent need no question at all.
+  - The remote machine isn't given your SSH agent or your display,
+    whatever `~/.ssh/config` says for the host.
+  - The helper there is checked (SHA-256) when Fenix installs it, not
+    each time it runs. It runs as your account on that machine, and is
+    as trustworthy as that account: use this on machines you'd `ssh`
+    into and edit on anyway.
+  - A remote machine can't write outside a folder you copy from it to
+    this one. It can, like any machine, give you files that aren't what
+    they claim.
+  - A remote project's `.fenix/` (its settings, its `tools.json`) isn't
+    read at all yet.
+
 - **File explorer**: one page, drawn at three widths -- the sidebar
   pinned at the left (`SPC e t`: names and status), a pane (`SPC f j`:
   names, status, size and age; splittable, closable with `q` or `SPC b
