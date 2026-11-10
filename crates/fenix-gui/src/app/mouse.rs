@@ -261,9 +261,16 @@ impl App {
         let (line, vcol, past) = match usize::try_from(row).ok().filter(|&r| r <= last) {
             Some(r) => {
                 // Past a row's end, on a line that goes on below: its
-                // last char (`RowMap::at` holds it there).
-                let (line, vcol) = map.at(r, cell)?;
-                (line, vcol, false)
+                // last char (`RowMap::at` holds it there). A row above a
+                // line that isn't text (a code lens) is stepped over: the
+                // line's start.
+                match map.row(r).map(|row| row.kind) {
+                    Some(super::rows::RowKind::Virtual(_)) => (map.row(r)?.line, 0, false),
+                    _ => {
+                        let (line, vcol) = map.at(r, cell)?;
+                        (line, vcol, false)
+                    }
+                }
             }
             None if row < 0 => (edge.saturating_sub(1), cell, false),
             None => (edge.saturating_add(1).min(lines - 1), cell, edge + 1 >= lines),
@@ -1565,6 +1572,19 @@ mod tests {
         app.mouse_drag_to(to, W, H);
         assert_eq!(selection(&app).as_deref(), Some("quick brown fox"));
         app.mouse_release();
+    }
+
+    #[test]
+    fn a_click_on_a_row_above_a_line_that_isn_t_text_is_the_line_s_start() {
+        let mut app = wrapped_app("one\ntwo words\n", 20);
+        let buffer = app.focused_buffer_id();
+        app.virtual_rows.entry(buffer).or_default().insert(1, vec!["a lens".into()]);
+        let pos = at(&app, 1, 4);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 0));
+        let pos = at(&app, 2, 4);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 4), "the text's row below it");
     }
 
     #[test]

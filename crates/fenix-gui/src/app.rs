@@ -5230,6 +5230,11 @@ pub struct App {
     /// Buffers whose wrap was turned on or off (`view.toggle_wrap`),
     /// whatever the default for them is.
     wrap_overrides: HashMap<BufferId, bool>,
+    /// Wrapped lines' rows, found once for the text as it is.
+    break_cache: std::cell::RefCell<row_scroll::BreakCache>,
+    /// Rows above lines that aren't text, by buffer and line: what a code
+    /// lens will put there. A wrapped pane lays them out.
+    virtual_rows: HashMap<BufferId, std::collections::BTreeMap<usize, Vec<String>>>,
     /// The focused buffer's decorations as moves by row see them, and the
     /// `decorations_rev` they were copied at.
     screen_decorations: Option<(BufferId, u64, std::sync::Arc<Vec<crate::decorations::Decoration>>)>,
@@ -6219,6 +6224,8 @@ impl App {
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
             wrap_overrides: HashMap::new(),
+            break_cache: std::cell::RefCell::new(HashMap::new()),
+            virtual_rows: HashMap::new(),
             screen_decorations: None,
             pane_text_cols: HashMap::new(),
             fold_levels: HashMap::new(),

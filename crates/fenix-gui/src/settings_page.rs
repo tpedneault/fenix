@@ -836,6 +836,9 @@ impl SettingsPage {
                     return self.set(k, None);
                 }
                 match s.kind.parse(&text) {
+                    // As the default says, and nothing to override: unset,
+                    // so a later default isn't pinned.
+                    Ok(v) if is_default(s, &v) && !self.snap.inherited.contains_key(k) => self.set(k, None),
                     Ok(v) => self.set(k, Some(v)),
                     Err(why) => {
                         // Stays open with the reason, to be put right.
@@ -907,6 +910,8 @@ fn shown(page: &SettingsPage, s: &Setting) -> (String, Role) {
         };
     }
     match (page.snap.here.get(s.key), page.snap.inherited.get(s.key)) {
+        // A list emptied over a default of its own.
+        (Some(Value::List(l)), _) if l.is_empty() => ("none".into(), Role::Text),
         (Some(v), _) => (v.show(), Role::Text),
         (None, Some(v)) => (v.show(), Role::Muted),
         (None, None) if s.default.is_empty() => ("not set".into(), Role::Muted),
@@ -951,6 +956,11 @@ fn is_default(s: &Setting, v: &Value) -> bool {
         Value::Int(n) => s.default.parse::<i64>() == Ok(*n),
         Value::Float(f) => s.default.parse::<f64>().is_ok_and(|d| d == *f),
         Value::Text(t) => t == s.default,
+        // The default's items, in its order.
+        Value::List(l) => {
+            let default: Vec<&str> = s.default.split(',').map(str::trim).filter(|d| !d.is_empty()).collect();
+            l.iter().map(|i| i.trim()).eq(default)
+        }
         _ => false,
     }
 }
@@ -1367,6 +1377,19 @@ mod tests {
             p.key(Key::Backspace);
         }
         assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: Some(Value::List(Vec::new())) });
+    }
+
+    /// Opened and closed unchanged, the default isn't pinned; emptied, the
+    /// row says so.
+    #[test]
+    fn the_languages_that_wrap_saved_as_the_default_stay_unset_and_empty_reads_none() {
+        let mut p = page();
+        goto(&mut p, "editor.wrap_languages");
+        p.key(Key::Enter);
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: None });
+        let s = fenix_config::setting("editor.wrap_languages").unwrap();
+        p.snap.here.insert("editor.wrap_languages", Value::List(Vec::new()));
+        assert_eq!(shown(&p, s), ("none".to_string(), Role::Text));
     }
 
     fn goto(p: &mut SettingsPage, key: &str) {

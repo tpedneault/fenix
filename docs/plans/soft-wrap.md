@@ -1,6 +1,6 @@
 # Plan: soft wrap
 
-- **Status:** in progress, for the release after 1.5 (issue #107).
+- **Status:** built, for the release after 1.5 (issue #107); see §5.
 - **Scope:** a line wider than its pane goes on under itself, per buffer,
   with a default in settings; the agents' compose pane wraps. The row
   model it brings is also what code lens (#106) needs: rows in a pane
@@ -463,3 +463,45 @@ stage by stage.
   default (`LISTED_DEFAULTS`); other list settings, whose unset is
   empty, are as they were. The per-buffer toggle isn't kept with the
   session and goes when its buffer closes.
+
+### Stage 7: hardening, and rows that aren't lines
+
+- Measured on a million lines of 50 chars at 20 columns, in a release
+  build (`measure_a_million_lines`, ignored; run it with `--ignored
+  --nocapture`): a frame's rows, follow included, 1.5 ms with wrap on
+  and 1.6 ms with it off; `G` and ten `gk`, 13 ms against 8 ms. The
+  `Vec` of display lines a frame builds a few times (as 1.5 does) is
+  that cheap, so it stays.
+- The row walk's breaks are kept (`break_cache`, by buffer and line,
+  `App::line_breaks`). They're kept while these stay the same:
+  - the buffer's edit count;
+  - the width;
+  - the tab stops;
+  - the decorations revision, which is global, so an extension setting
+    decorations on any buffer starts every line again;
+  - on a decorated line, whether the cursor is on it.
+  So a long line stepped back into is broken once per edit, not once per
+  frame. A hit costs a few comparisons and an `Arc` clone of the rows.
+  The cache holds at most 4096 lines, then starts again.
+- Only the row walk reads the cache: scrolling, follow, `zt`/`zz`/`zb`,
+  the wheel and the caret's row. Two others still break lines
+  themselves:
+  - drawing (`pane_layout`), which needs only the rows shown, so it
+    breaks no further than the bottom;
+  - Vim's motions by row (`PaneRows`), which take a snapshot per key
+    without borrowing the app.
+- No arithmetic long-line path: `break_line_rows` already reads only
+  what the rows wanted can hold, and the cache covers stepping back. A
+  very long line is still copied whole once a frame to be drawn, as it
+  is with wrap off.
+- `RowKind::Virtual` rows: `App::virtual_rows` (by buffer and line, a
+  list of texts) puts rows above a line in a wrapped pane, drawn at the
+  line's indent in the gutter's colour, the line's number on its text's
+  first row. The row walk counts them as the line's first rows, so
+  scrolling, `zt`/`zz`/`zb` and the wheel go by them; the caret, a
+  selection and the gutter marks go by the text's rows; a click on one
+  is the line's start, and a move by row (`gj`, the arrows) steps over
+  them. Nothing fills them yet: code lens (#106) will. In a pane that
+  doesn't wrap they aren't shown -- its scroll is by lines -- so a lens
+  in such a pane needs it on the row path: the step that comes with
+  code lens.
