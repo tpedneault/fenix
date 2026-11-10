@@ -54,6 +54,21 @@ pub(crate) struct CaretSteps {
     next: u64,
 }
 
+/// Where the cursors were, for `edit.cursor_undo` (Ctrl+U) to go back
+/// to: in a buffer and pane, as of an edit count (an edit since makes the
+/// positions stale).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CaretMark {
+    buffer: BufferId,
+    pane: fenix_window::WindowId,
+    edits: u64,
+    primary: Caret,
+    extra: Vec<Caret>,
+}
+
+/// The cursor moves `edit.cursor_undo` keeps.
+const KEPT_CARET_MARKS: usize = 100;
+
 /// How many such edits keep their carets for undo: past it, the oldest
 /// undo to one cursor, as any other edit does.
 const KEPT_CARET_STEPS: u64 = 1_000;
@@ -96,6 +111,7 @@ impl App {
     /// Alt+click (or Ctrl+click, `editor.multi_cursor_modifier`): a caret at
     /// `at`, or, on one, that one taken away.
     pub(crate) fn toggle_caret_at(&mut self, at: usize) {
+        let before = self.caret_mark();
         let mut extra = self.extra_carets().to_vec();
         let primary = self.cursor().char_idx;
         if let Some(i) = extra.iter().position(|c| c.at == at) {
@@ -113,6 +129,7 @@ impl App {
         }
         self.set_extra_carets(extra);
         self.say_carets();
+        self.note_caret_move(before);
     }
 
     /// Alt+Shift+drag: a caret on every line from `from_line` to the
@@ -341,6 +358,57 @@ impl App {
         self.put_carets(fit(primary), extra.into_iter().map(fit).collect());
     }
 
+    /// Where the cursors are now, for `edit.cursor_undo`.
+    pub(crate) fn caret_mark(&self) -> Option<CaretMark> {
+        let buffer = self.focused_buffer_id();
+        let edits = self.buffers.get(buffer)?.buffer.edit_count();
+        Some(CaretMark { buffer, pane: self.focused_pane_id(), edits, primary: self.primary_caret(), extra: self.extra_carets().to_vec() })
+    }
+
+    /// After a key (or a click) that may have moved the cursors: where
+    /// they were, kept for Ctrl+U when they moved and nothing was edited.
+    /// An edit makes what's kept for that buffer stale, so it goes.
+    pub(crate) fn note_caret_move(&mut self, before: Option<CaretMark>) {
+        if std::mem::take(&mut self.caret_undoing) {
+            return;
+        }
+        let (Some(before), Some(now)) = (before, self.caret_mark()) else { return };
+        if before.edits != now.edits {
+            self.caret_marks.retain(|m| m.buffer != now.buffer);
+            return;
+        }
+        if before.buffer != now.buffer || before.pane != now.pane || (before.primary, &before.extra) == (now.primary, &now.extra) {
+            return;
+        }
+        self.caret_marks.push(before);
+        if self.caret_marks.len() > KEPT_CARET_MARKS {
+            self.caret_marks.remove(0);
+        }
+    }
+
+    /// `edit.cursor_undo` (Ctrl+U): the cursors back where they were
+    /// before the last move, or before the last cursor was added.
+    pub(crate) fn cmd_cursor_undo(&mut self) {
+        let Some(now) = self.caret_mark() else { return };
+        while let Some(mark) = self.caret_marks.pop() {
+            if mark.buffer != now.buffer || mark.pane != now.pane || mark.edits != now.edits || (mark.primary, &mark.extra) == (now.primary, &now.extra) {
+                continue;
+            }
+            self.caret_undoing = true;
+            let len = self.open().buffer.len_chars();
+            let fit = |c: Caret| Caret { at: c.at.min(len), anchor: c.anchor.map(|a| a.min(len)), ..c };
+            if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+                self.put_carets(fit(mark.primary), mark.extra.into_iter().map(fit).collect());
+            } else {
+                let pane = self.focused_pane_id();
+                self.put_cursor(pane, fit(mark.primary).at);
+            }
+            self.say_carets();
+            return;
+        }
+        self.set_message("no cursor move to undo");
+    }
+
     /// The primary as a caret: where the cursor is, and where its
     /// selection starts when it has one.
     fn primary_caret(&self) -> Caret {
@@ -479,7 +547,7 @@ impl App {
 /// Whether command `id`, run from a chord, keeps the extra carets: the
 /// clipboard's (at every caret) and those that add carets.
 pub(crate) fn keeps_carets(id: &str) -> bool {
-    matches!(id, "edit.copy" | "edit.paste" | "edit.add_next_occurrence" | "edit.select_all_occurrences" | "edit.add_cursor_above" | "edit.add_cursor_below")
+    matches!(id, "edit.copy" | "edit.paste" | "edit.add_next_occurrence" | "edit.select_all_occurrences" | "edit.add_cursor_above" | "edit.add_cursor_below" | "edit.cursor_undo")
 }
 
 /// `text` on one line, short, for a message.

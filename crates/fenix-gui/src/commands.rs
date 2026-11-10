@@ -313,6 +313,18 @@ impl CommandRegistry {
         registry.register("edit.select_all_occurrences", "A cursor on every occurrence of the selection, or of the word under the cursor (standard keys)", |ctx| ctx.app.cmd_select_all_occurrences());
         registry.register("edit.add_cursor_above", "Add a cursor on the line above (standard keys)", |ctx| ctx.app.cmd_add_cursor_vertically(false));
         registry.register("edit.add_cursor_below", "Add a cursor on the line below (standard keys)", |ctx| ctx.app.cmd_add_cursor_vertically(true));
+        registry.register("edit.cursor_undo", "Put the cursors back where they were before the last move or added cursor", |ctx| ctx.app.cmd_cursor_undo());
+        registry.register("edit.delete_line", "Delete the cursor's line, or the selected lines (dd)", |ctx| ctx.app.cmd_delete_line());
+        registry.register("edit.new_line_below", "Open a line below the cursor's and type there (o)", |ctx| ctx.app.cmd_new_line(true));
+        registry.register("edit.new_line_above", "Open a line above the cursor's and type there (O)", |ctx| ctx.app.cmd_new_line(false));
+        registry.register("edit.select_line", "Select the cursor's line; again, the next one too (V)", |ctx| ctx.app.cmd_select_line());
+        registry.register("edit.indent_lines", "Indent the cursor's line, or the selected lines (>>)", |ctx| ctx.app.cmd_indent_lines(true));
+        registry.register("edit.outdent_lines", "Dedent the cursor's line, or the selected lines (<<)", |ctx| ctx.app.cmd_indent_lines(false));
+        registry.register("nav.matching_bracket", "Go to the bracket that pairs with the one at the cursor (%)", |ctx| ctx.app.cmd_matching_bracket());
+        registry.register("code.fold", "Close the fold the cursor is in (zc)", |ctx| ctx.app.cmd_fold(true));
+        registry.register("code.unfold", "Open the fold the cursor is in (zo)", |ctx| ctx.app.cmd_fold(false));
+        registry.register("code.problems", "List every problem the language servers report, in every file", |ctx| ctx.app.picker_problems());
+        registry.register("code.project_symbols", "Find a symbol in the project, as the language servers find it", |ctx| ctx.app.picker_project_symbols());
         registry.register("edit.move_lines_up", "Move the cursor's line, or the selected lines, up one", |ctx| ctx.app.cmd_move_lines(false));
         registry.register("edit.move_lines_down", "Move the cursor's line, or the selected lines, down one", |ctx| ctx.app.cmd_move_lines(true));
         registry.register("edit.copy_lines_up", "Copy the cursor's line, or the selected lines, above them", |ctx| ctx.app.cmd_copy_lines(false));

@@ -400,6 +400,14 @@ impl<K: PartialEq> Diagnostics<K> {
             .collect()
     }
 
+    /// Every document something is reported for, sorted.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.by_path.keys().chain(self.pulled.keys()).cloned().collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
     /// Only `server`'s own diagnostics for `path`, as it sent them -- what
     /// goes back to it in a code action request.
     pub fn from_server(&self, path: &Path, server: &K) -> Vec<Diagnostic> {
@@ -775,6 +783,18 @@ mod tests {
         all.pulled(path.clone(), "eslint", "eslint", vec![d("again")]);
         all.forget_server(&"eslint");
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn the_paths_with_diagnostics_are_listed_once_each() {
+        let d = Diagnostic { message: "x".to_string(), ..Default::default() };
+        let mut all: Diagnostics<&str> = Diagnostics::default();
+        all.publish(PathBuf::from("/p/b.rs"), "ra", "ra", vec![d.clone()]);
+        all.publish(PathBuf::from("/p/a.rs"), "ra", "ra", vec![d.clone()]);
+        all.pulled(PathBuf::from("/p/a.rs"), "ra", "ra", vec![d]);
+        assert_eq!(all.paths(), [PathBuf::from("/p/a.rs"), PathBuf::from("/p/b.rs")]);
+        all.publish(PathBuf::from("/p/b.rs"), "ra", "ra", Vec::new());
+        assert_eq!(all.paths(), [PathBuf::from("/p/a.rs")], "cleared: gone");
     }
 
     #[test]

@@ -46,6 +46,12 @@ extension's keys come with it.
 | `Alt+↑` / `Alt+↓` | Move the line (or the selected lines) up / down |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | Copy it above / below |
 | `Ctrl+G` | Go to a line |
+| `Ctrl+Shift+K` | Delete the line, or the selected lines (not to the clipboard) |
+| `Ctrl+Enter` / `Ctrl+Shift+Enter` | A new line below / above, indented, wherever the cursor is on the line |
+| `Ctrl+L` | Select the line; again, the next one too |
+| `Ctrl+]` / `Ctrl+[` | Indent / dedent the line, or the selected lines |
+| `Ctrl+Shift+\` | To the bracket that pairs with the one at (or just before) the cursor |
+| `Ctrl+Shift+[` / `Ctrl+Shift+]` | Close / open the fold the cursor is in |
 
 **More cursors**
 
@@ -56,6 +62,7 @@ extension's keys come with it.
 | `Ctrl+D` | Select the word under the cursor; again, add a cursor on the next occurrence of the selection |
 | `Ctrl+Shift+L` | A cursor on every occurrence of the selection (or of the word under the cursor) |
 | `Ctrl+Alt+↑` / `Ctrl+Alt+↓` | Add a cursor on the line above / below, at the same column |
+| `Ctrl+U` | Take back the last cursor move, or the last cursor added |
 | `Esc`, a plain click | Back to one cursor |
 
 Typing, deleting, `Enter`, `Tab`, the arrows and Shift with them happen at
@@ -87,7 +94,7 @@ desktops that move windows with `Alt`+drag; go to definition then moves to
 | `Ctrl+PageDown` / `Ctrl+PageUp` | Next / previous tab |
 | `Ctrl+1` … `Ctrl+9` | To pane N |
 | `Ctrl+Alt+→` / `Ctrl+Alt+←` | Move the tab to the next / previous pane |
-| `Ctrl+K w v` / `Ctrl+K w s` | Split right / down (the tab strip's split button does too) |
+| `Ctrl+\`, `Ctrl+K w v` / `Ctrl+K w s` | Split right / down (the tab strip's split button does too) |
 | `Ctrl+K w q`, `w o`, `w =` | Close the pane / the others / balance |
 | `Ctrl+Shift+N` | Another OS window |
 
@@ -106,6 +113,8 @@ desktops that move windows with `Alt`+drag; go to definition then moves to
 | `Ctrl+.` | Code actions |
 | `Shift+Alt+F` | Format the file (`Ctrl+K c f` the selection) |
 | `Ctrl+Shift+O` | The file's outline |
+| `Ctrl+T` | A symbol in the project, as the language servers find it for what's typed |
+| `Ctrl+Shift+M` | Every problem reported, in every file, errors first |
 | `F8` / `Shift+F8` | Next / previous problem |
 | `Alt+F5` / `Shift+Alt+F5` | Next / previous changed hunk |
 | `Alt+←` / `Alt+→` | Back / on along the jumplist |
@@ -118,6 +127,9 @@ desktops that move windows with `Alt`+drag; go to definition then moves to
 | `Ctrl+K` | The leader's menu |
 | `Ctrl+B` / `Ctrl+0` | Show or hide the sidebar / go into it |
 | `Ctrl+Shift+E` | The file being edited, in the sidebar |
+| `Ctrl+Shift+G` | Git |
+| `F5` / `Shift+F5` | Start or continue debugging / stop |
+| `F9` / `F10` / `F11` / `Shift+F11` | Breakpoint / step over / into / out |
 | `Ctrl+J` / ``Ctrl+` `` | Show or hide the terminal panel / go to it and back |
 | `Ctrl+,` | Settings |
 | `Ctrl+Q` | Quit |
@@ -133,6 +145,11 @@ away, `Ctrl+Shift+A` has the agent write it. An agent's question: click
 the answer, or its key with `Alt` (`Alt+Y`) from the prompt. The debugger
 is the F-keys. `SPC h ?` (`Ctrl+K h ?`) lists the keys in use on a page;
 `SPC h k` says what one runs.
+
+The bracket keys are where a US keyboard has them; on another layout,
+bind the commands (`nav.matching_bracket`, `code.fold`, `code.unfold`,
+`edit.indent_lines`, `edit.outdent_lines`) in `keybindings.toml`. The
+F-keys are the debugger's in every mode with either keys.
 
 Not in standard keys: the `:` command line, `.` and macros (they're Vim
 keys'; the palette has the commands).
@@ -411,6 +428,8 @@ keys'; the palette has the commands).
 | `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
 | `SPC c z`, `za` | Open or close the fold the cursor is in |
+| `SPC c p` | Every problem the language servers report, in every file (`code.problems`) |
+| `SPC c j` | Find a symbol in the project, as the language servers find it (`code.project_symbols`) |
 | `SPC c s` | A picture of the Visual selection's lines (or the file, up to 500 lines) in your theme and font, framed like a window: copied as an image and saved as a PNG (`screenshot.*` settings) |
 | `SPC c S` | The same, with the selected lines highlighted and `screenshot.context` lines around them |
 | `zo` / `zO`, `zc` / `zC` | Open / close the fold (and, capitals, every one inside it) |

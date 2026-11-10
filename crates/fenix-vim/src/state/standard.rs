@@ -282,6 +282,95 @@ impl VimState {
     }
 }
 
+impl VimState {
+    /// The lines a line command works on with standard keys: the
+    /// selection's -- not the last one when the selection ends at its
+    /// very start -- else the cursor's.
+    pub fn standard_lines(&self, buffer: &Buffer, cursor: &Cursor) -> (usize, usize) {
+        let line_of = |i: usize| buffer.rope().char_to_line(i.min(buffer.len_chars()));
+        let here = line_of(cursor.char_idx);
+        if self.mode != Mode::Visual {
+            return (here, here);
+        }
+        let (lo, hi) = (self.visual_anchor.min(cursor.char_idx), self.visual_anchor.max(cursor.char_idx));
+        let (first, mut last) = (line_of(lo), line_of(hi));
+        if last > first && hi == buffer.line_start_char(last) {
+            last -= 1;
+        }
+        (first, last)
+    }
+
+    /// `edit.delete_line` (Ctrl+Shift+K): the cursor's line, or the
+    /// selection's lines, gone; the cursor on the line that takes their
+    /// place, at its column. Nothing goes to the clipboard.
+    pub fn delete_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let (lo, hi) = self.standard_lines(buffer, cursor);
+        if self.mode == Mode::Visual {
+            self.exit_visual_mode(cursor);
+        }
+        let last = buffer.line_count().saturating_sub(1);
+        let (from, to) = if hi < last {
+            (buffer.line_start_char(lo), buffer.line_start_char(hi + 1))
+        } else if lo > 0 {
+            // The last line: the line break before it goes with it.
+            (buffer.line_start_char(lo - 1) + buffer.line_len(lo - 1), buffer.len_chars())
+        } else {
+            (0, buffer.len_chars())
+        };
+        let col = cursor.sticky_col;
+        if to > from {
+            buffer.delete_range(cursor, from, to);
+        }
+        let line = lo.min(buffer.line_count().saturating_sub(1));
+        cursor.char_idx = crate::occurrence::at_column(buffer, line, col);
+        cursor.sticky_col = col;
+        if self.policy == EditPolicy::Standard {
+            self.enter_insert_here(buffer, cursor);
+            cursor.sticky_col = col;
+        }
+    }
+
+    /// `edit.select_line` (Ctrl+L): the cursor's line selected, its line
+    /// break too; again, the next line as well.
+    pub fn select_line(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let (line, _) = buffer.line_col(cursor);
+        if self.mode != Mode::Visual {
+            if self.is_inserting() {
+                self.leave_insert_here(buffer);
+            }
+            self.select(VisualKind::Char, buffer.line_start_char(line));
+        }
+        cursor.char_idx = buffer.line_start_char(line + 1);
+        if line + 1 >= buffer.line_count() {
+            cursor.char_idx = buffer.len_chars();
+        }
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    /// `edit.indent_lines` / `edit.outdent_lines` (Ctrl+] / Ctrl+[): the
+    /// cursor's line, or the selection's, indented or dedented a level,
+    /// the cursor (and the selection) kept on the same text.
+    pub fn indent_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, indent: bool) {
+        if self.mode == Mode::Visual {
+            self.indent_selection(buffer, cursor, indent);
+            return;
+        }
+        let (line, col) = buffer.line_col(cursor);
+        let before = buffer.line_len(line);
+        let mut at = Cursor { char_idx: buffer.line_start_char(line), sticky_col: 0 };
+        if indent {
+            indent::indent_line(buffer, &mut at, line, self.indent_width);
+        } else {
+            indent::dedent_line(buffer, &mut at, line, self.indent_width);
+        }
+        let delta = buffer.line_len(line) as isize - before as isize;
+        let col = (col as isize + delta).max(0) as usize;
+        cursor.char_idx = buffer.line_start_char(line) + col.min(buffer.line_len(line));
+        cursor.sticky_col = col;
+    }
+}
+
 /// The movement a key is, if it's one.
 fn movement(key: KeyPress) -> Option<Move> {
     if key.mods.alt || key.mods.super_ {
@@ -350,6 +439,80 @@ mod tests {
             let key = if ch == '\n' { named(NamedKey::Enter) } else { KeyPress::char(ch) };
             press(vim, b, c, key);
         }
+    }
+
+    fn shift(n: NamedKey) -> KeyPress {
+        KeyPress { code: KeyCode::Named(n), mods: fenix_keymap::Mods { shift: true, ..Default::default() } }
+    }
+
+    #[test]
+    fn delete_lines_takes_the_line_or_the_selection_s_and_keeps_the_column() {
+        let (mut vim, mut b, mut c) = setup("one\ntwo\nthree");
+        press(&mut vim, &mut b, &mut c, named(NamedKey::Right));
+        press(&mut vim, &mut b, &mut c, named(NamedKey::Right));
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "two\nthree");
+        assert_eq!(c.char_idx, 2, "the next line, at the column");
+        assert!(vim.is_inserting());
+        // A selection that ends at the start of a line doesn't take it.
+        press(&mut vim, &mut b, &mut c, shift(NamedKey::Down));
+        let (lo, hi) = vim.standard_lines(&b, &c);
+        assert_eq!((lo, hi), (0, 1));
+        c.char_idx = 0;
+        vim.exit_visual_mode(&c);
+        vim.enter_insert_here(&b, &mut c);
+        press(&mut vim, &mut b, &mut c, shift(NamedKey::Down));
+        assert_eq!(vim.standard_lines(&b, &c), (0, 0), "from a line's start to the next's: one line");
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "three");
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "", "the only line");
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "", "an empty buffer");
+    }
+
+    #[test]
+    fn delete_lines_on_the_last_line_takes_the_break_before_it() {
+        let (mut vim, mut b, mut c) = setup("a\r\nb");
+        c.char_idx = 4;
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "a", "and a CRLF's \\r with it");
+        let (mut vim, mut b, mut c) = setup("a\nb\n");
+        c.char_idx = 4;
+        vim.delete_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "a\nb", "the empty line after the last break");
+    }
+
+    #[test]
+    fn select_line_selects_it_and_again_the_next() {
+        let (mut vim, mut b, mut c) = setup("ab\ncd\nef");
+        c.char_idx = 1;
+        vim.select_line(&mut b, &mut c);
+        assert_eq!(vim.visual_range(&b, &c).0, 0..3);
+        vim.select_line(&mut b, &mut c);
+        assert_eq!(vim.visual_range(&b, &c).0, 0..6);
+        vim.select_line(&mut b, &mut c);
+        vim.select_line(&mut b, &mut c);
+        assert_eq!(vim.visual_range(&b, &c).0, 0..8, "the last line, without a break, to the end");
+        typed(&mut vim, &mut b, &mut c, "x");
+        assert_eq!(b.text(), "x", "typing replaces it");
+    }
+
+    #[test]
+    fn indent_lines_keeps_the_cursor_on_its_text() {
+        let (mut vim, mut b, mut c) = setup("ab\ncd");
+        c.char_idx = 1;
+        vim.indent_lines(&mut b, &mut c, true);
+        assert_eq!(b.text(), "    ab\ncd");
+        assert_eq!(c.char_idx, 5, "still before the b");
+        vim.indent_lines(&mut b, &mut c, false);
+        vim.indent_lines(&mut b, &mut c, false);
+        assert_eq!(b.text(), "ab\ncd", "nothing more to take away");
+        assert_eq!(c.char_idx, 1);
+        press(&mut vim, &mut b, &mut c, shift(NamedKey::Down));
+        vim.indent_lines(&mut b, &mut c, true);
+        assert_eq!(b.text(), "    ab\n    cd", "the selection's lines");
+        assert!(vim.is_selecting(), "still selected");
     }
 
     #[test]
