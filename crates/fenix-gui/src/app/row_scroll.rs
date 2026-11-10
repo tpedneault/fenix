@@ -50,14 +50,22 @@ impl RowWalk<'_> {
         self.rows_upto(index, usize::MAX)
     }
 
+    /// The rows above display line `index` that aren't text (a code
+    /// lens's): its first rows, before its text's. A row `r` of the line
+    /// is its text's row `r - above`.
+    pub(super) fn above(&self, index: usize) -> usize {
+        self.lines.get(index).map_or(0, |&line| self.app.virtual_rows_above(self.buffer, line).len())
+    }
+
     /// How many rows display line `index` has, if no more than `cap`;
     /// `cap + 1` when it has more.
     fn count_capped(&mut self, index: usize, cap: usize) -> usize {
-        self.rows_upto(index, cap.saturating_add(1)).len().max(1)
+        let above = self.above(index);
+        above + self.rows_upto(index, cap.saturating_sub(above).saturating_add(1)).len().max(1)
     }
 
     fn count(&mut self, index: usize) -> usize {
-        self.breaks(index).len().max(1)
+        self.above(index) + self.breaks(index).len().max(1)
     }
 
     /// `pos` held to the rows there are: a top a resize, an edit or a
@@ -149,18 +157,20 @@ impl RowWalk<'_> {
         (n <= cap).then_some(n)
     }
 
-    /// The row of display line `index` that visual column `col` is on.
+    /// The row of display line `index` that visual column `col` is on,
+    /// its rows above it that aren't text counted.
     pub(super) fn row_of(&mut self, index: usize, col: usize) -> usize {
+        let above = self.above(index);
         let mut k = 8;
         loop {
             let rows = self.rows_upto(index, k);
             let found = rows.iter().position(|r| col < r.end);
             let all = rows.len() < k;
             if let Some(row) = found {
-                return row;
+                return above + row;
             }
             if all {
-                return rows.len().saturating_sub(1);
+                return above + rows.len().saturating_sub(1);
             }
             k = k.saturating_mul(2);
         }
@@ -454,6 +464,8 @@ impl App {
         } else {
             return true;
         };
+        // A row above the line that isn't text: as its first text row.
+        let row = row.saturating_sub(walk.above(index));
         let cols = walk.rows_upto(index, row + 1).get(row).cloned().unwrap_or(0..0);
         let next_line = walk.lines.get(index + 1).copied();
         let line = walk.lines.get(index).copied().unwrap_or(0);
@@ -488,10 +500,21 @@ impl App {
         if line == rows::NO_LINE || line >= ob.buffer.visual_line_count() {
             return (std::iter::once(0..usize::MAX).collect(), true);
         }
+        // Found before, for the text as it is: from the cache, from frame
+        // to frame and key to key until an edit, a resize, a change of
+        // tab width or of decorations (or, for a decorated line, the
+        // cursor going on or off it).
+        let tab_stops = self.tab_stops_for(buffer);
+        let decorated = self.wasm.decorations.contains_key(&buffer);
+        let stamp = BreakStamp { edits: ob.buffer.edit_count(), width, tabs: format!("{tab_stops:?}"), decorations: self.wasm.decorations_rev, cursor_on: decorated && line == cursor_line };
+        if let Some((was, rows, whole)) = self.break_cache.borrow().get(&(buffer, line)) {
+            if *was == stamp && (*whole || rows.len() >= max_rows) {
+                return (rows[..max_rows.min(rows.len())].to_vec(), *whole && max_rows >= rows.len());
+            }
+        }
         let start = ob.buffer.line_start_char(line);
         let len = ob.buffer.line_len(line);
         let line_text = ob.buffer.text_range(start, start + len);
-        let tab_stops = self.tab_stops_for(buffer);
         let decorations: Vec<&crate::decorations::Decoration> = self.code_decorations(buffer).into_iter().filter(|d| d.start <= start + len && d.end >= start).collect();
         let display = if !decorations.is_empty() {
             crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).display
@@ -501,9 +524,29 @@ impl App {
             line_text
         };
         let indent = crate::wrap::continuation_indent(&display, width);
-        crate::wrap::break_line_rows(&display, width, indent, max_rows)
+        let found = crate::wrap::break_line_rows(&display, width, indent, max_rows);
+        let mut cache = self.break_cache.borrow_mut();
+        // Bounded: a few panes' worth of lines, or it starts again.
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert((buffer, line), (stamp, found.0.clone(), found.1));
+        found
     }
 }
+
+/// What a line's rows were found for: they hold while it's the same.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct BreakStamp {
+    edits: u64,
+    width: usize,
+    tabs: String,
+    decorations: u64,
+    cursor_on: bool,
+}
+
+/// Lines' rows found, by buffer and line.
+pub(super) type BreakCache = HashMap<(BufferId, usize), (BreakStamp, Vec<std::ops::Range<usize>>, bool)>;
 
 #[cfg(test)]
 mod tests {
@@ -779,6 +822,23 @@ mod tests {
         let buffer = app.focused_buffer_id();
         let mut walk = app.row_walk(pane, buffer).unwrap();
         assert_eq!(app.cursor_row_pos(&mut walk, pane, buffer).0, 0);
+    }
+
+    #[test]
+    fn a_line_s_rows_are_found_once_until_its_text_or_the_width_changes() {
+        let (mut app, _f) = three_row_lines(3);
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        assert_eq!(app.line_breaks(buffer, 1, 10, 0, usize::MAX), (vec![0..10, 10..20, 20..24], true));
+        assert!(app.break_cache.borrow().contains_key(&(buffer, 1)));
+        // Asked for fewer: the first of those found, not all.
+        let (rows, whole) = app.line_breaks(buffer, 1, 10, 0, 1);
+        assert_eq!((rows.len(), rows.first().cloned(), whole), (1, Some(0..10), false));
+        // An edit: found again for the new text.
+        app.press_all("j A");
+        app.type_text(" ffff");
+        assert_eq!(app.line_breaks(buffer, 1, 10, 0, usize::MAX).0.len(), 3);
+        app.set_pane_text_cols(pane, 30);
+        assert_eq!(app.line_breaks(buffer, 1, 30, 0, usize::MAX).0.len(), 1);
     }
 
     #[test]
@@ -1069,3 +1129,41 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod large {
+    use super::*;
+
+    /// What a frame and a few keys cost on a million lines, wrap on and off.
+    #[test]
+    #[ignore]
+    fn measure_a_million_lines() {
+        let text: String = (0..1_000_000).map(|i| format!("line {i} with some words to wrap at a narrow width\n")).collect();
+        for wrap in [false, true] {
+            let mut app = App::with_file(None);
+            let (pane, id) = (app.focused_pane_id(), app.buffers.open_scratch());
+            app.set_pane_content(pane, id);
+            let ob = app.buffers.get_mut(id).unwrap();
+            ob.buffer = fenix_core::Buffer::from_text(&text);
+            ob.kind = BufferKind::Text;
+            app.test_set_cursor(Cursor::at_start());
+            app.wrap_overrides.insert(id, wrap);
+            app.set_pane_text_cols(pane, 20);
+            let t = std::time::Instant::now();
+            for _ in 0..10 {
+                app.ensure_cursor_visible(40);
+                let _ = app.focused_overlays_now(41);
+            }
+            let frame = t.elapsed() / 10;
+            let t = std::time::Instant::now();
+            app.press("G");
+            app.ensure_cursor_visible(40);
+            for _ in 0..10 {
+                app.press_all("g k");
+                app.ensure_cursor_visible(40);
+            }
+            let keys = t.elapsed();
+            eprintln!("wrap {wrap}: a frame's rows {frame:?}; G and ten gk {keys:?}");
+        }
+    }
+}
