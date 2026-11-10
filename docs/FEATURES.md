@@ -17,7 +17,7 @@ its extension. The rest is built into Fenix.
   file's text is typed into at once, Shift with a movement selects,
   Ctrl+C/X/V/Z/S, Ctrl+F, F12, F2, Ctrl+/ and the rest, Alt+click and
   Alt+Shift+drag, Ctrl+D, Ctrl+Shift+L and Ctrl+Alt+↑/↓ for more
-  cursors (Ctrl+U takes one back), Ctrl+Shift+K, Ctrl+L, Ctrl+Enter,
+  cursors (Ctrl+U takes one back; they come back with the session), Ctrl+Shift+K, Ctrl+L, Ctrl+Enter,
   Ctrl+T for the project's symbols and Ctrl+Shift+M for its problems,
   and the whole leader menu, every
   extension's included, on `Ctrl+K`. Both schemes run the same commands;

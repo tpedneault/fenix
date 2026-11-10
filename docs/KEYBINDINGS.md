@@ -70,6 +70,8 @@ every cursor, as one undo step; `Ctrl+Z` and `Ctrl+Y` put the cursors back
 as they were. `Ctrl+V` pastes a line at each cursor when
 the clipboard has as many lines as there are cursors. Any other key, or an
 edit made elsewhere (a language server's, an agent's), goes back to one.
+Extra cursors come back with the session when the file is as it was;
+if it changed meanwhile, only the main cursor does.
 A selected whole word finds only whole words; other text is found
 wherever it is, matching case. The newest cursor is the one the view
 follows. The keyboard's ways have commands of their own

@@ -73,6 +73,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nav.goto_line`, the bracket jumps (`nav.next_problem`…, on `SPC ]` and
   `SPC [` too), panes by number, a tab to the next pane, the recent-buffer
   switcher, and a keys page (`SPC h ?`).
+- Extra cursors come back with the session (without their selections,
+  as the main cursor's isn't kept) when the file's text is the one they
+  were left in; a file changed since gets its main cursor back only.
 - More of VS Code's keys, with standard keys: Ctrl+Shift+K deletes the
   line, Ctrl+Enter and Ctrl+Shift+Enter open one below or above, Ctrl+L
   selects the line (again, the next), Ctrl+U takes back the last cursor

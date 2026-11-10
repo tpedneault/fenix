@@ -86,6 +86,25 @@ impl App {
         &carets.extra
     }
 
+    /// `pane`'s extra carets, if they're in `buffer` and still hold.
+    pub(crate) fn pane_carets(&self, pane: fenix_window::WindowId, buffer: BufferId) -> &[Caret] {
+        let Some(carets) = self.carets.get(&pane) else { return &[] };
+        let edits = self.buffers.get(buffer).map(|ob| ob.buffer.edit_count());
+        if carets.buffer != Some(buffer) || edits != Some(carets.edits) {
+            return &[];
+        }
+        &carets.extra
+    }
+
+    /// A session's extra carets for `pane`, back as they were.
+    pub(crate) fn restore_pane_carets(&mut self, pane: fenix_window::WindowId, buffer: BufferId, mut extra: Vec<Caret>, edits: u64) {
+        extra.sort_by_key(|c| c.at);
+        extra.dedup_by_key(|c| c.at);
+        if !extra.is_empty() {
+            self.carets.insert(pane, Carets { buffer: Some(buffer), extra, edits });
+        }
+    }
+
     /// Back to the one cursor.
     pub(crate) fn clear_carets(&mut self) {
         let pane = self.focused_pane_id();
