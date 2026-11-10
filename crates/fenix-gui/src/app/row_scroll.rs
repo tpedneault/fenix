@@ -495,7 +495,8 @@ mod tests {
     fn three_row_lines(lines: usize) -> (App, super::super::test_keys::TestFile) {
         let text: String = (0..lines).map(|_| "aaaa bbbb cccc dddd eeee\n").collect();
         let (mut app, file) = app_on_file("a.txt", &text);
-        app.run_cmd("view.toggle_wrap");
+        // A plain text file wraps unless turned off.
+        assert!(app.buffer_wraps(app.focused_buffer_id()));
         let pane = app.focused_pane_id();
         app.set_pane_text_cols(pane, 10);
         (app, file)
@@ -531,7 +532,8 @@ mod tests {
     fn a_line_taller_than_the_pane_is_followed_inside() {
         let line = "word ".repeat(40);
         let (mut app, _f) = app_on_file("a.txt", &format!("{line}\nnext\n"));
-        app.run_cmd("view.toggle_wrap");
+        // A plain text file wraps unless turned off.
+        assert!(app.buffer_wraps(app.focused_buffer_id()));
         let pane = app.focused_pane_id();
         app.set_pane_text_cols(pane, 10);
         app.press("$");
@@ -716,7 +718,8 @@ mod tests {
 
     fn wrapped(text: &str, cols: usize) -> (App, super::super::test_keys::TestFile) {
         let (mut app, file) = app_on_file("a.txt", text);
-        app.run_cmd("view.toggle_wrap");
+        // A plain text file wraps unless turned off.
+        assert!(app.buffer_wraps(app.focused_buffer_id()));
         let pane = app.focused_pane_id();
         app.set_pane_text_cols(pane, cols);
         (app, file)

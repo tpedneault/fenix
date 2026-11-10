@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Soft wrap: long lines go on under themselves at the pane's width, by
+  buffer (`SPC t w`, `Alt+Z` with standard keys), with `editor.wrap` and
+  per-language lists (Markdown and plain text wrap by default); an
+  agent's prompt wraps. `gj` / `gk`, and with standard keys and in Insert
+  the arrows, `Home` / `End` and `PageUp` / `PageDown`, go by screen rows
+  (#107).
+
 ## [1.5.0] - 2026-11-10
 
 ### Security

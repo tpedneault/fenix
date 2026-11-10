@@ -423,3 +423,29 @@ stage by stage.
   then moves by row on a decorated line goes by where they were; and
   the cursor's line, whose decorations are laid out as on it, is the
   one the key started on.
+
+### Stage 6: settings and keys
+
+- `editor.wrap` (default off), `editor.wrap_languages` (default
+  `markdown, text`; `text` is a file of no language Fenix knows, not a
+  buffer with no file) and `editor.nowrap_languages` (default none), read
+  in that order of strength from the bottom: the nowrap list, then the
+  wrap list, then `editor.wrap`. An agent's `Prompt` buffer wraps
+  whatever they say; `view.toggle_wrap` for a buffer outranks them all.
+  The default is a few map lookups and the buffer's language, nothing
+  read from the file, so asking it every frame costs nothing.
+- `wrap_refusal` says why a pane doesn't wrap (a terminal, a table, a
+  page or Home, a side by side, a diff, a Git page), and gates the
+  setting, a language's default and `Prompt` alike; `view.toggle_wrap`
+  there changes nothing and says why.
+- `SPC t w` and, with standard keys, `Alt+Z` (free in 1.5).
+- Tested with real panes: a table (`table.toggle`), a page (the
+  settings page) and a side by side refuse, and say so; a terminal's
+  refusal is tested by its kind only (a real one starts a shell).
+- Not covered by a test: `decoration_click` with a fold closed or at a
+  break, the redraw half of debug marks and change seams, a decorated
+  line wrapped, the blame column on continuation rows, Block-visual
+  `gj`, `.` repeating `dgj`, PageDown with a real pane's height and at
+  the buffer's ends, an unfocused pane's `reveal_cursor` and
+  `search_reveal`, the reload clamp, folds, tabs, decorations and wide
+  chars inside a move by row.

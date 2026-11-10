@@ -505,6 +505,21 @@ mod tests {
     }
 
     #[test]
+    fn a_side_by_side_never_wraps_and_turning_wrap_says_why() {
+        let (_repo, mut app) = opened("wrap_sbs", |app| {
+            app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+        });
+        let s = &app.side_by_sides[0];
+        let (live, buffer) = (s.live_pane, s.live_buffer);
+        assert!(app.buffer_wraps(buffer), "the setting says wrap");
+        assert_eq!(app.wrap_cols(live, buffer), None, "but not beside a ref");
+        app.windows_mut().focus(live);
+        app.run_cmd("view.toggle_wrap");
+        let said = app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+        assert_eq!(said, "Lines don't wrap in a side by side");
+    }
+
+    #[test]
     fn an_unsaved_added_block_leaves_space_beside_it_on_the_left() {
         let (_repo, app) = opened("added", |app| insert_at_line(app, 1, "new A\nnew B\n"));
         let s = &app.side_by_sides[0];
