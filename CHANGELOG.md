@@ -10,6 +10,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A welcome for a first run (`SPC h w` brings it back): what Fenix is,
+  then a step each for how you'd like to edit (Vim keys, recommended, or
+  standard keys), a theme and the text size, the extension packs, and
+  where to learn -- the tutorial in the keys you picked, the keys page, a
+  folder to open. Every choice is in use as it's made; a click on a
+  choice picks it. The packs are on a view of their own
+  (`extensions.welcome`).
 - Standard keys: a traditional IDE's way to edit, beside Vim's
   (`editor.keys = "standard"`, `SPC t k`, or the welcome's question). A
   file's text is typed into at once; Shift with a movement selects, and

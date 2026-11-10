@@ -69,6 +69,7 @@ use crate::page::Key as PageKey;
 use explorer_host::{is_bare_server, is_unc, PromptKind};
 mod disk_probe;
 mod extensions_host;
+mod welcome_host;
 mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
@@ -19485,6 +19486,16 @@ impl App {
                         }
                         self.wake_caret();
                         return;
+                    }
+                    // The welcome's caps: a click presses the key on one.
+                    if pos.1 >= content.y {
+                        if let Some(&page) = self.windows().content(id) {
+                            let (line, col) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
+                            if self.welcome_click(page, line, col) {
+                                self.wake_caret();
+                                return;
+                            }
+                        }
                     }
                     // Standard keys: an answer on an agent's question card.
                     if pos.1 >= content.y && self.standard_keys() {

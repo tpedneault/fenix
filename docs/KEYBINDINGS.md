@@ -250,7 +250,7 @@ keys'; the palette has the commands).
 | `SPC ] d` / `SPC [ d` | Next / previous problem (also `h` hunk, `a` agent's change, `t` TODO, `c` side by side's change) |
 | `SPC ] f` | Open the file named under the cursor, as `gf` |
 | `SPC C-i` | Hover, as `K` (standard keys' `Ctrl+K Ctrl+I`) |
-| `SPC h x` / `SPC h w` | The Extensions page / the welcome's packs |
+| `SPC h x` / `SPC h w` | The Extensions page / the welcome (keys, look, packs, where to learn) |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |
 | `SPC h b` / `SPC h K` | The keys bound here / where keys disagree |
 | `SPC h e` / `SPC h l` | Your keybindings (`keybindings.toml`) / what the code extensions said |

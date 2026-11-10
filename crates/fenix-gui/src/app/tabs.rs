@@ -111,6 +111,7 @@ impl App {
                 Some(P::Log(_)) => crate::icon::HISTORY,
                 Some(P::Hub(_)) | Some(P::Wizard(_)) | Some(P::Doctor(_)) => crate::icon::PROJECTS,
                 Some(P::Notifications(_)) => crate::icon::BELL,
+                Some(P::Welcome(_)) => crate::icon::HELP,
                 Some(P::Extensions(_)) | Some(P::ExtensionOutput(_)) => crate::icon::PUZZLE,
                 Some(P::Agent(_)) | Some(P::AgentReview(_)) | Some(P::AgentUsage(_)) => crate::icon::SPARK,
                 _ => return None,
