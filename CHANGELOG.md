@@ -10,7 +10,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Soft wrap: long lines go on under themselves at the pane's width, by
   buffer (`SPC t w`, `Alt+Z` with standard keys), with `editor.wrap` and
-  per-language lists (Markdown and `.txt` files wrap by default); an
+  per-language lists (Markdown, `.txt` and `.text` files wrap by default); an
   agent's prompt wraps. `gj` / `gk`, and with standard keys and in Insert
   the arrows, `Home` / `End` and `PageUp` / `PageDown`, go by screen rows
   (#107).
