@@ -892,6 +892,12 @@ Where the implementation differs from the plan above, and why:
   other text matches anywhere, case and all. Where to put them is
   `fenix-vim`'s `occurrence` module; Vim keys get a message, since only
   standard keys have extra cursors.
+- **Extra cursors are kept with the session** (§2.6 said they
+  weren't): each pane saves its extras and the text's length. They come
+  back when the document's text is the one they were saved in -- the
+  session's own unsaved text, or a file whose size and time on disk are
+  as they were -- and the length agrees; otherwise the primary alone,
+  as before. Only with standard keys.
 - **The rest of §2.7's keys** came after: Ctrl+Shift+K, Ctrl+Enter
   and Ctrl+Shift+Enter, Ctrl+L, Ctrl+U (cursor undo: the cursors before
   each key that moved them without an edit, a hundred deep; an edit
