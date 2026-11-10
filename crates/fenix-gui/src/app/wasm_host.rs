@@ -5522,8 +5522,10 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.py");
         // Words, not single letters: Windows' sort takes a few bytes of
-        // input for UTF-16.
-        std::fs::write(&file, "apple\npear\nfig\n").unwrap();
+        // input for UTF-16. And in the line ending sort writes (CRLF on
+        // Windows), or every line would differ by its ending.
+        let nl = if cfg!(windows) { "\r\n" } else { "\n" };
+        std::fs::write(&file, ["apple", "pear", "fig", ""].join(nl)).unwrap();
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
@@ -5531,10 +5533,10 @@ pub(crate) mod tests {
         pack_project(&mut app, &file);
         app.answer_code_request("test.hello", Request::Formatter { languages: vec!["python".into()], program: Some(("sort".into(), Vec::new(), None)), keep_output: false });
         app.toggle_caret_at(1);
-        app.focused_buffer_and_cursor_mut().1.char_idx = "apple\n".len();
+        app.focused_buffer_and_cursor_mut().1.char_idx = "apple".len() + nl.len();
         assert!(app.format_with_extension());
         app.follow_outside_edits();
-        assert_eq!(app.open().buffer.text().replace('\r', ""), "apple\nfig\npear\n");
+        assert_eq!(app.open().buffer.text(), ["apple", "fig", "pear", ""].join(nl));
         assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [1], "apple's line wasn't changed");
         assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1, "the main cursor's line");
     }
