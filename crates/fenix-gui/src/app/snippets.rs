@@ -297,7 +297,7 @@ mod tests {
         assert!(app.open().buffer.text().starts_with("proc name {args}"));
         assert!(app.completion.is_none());
         assert!(app.snippet_is_valid());
-        assert_eq!(app.visual_selection_segments(20), vec![(0, 5, 9)]);
+        assert_eq!(app.visual_selection_segments(0..20), vec![(0, 5, 9)]);
         for ch in "greet".chars() {
             key(&mut app, KeyPress::char(ch));
         }

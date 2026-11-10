@@ -164,7 +164,7 @@ impl App {
             return false;
         }
         let scroll = self.pane_state(pane).scroll_line;
-        let Some(&line) = self.pane_display_lines(pane, buffer).get(scroll + row) else { return false };
+        let Some(line) = self.pane_rows(pane, buffer, scroll + row, 1).row(0).filter(|r| r.kind == super::rows::RowKind::Text).map(|r| r.line) else { return false };
         let ranges = self.fold_ranges_of(ob);
         if !ranges.iter().any(|r| r.0 == line) {
             return false;

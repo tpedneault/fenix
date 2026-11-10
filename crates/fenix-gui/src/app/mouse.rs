@@ -212,10 +212,13 @@ impl App {
             crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).col_map
         };
         let gutter = x < 0.0;
-        let vcol = (x / char_width).floor().max(0.0) as usize + scroll_col;
+        // The row it's on, through the pane's map of them.
+        let map = super::rows::RowMap::lines(&[line], scroll_col);
+        let (_, vcol) = map.at(0, (x / char_width).floor().max(0.0) as usize)?;
         let (col, past_end) = char_col_at(&col_map, vcol);
         let shown_row = row.clamp(0, text::lines_that_fit(content.h, line_height) as isize);
-        let glyph_x = content.x + text::PAD_LEFT + gutter_px + tabstops::visual_col(&col_map, col).saturating_sub(scroll_col) as f32 * char_width;
+        let glyph_col = map.locate(line, tabstops::visual_col(&col_map, col)).map_or(0, |(_, x)| x);
+        let glyph_x = content.x + text::PAD_LEFT + gutter_px + glyph_col as f32 * char_width;
         let glyph_bottom = content.y + text::PAD_TOP + (shown_row as f32 + 1.0 - frac) * line_height;
         Some(TextHit { buffer, line, col, past_end: past_end || index >= lines.len() as isize, gutter, anchor: (glyph_x, glyph_bottom) })
     }
@@ -1368,7 +1371,7 @@ mod tests {
         click(&mut app, at_pos);
         click(&mut app, at_pos);
         assert_eq!(selection(&app).as_deref(), Some("foo"), "the whole word, as standard keys select");
-        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 3)], "drawn as it is");
+        assert_eq!(app.visual_selection_segments(0..10), vec![(0, 0, 3)], "drawn as it is");
         app.press("C-c");
         assert_eq!(app.clipboard_text().unwrap_or_else(|| app.vim.register().0.to_string()), "foo", "copied whole");
         app.press("C-d");

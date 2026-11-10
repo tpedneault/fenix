@@ -11,18 +11,20 @@ use super::motion_host::{Ruler, RulerMark};
 /// What `polish_pane` needs to know about a pane besides its buffer.
 pub(super) struct PaneView<'a> {
     pub buffer: BufferId,
-    /// The document line on each screen row.
-    pub lines: &'a [usize],
+    /// What is on each screen row.
+    pub map: &'a super::rows::RowMap,
     pub rows: usize,
     pub gutter_chars: usize,
     pub scroll_col: usize,
     pub rendered_scroll: f32,
     pub cursor_line: usize,
-    /// Rows holding a tab: their columns don't map one to one.
-    pub tab_rows: &'a HashSet<usize>,
+    /// Lines holding a tab or a decoration: their columns don't map one
+    /// to one.
+    pub tab_lines: &'a HashSet<usize>,
     /// The Visual selection, as `(row, start_col, end_col)`.
     pub selection: &'a Segments,
-    pub remap_col: &'a dyn Fn(usize, usize) -> usize,
+    /// A line's char column -> its visual column.
+    pub vcol: &'a dyn Fn(usize, usize) -> usize,
     /// The pane's extra cursors (standard keys), for the ruler.
     pub carets: &'a [usize],
     /// The pane it is, for what its ruler's click snaps to.
@@ -96,7 +98,6 @@ impl App {
         let mut out = PanePolish::default();
         let polish = self.config.polish.clone();
         let mut rows = split_rows(std::mem::take(spans));
-        let row_of = |line: usize| view.lines.iter().position(|&l| l == line).filter(|&r| r < view.rows);
 
         // Problems.
         let inline = polish.diagnostics_inline.as_deref().unwrap_or("all");
@@ -132,28 +133,33 @@ impl App {
                 let [r, g, b, _] = glyphon_to_rgba(self.severity_color(sev));
                 let alpha = if sev == Severity::Info { 0.6 } else { 0.95 };
                 for line in start_line..=end_line {
-                    let Some(row) = row_of(line) else { continue };
                     let s = if line == start_line { start_col } else { 0 };
                     let e = if line == end_line { end_col } else { ob.buffer.line_len(line) };
                     let raw_end = e;
-                    let (s, e) = ((view.remap_col)(row, s), (view.remap_col)(row, e));
-                    // All of it left of a pane scrolled sideways: nothing to mark.
-                    if view.scroll_col > 0 && e == 0 && raw_end > 0 {
-                        continue;
+                    for (row, s, e) in view.map.segments(line, (view.vcol)(line, s)..(view.vcol)(line, e)) {
+                        // All of it left of a pane scrolled sideways: nothing to mark.
+                        if view.scroll_col > 0 && e == 0 && raw_end > 0 {
+                            continue;
+                        }
+                        out.squiggles.push((row, s, e.max(s + 1), [r, g, b, alpha]));
                     }
-                    out.squiggles.push((row, s, e.max(s + 1), [r, g, b, alpha]));
                 }
             }
             for (line, (sev, message)) in &worst {
-                let Some(row) = row_of(*line) else { continue };
+                // The number is on the line's first row, the message at
+                // the end of its last.
+                let on = view.map.rows_of(*line);
+                if on.is_empty() {
+                    continue;
+                }
                 let color = self.severity_color(*sev);
-                let Some(cells) = rows.get_mut(row) else { continue };
                 if view.gutter_chars > 0 && inline != "off" {
                     // The line number takes the problem's colour.
-                    if let Some(first) = cells.first_mut() {
+                    if let Some(first) = rows.get_mut(on.start).and_then(|cells| cells.first_mut()) {
                         first.1 = color;
                     }
                 }
+                let Some(cells) = rows.get_mut(on.end - 1) else { continue };
                 let show_message = match messages {
                     "all" => true,
                     "cursor" => *line == view.cursor_line,
@@ -172,8 +178,8 @@ impl App {
             let palette = self.theme.brackets.clone();
             if let Some(ob) = self.buffers.get(view.buffer) {
                 for (row, cells) in rows.iter_mut().enumerate().take(view.rows) {
-                    let Some(&line) = view.lines.get(row) else { continue };
-                    if view.tab_rows.contains(&row) || line >= ob.buffer.line_count() {
+                    let Some(line) = view.map.row(row).filter(|r| r.kind == super::rows::RowKind::Text).map(|r| r.line) else { continue };
+                    if view.tab_lines.contains(&line) || line >= ob.buffer.line_count() {
                         continue;
                     }
                     let start = ob.buffer.line_start_char(line) + view.scroll_col;
@@ -549,22 +555,23 @@ mod tests {
     fn polish(app: &mut App, spans: &mut RowSpans) -> PanePolish {
         let buffer = app.focused_buffer_id();
         let lines: Vec<usize> = (0..app.open().buffer.line_count()).collect();
-        let tab_rows = HashSet::new();
+        let map = super::super::rows::RowMap::lines(&lines, 0);
+        let tab_lines = HashSet::new();
         let selection = Segments::new();
-        let remap = |_row: usize, col: usize| col;
+        let vcol = |_line: usize, col: usize| col;
         let carets: Vec<usize> = app.extra_carets().iter().map(|c| c.at).collect();
         let pane = app.focused_pane_id();
         let view = PaneView {
             buffer,
-            lines: &lines,
+            map: &map,
             rows: lines.len(),
             gutter_chars: 0,
             scroll_col: 0,
             rendered_scroll: 0.0,
             cursor_line: 1,
-            tab_rows: &tab_rows,
+            tab_lines: &tab_lines,
             selection: &selection,
-            remap_col: &remap,
+            vcol: &vcol,
             carets: &carets,
             pane,
         };
