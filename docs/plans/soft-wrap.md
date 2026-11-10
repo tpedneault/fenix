@@ -267,6 +267,19 @@ stage by stage.
 - `frame_layout` builds what a frame lays out of a pane; `redraw`,
   `pane_rows` (the hit-tests) and the tests' `focused_layout` all use
   it. The `:s` preview is worked out once a frame, not per run of lines.
+- Second review: blanks after a row's last word hang only as far as the
+  row's last (kept) column; any more go on to the next rows like other
+  chars, so a row, blanks and all, is never wider than the pane, every
+  column of a wrapped line has a cell of its own, and `break_line_rows`'
+  first k rows are the first k of the whole break whatever k is (a
+  property test checks it over blank runs, tabs, wide chars and marks).
+  `locate` and `at` are each other's inverse on every cell but two: a
+  click in a continuation row's indent is its first column, and a click
+  right of a row that the line goes on from is that row's last column
+  (on a full row, the kept column's own column: the blank hanging there,
+  or the row's last char). `segments` is held to the pane's edge as a
+  guard. A very long line's highlights are asked for by the char columns
+  its rows' visual ones come to.
 - Left: `pane_text_cols` and `wrap_overrides` keep an entry for a pane
   or buffer that's gone (one small entry each).
 
