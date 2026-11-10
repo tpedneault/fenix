@@ -80,8 +80,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "after_delay"` saves a file a moment after its last edit
   (`editor.auto_save_delay_ms`, a second), `"on_focus_change"` when you
   leave it for another buffer, pane or application. It never writes over
-  a file that changed on disk, a buffer with no file, a read-only one or
-  a remote project's, and it doesn't format.
+  a file that changed on disk (it waits until you've settled that), nor
+  a buffer with no file, a file not yet on disk, a read-only one or a
+  remote project's, and it doesn't format.
 - More of VS Code's keys, with standard keys: Ctrl+Shift+K deletes the
   line, Ctrl+Enter and Ctrl+Shift+Enter open one below or above, Ctrl+L
   selects the line (again, the next), Ctrl+U takes back the last cursor
