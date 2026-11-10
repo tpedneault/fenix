@@ -18629,8 +18629,16 @@ impl App {
         match self.vim.visual_kind() {
             VisualKind::Char => {
                 let cursor_idx = self.cursor().char_idx;
-                let (lo, hi) =
-                    if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+                // Standard keys select between the anchor and the cursor,
+                // the cursor's character not in it -- drawn so, as the
+                // extra cursors' selections are.
+                let (lo, hi) = if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+                    (anchor.min(cursor_idx), anchor.max(cursor_idx))
+                } else if anchor <= cursor_idx {
+                    (anchor, cursor_idx + 1)
+                } else {
+                    (cursor_idx, anchor + 1)
+                };
                 let hi = hi.min(self.open().buffer.len_chars());
                 segments = self.range_to_segments(lo..hi, visible_lines);
             }
@@ -19597,6 +19605,13 @@ impl App {
     /// (which no headless test ever constructs), so it's directly
     /// testable the same way `frame_geometry` already is.
     fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        // A click that moves the cursors is a move Ctrl+U takes back.
+        let before = self.caret_mark();
+        self.handle_click_at_inner(pos, window_width, window_height);
+        self.note_caret_move(before);
+    }
+
+    fn handle_click_at_inner(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         if self.click_breadcrumb(&geometry, pos) { return }

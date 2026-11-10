@@ -342,7 +342,10 @@ impl App {
                 let word = self.buffers.get(hit.buffer).map_or(at..at, |ob| fenix_vim::word_at(&ob.buffer, at, self.vim.iskeyword_extra()));
                 let (start, end) = if word.is_empty() { (at, at + 1) } else { (word.start, word.end) };
                 self.vim.select(VisualKind::Char, start);
-                self.put_cursor(pane, end - 1);
+                // Standard keys' selection ends before the cursor; Vim's
+                // takes the cursor's character.
+                let last = if self.vim.policy() == fenix_vim::EditPolicy::Standard { end } else { end - 1 };
+                self.put_cursor(pane, last);
                 self.mouse.drag = Some(TextDrag { pane, unit: Unit::Word, anchor: start, anchor_end: end, started: true });
             }
             _ => {
@@ -411,12 +414,15 @@ impl App {
             Unit::Word => {
                 let word = self.buffers.get(hit.buffer).map_or(at..at + 1, |ob| fenix_vim::word_at(&ob.buffer, at, self.vim.iskeyword_extra()));
                 let (start, end) = if word.is_empty() { (at, at + 1) } else { (word.start, word.end) };
+                // Standard keys' selection doesn't take the cursor's
+                // character: its ends are one further out.
+                let inclusive = usize::from(self.vim.policy() != fenix_vim::EditPolicy::Standard);
                 if start < drag.anchor {
-                    self.vim.select(VisualKind::Char, drag.anchor_end - 1);
+                    self.vim.select(VisualKind::Char, drag.anchor_end - inclusive);
                     self.put_cursor(drag.pane, start);
                 } else {
                     self.vim.select(VisualKind::Char, drag.anchor);
-                    self.put_cursor(drag.pane, end.max(drag.anchor + 1) - 1);
+                    self.put_cursor(drag.pane, end.max(drag.anchor + 1) - inclusive);
                 }
             }
         }
@@ -1352,6 +1358,38 @@ mod tests {
     fn standard(app: &mut App) {
         app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
         app.sync_key_policy();
+    }
+
+    #[test]
+    fn standard_keys_a_double_click_selects_the_whole_word_and_ctrl_d_finds_whole_words() {
+        let mut app = app_with("foo for foobar foo");
+        standard(&mut app);
+        let at_pos = at(&app, 0, 1);
+        click(&mut app, at_pos);
+        click(&mut app, at_pos);
+        assert_eq!(selection(&app).as_deref(), Some("foo"), "the whole word, as standard keys select");
+        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 3)], "drawn as it is");
+        app.press("C-c");
+        assert_eq!(app.clipboard_text().unwrap_or_else(|| app.vim.register().0.to_string()), "foo", "copied whole");
+        app.press("C-d");
+        app.type_text("x");
+        assert_eq!(app.text(), "x for foobar x", "the next foo, whole: not for's fo nor foobar's");
+    }
+
+    #[test]
+    fn standard_keys_a_triple_click_then_ctrl_d_keeps_the_first_line_whole() {
+        let mut app = app_with("  }\nx\n  }\n");
+        standard(&mut app);
+        let at_pos = at(&app, 0, 2);
+        click(&mut app, at_pos);
+        click(&mut app, at_pos);
+        click(&mut app, at_pos);
+        app.press("C-d");
+        assert_eq!(app.extra_carets().len(), 1);
+        let extra = app.extra_carets()[0];
+        assert_eq!((extra.anchor, extra.at), (Some(0), 4), "line 1 and its break, as it was selected");
+        app.type_text("y");
+        assert_eq!(app.text(), "yx\ny", "both lines replaced whole");
     }
 
     #[test]
