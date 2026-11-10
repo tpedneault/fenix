@@ -34,6 +34,11 @@ impl App {
         let Some(state) = self.workspaces.active_pane_states().get(&pane) else { return (0, 0) };
         let buffer = &self.open().buffer;
         let (line, _) = buffer.line_col(&state.cursor);
+        // Standard keys: a selection that ends at a line's very start
+        // doesn't take that line.
+        if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+            return self.vim.standard_lines(buffer, &state.cursor);
+        }
         if self.vim.mode() == Mode::Visual {
             let anchor = self.vim.visual_anchor().min(buffer.rope().len_chars());
             let anchor_line = buffer.rope().char_to_line(anchor);
@@ -264,6 +269,117 @@ impl App {
         buffer.break_undo_run();
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
+    }
+
+    /// `act` on the focused buffer and its cursor, with standard keys'
+    /// policy, as one undo step.
+    fn standard_edit(&mut self, act: impl FnOnce(&mut fenix_vim::VimState, &mut fenix_core::Buffer, &mut fenix_core::Cursor)) {
+        let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+        if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+            ob.buffer.begin_undo_group();
+            act(&mut self.vim, &mut ob.buffer, &mut state.cursor);
+            ob.buffer.break_undo_run();
+            ob.buffer.end_undo_group();
+        }
+        self.wake_caret();
+    }
+
+    /// Vim's keys for a line command, from Normal or Visual as they are.
+    fn vim_line_keys(&mut self, normal: &str, visual: &str) {
+        let keys = if self.vim.mode() == Mode::Visual { visual } else { normal };
+        let keys: Vec<KeyPress> = keys.chars().map(KeyPress::char).collect();
+        self.vim_keys_from_normal(&keys);
+    }
+
+    /// `edit.delete_line` (Ctrl+Shift+K): the cursor's line, or the
+    /// selection's lines, deleted -- with standard keys not to the
+    /// clipboard; with Vim's, `dd` (or `D` on a selection).
+    pub(crate) fn cmd_delete_line(&mut self) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.delete_lines(buffer, cursor));
+        } else {
+            self.vim_line_keys("dd", "D");
+        }
+    }
+
+    /// `edit.new_line_below` / `_above` (Ctrl+Enter / Ctrl+Shift+Enter): a
+    /// line opened below (or above) the cursor's, indented, typing there
+    /// -- `o` and `O`.
+    pub(crate) fn cmd_new_line(&mut self, below: bool) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.vim.mode() == Mode::Visual {
+            self.leave_visual();
+        }
+        self.vim_keys_from_normal(&[KeyPress::char(if below { 'o' } else { 'O' })]);
+    }
+
+    /// `edit.select_line` (Ctrl+L): the cursor's line selected; again, the
+    /// next one too. With Vim keys, `V` and then `j`.
+    pub(crate) fn cmd_select_line(&mut self) {
+        if self.standard_keys() {
+            if self.focused_takes_typing() {
+                self.standard_edit(|vim, buffer, cursor| vim.select_line(buffer, cursor));
+            }
+        } else if self.vim.mode() == Mode::Visual {
+            self.vim_keys_from_normal(&[KeyPress::char('j')]);
+        } else {
+            self.vim_keys_from_normal(&[KeyPress::char('V')]);
+        }
+    }
+
+    /// `edit.indent_lines` / `edit.outdent_lines` (Ctrl+] / Ctrl+[): the
+    /// line, or the selection's lines, a level in or out -- `>>` and
+    /// `<<` with Vim keys.
+    pub(crate) fn cmd_indent_lines(&mut self, indent: bool) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.indent_lines(buffer, cursor, indent));
+        } else if indent {
+            self.vim_line_keys(">>", ">");
+        } else {
+            self.vim_line_keys("<<", "<");
+        }
+    }
+
+    /// `nav.matching_bracket` (Ctrl+Shift+\): to the bracket that pairs
+    /// with the one at the cursor -- or, with standard keys, just before
+    /// it -- as `%` goes.
+    pub(crate) fn cmd_matching_bracket(&mut self) {
+        let pane = self.focused_pane_id();
+        if self.standard_keys() {
+            if self.vim.mode() == Mode::Visual {
+                self.leave_visual();
+                self.enter_insert_in_place();
+            }
+            let buffer = &self.open().buffer;
+            let at = self.cursor().char_idx;
+            let bracket = |i: usize| buffer.char_at(i).is_some_and(|c| "()[]{}".contains(c));
+            if !bracket(at) && at > 0 && bracket(at - 1) {
+                self.put_cursor(pane, at - 1);
+            }
+        }
+        let (buffer, from) = (self.focused_buffer_id(), self.cursor().char_idx);
+        self.vim_keys_from_normal(&[KeyPress::char('%')]);
+        // A jump, as `%` is: Ctrl+O comes back.
+        if self.cursor().char_idx != from {
+            self.record_jump(super::JumpEntry { buffer, char_idx: from });
+        }
+    }
+
+    /// `code.fold` / `code.unfold` (Ctrl+Shift+[ / Ctrl+Shift+]): the
+    /// fold the cursor is in closed or opened -- `zc` and `zo`.
+    pub(crate) fn cmd_fold(&mut self, close: bool) {
+        if self.vim.mode() == Mode::Visual {
+            self.leave_visual();
+        }
+        self.fold_command(if close { fenix_vim::FoldCommand::Close { recursive: false } } else { fenix_vim::FoldCommand::Open { recursive: false } });
     }
 
     /// `edit.select_all`.

@@ -73,6 +73,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nav.goto_line`, the bracket jumps (`nav.next_problem`…, on `SPC ]` and
   `SPC [` too), panes by number, a tab to the next pane, the recent-buffer
   switcher, and a keys page (`SPC h ?`).
+- More of VS Code's keys, with standard keys: Ctrl+Shift+K deletes the
+  line, Ctrl+Enter and Ctrl+Shift+Enter open one below or above, Ctrl+L
+  selects the line (again, the next), Ctrl+U takes back the last cursor
+  move or added cursor, Ctrl+Shift+\ goes to the matching bracket,
+  Ctrl+] and Ctrl+[ indent and dedent, Ctrl+Shift+[ and Ctrl+Shift+] fold
+  and unfold, Ctrl+\ splits the pane, Ctrl+Shift+G opens Git. The F-keys
+  were already the debugger's.
+- Every problem in one list: `code.problems` (Ctrl+Shift+M, `SPC c p`),
+  errors first, the quickfix list too; and the project's symbols as the
+  language servers find them for what's typed: `code.project_symbols`
+  (Ctrl+T, `SPC c j`).
 - A split button after each pane's tabs.
 - Extensions: the welcome offers a Python pack -- the Python language pack, Jupyter
   notebooks (`fenix.jupyter`, `.ipynb` files run on a kernel) and the CSV table.

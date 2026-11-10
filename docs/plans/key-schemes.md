@@ -892,6 +892,16 @@ Where the implementation differs from the plan above, and why:
   other text matches anywhere, case and all. Where to put them is
   `fenix-vim`'s `occurrence` module; Vim keys get a message, since only
   standard keys have extra cursors.
+- **The rest of §2.7's keys** came after: Ctrl+Shift+K, Ctrl+Enter
+  and Ctrl+Shift+Enter, Ctrl+L, Ctrl+U (cursor undo: the cursors before
+  each key that moved them without an edit, a hundred deep; an edit
+  forgets them), Ctrl+Shift+\, Ctrl+] and Ctrl+[, Ctrl+Shift+[ and ]
+  (bound as `C-{` and `C-}`, what a US keyboard sends), Ctrl+\,
+  Ctrl+T (`workspace/symbol`, asked again as the query changes),
+  Ctrl+Shift+M and Ctrl+Shift+G. The line commands are `fenix-vim`'s
+  with standard keys and Vim's own keys (`dd`, `o`, `V`, `>>`, `%`,
+  `zc`) with Vim keys. F5, F9, F10 and F11 were already the debugger's,
+  ahead of the keymap and in every mode, so they stay out of it.
 - **Tabs already had a ×** (§2.8); the split button is the new part. It
   sits right after the tabs.
 - **The keys page** is `SPC h ?` (`help.keys_sheet`), a Markdown page of

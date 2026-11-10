@@ -52,6 +52,7 @@ mod keys_host;
 pub(crate) use keys_host::translate_leader;
 mod edit_commands;
 mod carets;
+mod problems;
 #[cfg(test)]
 mod test_keys;
 #[cfg(test)]
@@ -1367,6 +1368,8 @@ enum PendingLspRequest {
     WorkspaceNames,
     /// `fenix/lsp`'s, for its client (`LspFanout::Control`).
     Control { fanout: u64 },
+    /// `workspace/symbol`, for the symbol picker's question `generation`.
+    ProjectSymbols { generation: u64 },
     /// An agent's, through Fenix's tools (`agent_lsp`).
     Agent { id: u64 },
 }
@@ -2389,6 +2392,12 @@ enum ActivePicker {
     /// matches -- confirming behaves exactly like `Grep`'s, and the same
     /// list becomes the quickfix list for `SPC p n`/`SPC p N`.
     ProjectTodos(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `code.problems` (Ctrl+Shift+M): every problem reported, in every
+    /// file, as places to go -- confirming goes there, as `ProjectTodos`.
+    Problems(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `code.project_symbols` (Ctrl+T): what the language servers find
+    /// for what's typed (`workspace/symbol`), asked again as it changes.
+    ProjectSymbols(fenix_picker::PickerState<fenix_project::GrepMatch>),
     SwitchProject(fenix_picker::PickerState<PathBuf>),
     SwitchBuffer(fenix_picker::PickerState<BufferId>),
     /// `SPC f v`: unsaved work a previous session left behind, one row
@@ -2514,6 +2523,8 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::BufferSearch(s) => s.push_char(c),
         ActivePicker::BufferTodos(s) => s.push_char(c),
         ActivePicker::ProjectTodos(s) => s.push_char(c),
+        ActivePicker::Problems(s) => s.push_char(c),
+        ActivePicker::ProjectSymbols(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
         ActivePicker::Outline(s) => s.push_char(c),
@@ -2550,6 +2561,8 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::BufferSearch(s) => s.backspace(),
         ActivePicker::BufferTodos(s) => s.backspace(),
         ActivePicker::ProjectTodos(s) => s.backspace(),
+        ActivePicker::Problems(s) => s.backspace(),
+        ActivePicker::ProjectSymbols(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
         ActivePicker::Outline(s) => s.backspace(),
@@ -2586,6 +2599,8 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
         ActivePicker::BufferTodos(s) => s.move_selection(delta),
         ActivePicker::ProjectTodos(s) => s.move_selection(delta),
+        ActivePicker::Problems(s) => s.move_selection(delta),
+        ActivePicker::ProjectSymbols(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
         ActivePicker::Outline(s) => s.move_selection(delta),
@@ -2625,6 +2640,8 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
         ActivePicker::BufferTodos(s) => s.toggle_mark(),
         ActivePicker::ProjectTodos(s) => s.toggle_mark(),
+        ActivePicker::Problems(s) => s.toggle_mark(),
+        ActivePicker::ProjectSymbols(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
         ActivePicker::Outline(s) => s.toggle_mark(),
@@ -2661,6 +2678,8 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::BufferSearch(s) => s.query(),
         ActivePicker::BufferTodos(s) => s.query(),
         ActivePicker::ProjectTodos(s) => s.query(),
+        ActivePicker::Problems(s) => s.query(),
+        ActivePicker::ProjectSymbols(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
         ActivePicker::Outline(s) => s.query(),
@@ -2697,6 +2716,8 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::BufferSearch(s) => s.len(),
         ActivePicker::BufferTodos(s) => s.len(),
         ActivePicker::ProjectTodos(s) => s.len(),
+        ActivePicker::Problems(s) => s.len(),
+        ActivePicker::ProjectSymbols(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
         ActivePicker::Outline(s) => s.len(),
@@ -2733,6 +2754,8 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::BufferSearch(s) => s.selected_row(),
         ActivePicker::BufferTodos(s) => s.selected_row(),
         ActivePicker::ProjectTodos(s) => s.selected_row(),
+        ActivePicker::Problems(s) => s.selected_row(),
+        ActivePicker::ProjectSymbols(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
         ActivePicker::Outline(s) => s.selected_row(),
@@ -2774,6 +2797,8 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Problems(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::ProjectSymbols(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Outline(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5302,6 +5327,12 @@ pub struct App {
     /// proc defined in another file -- found by the Tcl extension's ctags
     /// -- is colored as one.
     lsp_workspace_names: HashMap<LspKey, (Instant, std::sync::Arc<std::collections::HashSet<String>>)>,
+    /// What the symbol picker (Ctrl+T) has asked, and been answered.
+    symbol_search: problems::SymbolSearch,
+    /// Where the cursors were before their last moves, for Ctrl+U
+    /// (`edit.cursor_undo`); and whether it's Ctrl+U moving them now.
+    caret_marks: Vec<carets::CaretMark>,
+    caret_undoing: bool,
     /// Each Tcl buffer's language servers, as last worked out (every few
     /// seconds, not every frame: it can touch the disk) -- whose
     /// `lsp_workspace_names` its calls are colored by.
@@ -6162,6 +6193,9 @@ impl App {
             page_images: Default::default(),
             lsp_sessions: HashMap::new(),
             lsp_workspace_names: HashMap::new(),
+            symbol_search: Default::default(),
+            caret_marks: Vec::new(),
+            caret_undoing: false,
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
             lsp_starting: HashMap::new(),
@@ -7386,6 +7420,7 @@ impl App {
     fn apply_lsp_response(&mut self, key: LspKey, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         match pending {
             PendingLspRequest::Agent { id } => self.agent_lsp_answered(id, result.map_err(|e| e.message)),
+            PendingLspRequest::ProjectSymbols { generation } => self.project_symbols_answered(key, generation, result.map_err(|e| e.message)),
             PendingLspRequest::Initialize => match result {
                 Ok(value) => {
                     let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
@@ -14508,7 +14543,7 @@ impl App {
                 self.active_picker = None;
                 self.switch_to_project(root);
             }
-            Some(ActivePicker::ProjectTodos(state)) => {
+            Some(ActivePicker::ProjectTodos(state) | ActivePicker::Problems(state) | ActivePicker::ProjectSymbols(state)) => {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
@@ -16300,8 +16335,10 @@ impl App {
         }
         self.change_capture.push(keypress);
         let before = self.motion_before_key();
+        let carets_before = self.caret_mark();
         self.route_keypress(keypress, event_loop);
         self.motion_after_key(before, keypress);
+        self.note_caret_move(carets_before);
         // Standard keys: back into Insert (or out of it) for where the key
         // left you.
         self.settle_keys();
@@ -16488,6 +16525,7 @@ impl App {
         }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
+            self.ask_project_symbols();
             if let Some(id) = self.queued_command.take() {
                 self.run_command_with(event_loop, &id);
                 self.wake_caret();
@@ -17708,6 +17746,8 @@ impl App {
             let (label, count) = match &self.active_picker {
                 Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
                 Some(picker @ (ActivePicker::BufferTodos(_) | ActivePicker::ProjectTodos(_))) => ("TODOS", picker_len(picker)),
+                Some(picker @ ActivePicker::Problems(_)) => ("PROBLEMS", picker_len(picker)),
+                Some(picker @ ActivePicker::ProjectSymbols(_)) => ("SYMBOLS", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
                 Some(picker @ ActivePicker::Recovery(_)) => ("RECOVER", picker_len(picker)),
@@ -19565,6 +19605,13 @@ impl App {
     /// (which no headless test ever constructs), so it's directly
     /// testable the same way `frame_geometry` already is.
     fn handle_click_at(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        // A click that moves the cursors is a move Ctrl+U takes back.
+        let before = self.caret_mark();
+        self.handle_click_at_inner(pos, window_width, window_height);
+        self.note_caret_move(before);
+    }
+
+    fn handle_click_at_inner(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         if self.click_breadcrumb(&geometry, pos) { return }

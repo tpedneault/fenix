@@ -270,7 +270,8 @@ fn key_for_says_the_keys_the_scheme_has() {
     assert_eq!(app.key_for("git.open").as_deref(), Some("SPC g g"));
     standard(&mut app);
     assert_eq!(app.key_for("code.goto_definition").as_deref(), Some("F12"));
-    assert_eq!(app.key_for("git.open").as_deref(), Some("C-k g g"));
+    assert_eq!(app.key_for("help.keys_sheet").as_deref(), Some("C-k h ?"), "a leader key, with the leader's chord");
+    assert_eq!(app.key_for("git.open").as_deref(), Some("C-S-g"), "a chord over the leader's");
     assert_eq!(app.key_for("commands.palette").as_deref(), Some("F1"), "the shortest");
     assert_eq!(super::translate_leader("SPC SPC, (SPC a a) SPCX", "C-k"), "C-k SPC, (C-k a a) SPCX", "the second key of SPC SPC is Space");
 }
@@ -387,4 +388,160 @@ fn hover_and_review_hints_say_the_leader_s_chord() {
     assert_eq!(app.keys_text("SPC a y keep · SPC a x reject · ]a next"), "C-k a y keep · C-k a x reject · C-k ] a next");
     assert_eq!(app.keys_text("SPC g a stage · SPC g d discard · ]h next"), "C-k g a stage · C-k g d discard · M-F5 next");
     assert_eq!(app.keys_text("   ✓ agent changes: 2 files to review (SPC a r, ]a)"), "   ✓ agent changes: 2 files to review (C-k a r, C-k ] a)");
+}
+
+#[test]
+fn ctrl_shift_k_deletes_the_line_as_one_undo_step() {
+    let (mut app, _f) = standard_on("a.txt", "one\ntwo\nthree");
+    app.press_all("Down Right");
+    app.press("C-S-k");
+    assert_eq!(app.text(), "one\nthree");
+    assert_eq!(app.line_col(), (1, 1), "the line after, at the column");
+    app.press_all("S-Up C-S-k");
+    assert_eq!(app.text(), "", "the selection's lines");
+    app.press("C-z");
+    assert_eq!(app.text(), "one\nthree", "one undo");
+}
+
+#[test]
+fn ctrl_enter_opens_a_line_below_and_ctrl_shift_enter_above() {
+    let (mut app, _f) = standard_on("a.rs", "fn a() {\n    x();\n}\n");
+    app.press_all("Down Right");
+    app.press("C-Enter");
+    app.type_text("y();");
+    assert_eq!(app.text(), "fn a() {\n    x();\n    y();\n}\n", "indented, wherever the cursor was on the line");
+    app.press("C-S-Enter");
+    app.type_text("w();");
+    assert_eq!(app.text(), "fn a() {\n    x();\n    w();\n    y();\n}\n");
+    assert_eq!(app.vim.mode(), Mode::Insert);
+}
+
+#[test]
+fn ctrl_l_selects_the_line_then_the_next() {
+    let (mut app, _f) = standard_on("a.txt", "ab\ncd\nef\n");
+    app.press_all("C-l C-l");
+    app.type_text("x");
+    assert_eq!(app.text(), "xef\n", "both lines, breaks and all, replaced");
+}
+
+#[test]
+fn ctrl_brackets_indent_and_dedent_and_ctrl_shift_backslash_finds_the_pair() {
+    let (mut app, _f) = standard_on("a.txt", "(ab)\ncd");
+    app.press("Right");
+    app.press("C-]");
+    assert_eq!(app.text(), "    (ab)\ncd");
+    assert_eq!(app.line_col(), (0, 5), "on the same text");
+    app.press("C-[");
+    assert_eq!(app.text(), "(ab)\ncd");
+    app.press("End");
+    app.press("C-|");
+    assert_eq!(app.line_col(), (0, 0), "from just after a bracket, to its pair");
+    assert_eq!(app.vim.mode(), Mode::Insert, "still typing");
+    app.press("C-|");
+    assert_eq!(app.line_col(), (0, 3));
+}
+
+#[test]
+fn ctrl_u_takes_back_the_last_cursor_move_or_added_cursor() {
+    let (mut app, _f) = standard_on("a.txt", "foo foo foo\n");
+    app.press_all("Right Right");
+    app.press("C-u");
+    assert_eq!(app.line_col(), (0, 1), "a move at a time");
+    app.press("C-u");
+    assert_eq!(app.line_col(), (0, 0));
+    app.press_all("C-d C-d C-d");
+    assert_eq!(app.extra_carets().len(), 2);
+    app.press("C-u");
+    assert_eq!(app.extra_carets().len(), 1, "the last cursor added, taken back");
+    app.press_all("C-u C-u");
+    assert!(app.extra_carets().is_empty());
+    assert!(!app.vim.is_selecting(), "back before the word was selected");
+    app.type_text("x");
+    app.press("C-u");
+    assert!(app.modeline_text().contains("no cursor move"), "an edit leaves nothing to undo: {}", app.modeline_text());
+}
+
+#[test]
+fn the_workbench_chords_run_their_commands() {
+    let (mut app, _f) = standard_on("a.txt", "");
+    let chord = |app: &App, key: &str| app.chord_command(crate::keymap::parse_key(key).unwrap());
+    assert_eq!(chord(&app, "C-S-g"), Some("git.open"));
+    assert_eq!(chord(&app, "C-t"), Some("code.project_symbols"));
+    assert_eq!(chord(&app, "C-S-m"), Some("code.problems"));
+    assert_eq!(chord(&app, "C-{"), Some("code.fold"));
+    assert_eq!(chord(&app, "C-}"), Some("code.unfold"));
+    let panes = app.windows().windows().len();
+    app.press("C-\\");
+    assert_eq!(app.windows().windows().len(), panes + 1, "Ctrl+\\ splits the pane");
+}
+
+#[test]
+fn the_line_commands_are_vim_s_own_keys_with_vim_keys() {
+    let (mut app, _f) = app_on_file("a.txt", "one\ntwo\n");
+    app.run_cmd("edit.delete_line");
+    assert_eq!(app.text(), "two\n", "dd");
+    app.run_cmd("edit.indent_lines");
+    assert_eq!(app.text(), "    two\n", ">>");
+    app.run_cmd("edit.new_line_below");
+    assert_eq!(app.vim.mode(), Mode::Insert, "o");
+    app.press("Esc");
+    let before = app.text();
+    app.press("C-l");
+    assert_eq!(app.text(), before, "Ctrl+L is still Vim's");
+    assert_ne!(app.vim.mode(), Mode::Visual, "nothing selected");
+}
+
+#[test]
+fn ctrl_shift_brackets_close_and_open_the_fold() {
+    let (mut app, _f) = standard_on("a.rs", "fn a() {\n    x();\n}\n");
+    app.press("Down");
+    app.press("C-{");
+    let id = app.focused_buffer_id();
+    assert!(app.code_folds.get(&id).is_some_and(|f| !f.is_empty()), "closed");
+    app.press("C-}");
+    assert!(app.code_folds.get(&id).is_none_or(|f| f.is_empty()), "open again");
+}
+
+#[test]
+fn ctrl_shift_backslash_is_a_jump_ctrl_o_comes_back_from() {
+    let (mut app, _f) = standard_on("a.txt", "(ab\ncd)");
+    app.press("C-|");
+    assert_eq!(app.line_col(), (1, 2), "to the pair");
+    app.run_cmd("nav.jump_back");
+    assert_eq!(app.line_col(), (0, 0), "back");
+}
+
+#[test]
+fn a_whole_selection_is_its_lines_to_every_line_command() {
+    let (mut app, _f) = standard_on("a.txt", "a\nb");
+    app.press_all("C-a C-S-k");
+    assert_eq!(app.text(), "", "Ctrl+A: both lines, the last with no break");
+    let (mut app, _f) = standard_on("a.txt", "one\ntwo\nthree\nfour\n");
+    app.press_all("Down C-l M-Down");
+    assert_eq!(app.text(), "one\nthree\ntwo\nfour\n", "Ctrl+L then Alt+Down moves its one line");
+    let (mut app, _f) = standard_on("a.txt", "ab\ncd\n");
+    app.press_all("C-l C-]");
+    assert_eq!(app.text(), "    ab\ncd\n", "and Ctrl+] indents one");
+}
+
+#[test]
+fn ctrl_u_keeps_each_buffer_s_moves_and_takes_back_a_click_s() {
+    let (mut app, _f) = standard_on("a.txt", "abc\n");
+    let a = app.focused_buffer_id();
+    app.press_all("Right Right");
+    app.run_cmd("buffer.scratch");
+    app.press("C-u");
+    assert!(app.modeline_text().contains("no cursor move"), "{}", app.modeline_text());
+    app.switch_focused_to_buffer(a);
+    app.press("C-u");
+    assert_eq!(app.line_col(), (0, 1), "a's moves were kept");
+}
+
+#[test]
+fn the_new_commands_run_from_the_palette_too() {
+    let (mut app, _f) = standard_on("a.txt", "x\n");
+    for id in ["git.open", "code.problems", "code.project_symbols", "edit.cursor_undo", "nav.matching_bracket", "code.fold", "code.unfold"] {
+        app.run_cmd(id);
+        app.active_picker = None;
+    }
 }

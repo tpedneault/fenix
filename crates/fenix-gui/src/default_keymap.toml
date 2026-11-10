@@ -887,6 +887,16 @@ command = "code.breadcrumbs"
 # (`code.format_selection`, above); `z` matches real Vim's own
 # `zo`/`zc`/`za` fold mnemonic instead of colliding with it.
 [[leader]]
+keys = "SPC c p"
+label = "problems, every file's"
+command = "code.problems"
+
+[[leader]]
+keys = "SPC c j"
+label = "a symbol in the project"
+command = "code.project_symbols"
+
+[[leader]]
 keys = "SPC c z"
 label = "toggle fold"
 command = "code.toggle_fold"
@@ -1626,7 +1636,68 @@ command = "nav.goto_line"
 scheme = "standard"
 when = "text"
 
+[[keys]]
+keys = "C-S-k"
+command = "edit.delete_line"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-Enter"
+command = "edit.new_line_below"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-S-Enter"
+command = "edit.new_line_above"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-l"
+command = "edit.select_line"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-]"
+command = "edit.indent_lines"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-["
+command = "edit.outdent_lines"
+scheme = "standard"
+when = "text"
+
+# Ctrl+Shift+\, [ and ], as a US keyboard sends them.
+[[keys]]
+keys = "C-|"
+command = "nav.matching_bracket"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-{"
+command = "code.fold"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "C-}"
+command = "code.unfold"
+scheme = "standard"
+when = "text"
+
 # More cursors
+[[keys]]
+keys = "C-u"
+command = "edit.cursor_undo"
+scheme = "standard"
+when = "text"
+
 [[keys]]
 keys = "C-d"
 command = "edit.add_next_occurrence"
@@ -1731,6 +1802,16 @@ command = "code.outline"
 scheme = "standard"
 
 [[keys]]
+keys = "C-t"
+command = "code.project_symbols"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-m"
+command = "code.problems"
+scheme = "standard"
+
+[[keys]]
 keys = "F8"
 command = "nav.next_problem"
 scheme = "standard"
@@ -1786,6 +1867,16 @@ scheme = "standard"
 [[keys]]
 keys = "C-S-e"
 command = "explorer.reveal_current"
+scheme = "standard"
+
+[[keys]]
+keys = "C-S-g"
+command = "git.open"
+scheme = "standard"
+
+[[keys]]
+keys = "C-\\"
+command = "window.split_vertical"
 scheme = "standard"
 
 [[keys]]
