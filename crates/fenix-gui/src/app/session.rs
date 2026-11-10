@@ -77,14 +77,13 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// An extra cursor: where it is, the column it keeps, and where its
-/// selection starts.
+/// An extra cursor: where it is and the column it keeps. Not its
+/// selection: the main cursor's isn't kept either, and typing at a
+/// selection on some cursors and not the others would surprise.
 #[derive(Clone, Copy, Serialize, Deserialize)]
 struct SavedCaret {
     at: usize,
     sticky: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    anchor: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -284,7 +283,7 @@ impl App {
                     focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
                     layout: workspace.windows.snapshot(|pane, buffer| {
                         let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
-                        let carets: Vec<SavedCaret> = self.pane_carets(pane, *buffer).iter().map(|c| SavedCaret { at: c.at, sticky: c.sticky, anchor: c.anchor }).collect();
+                        let carets: Vec<SavedCaret> = self.pane_carets(pane, *buffer).iter().map(|c| SavedCaret { at: c.at, sticky: c.sticky }).collect();
                         let carets_len = if carets.is_empty() { 0 } else { self.buffers.get(*buffer).map_or(0, |ob| ob.buffer.len_chars()) };
                         Pane { document: ids.get(buffer).copied(), cursor: state.cursor.char_idx, sticky_col: state.cursor.sticky_col,
                             scroll_line: state.scroll_line, scroll_col: state.scroll_col, carets, carets_len }
@@ -547,7 +546,7 @@ impl App {
                     let buffer = &self.buffers.get(*tree.content(id).unwrap()).unwrap().buffer;
                     let holds = pane.document.is_some_and(|i| same_text.get(i).copied().unwrap_or(false));
                     if holds && !pane.carets.is_empty() && pane.carets_len == buffer.len_chars() && standard {
-                        let extra: Vec<super::carets::Caret> = pane.carets.iter().take(super::carets::MAX_CARETS).filter(|c| c.at <= pane.carets_len && c.at != pane.cursor && c.anchor.is_none_or(|a| a <= pane.carets_len)).map(|c| super::carets::Caret { at: c.at, sticky: c.sticky.min(1_000_000), anchor: c.anchor }).collect();
+                        let extra: Vec<super::carets::Caret> = pane.carets.iter().take(super::carets::MAX_CARETS).filter(|c| c.at <= pane.carets_len && c.at != pane.cursor).map(|c| super::carets::Caret { at: c.at, sticky: c.sticky.min(1_000_000), anchor: None }).collect();
                         restored_carets.push((id, shown, extra, buffer.edit_count()));
                     }
                     let scroll_line = pane.scroll_line.min(buffer.visual_line_count().saturating_sub(1));
@@ -1265,6 +1264,35 @@ mod tests {
         let mut app = temp.app();
         app.restore_session(false);
         assert!(app.extra_carets().is_empty());
+    }
+
+    #[test]
+    fn a_pane_saved_before_extra_cursors_were_kept_still_reads() {
+        let pane: Pane = serde_json::from_str(r#"{"document":0,"cursor":3,"sticky_col":1,"scroll_line":2,"scroll_col":0}"#).unwrap();
+        assert!(pane.carets.is_empty() && pane.carets_len == 0);
+        assert_eq!(pane.cursor, 3);
+    }
+
+    #[test]
+    fn extra_cursors_saved_against_another_length_are_left_out() {
+        let temp = Temp::new();
+        let path = temp.0.join("carets.txt");
+        std::fs::write(&path, "abc\ndef\n").unwrap();
+        let mut app = temp.app();
+        standard(&mut app);
+        app.open_startup_file(&path);
+        app.press("x");
+        app.toggle_caret_at(5);
+        assert!(app.checkpoint_session());
+        let file = temp.0.join("session.json");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("\"carets_len\":9"), "{text}");
+        // The unsaved text itself is the same; only the length the
+        // cursors were saved against isn't.
+        std::fs::write(&file, text.replace("\"carets_len\":9", "\"carets_len\":8")).unwrap();
+        let restored = restore_standard(&temp);
+        assert!(restored.open().buffer.is_dirty(), "the text came back");
+        assert!(restored.extra_carets().is_empty(), "the cursors didn't");
     }
 
     #[test]
