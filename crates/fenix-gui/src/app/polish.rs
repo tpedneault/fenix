@@ -23,6 +23,8 @@ pub(super) struct PaneView<'a> {
     /// The Visual selection, as `(row, start_col, end_col)`.
     pub selection: &'a Segments,
     pub remap_col: &'a dyn Fn(usize, usize) -> usize,
+    /// The pane's extra cursors (standard keys), for the ruler.
+    pub carets: &'a [usize],
 }
 
 /// What `polish_pane` hands back to draw.
@@ -240,7 +242,11 @@ impl App {
         let lines = ob.buffer.line_count().max(1);
         let mut marks: Vec<(usize, RulerMark)> = Vec::new();
         for &(line, sev) in problems {
-            marks.push((line, if sev == Severity::Error { RulerMark::Error } else { RulerMark::Warning }));
+            marks.push((line, match sev {
+                Severity::Error => RulerMark::Error,
+                Severity::Warning => RulerMark::Warning,
+                Severity::Info => RulerMark::Info,
+            }));
         }
         if let Some(hunks) = self.gutter_hunks.get(&view.buffer) {
             for mark in hunks {
@@ -273,6 +279,15 @@ impl App {
                 marks.extend(found.iter().map(|&l| (l, RulerMark::Search)));
             }
         }
+        // Extra cursors, by line.
+        let mut caret_lines: Vec<usize> = view.carets.iter().map(|&at| ob.buffer.rope().char_to_line(at.min(ob.buffer.len_chars()))).collect();
+        caret_lines.dedup();
+        marks.extend(caret_lines.into_iter().map(|l| (l, RulerMark::Caret)));
+        // Where a click on the ruler snaps to: every mark's line.
+        let mut targets: Vec<usize> = marks.iter().map(|&(l, _)| l).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        self.motion.ruler_targets.insert(view.buffer, targets);
         Some(Ruler { lines, first: view.rendered_scroll, visible: view.rows.saturating_sub(1) as f32, cursor: view.cursor_line, marks })
     }
 
@@ -306,6 +321,9 @@ impl App {
         let Some(ob) = self.buffers.get(buffer) else { return false };
         let lines = ob.buffer.line_count().max(1);
         let line = (((pos.1 - content.y) / content.h) * lines as f32).floor().clamp(0.0, (lines - 1) as f32) as usize;
+        // On a mark (within a few pixels of one): its line, exactly.
+        let per_pixel = lines as f32 / content.h;
+        let line = self.motion.ruler_targets.get(&buffer).and_then(|t| ruler_snap(t, line, (RULER_SNAP_PX * per_pixel).ceil() as usize)).unwrap_or(line);
         let char_idx = ob.buffer.line_start_char(line);
         let from = JumpEntry { buffer, char_idx: self.pane_state(pane).cursor.char_idx };
         self.pane_state_mut(pane).cursor = Cursor { char_idx, sticky_col: 0 };
@@ -452,6 +470,15 @@ pub(super) fn selection_corners(segments: &Segments, radius: f32) -> Vec<[f32; 4
         .collect()
 }
 
+/// How near a mark, in pixels, a click on the ruler goes to it.
+const RULER_SNAP_PX: f32 = 3.0;
+
+/// The mark's line nearest `line`, if one is within `within` lines.
+fn ruler_snap(targets: &[usize], line: usize, within: usize) -> Option<usize> {
+    let i = targets.partition_point(|&t| t < line);
+    [i.checked_sub(1), Some(i)].into_iter().flatten().filter_map(|i| targets.get(i)).copied().filter(|t| t.abs_diff(line) <= within).min_by_key(|t| t.abs_diff(line))
+}
+
 /// Brackets by depth from the text alone, for a file of no language:
 /// `(char index, depth)`.
 fn text_bracket_depths(chars: impl Iterator<Item = char>) -> Vec<(usize, usize)> {
@@ -514,6 +541,7 @@ mod tests {
         let tab_rows = HashSet::new();
         let selection = Segments::new();
         let remap = |_row: usize, col: usize| col;
+        let carets: Vec<usize> = app.extra_carets().iter().map(|c| c.at).collect();
         let view = PaneView {
             buffer,
             lines: &lines,
@@ -525,6 +553,7 @@ mod tests {
             tab_rows: &tab_rows,
             selection: &selection,
             remap_col: &remap,
+            carets: &carets,
         };
         app.polish_pane(&view, spans, Instant::now())
     }
@@ -575,6 +604,23 @@ y = zed
         let out = polish(&mut app, &mut spans);
         assert!(out.squiggles.is_empty());
         assert!(!spans.iter().any(|s| s.0.contains("not defined")));
+    }
+
+    #[test]
+    fn the_ruler_marks_extra_cursors_and_a_click_near_a_mark_goes_to_it() {
+        let mut app = with_problem("a\nb\nc\nd = zed\n", 3, 4, 7);
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        app.toggle_caret_at(4);
+        let mut spans = row_spans(&app);
+        let ruler = polish(&mut app, &mut spans).ruler.expect("on");
+        assert!(ruler.marks.contains(&(2, RulerMark::Caret)), "{:?}", ruler.marks);
+        assert!(ruler.marks.contains(&(3, RulerMark::Error)));
+        assert_eq!(app.motion.ruler_targets.get(&app.focused_buffer_id()).cloned(), Some(vec![2, 3]));
+        assert_eq!(ruler_snap(&[2, 3, 40], 5, 2), Some(3), "the nearest within reach");
+        assert_eq!(ruler_snap(&[2, 3, 40], 20, 2), None, "none near: where it was clicked");
+        assert_eq!(ruler_snap(&[], 0, 2), None);
+        assert_eq!(ruler_snap(&[10], 9, 1), Some(10));
     }
 
     #[test]

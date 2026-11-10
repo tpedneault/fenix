@@ -148,9 +148,13 @@ pub(super) enum RulerMark {
     Search,
     Error,
     Warning,
+    /// A problem that's information or a hint.
+    Info,
     Added,
     Modified,
     Deleted,
+    /// An extra cursor.
+    Caret,
 }
 
 /// After a jump: the line the cursor landed on, flashing once.
@@ -298,6 +302,9 @@ pub(super) struct MotionState {
     pub ruler_search: HashMap<BufferId, (u64, String, Vec<usize>)>,
     /// Bracket depths for rainbow brackets, by buffer: the edit count
     /// they're for, and each bracket's char index and depth.
+    /// The lines of each buffer's ruler marks, as last drawn: where a
+    /// click on the ruler snaps to.
+    pub ruler_targets: HashMap<BufferId, Vec<usize>>,
     pub brackets: HashMap<BufferId, ((u64, Option<u64>), std::sync::Arc<Vec<(usize, usize)>>)>,
     /// When the focused buffer was last typed into, for holding new
     /// diagnostics back while typing.

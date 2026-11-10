@@ -20756,6 +20756,7 @@ impl App {
             // whitespace, the overview ruler, sticky scroll.
             if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
                 let tab_rows: HashSet<usize> = col_maps.keys().copied().collect();
+                let pane_caret_ats: Vec<usize> = self.pane_carets(pane, buffer_id).iter().map(|c| c.at).collect();
                 let view = polish::PaneView {
                     buffer: buffer_id,
                     lines: visible_document_lines,
@@ -20767,6 +20768,7 @@ impl App {
                     tab_rows: &tab_rows,
                     selection: &selection_segments,
                     remap_col: &remap_col,
+                    carets: &pane_caret_ats,
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;
@@ -21932,6 +21934,8 @@ impl App {
                         motion_host::RulerMark::Search => (2.0, 4.0, 2.0, theme.search_match),
                         motion_host::RulerMark::Error => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_conflicted)),
                         motion_host::RulerMark::Warning => (5.0, 5.0, 3.0, glyphon_to_rgba(theme.git_modified)),
+                        motion_host::RulerMark::Info => (5.0, 5.0, 2.0, glyphon_to_rgba(theme.git_untracked)),
+                        motion_host::RulerMark::Caret => (2.0, 7.0, 2.0, glyphon_to_rgba(theme.fg)),
                         motion_host::RulerMark::Added => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_staged)),
                         motion_host::RulerMark::Modified => (1.0, 3.0, 4.0, glyphon_to_rgba(theme.git_modified)),
                         motion_host::RulerMark::Deleted => (1.0, 3.0, 2.0, glyphon_to_rgba(theme.git_conflicted)),
