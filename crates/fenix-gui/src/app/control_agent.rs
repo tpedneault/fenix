@@ -222,7 +222,7 @@ impl App {
                 (text, version)
             }
         };
-        self.sync_lsp_for(&path, &text, version);
+        self.sync_lsp_for(&path, &text, version, None);
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
         let all = self.cached_lsp_keys(&path);
         if all.is_empty() {

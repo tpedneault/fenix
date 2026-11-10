@@ -2,17 +2,25 @@
 //! document's tokens asked of the one of its language servers that
 //! offers them, kept as char ranges that move with each edit sent, and
 //! laid over the grammar's colours where they're drawn.
+//!
+//! Only a document shown in a buffer is asked for. Which server and
+//! which path that is are worked out when the buffer is synced
+//! (`App::semantic_of`), so drawing looks at nothing on disk; a
+//! document's tokens belong to that buffer, and go when it closes.
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use fenix_lsp::semantic::{self as tokens, Token};
+use fenix_lsp::semantic::{self as tokens, Layer, Token};
 
 use super::{App, BufferId, LspKey, LspSession, PendingLspRequest};
 
 /// How long typing pauses before a document's tokens are asked again.
 pub(super) const SEMANTIC_PAUSE: Duration = Duration::from_millis(250);
+
+/// How long an ask may go unanswered before it's cancelled.
+pub(super) const SEMANTIC_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A document this many lines or bytes long is asked only for the lines
 /// in view, when its server answers that way.
@@ -25,22 +33,30 @@ const MAX_FULL_LINES: usize = 50_000;
 const RANGE_MARGIN: usize = 100;
 
 /// One document's tokens from one server (`LspSession::semantic`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct SemanticDoc {
+    /// The buffer it's shown in: what the tokens are drawn for.
+    pub buffer: BufferId,
     /// In order, not overlapping: chars into the text of edit count
     /// `stamp`.
     pub tokens: Vec<Token>,
     /// The edit count the tokens describe; `None` until an answer is
     /// kept, or once an edit couldn't be followed.
     pub stamp: Option<u64>,
-    /// An ask is out, for this edit count.
+    /// An ask is out, for this edit count, by this request, since then.
     pub asking: Option<u64>,
+    pub(super) asked: Option<(i64, Instant)>,
+    /// One ask timed out already: the next waits for an edit.
+    pub(super) timed_out: bool,
     /// When the next ask is due.
     pub due: Option<Instant>,
+    /// The server said its tokens changed (a refresh) while this wasn't
+    /// drawn: asked once it is.
+    pub(super) stale: bool,
     /// The server's last whole-document answer, as sent, and its id: what
     /// a delta is applied to.
     result_id: Option<String>,
-    data: Vec<lsp_types::SemanticToken>,
+    data: Vec<u32>,
     /// Asked by range: the lines the tokens cover, and those in view
     /// (with a margin) to ask for next.
     covered: Option<Range<usize>>,
@@ -56,6 +72,32 @@ pub(super) enum SemanticAsk {
     Range(Range<usize>),
 }
 
+impl SemanticDoc {
+    fn new(buffer: BufferId) -> Self {
+        SemanticDoc { buffer, tokens: Vec::new(), stamp: None, asking: None, asked: None, timed_out: false, due: None, stale: false, result_id: None, data: Vec::new(), covered: None, want: None }
+    }
+}
+
+/// The document a buffer's tokens come from: its server and its path as
+/// that server knows it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct SemanticTarget {
+    pub key: LspKey,
+    pub path: PathBuf,
+}
+
+/// What a sync means for a server's semantic tokens of a document.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum SemanticSync {
+    /// It's the server asked, for this buffer.
+    Ask(BufferId),
+    /// Not a buffer's sync (an agent's): any tokens held follow the
+    /// edit, and nothing new is asked.
+    Follow,
+    /// It isn't the server asked (or it's off): its tokens go.
+    Drop,
+}
+
 /// Whether semantic tokens can be asked of `session`: it's said what it
 /// offers, a whole document or a range.
 pub(super) fn offers(session: &LspSession) -> bool {
@@ -68,20 +110,33 @@ fn by_range(provider: &tokens::Provider, lines: usize, bytes: usize) -> bool {
     provider.range && (!provider.full || lines > RANGE_LINES || bytes > RANGE_BYTES)
 }
 
-/// After `sync_lsp_document` sent `canonical`'s text: on opening, an ask
-/// due now; on a change from `old` (edit count `old_count`) to `new`
-/// (`new_count`), the tokens moved through it and an ask due after the
-/// pause. `ask` is false for a server that isn't the one asked (or with
-/// it off): its tokens are let go.
-pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Option<(&str, u64)>, new: &str, new_count: u64, ask: bool) {
-    if !ask {
-        session.semantic.remove(canonical);
-        return;
-    }
-    let doc = session.semantic.entry(canonical.to_path_buf()).or_default();
+/// After `sync_lsp_document` sent `canonical`'s text: on opening (or a
+/// buffer newly shown), an ask due now; on a change from `old` (edit
+/// count `old_count`) to `new` (`new_count`), the tokens moved through
+/// it and an ask due after the pause.
+pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Option<(&str, u64)>, new: &str, new_count: u64, sync: SemanticSync) {
+    let buffer = match sync {
+        SemanticSync::Drop => {
+            session.semantic.remove(canonical);
+            return;
+        }
+        SemanticSync::Follow => None,
+        SemanticSync::Ask(buffer) => Some(buffer),
+    };
+    let held = session.semantic.contains_key(canonical);
+    let doc = match (buffer, held) {
+        (None, false) => return,
+        (None, true) => session.semantic.get_mut(canonical).expect("held"),
+        (Some(b), _) => session.semantic.entry(canonical.to_path_buf()).or_insert_with(|| SemanticDoc::new(b)),
+    };
     let now = Instant::now();
+    // Shown for the first time, or in another buffer than before (closed
+    // and opened again): asked at once.
+    let newly_shown = buffer.is_some_and(|b| !held || b != doc.buffer);
+    if let Some(buffer) = buffer {
+        doc.buffer = buffer;
+    }
     match change {
-        None => doc.due = Some(now),
         Some((old, old_count)) => {
             if doc.stamp == Some(old_count) && !doc.tokens.is_empty() {
                 let (start, old_end, new_end) = fenix_lsp::changed_span(old, new);
@@ -90,8 +145,13 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
             } else {
                 doc.stamp = None;
             }
-            doc.due = Some(now + SEMANTIC_PAUSE);
+            doc.timed_out = false;
+            if buffer.is_some() {
+                doc.due = Some(if newly_shown { now } else { now + SEMANTIC_PAUSE });
+            }
         }
+        None if buffer.is_some() => doc.due = Some(now),
+        None => {}
     }
 }
 
@@ -138,22 +198,48 @@ fn ask(session: &mut LspSession, canonical: &Path, now: Instant) {
     };
     if let Ok(id) = sent {
         doc.asking = Some(edit_count);
+        doc.asked = Some((id, now));
         session.pending.insert(id, PendingLspRequest::SemanticTokens { path: canonical.to_path_buf(), edit_count, how });
     }
 }
 
-/// `tokens` laid over `syntax`'s colours: the grammar's ranges cut where
-/// a token is, the token's colour inside it. A token reaching into one
-/// of `protected` (the grammar's comments and strings) isn't laid: the
-/// grammar already has those right. Both lists, and what comes back,
-/// are in order and don't overlap, as `split_line_by_highlights` wants.
-pub(super) fn lay_over<C: Copy>(syntax: Vec<(Range<usize>, C)>, laid: &[(Range<usize>, C)], protected: &[Range<usize>]) -> Vec<(Range<usize>, C)> {
-    let laid: Vec<&(Range<usize>, C)> = laid
+/// An ask out longer than `SEMANTIC_TIMEOUT`: cancelled, and asked once
+/// more; a second that times out waits for an edit.
+fn time_out(session: &mut LspSession, canonical: &Path, now: Instant) {
+    let Some(doc) = session.semantic.get_mut(canonical) else { return };
+    let Some((id, at)) = doc.asked.filter(|&(_, at)| doc.asking.is_some() && now.duration_since(at) >= SEMANTIC_TIMEOUT) else { return };
+    let _ = at;
+    let _ = session.client.notify::<lsp_types::notification::Cancel>(lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id as i32) });
+    session.pending.remove(&id);
+    doc.asking = None;
+    doc.asked = None;
+    doc.due = (!doc.timed_out).then_some(now);
+    doc.timed_out = true;
+}
+
+/// `tokens` laid over `syntax`'s colours, each as its layer says: the
+/// grammar's ranges cut where a token is laid, the token's colour inside
+/// it. One that's `Over` isn't laid where it reaches into `protected`
+/// (the grammar's comments and strings), one that's `Fill` where it
+/// reaches into anything the grammar coloured; one that `Wins` is laid
+/// whatever's under it. Both lists, and what comes back, are in order
+/// and don't overlap, as `split_line_by_highlights` wants.
+pub(super) fn lay_over<C: Copy>(syntax: Vec<(Range<usize>, C)>, laid: &[(Range<usize>, C, Layer)], protected: &[Range<usize>]) -> Vec<(Range<usize>, C)> {
+    let reaches = |sorted: &[Range<usize>], r: &Range<usize>| {
+        let first = sorted.partition_point(|p| p.end <= r.start);
+        sorted.get(first).is_some_and(|p| p.start < r.end)
+    };
+    let laid: Vec<(Range<usize>, C)> = laid
         .iter()
-        .filter(|(r, _)| {
-            let first = protected.partition_point(|p| p.end <= r.start);
-            protected.get(first).is_none_or(|p| p.start >= r.end)
+        .filter(|(r, _, layer)| match layer {
+            Layer::Wins => true,
+            Layer::Over => !reaches(protected, r),
+            Layer::Fill => {
+                let first = syntax.partition_point(|(s, _)| s.end <= r.start);
+                syntax.get(first).is_none_or(|(s, _)| s.start >= r.end)
+            }
         })
+        .map(|(r, c, _)| (r.clone(), *c))
         .collect();
     if laid.is_empty() {
         return syntax;
@@ -164,7 +250,7 @@ pub(super) fn lay_over<C: Copy>(syntax: Vec<(Range<usize>, C)>, laid: &[(Range<u
         let mut at = range.start;
         // The tokens before this range's end: each put out once, in order.
         while next < laid.len() && laid[next].0.start < range.end {
-            let (token, c) = laid[next];
+            let (token, c) = &laid[next];
             if token.start > at {
                 out.push((at..token.start.min(range.end), colour));
             }
@@ -176,7 +262,7 @@ pub(super) fn lay_over<C: Copy>(syntax: Vec<(Range<usize>, C)>, laid: &[(Range<u
             out.push((at..range.end, colour));
         }
     }
-    out.extend(laid[next..].iter().map(|(r, c)| (r.clone(), *c)));
+    out.extend(laid[next..].iter().cloned());
     // A token reaching past a range's end, and the next range starting
     // under it: what's under the token goes.
     let mut tidy: Vec<(Range<usize>, C)> = Vec::with_capacity(out.len());
@@ -195,14 +281,14 @@ impl App {
         self.config.bool_value("lsp.semantic_highlighting").unwrap_or(true)
     }
 
-    /// Whether `path`'s tokens may be asked for and drawn: the setting on,
-    /// and its language not in `lsp.semantic_highlighting_off`.
-    pub(super) fn semantic_wanted(&self, path: &Path) -> bool {
+    /// Whether buffer `id`'s tokens may be asked for and drawn: the
+    /// setting on, and its language (as `editor.wrap_languages` names
+    /// it) not in `lsp.semantic_highlighting_off`.
+    pub(super) fn semantic_wanted(&self, id: BufferId) -> bool {
         if !self.semantic_highlighting_on() {
             return false;
         }
-        let Some(language) = fenix_syntax::detect_language_from_path(path) else { return true };
-        let name = language.name();
+        let Some(name) = self.buffer_language_name(id) else { return true };
         !self.config.list_value("lsp.semantic_highlighting_off").iter().any(|l| l.trim().eq_ignore_ascii_case(&name))
     }
 
@@ -212,34 +298,47 @@ impl App {
         self.cached_lsp_keys(path).into_iter().find(|key| self.lsp_sessions.get(key).is_some_and(offers))
     }
 
-    /// Each frame: the asks that are due, sent.
+    /// Each frame, and when the loop wakes: the asks that are due sent,
+    /// those out too long cancelled, and what closed buffers held let go.
     pub(super) fn ask_due_semantic_tokens(&mut self) {
         let now = Instant::now();
+        let buffers = &self.buffers;
+        self.semantic_of.retain(|b, _| buffers.get(*b).is_some());
         for session in self.lsp_sessions.values_mut() {
             if session.semantic.is_empty() {
                 continue;
             }
-            let due: Vec<PathBuf> = session.semantic.iter().filter(|(_, d)| d.asking.is_none() && d.due.is_some_and(|t| t <= now)).map(|(p, _)| p.clone()).collect();
-            for path in due {
+            session.semantic.retain(|_, d| buffers.get(d.buffer).is_some());
+            let paths: Vec<PathBuf> = session.semantic.keys().cloned().collect();
+            for path in paths {
+                time_out(session, &path, now);
                 ask(session, &path, now);
             }
         }
     }
 
-    /// The next ask due, for the loop to wake for: at once, for one a
-    /// frame drawn since made due.
-    pub(super) fn semantic_wake(&self, now: Instant) -> Option<Instant> {
-        self.lsp_sessions.values().flat_map(|s| s.semantic.values()).filter(|d| d.asking.is_none()).filter_map(|d| d.due).min().map(|t| t.max(now))
+    /// When the loop next has to wake for semantic tokens: an ask due,
+    /// or one out that would time out.
+    pub(super) fn semantic_wake(&self) -> Option<Instant> {
+        self.lsp_sessions
+            .values()
+            .flat_map(|s| s.semantic.values())
+            .filter_map(|d| match (d.asking, d.asked) {
+                (Some(_), Some((_, at))) => Some(at + SEMANTIC_TIMEOUT),
+                (Some(_), None) => None,
+                (None, _) => d.due,
+            })
+            .min()
     }
 
-    /// `workspace/semanticTokens/refresh`: every open document of `key`'s
-    /// asked again.
+    /// `workspace/semanticTokens/refresh`: `key`'s documents asked again
+    /// as they're drawn, not all at once.
     pub(super) fn refresh_semantic_tokens(&mut self, key: &LspKey) {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
-        let now = Instant::now();
         for doc in session.semantic.values_mut() {
-            doc.due = Some(now);
+            doc.stale = true;
         }
+        self.request_redraw_all();
     }
 
     /// An answer to `PendingLspRequest::SemanticTokens` (asked `how`): a
@@ -248,93 +347,66 @@ impl App {
     /// still as it was asked, else asked again.
     pub(super) fn semantic_tokens_answered(&mut self, key: &LspKey, path: PathBuf, edit_count: u64, how: SemanticAsk, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
-        let legend = session.capabilities.as_ref().and_then(tokens::provider).map(|p| p.legend);
         let synced = session.open_documents.get(&path).map(|&(count, _)| count);
-        let text = session.synced_text.get(&path);
-        let Some(doc) = session.semantic.get_mut(&path) else { return };
+        let (Some(doc), Some(text)) = (session.semantic.get_mut(&path), session.synced_text.get(&path)) else { return };
         doc.asking = None;
+        doc.asked = None;
         let now = Instant::now();
-        let value = match result {
-            Ok(value) => value,
-            // Modified or cancelled while it worked: asked again after
-            // a pause.
-            Err(e) if e.code == -32801 || e.code == -32802 => {
+        let answer = match result {
+            Ok(value) => match tokens::read_answer(value) {
+                Ok(answer) => answer.unwrap_or_default(),
+                Err(_) => return,
+            },
+            // RequestCancelled, ContentModified, ServerCancelled: asked
+            // again after a pause.
+            Err(e) if (-32802..=-32800).contains(&e.code) => {
                 doc.due = Some(now + SEMANTIC_PAUSE);
                 return;
             }
             // A delta it can't give (it's let the last answer go): the
-            // whole document, after a pause. Any other refusal: not asked
-            // again until an edit.
+            // whole document, after a pause. A range: those lines as good
+            // as answered, so they're not asked each frame they're shown.
+            // Any other: not asked again until an edit.
             Err(_) => {
                 match &how {
                     SemanticAsk::Delta => {
                         doc.result_id = None;
                         doc.due = Some(now + SEMANTIC_PAUSE);
                     }
-                    // Those lines as good as answered: not asked again
-                    // each frame they're in view.
                     SemanticAsk::Range(lines) => doc.covered = Some(lines.clone()),
                     SemanticAsk::Full => {}
                 }
                 return;
             }
         };
-        let whole = |doc: &mut SemanticDoc, t: lsp_types::SemanticTokens| {
-            doc.result_id = t.result_id;
-            doc.data = t.data;
-        };
         let range = match how {
-            SemanticAsk::Full => {
-                match serde_json::from_value::<Option<lsp_types::SemanticTokensResult>>(value) {
-                    Ok(Some(lsp_types::SemanticTokensResult::Tokens(t))) => whole(doc, t),
-                    Ok(Some(lsp_types::SemanticTokensResult::Partial(p))) => whole(doc, lsp_types::SemanticTokens { result_id: None, data: p.data }),
-                    Ok(None) => whole(doc, Default::default()),
-                    Err(_) => return,
-                }
-                None
-            }
-            SemanticAsk::Delta => {
-                let edits = match serde_json::from_value::<Option<lsp_types::SemanticTokensFullDeltaResult>>(value) {
-                    Ok(Some(lsp_types::SemanticTokensFullDeltaResult::Tokens(t))) => {
-                        whole(doc, t);
-                        None
-                    }
-                    Ok(Some(lsp_types::SemanticTokensFullDeltaResult::TokensDelta(d))) => Some((d.result_id, d.edits)),
-                    Ok(Some(lsp_types::SemanticTokensFullDeltaResult::PartialTokensDelta { edits })) => Some((None, edits)),
-                    Ok(None) => {
-                        whole(doc, Default::default());
-                        None
-                    }
-                    Err(_) => return,
-                };
-                if let Some((result_id, edits)) = edits {
-                    match tokens::apply_edits(&doc.data, &edits) {
-                        Some(data) => whole(doc, lsp_types::SemanticTokens { result_id, data }),
-                        // Edits that don't fit what's kept: the whole of
-                        // it asked again.
+            SemanticAsk::Range(lines) => Some((lines, answer.data.unwrap_or_default())),
+            SemanticAsk::Full | SemanticAsk::Delta => {
+                match (answer.edits, answer.data) {
+                    (Some(edits), _) => match tokens::apply_edits(&doc.data, &edits) {
+                        Some(data) => doc.data = data,
+                        // Edits that don't fit what's kept: the whole of it
+                        // asked again.
                         None => {
                             doc.result_id = None;
+                            doc.data.clear();
                             doc.due = Some(now);
                             return;
                         }
-                    }
+                    },
+                    (None, data) => doc.data = data.unwrap_or_default(),
                 }
+                doc.result_id = answer.result_id;
                 None
             }
-            SemanticAsk::Range(lines) => match serde_json::from_value::<Option<lsp_types::SemanticTokensRangeResult>>(value) {
-                Ok(Some(lsp_types::SemanticTokensRangeResult::Tokens(t))) => Some((lines, t.data)),
-                Ok(Some(lsp_types::SemanticTokensRangeResult::Partial(p))) => Some((lines, p.data)),
-                Ok(None) => Some((lines, Vec::new())),
-                Err(_) => return,
-            },
         };
         // Edited since it was asked: what it says is of other text.
         if synced != Some(edit_count) {
             doc.due = Some(doc.due.unwrap_or(now));
             return;
         }
-        let (Some(legend), Some(text)) = (legend, text) else { return };
-        let styles = tokens::Styles::new(&legend);
+        let Some(legend) = session.capabilities.as_ref().and_then(tokens::legend) else { return };
+        let styles = tokens::Styles::new(legend);
         match range {
             Some((lines, data)) => {
                 doc.tokens = tokens::decode(&data, text, &styles);
@@ -346,57 +418,37 @@ impl App {
             }
         }
         doc.stamp = Some(edit_count);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
-
-    /// `path` as its language servers know it, worked out once.
-    pub(super) fn lsp_path(&mut self, path: &Path) -> PathBuf {
-        if let Some(canonical) = self.lsp_canonical.get(path) {
-            return canonical.clone();
-        }
-        let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or(path.to_path_buf()));
-        self.lsp_canonical.insert(path.to_path_buf(), canonical.clone());
-        canonical
-    }
-
-    /// Buffer `id`'s document as its tokens' server knows it: the server
-    /// and the path, when its tokens are wanted and it has a server
-    /// asked for them.
-    fn semantic_doc_of(&mut self, id: BufferId) -> Option<(LspKey, PathBuf)> {
-        let path = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf)?;
-        if self.lsp_sessions.values().all(|s| s.semantic.is_empty()) || !self.semantic_wanted(&path) {
-            return None;
-        }
-        let key = self.semantic_server(&path)?;
-        let canonical = self.lsp_path(&path);
-        self.lsp_sessions.get(&key)?.semantic.contains_key(&canonical).then_some((key, canonical))
+        self.request_redraw_all();
     }
 
     /// Buffer `id`'s tokens, when it has some that describe its text as
-    /// it is: the server they're from and the document's path.
-    fn drawn_tokens(&mut self, id: BufferId) -> Option<(LspKey, PathBuf)> {
-        let (key, canonical) = self.semantic_doc_of(id)?;
+    /// it is and they're wanted: where they're held. Nothing on disk is
+    /// looked at.
+    pub(super) fn drawn_tokens(&self, id: BufferId) -> Option<&SemanticTarget> {
+        let target = self.semantic_of.get(&id)?;
+        let doc = self.lsp_sessions.get(&target.key)?.semantic.get(&target.path)?;
         let edit_count = self.buffers.get(id)?.buffer.edit_count();
-        let doc = self.lsp_sessions.get(&key)?.semantic.get(&canonical)?;
-        (doc.stamp == Some(edit_count)).then_some((key, canonical))
+        (doc.buffer == id && doc.stamp == Some(edit_count) && self.semantic_wanted(id)).then_some(target)
     }
 
-    /// For a document asked for by range: the lines `windows` (bytes)
-    /// show, with a margin, to be asked for once they're no longer all
-    /// covered.
-    fn note_semantic_view(&mut self, id: BufferId, key: &LspKey, canonical: &Path, windows: &[Range<usize>]) {
-        let (Some(ob), Some(first), Some(last)) = (self.buffers.get(id), windows.first(), windows.last()) else { return };
-        let Some(session) = self.lsp_sessions.get_mut(key) else { return };
-        let Some(provider) = session.capabilities.as_ref().and_then(tokens::provider) else { return };
+    /// Drawing `rows` lines of buffer `id` from line `base`: a refresh it
+    /// missed asked for now; for a document asked by range, those lines
+    /// (with a margin) asked for once they're no longer all covered.
+    fn note_semantic_view(&mut self, id: BufferId, base: usize, rows: usize) {
+        let Some(target) = self.semantic_of.get(&id) else { return };
+        let Some(ob) = self.buffers.get(id) else { return };
+        let Some(session) = self.lsp_sessions.get_mut(&target.key) else { return };
+        let provider = session.capabilities.as_ref().and_then(tokens::provider);
+        let Some(doc) = session.semantic.get_mut(&target.path) else { return };
+        let now = Instant::now();
+        if std::mem::take(&mut doc.stale) && doc.asking.is_none() {
+            doc.due = Some(now);
+        }
         let lines = ob.buffer.line_count();
-        if !by_range(&provider, lines, ob.buffer.rope().len_bytes()) {
+        if !provider.is_some_and(|p| by_range(&p, lines, ob.buffer.rope().len_bytes())) {
             return;
         }
-        let rope = ob.buffer.rope();
-        let shown = rope.byte_to_line(first.start.min(rope.len_bytes()))..rope.byte_to_line(last.end.min(rope.len_bytes())) + 1;
-        let Some(doc) = session.semantic.get_mut(canonical) else { return };
+        let shown = base.min(lines)..(base + rows).min(lines);
         if doc.covered.as_ref().is_some_and(|c| c.start <= shown.start && shown.end <= c.end) {
             return;
         }
@@ -404,35 +456,43 @@ impl App {
         if doc.want.as_ref() != Some(&want) || doc.due.is_none() {
             doc.want = Some(want);
             if doc.asking.is_none() {
-                doc.due = Some(doc.due.map_or_else(Instant::now, |due| due.min(Instant::now())));
+                doc.due = Some(doc.due.map_or(now, |due| due.min(now)));
             }
         }
+    }
+
+    /// Whether drawing `rows` lines of buffer `id` from line `base` may
+    /// lay tokens: false (without allocating anything) when it has none
+    /// to lay.
+    pub(super) fn semantic_to_draw(&mut self, id: BufferId, base: usize, rows: usize) -> bool {
+        if self.semantic_of.is_empty() {
+            return false;
+        }
+        self.note_semantic_view(id, base, rows);
+        self.drawn_tokens(id).is_some()
     }
 
     /// The grammar's colours for buffer `id` (`syntax`), with its server's
     /// tokens in `windows` (bytes) laid over them; unchanged when it has
     /// none that describe the text as it is.
     pub(super) fn with_semantic_tokens(
-        &mut self,
+        &self,
         id: BufferId,
         syntax: Vec<(Range<usize>, glyphon::Color)>,
         windows: &[Range<usize>],
         protected: &[Range<usize>],
     ) -> Vec<(Range<usize>, glyphon::Color)> {
-        let Some((key, canonical)) = self.semantic_doc_of(id) else { return syntax };
-        self.note_semantic_view(id, &key, &canonical, windows);
-        if self.drawn_tokens(id).is_none() {
-            return syntax;
-        }
-        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&key).and_then(|s| s.semantic.get(&canonical)), self.buffers.get(id)) else { return syntax };
+        let Some(target) = self.drawn_tokens(id) else { return syntax };
+        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&target.key).and_then(|s| s.semantic.get(&target.path)), self.buffers.get(id)) else { return syntax };
         let theme = self.theme;
         let mut laid = Vec::new();
         for window in windows {
             let (from, to) = (ob.buffer.byte_to_char(window.start), ob.buffer.byte_to_char(window.end));
             for t in tokens::within(&doc.tokens, from, to) {
+                let Some(slot) = t.style.slot else { continue };
                 let bytes = ob.buffer.char_to_byte(t.start.max(from))..ob.buffer.char_to_byte(t.end.min(to));
                 if !bytes.is_empty() {
-                    laid.push((bytes, theme.semantic_color(t.style.slot)));
+                    laid.push((bytes, theme.semantic_color(slot), t.style.layer));
                 }
             }
         }
@@ -441,9 +501,9 @@ impl App {
 
     /// Buffer `id`'s tokens drawn underlined (`mutable`) on `lines`: each
     /// as its line, its char columns and its colour.
-    pub(super) fn underlined_tokens(&mut self, id: BufferId, lines: Range<usize>) -> Vec<(usize, Range<usize>, glyphon::Color)> {
-        let Some((key, canonical)) = self.drawn_tokens(id) else { return Vec::new() };
-        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&key).and_then(|s| s.semantic.get(&canonical)), self.buffers.get(id)) else { return Vec::new() };
+    pub(super) fn underlined_tokens(&self, id: BufferId, lines: Range<usize>) -> Vec<(usize, Range<usize>, glyphon::Color)> {
+        let Some(target) = self.drawn_tokens(id) else { return Vec::new() };
+        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&target.key).and_then(|s| s.semantic.get(&target.path)), self.buffers.get(id)) else { return Vec::new() };
         let last = ob.buffer.visual_line_count();
         if lines.start >= last {
             return Vec::new();
@@ -455,7 +515,9 @@ impl App {
             .map(|t| {
                 let line = ob.buffer.rope().char_to_line(t.start);
                 let first = ob.buffer.line_start_char(line);
-                (line, t.start - first..t.end - first, self.theme.semantic_color(t.style.slot))
+                // A plain name in the grammar's colour: underlined in the
+                // variables' colour.
+                (line, t.start - first..t.end - first, t.style.slot.map_or(self.theme.syntax_variable, |slot| self.theme.semantic_color(slot)))
             })
             .collect()
     }
@@ -469,27 +531,32 @@ mod tests {
         (start..end, c)
     }
 
+    /// A token laid over the grammar.
+    fn o(start: usize, end: usize, c: char) -> (Range<usize>, char, Layer) {
+        (start..end, c, Layer::Over)
+    }
+
     #[test]
     fn a_token_inside_a_range_cuts_it() {
-        let got = lay_over(vec![r(0, 10, 'v')], &[r(3, 5, 'p')], &[]);
+        let got = lay_over(vec![r(0, 10, 'v')], &[o(3, 5, 'p')], &[]);
         assert_eq!(got, vec![r(0, 3, 'v'), r(3, 5, 'p'), r(5, 10, 'v')]);
     }
 
     #[test]
     fn tokens_between_and_across_ranges_are_put_in_order() {
-        let got = lay_over(vec![r(0, 2, 'k'), r(4, 8, 'v'), r(12, 14, 'o')], &[r(2, 3, 'a'), r(6, 13, 'b'), r(20, 22, 'c')], &[]);
+        let got = lay_over(vec![r(0, 2, 'k'), r(4, 8, 'v'), r(12, 14, 'o')], &[o(2, 3, 'a'), o(6, 13, 'b'), o(20, 22, 'c')], &[]);
         assert_eq!(got, vec![r(0, 2, 'k'), r(2, 3, 'a'), r(4, 6, 'v'), r(6, 13, 'b'), r(13, 14, 'o'), r(20, 22, 'c')]);
     }
 
     #[test]
     fn a_token_over_a_whole_range_replaces_it() {
-        let got = lay_over(vec![r(0, 3, 'f'), r(4, 7, 'v')], &[r(4, 7, 'p')], &[]);
+        let got = lay_over(vec![r(0, 3, 'f'), r(4, 7, 'v')], &[o(4, 7, 'p')], &[]);
         assert_eq!(got, vec![r(0, 3, 'f'), r(4, 7, 'p')]);
     }
 
     #[test]
     fn a_token_reaching_into_a_comment_or_string_isn_t_laid() {
-        let got = lay_over(vec![r(0, 10, 'c'), r(12, 14, 'v')], &[r(2, 4, 'f'), r(12, 14, 'p')], std::slice::from_ref(&(0..10)));
+        let got = lay_over(vec![r(0, 10, 'c'), r(12, 14, 'v')], &[o(2, 4, 'f'), o(12, 14, 'p')], std::slice::from_ref(&(0..10)));
         assert_eq!(got, vec![r(0, 10, 'c'), r(12, 14, 'p')]);
     }
 
@@ -500,8 +567,20 @@ mod tests {
     }
 
     #[test]
+    fn a_lexical_token_fills_only_where_the_grammar_coloured_nothing_and_a_comment_wins() {
+        let syntax = vec![r(0, 3, 'k'), r(6, 9, 's')];
+        // A keyword token over the grammar's keyword: the grammar's; one
+        // where it coloured nothing: laid.
+        let got = lay_over(syntax.clone(), &[(0..3, 'K', Layer::Fill), (4..5, 'K', Layer::Fill)], &[]);
+        assert_eq!(got, vec![r(0, 3, 'k'), r(4, 5, 'K'), r(6, 9, 's')]);
+        // An inactive region's comment token: over all of it, a string too.
+        let got = lay_over(syntax, &[(0..9, 'c', Layer::Wins)], std::slice::from_ref(&(6..9)));
+        assert_eq!(got, vec![r(0, 9, 'c')]);
+    }
+
+    #[test]
     fn a_token_where_the_grammar_coloured_nothing_is_laid_too() {
-        let got = lay_over(vec![], &[r(1, 2, 'p')], &[]);
+        let got = lay_over(vec![], &[o(1, 2, 'p')], &[]);
         assert_eq!(got, vec![r(1, 2, 'p')]);
     }
 }
