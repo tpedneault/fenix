@@ -299,3 +299,32 @@ stage by stage.
 - Still O(lines) a frame, as in 1.5 and not made worse:
   `pane_display_lines` builds a `Vec` of every display line, called a
   few times a frame. For stage 7.
+
+### Stage 5: motion
+
+- `fenix_vim::ScreenRows` (`row_move(buffer, at, delta, x)`,
+  `row_bounds(buffer, at)`) and `LineRows`, the no-wrap one, in
+  `fenix-vim/src/screen.rs`. Rather than `handle_key_with`, the GUI
+  sets it before each key (`VimState::set_screen_rows`, from
+  `dispatch_keypress` by `sync_screen_rows`): everything a key runs --
+  the extra cursors' replay, `.`, a macro -- then goes by the same
+  rows without another parameter through every key handler. The GUI's
+  is `PaneRows`, a snapshot of the focused pane's width, tab stops and
+  decorations that doesn't borrow `App`.
+- The goal cell is `(char, x)`: kept by a move by row, and forgotten
+  by any other move, which leaves the cursor on another char, so
+  nothing has to clear it.
+- `Motion::ScreenDown` / `ScreenUp` (`gj`, `gk`, `g<Down>`, `g<Up>`) in
+  Normal, Visual (Block too) and after an operator: charwise and
+  exclusive, as Vim's, with a count; never onto the empty line after a
+  last newline; without wrap, the line motions.
+- Up and Down with standard keys and in Insert go by rows. Home and End
+  go to the row's ends first, then the line's: End on a row before the
+  line's last goes to that row's last char, since the place after it
+  is drawn at the next row's start.
+- PageUp/PageDown in a wrapped pane move the cursor by the pane's rows
+  less one (`VimState::move_rows`; twenty rows without a window).
+- Adding a cursor above or below (Ctrl+Alt+Up/Down) stays by line; the
+  extra cursors then each move by their own rows.
+- One stage 2 test changed: End now stops at a row's end first, so the
+  test presses it twice.

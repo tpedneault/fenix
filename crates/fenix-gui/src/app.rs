@@ -16440,6 +16440,8 @@ impl App {
         self.change_capture.push(keypress);
         let before = self.motion_before_key();
         let carets_before = self.caret_mark();
+        // What a move by row goes by: the focused pane's rows now.
+        self.sync_screen_rows();
         self.route_keypress(keypress, event_loop);
         // And whatever the key itself did that wasn't theirs (an undo).
         self.follow_outside_edits();
@@ -16720,6 +16722,17 @@ impl App {
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
+            // A wrapped pane: by its rows, a pane less one.
+            let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+            if self.wrap_cols(pane, id).is_some() {
+                let rows = self.pane_text_rows(pane).unwrap_or(page_size).saturating_sub(1).max(1) as isize;
+                if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+                    if self.vim.move_rows(&mut ob.buffer, &mut state.cursor, if down { rows } else { -rows }) {
+                        self.wake_caret();
+                        return;
+                    }
+                }
+            }
             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
             buffer.move_page(cursor, page_size, down);
             self.wake_caret();

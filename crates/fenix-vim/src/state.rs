@@ -517,6 +517,10 @@ pub struct VimState {
     /// never by `W`/`E`/`B` (real Vim's WORD motions are always
     /// whitespace-only, regardless of `iskeyword`).
     iskeyword_extra: Vec<char>,
+    /// The focused pane's rows, for `gj`/`gk` and the arrows by row
+    /// (`set_screen_rows`), and the cell a run of moves by row keeps to.
+    screen: std::sync::Arc<dyn crate::screen::ScreenRows>,
+    row_goal: std::cell::Cell<Option<(usize, usize)>>,
 
     normal_matcher: Matcher<'static, VimAction>,
     visual_matcher: Matcher<'static, VisualAction>,
@@ -580,6 +584,8 @@ impl VimState {
             indent_width: indent::DEFAULT_INDENT_WIDTH,
             syntax_indent: None,
             iskeyword_extra: crate::charclass::DEFAULT_ISKEYWORD_EXTRA.to_vec(),
+            screen: std::sync::Arc::new(crate::screen::LineRows),
+            row_goal: std::cell::Cell::new(None),
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
             pending_matcher: keymaps::pending_trie().matcher(),
@@ -1010,6 +1016,56 @@ impl VimState {
         }
     }
 
+    /// How the pane the next keys are for lays its lines out on rows:
+    /// `gj`/`gk`, and Up/Down and Home/End with standard keys and in
+    /// Insert, go by them. `LineRows` (the default) is a row a line.
+    pub fn set_screen_rows(&mut self, rows: std::sync::Arc<dyn crate::screen::ScreenRows>) {
+        self.screen = rows;
+    }
+
+    fn screen(&self) -> crate::screen::Screen<'_> {
+        crate::screen::Screen { rows: &*self.screen, goal: &self.row_goal }
+    }
+
+    /// PageUp/PageDown in a wrapped pane: `cursor` `delta` rows on, as
+    /// `move_by_row` moves it. False, not moving it, when a row is a line.
+    pub fn move_rows(&self, buffer: &mut Buffer, cursor: &mut Cursor, delta: isize) -> bool {
+        buffer.break_undo_run();
+        self.move_by_row(buffer, cursor, delta)
+    }
+
+    /// `cursor` `delta` rows on, by the pane's rows, at the cell the last
+    /// move by row kept to; anywhere on the last row of its line, past
+    /// its last char too (Insert's and standard keys' cursor can be).
+    /// False when a row is a line.
+    pub(crate) fn move_by_row(&self, buffer: &Buffer, cursor: &mut Cursor, delta: isize) -> bool {
+        let screen = self.screen();
+        let Some((to, x)) = screen.step(buffer, cursor.char_idx, delta) else { return false };
+        cursor.char_idx = to;
+        cursor.sticky_col = buffer.line_col(cursor).1;
+        screen.keep(to, x);
+        true
+    }
+
+    /// Home on a wrapped line's row after its first, the cursor not
+    /// already at its start: the row's start. `None` otherwise, for the
+    /// line's own Home.
+    pub(crate) fn row_home(&self, buffer: &Buffer, at: usize) -> Option<usize> {
+        let row = self.screen.row_bounds(buffer, at)?;
+        let line = buffer.rope().char_to_line(at.min(buffer.len_chars()));
+        (row.start > buffer.line_start_char(line) && at != row.start).then_some(row.start)
+    }
+
+    /// End on a wrapped line's row before its last, the cursor not
+    /// already at its end: the row's last char (the place after it is
+    /// the next row's start). `None` otherwise, for the line's own End.
+    pub(crate) fn row_end(&self, buffer: &Buffer, at: usize) -> Option<usize> {
+        let row = self.screen.row_bounds(buffer, at)?;
+        let line = buffer.rope().char_to_line(at.min(buffer.len_chars()));
+        let last = row.end.checked_sub(1)?;
+        (row.end < buffer.line_start_char(line) + buffer.line_len(line) && at < last).then_some(last)
+    }
+
     pub fn handle_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         // Whatever one key does is one undo step, however many edits it
         // takes underneath -- a visual `r#` rewrites every selected char
@@ -1244,10 +1300,37 @@ impl VimState {
             }
             KeyCode::Named(NamedKey::Left) => buffer.move_left(cursor),
             KeyCode::Named(NamedKey::Right) => buffer.move_right(cursor),
-            KeyCode::Named(NamedKey::Up) => buffer.move_up(cursor),
-            KeyCode::Named(NamedKey::Down) => buffer.move_down(cursor),
-            KeyCode::Named(NamedKey::Home) => buffer.move_home(cursor),
-            KeyCode::Named(NamedKey::End) => buffer.move_end(cursor),
+            // By the pane's rows, where its lines wrap; a move ends the
+            // typing run, as a move by line does.
+            KeyCode::Named(NamedKey::Up) => {
+                buffer.break_undo_run();
+                if !self.move_by_row(buffer, cursor, -1) {
+                    buffer.move_up(cursor);
+                }
+            }
+            KeyCode::Named(NamedKey::Down) => {
+                buffer.break_undo_run();
+                if !self.move_by_row(buffer, cursor, 1) {
+                    buffer.move_down(cursor);
+                }
+            }
+            // The row's ends first, then the line's.
+            KeyCode::Named(NamedKey::Home) => match self.row_home(buffer, cursor.char_idx) {
+                Some(at) => {
+                    buffer.break_undo_run();
+                    *cursor = Cursor { char_idx: at, sticky_col: 0 };
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                }
+                None => buffer.move_home(cursor),
+            },
+            KeyCode::Named(NamedKey::End) => match self.row_end(buffer, cursor.char_idx) {
+                Some(at) => {
+                    buffer.break_undo_run();
+                    *cursor = Cursor { char_idx: at, sticky_col: 0 };
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                }
+                None => buffer.move_end(cursor),
+            },
             KeyCode::Char(c) if key.mods == Mods::default() => {
                 if replace && buffer.char_at(cursor.char_idx).is_some() {
                     buffer.delete_forward(cursor);
@@ -1904,12 +1987,12 @@ impl VimState {
             }
             VimAction::Motion(m @ Motion::MatchingBracket) => {
                 let before = cursor.char_idx;
-                apply_motion(buffer, cursor, m, count, &self.iskeyword_extra);
+                apply_motion(buffer, cursor, m, count, &self.iskeyword_extra, &self.screen());
                 if cursor.char_idx != before {
                     self.pending_jump = Some(before);
                 }
             }
-            VimAction::Motion(m) => apply_motion(buffer, cursor, m, count, &self.iskeyword_extra),
+            VimAction::Motion(m) => apply_motion(buffer, cursor, m, count, &self.iskeyword_extra, &self.screen()),
             VimAction::Operator(op) => {
                 self.pending_op = Some(op);
                 self.pending_op_count = count;
@@ -1985,7 +2068,7 @@ impl VimState {
                 // Count support skipped here (real Vim's "3D" also pulls in
                 // the next 2 full lines, a nuance not worth the complexity
                 // for this action) -- always behaves as a plain d$/c$/y$.
-                let range = range_for_motion(buffer, cursor, Motion::LineEnd, 1, &self.iskeyword_extra);
+                let range = range_for_motion(buffer, cursor, Motion::LineEnd, 1, &self.iskeyword_extra, &self.screen());
                 self.finish_operator(buffer, cursor, op, range, false);
             }
             VimAction::ChangeLine => {
@@ -2018,7 +2101,7 @@ impl VimState {
             VimAction::RepeatFind { reverse } => {
                 if let Some((m, _)) = self.last_find {
                     let m = if reverse { reverse_find_motion(m) } else { m };
-                    apply_motion(buffer, cursor, m, count, &self.iskeyword_extra);
+                    apply_motion(buffer, cursor, m, count, &self.iskeyword_extra, &self.screen());
                 }
             }
             VimAction::EnterSearch { forward } => {
@@ -2097,10 +2180,10 @@ impl VimState {
         self.last_find = Some((m, c));
         if let Some(op) = self.pending_op.take() {
             let total_count = self.pending_op_count.saturating_mul(count);
-            let range = range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra);
+            let range = range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra, &self.screen());
             self.finish_operator(buffer, cursor, op, range, m.is_linewise());
         } else {
-            apply_motion(buffer, cursor, m, count, &self.iskeyword_extra);
+            apply_motion(buffer, cursor, m, count, &self.iskeyword_extra, &self.screen());
         }
     }
 
@@ -2463,7 +2546,7 @@ impl VimState {
                     }
                     PendingTarget::Motion(m) => {
                         let m = adjust_for_change_word(op, m, buffer, cursor);
-                        (range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra), m.is_linewise())
+                        (range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra, &self.screen()), m.is_linewise())
                     }
                     // Counts on text objects aren't supported ("2diw" behaves
                     // like "diw") -- a disclosed simplification.
@@ -2605,7 +2688,7 @@ impl VimState {
     /// that same simplification.
     fn surround_target_range(&self, buffer: &Buffer, cursor: &Cursor, target: PendingTarget) -> Range<usize> {
         match target {
-            PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, 1, &self.iskeyword_extra),
+            PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, 1, &self.iskeyword_extra, &self.screen()),
             PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj, &self.iskeyword_extra),
         }
     }
@@ -2682,7 +2765,7 @@ impl VimState {
                 self.pending_comment = false;
                 let total_count = self.pending_comment_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
                 let range = match target {
-                    PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra),
+                    PendingTarget::Motion(m) => range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra, &self.screen()),
                     PendingTarget::TextObject(obj) => textobject::span(buffer, cursor, obj, &self.iskeyword_extra),
                 };
                 self.pending_comment_lines = Some(range_to_lines(buffer, &range));
@@ -2996,9 +3079,9 @@ impl VimState {
                         cursor.char_idx = motion::buffer_line_target(buffer, m, raw_count);
                         cursor.sticky_col = buffer.line_col(cursor).1;
                     } else {
-                        apply_motion(buffer, cursor, m, raw_count.unwrap_or(1).max(1), &self.iskeyword_extra);
+                        apply_motion(buffer, cursor, m, raw_count.unwrap_or(1).max(1), &self.iskeyword_extra, &self.screen());
                     }
-                    self.block_to_line_end = m == Motion::LineEnd || (self.block_to_line_end && matches!(m, Motion::Up | Motion::Down));
+                    self.block_to_line_end = m == Motion::LineEnd || (self.block_to_line_end && matches!(m, Motion::Up | Motion::Down | Motion::ScreenUp | Motion::ScreenDown));
                 }
                 VisualAction::TextObject(object) => {
                     let range = textobject::span(buffer, cursor, object, &self.iskeyword_extra);
@@ -3261,14 +3344,29 @@ fn reverse_find_motion(m: Motion) -> Motion {
     }
 }
 
-fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, iskeyword_extra: &[char]) {
+fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, iskeyword_extra: &[char], screen: &crate::screen::Screen) {
+    // By the pane's rows, all `count` at once, onto a char (never past
+    // a line's last, as `j`/`k`).
+    if matches!(m, Motion::ScreenDown | Motion::ScreenUp) {
+        let delta = count.max(1) as isize * if m == Motion::ScreenDown { 1 } else { -1 };
+        if let Some((to, x)) = screen.step(buffer, cursor.char_idx, delta) {
+            // Not onto the empty line after a last newline, as `j` won't.
+            let line = buffer.rope().char_to_line(to.min(buffer.len_chars())).min(buffer.visual_line_count().saturating_sub(1));
+            let to = to.min(buffer.line_start_char(line) + buffer.line_len(line));
+            let last = buffer.line_start_char(line) + buffer.line_len(line).saturating_sub(1);
+            cursor.char_idx = to.min(last.max(buffer.line_start_char(line)));
+            cursor.sticky_col = buffer.line_col(cursor).1;
+            screen.keep(cursor.char_idx, x);
+            return;
+        }
+    }
     for _ in 0..count.max(1) {
         let target = motion::target(buffer, cursor, m, iskeyword_extra);
         if target == cursor.char_idx {
             break; // no progress (already at a boundary) -- stop instead of spinning
         }
         cursor.char_idx = target;
-        if !matches!(m, Motion::Up | Motion::Down) {
+        if !matches!(m, Motion::Up | Motion::Down | Motion::ScreenUp | Motion::ScreenDown) {
             let (_, col) = buffer.line_col(cursor);
             cursor.sticky_col = col;
         }
@@ -3279,9 +3377,11 @@ fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, isk
 /// without mutating `cursor` -- used to compute an operator's range
 /// (`3dw`, `d3w`) without moving the cursor before the delete/change/yank
 /// actually happens.
-fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u32, iskeyword_extra: &[char]) -> usize {
+fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u32, iskeyword_extra: &[char], screen: &crate::screen::Screen) -> usize {
     let mut probe = *cursor;
-    apply_motion(buffer, &mut probe, m, count, iskeyword_extra);
+    // An operator's range is only looked at: it keeps no goal cell.
+    let goal = std::cell::Cell::new(screen.goal.get());
+    apply_motion(buffer, &mut probe, m, count, iskeyword_extra, &crate::screen::Screen { rows: screen.rows, goal: &goal });
     probe.char_idx
 }
 
@@ -3409,8 +3509,8 @@ fn lines_content_range(buffer: &Buffer, line_a: usize, line_b: usize) -> Range<u
     start..end
 }
 
-fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32, iskeyword_extra: &[char]) -> Range<usize> {
-    let target = motion_target_repeated(buffer, cursor, motion, count, iskeyword_extra);
+fn range_for_motion(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32, iskeyword_extra: &[char], screen: &crate::screen::Screen) -> Range<usize> {
+    let target = motion_target_repeated(buffer, cursor, motion, count, iskeyword_extra, screen);
     if motion.is_linewise() {
         let (cur_line, _) = buffer.line_col(cursor);
         let (tgt_line, _) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
