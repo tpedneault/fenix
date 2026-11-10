@@ -304,10 +304,14 @@ impl App {
         };
         let Some((index, row)) = held else { return true };
         let line = walk.lines.get(index).copied().unwrap_or(0);
-        let vcol = walk.breaks(index).get(row).map_or(0, |r| r.start);
+        // Only as far as that row.
+        let vcol = walk.rows_upto(index, row + 1).get(row).map_or(0, |r| r.start);
         drop(walk);
         let Some(ob) = self.buffers.get(buffer) else { return true };
-        let col = crate::mouse::char_col_at(&self.line_col_map(buffer, line, line), vcol).0;
+        // The first char that starts on the row: a tab or a decoration
+        // the row begins inside starts on the row above.
+        let col_map = self.line_col_map(buffer, line, line);
+        let col = col_map[..col_map.len().saturating_sub(1)].partition_point(|&v| v < vcol);
         let at = ob.buffer.line_start_char(line) + col;
         self.pane_state_mut(pane).cursor = Cursor { char_idx: at, sticky_col: col };
         true
@@ -389,11 +393,11 @@ mod tests {
         app.set_pane_text_cols(pane, 10);
         app.press("$");
         app.ensure_cursor_visible(5);
-        // The line's twenty rows end at row 19 (`$` is on its last
-        // blank), `next` is row 20 and the empty line after it row 21:
-        // centred, which the end leaves where it is.
-        assert_eq!(top(&app), (0, 17));
-        assert_eq!(app.focused_overlays_now(5).caret, Some((2, 9)));
+        // The line's twenty-one rows end at row 20, its last blank on a
+        // row of its own (`$` is on it), `next` is row 21 and the empty
+        // line after it row 22: centred, which the end leaves there.
+        assert_eq!(top(&app), (0, 18));
+        assert_eq!(app.focused_overlays_now(5).caret, Some((2, 0)));
         app.press("0");
         app.ensure_cursor_visible(5);
         assert_eq!(top(&app), (0, 0), "a jump of more than half the pane back: centred, held to the top");
@@ -492,8 +496,8 @@ mod tests {
         app.ensure_cursor_visible(5);
         app.press("j");
         app.ensure_cursor_visible(5);
-        assert_eq!(top(&app), (0, 17));
-        // Four times as wide: line 0 is six rows now, the top's row 17 gone.
+        assert_eq!(top(&app), (0, 18));
+        // Four times as wide: line 0 is six rows now, the top's row 18 gone.
         app.set_pane_text_cols(pane, 40);
         app.ensure_cursor_visible(5);
         let (index, row) = top(&app);
@@ -534,6 +538,24 @@ mod tests {
             notch(&mut app);
         }
         assert_eq!(app.line_col().1, top(&app).1 * 10);
+    }
+
+    #[test]
+    fn the_wheel_holds_the_cursor_on_the_top_row_when_that_row_starts_inside_a_tab() {
+        // A tab at eight is columns 8 to 15 at the default stop: row 1
+        // (from column 9) starts inside it; `x` is the first char on it.
+        let text = format!("abcdefgh\tx yyyy\n{}", "more\n".repeat(40));
+        let (mut app, _f) = app_on_file("a.txt", &text);
+        if !app.buffer_wraps(app.focused_buffer_id()) {
+            app.run_cmd("view.toggle_wrap");
+        }
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 10);
+        assert!(app.scroll_focused_by_rows(pane, buffer, 1, 5));
+        assert_eq!(top(&app), (0, 1));
+        assert_eq!(app.line_col(), (0, 9), "on `x`, not the tab above");
+        app.ensure_cursor_visible(5);
+        assert_eq!(top(&app), (0, 1), "and the view stays");
     }
 
     #[test]
