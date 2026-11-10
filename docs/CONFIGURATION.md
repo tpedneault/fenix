@@ -481,7 +481,7 @@ when it's out of date).
 | `appearance.shadows` | true / false | on | Popups cast a soft shadow. |
 | `appearance.indent_guides` | true / false | on | A thin line for each indent level. |
 | `appearance.active_indent_guide` | true / false | on | The guide of the block the cursor is in is brighter. |
-| `appearance.overview_ruler` | true / false | on | A track on each code pane's right edge showing the visible part, search matches, problems, changes and the cursor. Click it to jump. |
+| `appearance.overview_ruler` | true / false | on | A track on each code pane's right edge showing the visible part, search matches, problems by severity, Git changes, the cursor and any extra cursors. A click on a mark goes to it; elsewhere, to that part of the file. |
 | `appearance.sticky_scroll` | true / false | on | The first lines of the function and class you're inside stay at the top of the pane. |
 | `appearance.sticky_lines` | 1–6 | 3 | How many enclosing lines sticky scroll keeps at most. |
 | `appearance.rounded_selection` | true / false | on | A Visual selection's outer corners are rounded, so it reads as one shape. |

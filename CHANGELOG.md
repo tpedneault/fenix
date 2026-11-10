@@ -105,6 +105,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The overview ruler down a code pane's right edge marks extra cursors
+  and information-level problems too, and a click on (or near) a mark
+  goes to that line exactly. It's still on by default, as it has been
+  since 1.0 (`appearance.overview_ruler`).
 - Rainbow brackets (`appearance.rainbow_brackets`) go by the syntax
   tree: a bracket in a string or a comment isn't coloured, and a closing
   bracket is its partner's colour. The colours are the theme's: a theme

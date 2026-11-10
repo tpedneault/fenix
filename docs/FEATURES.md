@@ -1497,8 +1497,9 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   or close. Popups get rounded corners and soft shadows; problems from
   language servers are underlined with a wave, with the cursor line's
   message at its end; an overview ruler down each code pane's right edge
-  shows the visible part, search matches, problems and changes (click
-  it to jump); sticky scroll pins the headers of the scopes you're
+  shows the visible part, search matches, problems by severity (errors,
+  warnings, information), Git changes, the cursor and extra cursors -- a
+  click on a mark goes to it, anywhere else to that part of the file; sticky scroll pins the headers of the scopes you're
   inside; a Visual selection is rounded and shows its whitespace;
   unfocused panes are dimmed; brackets can be coloured by depth.
   `motion.level` (`SPC t a`) sets how much moves, every animation and
