@@ -421,9 +421,23 @@ A `policy.toml` in the same folder decides for everyone:
 ```toml
 store = false                                # no registry here: files only
 # registry = "https://mirror.example/index.json"   # or everyone uses this mirror
+update_check = false                         # no one here looks for a newer Fenix
 ```
 
-A `policy.toml` that can't be read keeps the store switched off.
+A `policy.toml` that can't be read keeps the store switched off, and
+the update check too.
+
+### Looking for a newer Fenix
+
+Fenix doesn't go on the network unasked. With `updates.check = true`
+(the Settings page's Windows & session) it asks GitHub once a day for
+the latest release of `tpedneault/fenix` -- a request to
+`api.github.com` with nothing about your files or settings in it -- and
+when there's a newer one, Home says so in a line under the date. `app.check_for_updates`
+(the palette) looks whenever you ask, the setting on or off. Nothing is
+downloaded or installed: get the new one from the releases page as you
+got this one. What it found last is kept in `updates.json` in Fenix's
+state folder, so a restart doesn't ask again.
 
 When an extension seems to be the trouble, `fenix --disable-extensions`
 starts in safe mode: the core alone, with nothing read from an installed
@@ -547,6 +561,7 @@ when it's out of date).
 | **Windows & session** | | | |
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
+| `updates.check` | true / false | off | Once a day, ask GitHub whether there's a newer release of Fenix, and say so on Home. Nothing is downloaded. app.check_for_updates looks whenever you ask, this on or off. |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
 | **Extensions** | | | |
 | `extensions.store` | true / false | on | Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext). |

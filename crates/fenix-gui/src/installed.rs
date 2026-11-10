@@ -526,9 +526,9 @@ mod tests {
         let path = dir.path().join("settings.toml");
         std::fs::write(&path, "[extensions]\nregistry = \"https://yours.test/index.json\"\n").unwrap();
         let config = fenix_config::Config::load(path).unwrap();
-        let off = Policy { store: Some(false), registry: None };
+        let off = Policy { store: Some(false), registry: None, update_check: None };
         assert!(registry_with(Some(&config), &off).err().unwrap().contains("by its administrator"));
-        let mirror = Policy { store: None, registry: Some("https://mirror.test/index.json".into()) };
+        let mirror = Policy { store: None, registry: Some("https://mirror.test/index.json".into()), update_check: None };
         assert_eq!(registry_with(Some(&config), &mirror).ok().map(|r| r.url).as_deref(), Some("https://mirror.test/index.json"));
         assert_eq!(registry_with(Some(&config), &Policy::default()).ok().map(|r| r.url).as_deref(), Some("https://yours.test/index.json"));
     }

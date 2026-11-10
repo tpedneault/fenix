@@ -51,6 +51,9 @@ pub struct Policy {
     /// The registry everyone here uses (a mirror), whatever their
     /// `extensions.registry` says.
     pub registry: Option<String>,
+    /// `false`: no one here looks for a newer Fenix, daily or when asked
+    /// (`updates.check`, `app.check_for_updates`).
+    pub update_check: Option<bool>,
 }
 
 /// An installed extension.
@@ -279,7 +282,9 @@ mod tests {
         let store = Store::new(dir.path());
         assert_eq!(store.policy().unwrap(), Policy::default());
         std::fs::write(dir.path().join("policy.toml"), "store = false\nregistry = \"https://mirror.test/index.json\"\n").unwrap();
-        assert_eq!(store.policy().unwrap(), Policy { store: Some(false), registry: Some("https://mirror.test/index.json".into()) });
+        assert_eq!(store.policy().unwrap(), Policy { store: Some(false), registry: Some("https://mirror.test/index.json".into()), update_check: None });
+        std::fs::write(dir.path().join("policy.toml"), "update_check = false\n").unwrap();
+        assert_eq!(store.policy().unwrap().update_check, Some(false));
         std::fs::write(dir.path().join("policy.toml"), "stores = false\n").unwrap();
         assert!(store.policy().unwrap_err().contains("policy.toml"));
     }
