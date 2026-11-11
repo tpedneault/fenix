@@ -29,6 +29,10 @@ mod rows;
 mod row_scroll;
 mod semantic;
 mod code_lens;
+mod server_install;
+mod editorconfig_host;
+mod inlay_hints;
+use server_install::spawn_lsp_server;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -1431,6 +1435,9 @@ enum PendingLspRequest {
     /// `textDocument/codeLens` for `path` (canonical) as it was at
     /// `edit_count`, by request `request`.
     CodeLens { path: PathBuf, edit_count: u64, request: i64 },
+    /// `textDocument/inlayHint` for buffer `buffer`'s lines in view, by
+    /// request `request`.
+    InlayHint { buffer: BufferId, request: i64 },
     /// `codeLens/resolve` for lens `index` of `path`'s answer `generation`.
     CodeLensResolve { path: PathBuf, generation: u64, index: usize },
     /// `workspace/executeCommand` for the lens titled `title`.
@@ -5574,6 +5581,12 @@ pub struct App {
     /// Why each of `lsp_unavailable` stopped, with the last it wrote to
     /// stderr: what Tool Status shows.
     lsp_failures: HashMap<LspKey, String>,
+    /// A missing language server offered, asked about, or installing.
+    server_install: server_install::InstallState,
+    /// What `.editorconfig` says of each file looked at, by path.
+    editorconfig_cache: HashMap<PathBuf, fenix_config::editorconfig::Properties>,
+    /// Each buffer's inlay hints: which server, what's asked and drawn.
+    inlay: HashMap<BufferId, inlay_hints::InlayDoc>,
     /// Each project root's additional servers (`tools.json`'s
     /// `lsp.additional`), read once and again on `:lsp-restart`.
     lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
@@ -6434,6 +6447,9 @@ impl App {
             restart_requested: false,
             lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
+            server_install: Default::default(),
+            editorconfig_cache: HashMap::new(),
+            inlay: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
             next_lsp_fanout: 1,
@@ -7253,6 +7269,7 @@ impl App {
             }
         }
         self.refresh_project_settings(false);
+        self.apply_editorconfig();
         self.tell_extensions(Happened::FocusChanged);
         // Said before its servers would have started: they won't, yet.
         self.project_trust_notice();
@@ -7350,6 +7367,7 @@ impl App {
         }
         // A buffer's lenses from every one of them that offers them.
         let lensed = self.lens_targets(buffer, &path, &canonical);
+        self.inlay_targets(buffer, &path, &canonical);
         for (key, language_id, by_pattern) in self.lsp_targets(&path) {
             let semantic = match (&asked, buffer) {
                 (Some((b, asked)), _) if *asked == key => semantic::SemanticSync::Ask(*b),
@@ -7529,7 +7547,7 @@ impl App {
     /// window (#33). With no event loop to hear of it, it starts here.
     fn start_lsp_session(&mut self, key: LspKey, name: String, languages: Vec<String>, spec: &fenix_project::tools::CommandSpec, cwd: &Path) {
         let Some(send) = self.lsp_start_sender() else {
-            let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+            let spawned = spawn_lsp_server(spec, &key.root);
             return self.lsp_started(key, name, languages, &spec.executable, cwd, spawned);
         };
         let generation = tool_sessions::generation();
@@ -7538,7 +7556,7 @@ impl App {
         std::thread::Builder::new()
             .name("fenix-lsp-start".into())
             .spawn(move || {
-                let result = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+                let result = spawn_lsp_server(&spec, &key.root);
                 send(FenixUserEvent::LspStarted(Box::new(LspStart { key, generation, name, languages, executable: spec.executable, cwd, result })));
             })
             .expect("a thread to start a language server");
@@ -7599,8 +7617,12 @@ impl App {
             }
             Err(err) => {
                 self.lsp_failures.insert(key.clone(), format!("couldn't start {executable}: {err}"));
+                // A built-in server that isn't installed is offered, in a
+                // notice, rather than reported as an error.
+                if !self.offer_server_install(&key, executable, &err) {
+                    self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
+                }
                 self.lsp_unavailable.insert(key);
-                self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
             }
         }
     }
@@ -7610,14 +7632,14 @@ impl App {
     /// later reconnect (once one exists) can re-send just this without
     /// re-spawning the process.
     fn send_lsp_initialize(&mut self, key: LspKey, cwd: &Path) {
-        let (semantic, lens) = (self.semantic_highlighting_on(), self.code_lens_on());
+        let (semantic, lens, inlay) = (self.semantic_highlighting_on(), self.code_lens_on(), self.inlay_hints_on());
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
             #[allow(deprecated)] // still set alongside workspace_folders for servers that only look at this
             root_uri: root_uri.clone(),
-            capabilities: crate::lsp::client_capabilities(semantic, lens),
+            capabilities: crate::lsp::client_capabilities(semantic, lens, inlay),
             workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
             ..Default::default()
         };
@@ -7660,6 +7682,9 @@ impl App {
                 }
                 if method == "workspace/codeLens/refresh" {
                     self.refresh_lenses(&key);
+                }
+                if method == "workspace/inlayHint/refresh" {
+                    self.refresh_inlay_hints(&key);
                 }
                 if let Some(session) = self.lsp_sessions.get_mut(&key) {
                     let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
@@ -7815,6 +7840,7 @@ impl App {
             }
             PendingLspRequest::SemanticTokens { path, edit_count, how, request } => self.semantic_tokens_answered(&key, path, edit_count, how, request, result),
             PendingLspRequest::CodeLens { path, edit_count, request } => self.lenses_answered(&key, path, edit_count, request, result),
+            PendingLspRequest::InlayHint { buffer, request } => self.inlay_hints_answered(&key, buffer, request, result),
             PendingLspRequest::CodeLensResolve { path, generation, index } => self.lens_resolved(&key, path, generation, index, result),
             PendingLspRequest::LensCommand { title } => {
                 if let Err(e) = result {
@@ -8469,7 +8495,7 @@ impl App {
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return false };
         let params = lsp_types::DocumentFormattingParams {
             text_document,
-            options: lsp_types::FormattingOptions { tab_size: 4, insert_spaces: true, ..Default::default() },
+            options: lsp_types::FormattingOptions { tab_size: self.vim.indent_width() as u32, insert_spaces: !self.vim.indent_tabs(), ..Default::default() },
             work_done_progress_params: Default::default(),
         };
         match session.client.request::<lsp_types::request::Formatting>(params) {
@@ -9390,6 +9416,7 @@ impl App {
                 return;
             }
         }
+        self.editorconfig_before_save(id, None);
         let ob = self.open_mut();
         match ob.buffer.save() {
             Ok(()) => {
@@ -9431,6 +9458,10 @@ impl App {
         if let Some(project) = lsp_settings_file(path) {
             let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             self.lsp_settings_changed(&project, Some(&server));
+        }
+        // A `.editorconfig` of yours, saved: read again.
+        if path.file_name().is_some_and(|n| n == ".editorconfig") {
+            self.editorconfig_changed();
         }
     }
 
@@ -9549,6 +9580,7 @@ impl App {
         }
         for id in dirty {
             let name = self.buffer_display_name(id);
+            self.editorconfig_before_save(id, None);
             let Some(ob) = self.buffers.get_mut(id) else { continue };
             if let Err(err) = ob.buffer.save() {
                 self.set_error(format!("save failed for {name}: {err}"));
@@ -10901,10 +10933,14 @@ impl App {
             fenix_tasks::TaskEvent::Finished(outcome) => {
                 match outcome {
                     fenix_tasks::TaskOutcome::Exited { success, .. } => self.finish_task_run(buffer, Some(success)),
-                    fenix_tasks::TaskOutcome::Cancelled => self.append_task_output_text(buffer, "-- task cancelled --"),
+                    fenix_tasks::TaskOutcome::Cancelled => {
+                        self.append_task_output_text(buffer, "-- task cancelled --");
+                        self.server_install_finished(false);
+                    }
                     fenix_tasks::TaskOutcome::Failed(error) => {
                         self.append_task_output_text(buffer, &format!("-- task error: {error} --"));
                         self.set_error(format!("Task failed: {error}"));
+                        self.server_install_finished(false);
                     }
                 }
                 if let Some(session) = self.task_session.as_mut() {
@@ -11032,6 +11068,7 @@ impl App {
             ok: success == Some(true),
             tests: fenix_tasks::test_counts(&output),
         });
+        self.server_install_finished(success == Some(true));
         let took = self.task_session.as_mut().and_then(|s| s.started.take()).map(|t| t.elapsed());
         self.task_notify(success == Some(true), took);
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
@@ -16913,6 +16950,10 @@ impl App {
             self.delete_file_confirm_key(keypress);
             return;
         }
+        if self.server_install.confirm.is_some() {
+            self.server_install_confirm_key(keypress);
+            return;
+        }
 
         // The grep search-term prompt and an open picker both capture
         // input the same way -- checked ahead of the explorer/sidebar-
@@ -18406,6 +18447,7 @@ impl App {
             .or_else(|| self.workspace_rename_prompt_text())
             .or_else(|| self.goto_line_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
+            .or_else(|| self.server_install_confirm_text())
     }
 
     /// Test-only: the modeline as one plain string, for assertions --
@@ -20528,6 +20570,7 @@ impl App {
         self.sync_lsp_if_changed();
         self.ask_due_semantic_tokens();
         self.ask_due_lenses();
+        self.ask_due_inlay_hints();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -21081,9 +21124,12 @@ impl App {
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
             // Its lines shown, for semantic tokens asked by range and the
             // lenses resolved: worked out only when either wants them.
-            let (semantic, lensed) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id));
-            if semantic || lensed {
+            let (semantic, lensed, hinted) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id), self.inlay.contains_key(&buffer_id));
+            if semantic || lensed || hinted {
                 let runs = row_map.runs();
+                if hinted {
+                    self.note_inlay_view(buffer_id, pane, &runs);
+                }
                 if semantic {
                     self.note_semantic_view(buffer_id, pane, &runs);
                 }
@@ -23311,6 +23357,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // timed out): asked now, not on whatever frame comes next.
         self.ask_due_semantic_tokens();
         self.ask_due_lenses();
+        self.ask_due_inlay_hints();
 
         // Keep redrawing at animation cadence only while something is
         // actually transitioning (blink fade or an active pulse); once
@@ -37623,6 +37670,69 @@ name = \"orbit\"
         (dir, app, path, key)
     }
 
+    /// Inlay hints: asked for the lines in view once the server has the
+    /// text, drawn as dimmed decorations where they go, asked again when
+    /// the server says so, and gone when they're turned off, globally or
+    /// for the language.
+    #[test]
+    fn inlay_hints_are_asked_for_the_view_drawn_refreshed_and_turned_off() {
+        let dir = TempDir::new("inlay_hints");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() {}\nfn other() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], capabilities(serde_json::json!({"textDocumentSync": 2, "inlayHintProvider": true})));
+        app.sync_lsp_for_focused_buffer();
+        let id = app.focused_buffer_id();
+        assert!(app.inlay.contains_key(&id), "the server offers them");
+        app.ask_due_inlay_hints();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "nothing in view yet");
+        let pane = app.focused_pane_id();
+        app.note_inlay_view(id, pane, &[0..2]);
+        app.ask_due_inlay_hints();
+        let (request, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::InlayHint { buffer, .. } if buffer == id));
+        let hint = |line: u32, character: u32, label: &str| serde_json::json!({"position": {"line": line, "character": character}, "label": label, "kind": 1, "paddingLeft": true});
+        answer(&mut app, &key, request, serde_json::json!([hint(1, 8, "-> ()"), hint(0, 7, "-> ()")]));
+        assert_eq!(app.inlay_hints_drawn(id), vec![(7, " -> ()".to_string()), (13 + 8, " -> ()".to_string())]);
+        app.ask_due_inlay_hints();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "answered for what's in view");
+
+        // The server's refresh: asked again.
+        app.apply_lsp_event(key.clone(), app.lsp_sessions[&key].generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(9), method: "workspace/inlayHint/refresh".into(), params: serde_json::Value::Null });
+        app.ask_due_inlay_hints();
+        let (request, _) = only_pending(&app, &key);
+        answer(&mut app, &key, request, serde_json::json!([hint(0, 7, ": x")]));
+        assert_eq!(app.inlay_hints_drawn(id), vec![(7, " : x".to_string())]);
+        // They move with typing before them, until the next answer.
+        app.focused_buffer_and_cursor_mut().1.char_idx = 0;
+        app.test_insert_str("  ");
+        app.shift_code_decorations();
+        assert_eq!(app.inlay_hints_drawn(id), vec![(9, " : x".to_string())]);
+        app.sync_lsp_for_focused_buffer();
+
+        // An answer for text edited since is let go.
+        app.lsp_sessions.get_mut(&key).unwrap().pending.clear();
+        app.refresh_inlay_hints(&key);
+        app.ask_due_inlay_hints();
+        let (request, _) = only_pending(&app, &key);
+        app.test_insert_str("// ");
+        answer(&mut app, &key, request, serde_json::json!([hint(0, 0, "stale")]));
+        assert!(!app.inlay_hints_drawn(id).iter().any(|(_, t)| t.contains("stale")));
+
+        // Off for Rust: gone at the next frame.
+        app.config.set_value("lsp.inlay_hints_off", Some(fenix_config::Value::List(vec!["rust".into()])));
+        app.ask_due_inlay_hints();
+        assert!(!app.inlay.contains_key(&id) && app.inlay_hints_drawn(id).is_empty());
+        app.sync_lsp_for_focused_buffer();
+        assert!(!app.inlay.contains_key(&id), "not taken up again");
+        app.config.set_value("lsp.inlay_hints_off", None);
+        app.config.set_value("lsp.inlay_hints", Some(fenix_config::Value::Bool(false)));
+        app.sync_lsp_for_focused_buffer();
+        assert!(!app.inlay.contains_key(&id));
+        assert!(crate::lsp::client_capabilities(false, false, false).text_document.unwrap().inlay_hint.is_none(), "not advertised when off");
+        assert!(crate::lsp::client_capabilities(false, false, true).text_document.unwrap().inlay_hint.is_some());
+    }
+
     fn lens_json(line: u32, title: Option<&str>) -> serde_json::Value {
         let range = serde_json::json!({"start": {"line": line, "character": 0}, "end": {"line": line, "character": 2}});
         match title {
@@ -37955,8 +38065,8 @@ name = \"orbit\"
         app.sync_lsp_for_focused_buffer();
         app.ask_due_lenses();
         assert!(!app.lsp_sessions[&key].pending.values().any(|p| matches!(p, PendingLspRequest::CodeLens { .. })));
-        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().code_lens.is_none(), "not advertised");
-        assert!(crate::lsp::client_capabilities(false, true).text_document.unwrap().code_lens.is_some());
+        assert!(crate::lsp::client_capabilities(false, false, false).text_document.unwrap().code_lens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(false, true, false).text_document.unwrap().code_lens.is_some());
     }
 
     #[test]
@@ -38266,8 +38376,8 @@ name = \"orbit\"
 
     #[test]
     fn semantic_tokens_are_neither_asked_nor_drawn_with_the_setting_off_or_the_language_left_out() {
-        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
-        assert!(crate::lsp::client_capabilities(true, false).text_document.unwrap().semantic_tokens.is_some());
+        assert!(crate::lsp::client_capabilities(false, false, false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(true, false, false).text_document.unwrap().semantic_tokens.is_some());
         for (key, value) in [("lsp.semantic_highlighting", fenix_config::Value::Bool(false)), ("lsp.semantic_highlighting_off", fenix_config::Value::List(vec!["Rust".into()]))] {
             let (_dir, mut app, _path, server) = semantic_fixture("semantic_off");
             let grammar = colour_at(&mut app, 16);

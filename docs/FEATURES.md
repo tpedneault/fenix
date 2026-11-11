@@ -71,6 +71,14 @@ its extension. The rest is built into Fenix.
   stops at the end of `testing` -- `:set iskeyword+=X`/`iskeyword=X,Y`
   add to or replace the set outright. Persisted across restarts the
   same way `shiftwidth` already is.
+- **`.editorconfig`**: a repository's `.editorconfig` sets the focused
+  file's indent (spaces or tabs, how wide) and tab width as you move
+  between files, and on save its line endings, charset, trailing
+  whitespace and final newline -- one undo step. Sections, `root = true`
+  and the specification's globs are honoured; a project's
+  `.fenix/settings.toml` comes before it and your own settings after.
+  `SPC f c` shows what applies and from where. See
+  [CONFIGURATION.md](CONFIGURATION.md#editorconfig).
 - **Macros** (`q{a-zA-Z}` to record, a second bare `q` to stop, `@
   {register}` to replay, `@@` to repeat whichever was last played,
   `3@a`-style count prefix): real Vim's own model, not a separate
@@ -217,6 +225,23 @@ its extension. The rest is built into Fenix.
     `syntax.macro`; every built-in theme does.
   - `lsp.semantic_highlighting_off` lists languages that keep the
     grammar's colours alone.
+- **Inlay hints** (`SPC t i`, `lsp.inlay_hints`, on): where a file's
+  language server offers them, what it would write into the code without
+  it being there -- a variable's type after its name (`: Vec<String>`),
+  a parameter's name before an argument (`count:`) -- drawn dimmed in the
+  line. They take room as the debugger's values do, so the caret, extra
+  carets, Visual selections and soft wrap all go by where the text is
+  drawn, and nothing of them is ever in the file, copied or searched.
+  - Only the first of a file's servers that offers them is asked, for
+    the lines in view and a margin around them: again when the view
+    moves past those, about a third of a second after typing pauses, and
+    when the server says they changed. Until then they move with your
+    typing: a type stays after the name, a parameter's name before the
+    argument you type into.
+  - A label is cut at 48 characters; a hint's tooltip and its edits
+    aren't shown.
+  - `lsp.inlay_hints_off` lists languages that show none; `SPC t i`
+    turns them all off or on again (saved).
 - **Code lens** (`lsp.code_lens`, off for now): what a file's language
   servers offer for a function, a test or a type, on a dimmed row of its
   own above it ("▶ Run | Debug", "3 references"). A click on one runs
@@ -1595,14 +1620,33 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   session for it is running right now, and, for anything missing, the
   one-line command that installs it (`rustup component add
   rust-analyzer`, `uv tool install pyright`, `npm install -g
-  typescript-language-server typescript`, ...). Detect and guide only --
-  Fenix never downloads or manages a tool binary itself, the same
-  posture the debugger bullet above already takes for adapters it
-  doesn't have. A language server that failed -- couldn't start, crashed,
+  typescript-language-server typescript`, ...) -- the same one the
+  doctor (`SPC p h`) offers as its fix. A language server that failed -- couldn't start, crashed,
   or didn't answer `initialize` within 30 seconds -- is listed with why
   and the last lines it wrote to stderr, until `:lsp-restart` tries it
   again. A server is looked for and started on a thread of its own, so a
   slow `PATH` or a server slow to start never holds up the window.
+- **Installing a missing language server**: opening a file whose
+  built-in server (pyright, rust-analyzer, clangd, bash-language-server,
+  typescript-language-server, gopls, lua-language-server) isn't installed
+  brings a notice, once a session, saying so and with the command that
+  installs it. `SPC l i` (`lsp.install`), or the notice's action
+  (`SPC o .`), shows that exact command and asks; `y` runs it in Task
+  Output, where you watch it, and once it succeeds the server starts for
+  the files that wanted it. Nothing is installed without that `y`. The
+  commands need no administrator rights: `rustup component add
+  rust-analyzer`, `uv tool install pyright` (else `npm install -g
+  pyright`), `npm install -g` for the Bash and TypeScript servers, `go
+  install golang.org/x/tools/gopls@latest`, and on Windows `winget` for
+  clangd (LLVM) and lua-language-server. Where the installer isn't
+  there, or no install exists that Fenix would run for you (clangd and
+  lua-language-server on Linux come from your distribution, with
+  `sudo`), the notice says what to do and links to it. A server an
+  installer put somewhere not yet on Fenix's `PATH` (`~/.cargo/bin`,
+  `~/go/bin`, uv's, npm's or winget's folder) is started from there.
+  `lsp.offer_install` (on) turns the notice off; `SPC l i` still works.
+  A server you named yourself (`[lsp]`, `.fenix/tools.json`) is never
+  offered.
 - **Symbol picker**: with the Tcl extension, `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan

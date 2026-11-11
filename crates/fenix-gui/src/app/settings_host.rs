@@ -391,6 +391,10 @@ impl App {
     /// the project changes, and on the disk poll's tick (`poll`), when
     /// its file may have been edited. What they change is applied.
     pub(super) fn refresh_project_settings(&mut self, poll: bool) {
+        // A `.editorconfig` may have been edited too: read again.
+        if poll {
+            self.editorconfig_cache.clear();
+        }
         let root = self.project_root.clone();
         let same = self.project_settings.as_ref().map(|(r, _)| r) == root.as_ref();
         if same && !poll {
@@ -445,19 +449,21 @@ impl App {
         self.project_settings.as_ref().and_then(|(_, p)| p.get(key))
     }
 
-    /// Spaces an indent is: the project's, else yours, else 4.
+    /// Columns an indent is: the project's, else the focused file's
+    /// `.editorconfig`'s, else yours, else 4.
     pub(super) fn effective_indent_width(&self) -> usize {
         match self.project_value("editor.indent_width") {
             Some(fenix_config::Value::Int(n)) => *n as usize,
-            _ => self.config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH),
+            _ => self.editorconfig_indent_width().or(self.config.indent_width).unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH),
         }
     }
 
-    /// Columns a tab takes: the project's, else yours, else 8.
+    /// Columns a tab takes: the project's, else the focused file's
+    /// `.editorconfig`'s, else yours, else 8.
     pub(super) fn effective_tab_width(&self) -> usize {
         match self.project_value("editor.tab_width") {
             Some(fenix_config::Value::Int(n)) => *n as usize,
-            _ => self.config.tab_width.unwrap_or(DEFAULT_TAB_WIDTH),
+            _ => self.editorconfig_tab_width().or(self.config.tab_width).unwrap_or(DEFAULT_TAB_WIDTH),
         }
     }
 

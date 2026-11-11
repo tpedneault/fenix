@@ -37,6 +37,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before them; `yy` leaves the cursor where it was; linewise `p` after a
   last line with no line break; `{count}r` and `5x` leave the cursor where
   Vim does; `J` adds no space before a `)` or after a blank.
+- A file whose built-in language server isn't installed (rust-analyzer,
+  pyright, clangd, gopls, ...) brings a notice with the command that
+  installs it; `SPC l i` (or the notice's action) shows the command and
+  runs it in Task Output on `y`, then starts the server. Nothing is
+  installed without that `y`; where no safe install exists (clangd on
+  Linux), the notice links to how. The doctor and Tool Status offer the
+  same commands, Go and Lua included (#43). `lsp.offer_install` (on)
+  turns the notice off.
+- `.editorconfig` is read: `indent_style` (tabs included), `indent_size`,
+  `tab_width`, and on save `end_of_line`, `charset`,
+  `trim_trailing_whitespace` and `insert_final_newline`, with `root =
+  true` and glob sections. It comes after a project's
+  `.fenix/settings.toml` and before your `settings.toml`. `SPC f c` shows
+  what applies to the file.
+- Inlay hints, on by default: where a file's language server offers
+  them, a variable's type after its name and a parameter's name before
+  an argument, dimmed in the line. Asked for the lines in view, after
+  typing pauses and when the server refreshes them; they move with your
+  typing until then, and soft wrap, extra carets and selections go by
+  where they're drawn. `lsp.inlay_hints` (on), `lsp.inlay_hints_off`
+  per language, and `SPC t i` to turn them off and on.
 
 ## [1.5.2] - 2026-11-11
 

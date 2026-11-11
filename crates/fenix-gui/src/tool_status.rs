@@ -5,11 +5,9 @@
 //! else `lsp::default_server_command`/`dap::default_adapter_command`)
 //! is found on `PATH`, whether a session for it is currently running,
 //! and -- when it's missing -- the one-line command that installs it.
-//! Deliberately never downloads or manages a binary itself: this is
-//! "detect and guide," the scope decision locked in before any of this
-//! milestone's work started (see the plan's own "Tool manager scope"
-//! note) -- Fenix shows what's there and how to get what isn't, full
-//! stop.
+//! This page never installs anything itself: it shows what's there and
+//! how to get what isn't. Installing a missing server is `SPC l i`'s, in
+//! one of its files, and only once you say yes to the command it shows.
 
 use fenix_syntax::LanguageId;
 use std::path::Path;
@@ -32,7 +30,7 @@ pub struct ToolEntry {
     pub running: bool,
     /// `None` when `found_on_path` is true -- nothing to suggest
     /// installing.
-    pub install_hint: Option<&'static str>,
+    pub install_hint: Option<String>,
     /// Where it's installed when that isn't on Fenix's `PATH` (`uv tool
     /// install`'s folder), as the doctor finds it (#43).
     pub elsewhere: Option<std::path::PathBuf>,
@@ -68,22 +66,19 @@ const KNOWN_LANGUAGES: &[LanguageId] =
         LanguageId::Lua,
     ];
 
-/// The one-line command that installs `command` for `language` -- shown
-/// only when `command` isn't found on `PATH`. Keyed by the *command
-/// name itself*, not the language, since C and C++ share `clangd` and
-/// JavaScript/TypeScript/TSX share `typescript-language-server` -- one
-/// hint, not a near-duplicate per language.
-fn install_hint_for(command: &str) -> Option<&'static str> {
+/// The one-line command that installs `command` -- shown only when
+/// `command` isn't found. Keyed by the *command name itself*, not the
+/// language, since C and C++ share `clangd` and JavaScript/TypeScript/TSX
+/// share `typescript-language-server`. A language server's comes from
+/// `fenix_project::server_install`, the table the doctor and `SPC l i`
+/// read too (#43), so the three never disagree.
+fn install_hint_for(command: &str) -> Option<String> {
+    if let Some(install) = fenix_project::server_install::server_install(command) {
+        return Some(install.hint());
+    }
     match command {
-        "pyright-langserver" => Some("uv tool install pyright  (or: pip install pyright)"),
-        "python" => Some("install Python from https://python.org, or via your platform's package manager"),
-        "rust-analyzer" => Some("rustup component add rust-analyzer"),
-        "clangd" => Some("install clangd via your platform's package manager, or the LLVM installer on Windows"),
-        "bash-language-server" => Some("npm install -g bash-language-server"),
-        "typescript-language-server" => Some("npm install -g typescript-language-server typescript"),
-        "gopls" => Some("go install golang.org/x/tools/gopls@latest"),
-        "lua-language-server" => Some("install lua-language-server via your platform's package manager, or from https://luals.github.io"),
-        "lldb-dap" => Some("install LLVM (lldb-dap comes with it), or rustup's lldb on macOS"),
+        "python" => Some("install Python from https://python.org, or via your platform's package manager".to_string()),
+        "lldb-dap" => Some("install LLVM (lldb-dap comes with it), or rustup's lldb on macOS".to_string()),
         _ => None,
     }
 }
@@ -173,8 +168,11 @@ pub fn render(entries: &[ToolEntry]) -> String {
         if let Some(dir) = entry.elsewhere.as_ref().and_then(|p| p.parent()) {
             out.push_str(&format!("             installed in {}, which isn't on Fenix's PATH -- SPC p h can use it for this project\n", dir.display()));
         }
-        if let Some(hint) = entry.install_hint {
+        if let Some(hint) = &entry.install_hint {
             out.push_str(&format!("             install: {hint}\n"));
+            if entry.kind == ToolKind::Lsp && fenix_project::server_install::server_install(&entry.command).is_some_and(|i| i.step().is_some()) {
+                out.push_str("             SPC l i in one of its files installs it\n");
+            }
         }
     }
     out
@@ -326,7 +324,7 @@ mod tests {
             command: "rust-analyzer".to_string(),
             found_on_path: false,
             running: false,
-            install_hint: Some("rustup component add rust-analyzer"),
+            install_hint: Some("rustup component add rust-analyzer".to_string()),
             elsewhere: None,
         }];
         let text = render(&entries);

@@ -103,6 +103,7 @@ impl CommandRegistry {
         registry.external("view.pick_theme", "Pick a theme by name", |app| app.picker_pick_theme());
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
+        registry.register("view.toggle_inlay_hints", "Inlay hints on or off: types and parameter names from language servers, dimmed in the line", |ctx| ctx.app.toggle_inlay_hints());
         registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
         registry.register("view.toggle_wrap", "Wrap long lines in the current buffer, or stop", |ctx| ctx.app.toggle_wrap());
         registry.register(
@@ -346,6 +347,8 @@ impl CommandRegistry {
         registry.register("edit.sort_lines_numeric", "Sort the selected lines, or the buffer's, by the number in each (:sort n)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Numeric));
         registry.register("edit.sort_lines_unique", "Sort the selected lines, or the buffer's, dropping repeats (:sort u)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Unique));
         registry.register("lsp.restart", "Restart this project's language servers (:lsp-restart)", |ctx| ctx.app.restart_project_lsp(""));
+        registry.register("file.editorconfig", "What .editorconfig says of this file, and from which files", |ctx| ctx.app.cmd_show_editorconfig());
+        registry.register("lsp.install", "Install this file's language server: shows the command, runs it on y", |ctx| ctx.app.cmd_lsp_install());
         registry.register("nav.goto_line", "Go to a line, by its number", |ctx| ctx.app.start_goto_line_prompt());
         registry.register("nav.next_problem", "The next problem in the file (]d)", |ctx| ctx.app.jump_to_diagnostic(true, 1));
         registry.register("nav.prev_problem", "The previous problem in the file ([d)", |ctx| ctx.app.jump_to_diagnostic(false, 1));

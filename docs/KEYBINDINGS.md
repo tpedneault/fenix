@@ -228,6 +228,7 @@ keys'; the palette has the commands).
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |
 | `SPC f R` | Rename the current file on disk |
+| `SPC f c` | What `.editorconfig` says of this file (indent, line endings, whitespace), and from which files |
 | `SPC f D` | Delete the current file (with confirmation) |
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |
@@ -240,6 +241,7 @@ keys'; the palette has the commands).
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Cycle motion: off, subtle, full |
 | `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
+| `SPC t i` | Inlay hints on or off: types and parameter names from language servers, dimmed in the line |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC t k` | Vim keys or standard keys (`editor.keys`) |
 | `SPC e e` | Open the file explorer here |
@@ -298,6 +300,7 @@ keys'; the palette has the commands).
 | F9 / F10 / F11 / Shift-F11 | Breakpoint / step over / in / out, in every mode |
 | `n` `s` `o` `c` `r` in DEBUG | Step over / in / out, continue, run to the cursor; Esc goes back to Normal, still stopped |
 | `SPC l m` | Show LSP/DAP tool status (found on PATH, running, install hints) |
+| `SPC l i` | Install this file's missing language server: shows the command, `y` runs it in Task Output |
 | `SPC s s` | Search this file, or the selection, on the Search page (a buffer that isn't a file: find a line) |
 | `SPC s t` | List the TODO/FIXME/NOTE-style comments in the current buffer |
 | `SPC s T` | List the TODO-style comments across the project (also becomes the quickfix list) |
