@@ -19,10 +19,17 @@ mod query;
 /// into without this.
 const SCROLLBACK_LINES: usize = 10_000;
 
+/// Where a terminal's program runs.
+enum Backend {
+    /// Here, in a pty of this machine's.
+    Local { child: Box<dyn Child + Send + Sync>, master: Box<dyn MasterPty + Send> },
+    /// On a remote project's machine, in a pty of the helper's there.
+    Remote(Box<dyn fenix_vfs::TerminalControl>),
+}
+
 pub struct Terminal {
-    child: Box<dyn Child + Send + Sync>,
+    backend: Backend,
     writer: Box<dyn Write + Send>,
-    master: Box<dyn MasterPty + Send>,
     parser: vt100::Parser<query::QueryReplies>,
     /// Rows that have gone up into the history since the shell started
     /// (`top_row`).
@@ -72,6 +79,34 @@ impl Terminal {
         Self::spawn_command(rows, cols, cwd, command)
     }
 
+    /// A terminal on the remote machine `cwd` is on (`fenix_vfs::remote`),
+    /// started there in `cwd`: `program args`, or with no program the
+    /// user's own shell there, as a login shell. `None` when `cwd` is a
+    /// folder on this machine.
+    pub fn spawn_remote(rows: u16, cols: u16, cwd: &std::path::Path, program: Option<(&str, &[String])>) -> Option<std::io::Result<(Terminal, Box<dyn Read + Send>)>> {
+        let machine = fenix_vfs::host_of(cwd)?;
+        let shell = fenix_vfs::Shell { program: program.map(|(program, _)| program), args: program.map_or(&[], |(_, args)| args), env: &[], rows, cols };
+        let started = match fenix_vfs::terminal(cwd, shell)? {
+            Ok(started) => started,
+            Err(error) => return Some(Err(error)),
+        };
+        let fenix_vfs::Terminal { reader, writer, control } = started;
+        // Typing waits on no network: queued, as for a local one.
+        let writer: Box<dyn Write + Send> = match fenix_rpc::QueueWriter::spawn("fenix-terminal-writer", writer) {
+            Ok(queued) => Box::new(queued),
+            Err(error) => return Some(Err(error)),
+        };
+        let mut parser = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, query::QueryReplies::default());
+        parser.callbacks_mut().machine = Some(machine);
+        let program = program.map_or_else(|| "shell".to_string(), |(program, _)| program_name(program));
+        Some(Ok((Terminal { backend: Backend::Remote(control), writer, parser, scrolled: 0, program, start_dir: Some(cwd.to_path_buf()) }, reader)))
+    }
+
+    /// Whether its program runs on another machine.
+    pub fn is_remote(&self) -> bool {
+        matches!(self.backend, Backend::Remote(_))
+    }
+
     fn spawn_command(rows: u16, cols: u16, cwd: Option<&std::path::Path>, mut command: CommandBuilder) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
         let program = command.get_argv().first().map(|p| program_name(&p.to_string_lossy())).unwrap_or_default();
         let pty_system = native_pty_system();
@@ -96,7 +131,7 @@ impl Terminal {
         let writer = pair.master.take_writer().map_err(|err| std::io::Error::other(err.to_string()))?;
         let writer: Box<dyn Write + Send> = Box::new(fenix_rpc::QueueWriter::spawn("fenix-terminal-writer", writer)?);
         let parser = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, query::QueryReplies::default());
-        Ok((Terminal { child, writer, master: pair.master, parser, scrolled: 0, program, start_dir }, reader))
+        Ok((Terminal { backend: Backend::Local { child, master: pair.master }, writer, parser, scrolled: 0, program, start_dir }, reader))
     }
 
     /// The folder it started in.
@@ -212,9 +247,10 @@ impl Terminal {
     /// both need to agree, or the shell's own idea of `$COLUMNS`/
     /// `$LINES` drifts from what's actually being rendered.
     pub fn resize(&mut self, rows: u16, cols: u16) -> std::io::Result<()> {
-        self.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        match &self.backend {
+            Backend::Local { master, .. } => master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|err| std::io::Error::other(err.to_string()))?,
+            Backend::Remote(control) => control.resize(rows, cols)?,
+        }
         self.parser.screen_mut().set_size(rows, cols);
         Ok(())
     }
@@ -223,7 +259,10 @@ impl Terminal {
     /// lets the caller respawn a fresh shell instead of showing a dead
     /// panel the next time it's opened.
     pub fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        match &mut self.backend {
+            Backend::Local { child, .. } => matches!(child.try_wait(), Ok(None)),
+            Backend::Remote(control) => control.exited().is_none(),
+        }
     }
 
     pub fn screen(&self) -> &vt100::Screen {
@@ -252,13 +291,28 @@ impl Terminal {
     /// bounded retry loop instead, so teardown can never hang even if
     /// the kill signal is slow to take effect.
     pub fn kill(&mut self) {
-        let _ = self.child.kill();
+        let child = match &mut self.backend {
+            Backend::Local { child, .. } => child,
+            // Ended there; its output ends when the helper says so.
+            Backend::Remote(control) => return control.kill(),
+        };
+        let _ = child.kill();
         for _ in 0..20 {
-            match self.child.try_wait() {
+            match child.try_wait() {
                 Ok(Some(_)) => return,
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
                 Err(_) => return,
             }
+        }
+    }
+}
+
+impl Drop for Terminal {
+    /// A remote program isn't this process's child, to end with it: it's
+    /// told to end.
+    fn drop(&mut self) {
+        if let Backend::Remote(control) = &self.backend {
+            control.kill();
         }
     }
 }
@@ -642,5 +696,48 @@ mod tests {
             eprintln!("fenix-terminal test: last observed screen text:\n{last_text}");
         }
         assert!(found, "expected the echoed marker to appear in the parsed screen within the timeout");
+    }
+
+    /// Reads `reader` into `terminal` until its screen shows `want`.
+    #[cfg(unix)]
+    fn read_until(terminal: &mut Terminal, reader: &mut dyn Read, want: &str) -> bool {
+        let mut buffer = [0u8; 4096];
+        for _ in 0..2000 {
+            if (0..terminal.screen().size().0).any(|row| terminal.row_text(row).contains(want)) {
+                return true;
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => terminal.process(&buffer[..n]),
+            }
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_in_a_remote_folder_runs_there() {
+        let _machine = fenix_ssh::testing::Loopback::mount("term-box").unwrap();
+        let dir = std::env::temp_dir().join(format!("fenix-remote-term-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let folder = fenix_vfs::remote("term-box", &dir.to_string_lossy());
+        assert!(Terminal::spawn_remote(24, 80, &dir, None).is_none(), "a local folder's terminal is a local one");
+
+        let (mut terminal, mut reader) = Terminal::spawn_remote(24, 80, &folder, Some(("sh", &[]))).unwrap().unwrap();
+        assert!(terminal.is_remote() && terminal.is_alive());
+        assert_eq!(terminal.start_dir(), Some(folder.as_path()));
+        // Where the shell says it is, as a path on its machine.
+        terminal.write_input(b"printf '\\033]7;file://box%s\\007' \"$PWD\"; echo AT$((40+2))\n").unwrap();
+        assert!(read_until(&mut terminal, &mut *reader, "AT42"));
+        let said = terminal.cwd().map(|cwd| fenix_vfs::split(cwd).map(|(host, _)| host));
+        assert_eq!(said, Some(Some("term-box".to_string())), "{:?}", terminal.cwd());
+        terminal.resize(30, 90).unwrap();
+        terminal.write_input(b"stty size; echo SIZED$((1+1))\n").unwrap();
+        assert!(read_until(&mut terminal, &mut *reader, "SIZED2"));
+        assert!((0..30).any(|row| terminal.row_text(row).contains("30 90")));
+        terminal.write_input(b"exit\n").unwrap();
+        read_until(&mut terminal, &mut *reader, "never shown");
+        assert!(!terminal.is_alive());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

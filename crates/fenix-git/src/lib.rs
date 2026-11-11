@@ -6,6 +6,7 @@ mod commit;
 mod compare;
 mod conflict;
 mod diff;
+mod disk;
 mod files;
 mod graph;
 mod log;

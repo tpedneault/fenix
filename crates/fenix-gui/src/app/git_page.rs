@@ -736,6 +736,29 @@ mod tests {
 
     /// `SPC g g` with a file from outside any repository in front: the
     /// project's repository, not nothing.
+    /// A remote project's repository: the page is on it, its `git` runs
+    /// on that machine (a folder here, in the test), and a file staged
+    /// there is staged.
+    #[test]
+    fn a_remote_projects_repository_opens_and_stages_a_file_there() {
+        let repo = Repo::new("remote");
+        repo.write("a.txt", "one\nTWO\nthree\n");
+        let machine = fenix_vfs::testing::Folder::mount("git-page-box", repo.dir.parent().unwrap());
+        let root = fenix_vfs::remote("git-page-box", "/work");
+        let mut app = App::with_file(None);
+        app.open_project(root.clone(), Some(fenix_vfs::remote("git-page-box", "/work/a.txt")), false);
+        app.open_git_status();
+        let said = app.modeline_pieces().1;
+        assert_eq!(page_mut(&mut app).root, root, "{said}");
+        let shown = text(&mut app);
+        assert!(shown.contains(" main ") && shown.contains("UNSTAGED  1") && shown.contains("a.txt"), "{shown}");
+        goto(&mut app, |r| matches!(r, Row::File { path, .. } if path == "a.txt"));
+        press(&mut app, "s");
+        assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "a.txt");
+        assert!(machine.calls.lock().unwrap().iter().any(|path| path.starts_with("/work")), "asked of the machine");
+        fenix_vfs::unmount("git-page-box");
+    }
+
     #[test]
     fn a_file_outside_any_repository_opens_the_project_s() {
         let repo = Repo::new("outside");

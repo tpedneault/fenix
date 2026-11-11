@@ -155,7 +155,7 @@ impl Entry {
 }
 
 fn git_dir(repo: &Path) -> Option<PathBuf> {
-    run_lines(repo, &["rev-parse", "--absolute-git-dir"]).into_iter().next().map(PathBuf::from)
+    run_lines(repo, &["rev-parse", "--absolute-git-dir"]).into_iter().next().map(|dir| crate::disk::from_git(repo, &dir))
 }
 
 fn log_path(repo: &Path) -> Option<PathBuf> {
@@ -192,11 +192,9 @@ pub fn save_patch(repo: &Path, patch: &str) -> Option<String> {
 pub fn record(repo: &Path, entry: &Entry) -> Result<(), String> {
     let path = log_path(repo).ok_or("not a git repository")?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        crate::disk::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
-    writeln!(file, "{}", entry.encode()).map_err(|e| e.to_string())
+    crate::disk::append_line(&path, &entry.encode()).map_err(|e| e.to_string())
 }
 
 /// Runs an operation and logs it. `undo` is handed the result and says
@@ -226,7 +224,7 @@ pub fn logged(repo: &Path, label: &str, run: impl FnOnce() -> Result<String, Str
 /// The log, newest first, at most `limit` entries.
 pub fn entries(repo: &Path, limit: usize) -> Vec<Entry> {
     let Some(path) = log_path(repo) else { return Vec::new() };
-    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let text = crate::disk::read_to_string(&path).unwrap_or_default();
     text.lines().rev().filter_map(Entry::decode).take(limit).collect()
 }
 
@@ -324,11 +322,11 @@ pub fn apply(repo: &Path, undo: &Undo) -> Result<String, String> {
             }
             for (path, blob) in files {
                 let content = run_action_bytes(repo, blob)?;
-                let target = repo.join(path);
+                let target = crate::disk::under(repo, path);
                 if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    crate::disk::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
-                std::fs::write(&target, content).map_err(|e| format!("{path}: {e}"))?;
+                crate::disk::write(&target, &content).map_err(|e| format!("{path}: {e}"))?;
             }
             Ok(out)
         }

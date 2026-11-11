@@ -273,9 +273,34 @@ its extension. The rest is built into Fenix.
   machine the first time (Linux, x86_64 or aarch64; no administrator
   rights). It runs as you, only while connected, and listens on nothing.
 
-  Not there yet on a remote project: terminals, Git, search, language
-  servers, tasks, the debugger and agents. Files that aren't text open
-  as text.
+  Terminals, Git and search work there too, by the same keys as for a
+  local project:
+
+  - A terminal (`SPC o t`, `SPC o T`) opened in a remote project is a
+    shell on that machine, in the project's folder: your own login
+    shell there, in a terminal of its own (`TERM=xterm-256color`), at
+    the pane's size, with your login profile's `PATH`. It goes over the
+    connection already open, so it asks nothing and starts at once.
+    Closing it hangs it up, as closing any terminal does: what you
+    started in it ends with it (a program started with `nohup`, or that
+    starts a session of its own, keeps going). `terminal.shell` names a
+    shell on this machine, so it isn't used there.
+  - Git is the machine's own `git`, run there in the repository: the
+    status page (`SPC g g`), staging and committing, diffs and the
+    gutter's marks, the log, branches, stashes, rebases and the
+    operation log, and the explorer's badges. Fetch, pull and push use
+    the machine's credentials and config; nothing of yours goes there,
+    and a remote that would ask for a password fails and says so rather
+    than wait.
+  - The Search page (`SPC /`, `SPC p s`, `SPC s s`) searches on the
+    machine, with Fenix's own search engine (ripgrep's): the machine
+    needs no `rg`, and only the matches come over the network. Open
+    files are searched as they are here, unsaved edits and all. A
+    replace writes the files there; `SPC s u` undoes it. `SPC s T`
+    lists the project's TODOs the same way.
+
+  Not there yet on a remote project: language servers, tasks, the
+  debugger and agents. Files that aren't text open as text.
 
   What a preview means for trust, so you can decide where to use it:
 

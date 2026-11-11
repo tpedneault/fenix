@@ -1277,6 +1277,8 @@ name = "fenix-git"
 version = "1.5.2"
 dependencies = [
  "fenix-diff",
+ "fenix-ssh",
+ "fenix-vfs",
 ]
 
 [[package]]
@@ -1392,6 +1394,7 @@ dependencies = [
  "dirs",
  "fenix-extensions",
  "fenix-picker",
+ "fenix-ssh",
  "fenix-storage",
  "fenix-vfs",
  "grep-matcher",
@@ -1418,6 +1421,9 @@ dependencies = [
 name = "fenix-remote"
 version = "1.5.2"
 dependencies = [
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
  "libc",
  "serde",
  "serde_json",
@@ -1518,6 +1524,8 @@ name = "fenix-terminal"
 version = "1.5.2"
 dependencies = [
  "fenix-rpc",
+ "fenix-ssh",
+ "fenix-vfs",
  "portable-pty",
  "vt100",
 ]

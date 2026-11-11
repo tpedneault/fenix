@@ -99,7 +99,7 @@ pub fn changed_files(repo: &Path, range: &Range) -> Result<Vec<ChangedFile>, Str
     }
     if range.head == Side::WorkTree {
         for path in untracked(repo) {
-            let (added, removed) = match read_text(&repo.join(&path)) {
+            let (added, removed) = match read_text(&crate::disk::under(repo, &path)) {
                 Ok(text) => (Some(line_count(&text)), Some(0)),
                 Err(_) => (None, None),
             };
@@ -136,11 +136,11 @@ const UNTRACKED_LIMIT: u64 = 1024 * 1024;
 
 /// A file's text; `Err` when it's binary, too big or unreadable.
 fn read_text(path: &Path) -> Result<String, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() > UNTRACKED_LIMIT {
-        return Err(format!("too large to show ({} KB)", meta.len() / 1024));
+    let (_, len) = crate::disk::modified_and_len(path).map_err(|e| e.to_string())?;
+    if len > UNTRACKED_LIMIT {
+        return Err(format!("too large to show ({} KB)", len / 1024));
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = crate::disk::read(path).map_err(|e| e.to_string())?;
     if bytes.iter().take(8000).any(|b| *b == 0) {
         return Err("binary".to_string());
     }
@@ -155,7 +155,7 @@ fn line_count(text: &str) -> usize {
 /// `git diff --no-index /dev/null <file>` would say, without its exit
 /// status of 1 or `/dev/null` on Windows to deal with.
 pub fn untracked_diff(repo: &Path, path: &str) -> Result<String, String> {
-    match read_text(&repo.join(path)) {
+    match read_text(&crate::disk::under(repo, path)) {
         Ok(text) => Ok(added_file_diff(path, &text)),
         Err(e) if e == "binary" => Ok(format!("diff --git a/{path} b/{path}\nnew file mode 100644\nBinary files /dev/null and b/{path} differ\n")),
         Err(e) => Err(e),

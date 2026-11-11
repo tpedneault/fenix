@@ -218,8 +218,8 @@ pub fn shortstat(repo: &Path, base: &str, head: &str) -> (usize, usize, usize) {
 /// conflict, worked out without touching the working tree (`git
 /// merge-tree`); `None` when git couldn't say.
 pub fn merges_cleanly(repo: &Path, base: &str, head: &str) -> Option<bool> {
-    let out = crate::process::git_command(repo, &["merge-tree", "--write-tree", "--name-only", "--no-messages", base, head]).output().ok()?;
-    match out.status.code() {
+    let out = crate::process::run(repo, &["merge-tree", "--write-tree", "--name-only", "--no-messages", base, head]).ok()?;
+    match out.code {
         Some(0) => Some(true),
         // A bad revision exits 1 too, but says so on stderr.
         Some(1) if out.stderr.is_empty() => Some(false),

@@ -21,7 +21,7 @@ pub fn list_worktrees(repo: &Path) -> Vec<Worktree> {
     let mut out: Vec<Worktree> = Vec::new();
     for line in run_lines(repo, &["worktree", "list", "--porcelain"]) {
         if let Some(path) = line.strip_prefix("worktree ") {
-            out.push(Worktree { path: PathBuf::from(path), branch: None, head: String::new(), prunable: false });
+            out.push(Worktree { path: crate::disk::from_git(repo, path), branch: None, head: String::new(), prunable: false });
         } else if let Some(last) = out.last_mut() {
             if let Some(head) = line.strip_prefix("HEAD ") {
                 last.head = head.to_string();
@@ -47,7 +47,7 @@ pub fn default_worktree_path(repo: &Path, branch: &str) -> PathBuf {
 /// when `None`) if it doesn't exist yet.
 pub fn add_worktree(repo: &Path, path: &Path, branch: &str, start: Option<&str>) -> Result<String, String> {
     let exists = !run_lines(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_empty();
-    let path = path.to_string_lossy().to_string();
+    let path = crate::disk::arg(path);
     let mut args = vec!["worktree".to_string(), "add".to_string()];
     if exists {
         args.extend([path, branch.to_string()]);
@@ -63,7 +63,7 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, start: Option<&str>)
 /// Removes a worktree's folder and forgets it -- refused while it has
 /// uncommitted changes, rather than forced.
 pub fn remove_worktree(repo: &Path, path: &Path) -> Result<String, String> {
-    run_action(repo, &["worktree".into(), "remove".into(), path.to_string_lossy().to_string()])
+    run_action(repo, &["worktree".into(), "remove".into(), crate::disk::arg(path)])
 }
 
 pub fn prune_worktrees(repo: &Path) -> Result<String, String> {

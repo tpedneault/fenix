@@ -25,6 +25,8 @@ ignore = "0.4.34"
 regex = "1.13.1"
 
 [dev-dependencies]
+# A remote machine in the tests: the real helper, in this process.
+fenix-ssh = { path = "../fenix-ssh" }
 tempfile = "3"
 # The extension template writes a manifest that has to read.
 fenix-extensions = { path = "../fenix-extensions" }

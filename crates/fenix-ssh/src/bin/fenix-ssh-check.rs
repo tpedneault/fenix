@@ -237,6 +237,73 @@ fn run() -> Outcome {
     std::fs::remove_dir_all(&here)?;
     check(!sh(&session, &format!("ls -a '{dir}'"))?.contains(".fenix-check"), "and nothing of the check is left there")?;
 
+    println!("== terminals, search and Git (phase 3)");
+    // The user's own shell there, as a login shell, in a pty of its own.
+    let began = Instant::now();
+    let shell = fenix_vfs::Shell { rows: 24, cols: 80, ..fenix_vfs::Shell::default() };
+    let mut terminal = fenix_vfs::terminal(&root, shell).expect("a remote folder")?;
+    let mut said = String::new();
+    // What's typed is echoed: the marks looked for are worked out there.
+    terminal.writer.write_all(b"tty; echo TERM=$TERM; stty size; echo PATH=$PATH; pwd; echo DONE$((40+2))\n")?;
+    read_until(&mut terminal.reader, &mut said, "DONE42")?;
+    println!("  a shell answered in {:?}", began.elapsed());
+    check(said.contains("/dev/pts/"), "the shell has a terminal of its own")?;
+    check(said.contains("TERM=xterm-256color") && said.contains("24 80"), "of the kind and size asked")?;
+    check(said.contains(&format!("{}/bin", hello.home)), "with the login shell's PATH")?;
+    check(said.lines().any(|line| line.trim() == dir.as_str()), "in the project's folder")?;
+    terminal.control.resize(40, 120)?;
+    said.clear();
+    terminal.writer.write_all(b"stty size; echo SIZED$((1+1))\n")?;
+    read_until(&mut terminal.reader, &mut said, "SIZED2")?;
+    check(said.contains("40 120"), "resized")?;
+    terminal.writer.write_all(b"sleep 344 & echo STARTED$((2+2))\n")?;
+    said.clear();
+    read_until(&mut terminal.reader, &mut said, "STARTED4")?;
+    check(count(&session, "sleep 344")? == 1, "a job runs in it")?;
+    terminal.control.kill();
+    let mut rest = String::new();
+    let _ = read_until(&mut terminal.reader, &mut rest, "\u{0}never");
+    check(terminal.control.exited().is_some(), "a terminal that's closed ends")?;
+    std::thread::sleep(Duration::from_millis(300));
+    check(count(&session, "sleep 344")? == 0, "and what was started in it ends with it")?;
+    let mut exits = fenix_vfs::terminal(&root, fenix_vfs::Shell { program: Some("sh"), rows: 24, cols: 80, ..fenix_vfs::Shell::default() }).expect("a remote folder")?;
+    exits.writer.write_all(b"exit 3\n")?;
+    let _ = read_until(&mut exits.reader, &mut String::new(), "\u{0}never");
+    check(exits.control.exited() == Some(Some(3)), "a shell's exit code comes back")?;
+
+    // Search with the helper's own engine: no `rg` there.
+    let paths = fenix_vfs::SearchPaths { folders: vec![root.clone()], ..Default::default() };
+    let mut found = Vec::new();
+    let began = Instant::now();
+    let searched = fenix_vfs::search(&paths, fenix_vfs::Search { pattern: "main", ..Default::default() }, &mut |file| {
+        if let Some((path, lines)) = file {
+            found.push((path, lines));
+        }
+        true
+    })
+    .expect("a remote folder")?;
+    check(!found.is_empty(), &format!("a search there finds {} files in {:?} ({} searched)", found.len(), began.elapsed(), searched.files_searched))?;
+    check(found.iter().all(|(path, _)| fenix_vfs::host_of(path).as_deref() == Some("spike")), "as paths on the machine")?;
+    check(!found.iter().any(|(path, _)| fenix_vfs::display(path).contains("/.git/")), "and nothing of .git")?;
+
+    // Git, as fenix-git runs it: the machine's own, with no prompt.
+    let git = |args: &[&str]| fenix_vfs::run_there(&root, fenix_vfs::Run { program: "git", args, env: &[("GIT_TERMINAL_PROMPT", "0"), ("GIT_EDITOR", "true")], ..Default::default() }).expect("a remote folder");
+    let scratch = fenix_vfs::child(&root, ".fenix-check-git.txt");
+    fenix_vfs::write(&scratch, b"new\n", fenix_vfs::Over::Nothing)?;
+    let status = git(&["status", "--porcelain=v2", "--branch"])?;
+    let status = String::from_utf8_lossy(&status.stdout).into_owned();
+    check(status.contains("# branch.head") && status.contains(".fenix-check-git.txt"), "git status there sees the branch and a new file")?;
+    let patch = git(&["diff", "--no-index", "--no-color", "/dev/null", ".fenix-check-git.txt"])?;
+    check(String::from_utf8_lossy(&patch.stdout).contains("+new"), "git diff there")?;
+    let applied = fenix_vfs::run_there(&root, fenix_vfs::Run { program: "git", args: &["apply", "--cached", "-"], stdin: Some(&patch.stdout), ..Default::default() }).expect("a remote folder")?;
+    check(applied.success(), "a patch sent to git apply's stdin is staged")?;
+    let staged = git(&["diff", "--cached", "--name-only"])?;
+    check(String::from_utf8_lossy(&staged.stdout).contains(".fenix-check-git.txt"), "and shows as staged")?;
+    git(&["reset", "-q", "--", ".fenix-check-git.txt"])?;
+    fenix_vfs::remove(&scratch, false)?;
+    let clean = git(&["status", "--porcelain"])?;
+    check(!String::from_utf8_lossy(&clean.stdout).contains(".fenix-check"), "and the repository is left as it was")?;
+
     println!("== a connection that drops");
     let began = Instant::now();
     session.sever();
@@ -256,6 +323,22 @@ fn run() -> Outcome {
     machine.close();
 
     println!("\nall passed");
+    Ok(())
+}
+
+/// Reads a terminal's output into `said` until it holds `want`, or ends.
+fn read_until(reader: &mut dyn std::io::Read, said: &mut String, want: &str) -> Outcome {
+    let mut buffer = [0u8; 4096];
+    let until = Instant::now() + Duration::from_secs(20);
+    while !said.contains(want) {
+        if Instant::now() > until {
+            return Err(format!("no {want:?} from the terminal: {said:?}").into());
+        }
+        match reader.read(&mut buffer)? {
+            0 => return Err(format!("the terminal ended before {want:?}: {said:?}").into()),
+            n => said.push_str(&String::from_utf8_lossy(&buffer[..n])),
+        }
+    }
     Ok(())
 }
 
