@@ -633,7 +633,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                             }
                         }
                         other => {
-                            x = g.put(y, left + 3, &fit(&other.as_text(), inner.saturating_sub(1)), Role::Accent);
+                            x = g.put(y, left + 3, &fit(&one_line(&other.as_text()), inner.saturating_sub(1)), Role::Accent);
                             let _ = x;
                             y += 1;
                         }
@@ -650,7 +650,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                     y += lines;
                 }
                 for block in extra {
-                    g.put(y, left, &fit(&block.as_text(), width), Role::Muted);
+                    g.put(y, left, &fit(&one_line(&block.as_text()), width), Role::Muted);
                     y += 1;
                 }
             }
@@ -834,11 +834,11 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                             y += 1;
                         }
                         if url {
-                            g.put(y, left + 2, &fit(e.url.as_deref().unwrap_or(""), inner), Role::Accent);
+                            g.put(y, left + 2, &fit(&one_line(e.url.as_deref().unwrap_or("")), inner), Role::Accent);
                             y += 1;
                         }
                         for f in &e.fields {
-                            let mut what = format!("{}{}", f.title, if f.required { " *" } else { "" });
+                            let mut what = format!("{}{}", one_line(&f.title), if f.required { " *" } else { "" });
                             if let Some(d) = &f.default {
                                 what.push_str(&format!(" = {}", d.as_str().map(str::to_string).unwrap_or_else(|| d.to_string())));
                             }
@@ -881,15 +881,15 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                     }
                     ElicitationState::Answered { action, summary } => {
                         let said = if summary.is_empty() { action.clone() } else { format!("{action}: {summary}") };
-                        g.put(y, left, &fit(&format!("✓ {} — {said}", e.message), width), Role::Muted);
+                        g.put(y, left, &answered("✓", &one_line(&e.message), &one_line(&said), width), Role::Muted);
                         y += 1;
                     }
                     ElicitationState::Completed => {
-                        g.put(y, left, &fit(&format!("✓ {} — done", e.message), width), Role::Muted);
+                        g.put(y, left, &answered("✓", &one_line(&e.message), "done", width), Role::Muted);
                         y += 1;
                     }
                     ElicitationState::Withdrawn => {
-                        g.put(y, left, &fit(&format!("– {} — not answered", e.message), width), Role::Muted);
+                        g.put(y, left, &answered("–", &one_line(&e.message), "not answered", width), Role::Muted);
                         y += 1;
                     }
                 }
@@ -939,7 +939,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 PlanStatus::Pending => ("☐", Role::Muted),
             };
             let x = g.put(y, left, mark, role) + 1;
-            g.put(y, x, &fit(&entry.content, width.saturating_sub(2)), if entry.status == PlanStatus::Completed { Role::Muted } else { Role::Text });
+            g.put(y, x, &fit(&one_line(&entry.content), width.saturating_sub(2)), if entry.status == PlanStatus::Completed { Role::Muted } else { Role::Text });
             y += 1;
         }
     }
