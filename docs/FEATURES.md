@@ -1210,8 +1210,16 @@ the guide.
   plan (you approve it), build, review, the review's findings sent back
   to be fixed -- each step a thread with its own agent, mode and
   toolsets, their changes one review. Each stops at a gate you can keep
-  writing at, until you say go. Also a bug fix, tests first, a refactor,
-  and a review of what isn't committed. Your own are `pipelines/*.toml`.
+  writing at, until you say go, or run the step again (`r`). A step that
+  ends badly -- a command you refused, `SPC a k`, the agent cut off --
+  asks at its gate too, and a run that stops is kept, after a restart
+  too: `SPC a g` picks it up where it stopped. Also a bug fix, tests
+  first, a refactor, and a review of what isn't committed. Your own are
+  `pipelines/*.toml`.
+- **Questions that show what's asked**: a request to run a command shows
+  its own lines, the first five and the last, `v` all of it; no title,
+  however many lines or wide characters, pushes the card's answers off
+  their rows or past the dock's edge.
 - **Agents** (`SPC a p`): a thread with another, a login, a restart.
   It also reads the ACP registry (`agents.registry`) and installs an
   agent from it into Fenix's data folder -- a download whose SHA-256 is
