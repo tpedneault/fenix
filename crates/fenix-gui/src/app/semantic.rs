@@ -257,6 +257,8 @@ impl App {
         let buffers = &self.buffers;
         self.semantic_of.retain(|b, _| buffers.get(*b).is_some());
         let of = &self.semantic_of;
+        self.semantic_protected.retain(|b, _| of.contains_key(b));
+        let of = &self.semantic_of;
         for (key, session) in self.lsp_sessions.iter_mut() {
             if session.semantic.is_empty() {
                 continue;
@@ -393,6 +395,38 @@ impl App {
             }
         }
         lay_over(syntax, &laid, protected)
+    }
+
+    /// Buffer `id`'s tokens drawn underlined (`mutable`) on `lines`: each
+    /// as its line, its char columns and its colour.
+    pub(super) fn underlined_tokens(&self, id: BufferId, lines: Range<usize>) -> Vec<(usize, Range<usize>, glyphon::Color)> {
+        let Some(target) = self.drawn_tokens(id) else { return Vec::new() };
+        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&target.key).and_then(|s| s.semantic.get(&target.path)), self.buffers.get(id)) else { return Vec::new() };
+        let last = ob.buffer.visual_line_count();
+        if lines.is_empty() || lines.start >= last {
+            return Vec::new();
+        }
+        let (from, to) = (ob.buffer.line_start_char(lines.start), ob.buffer.line_start_char(lines.end.min(last) - 1) + ob.buffer.line_len(lines.end.min(last) - 1));
+        let protected = self.semantic_protected.get(&id).map_or(&[][..], Vec::as_slice);
+        let inside = |t: &&Token| {
+            let bytes = ob.buffer.char_to_byte(t.start)..ob.buffer.char_to_byte(t.end);
+            let first = protected.partition_point(|p| p.end <= bytes.start);
+            protected.get(first).is_some_and(|p| p.start < bytes.end)
+        };
+        tokens::within(&doc.tokens, from, to)
+            .iter()
+            .filter(|t| t.style.underline)
+            // Not inside the grammar's comments and strings, where its
+            // colour isn't laid either.
+            .filter(|t| t.style.layer == Layer::Wins || !inside(t))
+            .map(|t| {
+                let line = ob.buffer.rope().char_to_line(t.start);
+                let first = ob.buffer.line_start_char(line);
+                // A plain name in the grammar's colour: underlined in the
+                // variables' colour.
+                (line, t.start - first..t.end - first, t.style.slot.map_or(self.theme.syntax_variable, |slot| self.theme.semantic_color(slot)))
+            })
+            .collect()
     }
 }
 

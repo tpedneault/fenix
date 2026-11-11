@@ -1,6 +1,6 @@
 # Plan: semantic highlighting
 
-- **Status:** stages 1 and 2 built, for the release after 1.5 (issue #105); see §5.
+- **Status:** stages 1 to 3 built, for the release after 1.5 (issue #105); see §5.
 - **Scope:** code coloured by what its language server knows
   (`textDocument/semanticTokens`), on top of tree-sitter's colours:
   a parameter apart from a local, a macro apart from a function, an
@@ -415,6 +415,36 @@ These supersede the table and rules above where they differ.
     goes through `record_lsp_sync`, which moves held tokens through the
     change sent. There were two: `sync_lsp_document` and a refactor's
     own sync (`sync_refactor_buffers`), which used to skip it.
-- **Not yet:**
-  - the theme keys and the modifier rules' underline (stage 3);
-  - delta and range (stage 4).
+- **Not yet:** delta and range (stage 4).
+
+### Stage 3
+
+- **Theme keys.** `[syntax]` takes optional `interface`, `parameter`
+  and `macro` keys (`Theme::syntax_interface`, `syntax_parameter`,
+  `syntax_macro`). Left out, they're type, variable and function.
+- **Built-in themes.** Every built-in theme names all three.
+  - Each must differ from variable, constant, type, function, keyword,
+    string, comment and the text colour, and from the other two. "Differ"
+    means a distance of at least 0.15 in RGB (0 to 1 per channel), not
+    only a different hex value.
+  - Each must keep at least 4:1 contrast with the background.
+  - Each is the first that qualifies of the theme's own attribute,
+    number and operator colours, then its other syntax, mode, Git and
+    explorer colours. Where none qualifies, it's the fallback colour
+    blended toward one of those.
+  - A test checks that rule as stated: the 0.15 distance from each
+    other and from the eight colours above, and 4:1 contrast. The lowest
+    contrast is 4.07:1 (everforest-dark); the smallest distance is 0.152
+    (catppuccin-frappe's interface against its parameter).
+- **The `mutable` underline.** `App::underlined_tokens` gives the
+  mutable tokens on the lines shown. `polish_pane` turns them into row
+  segments (`RowMap::segments`, so one split by a row break is
+  underlined on each row). The segments are drawn as underlines,
+  through the path extensions' decorations already use, in the token's
+  colour at 0.8 alpha. None is drawn inside the grammar's comments and
+  strings, where a token's colour isn't laid either. Those ranges are
+  `App::semantic_protected`, kept only from a pane's own highlight pass
+  (`viewport`), not sticky headers or one-off lookups, and dropped with
+  the buffer's tokens.
+- **Stage 2's tests changed.** A macro token is now drawn in the macro
+  colour, not the function colour.
