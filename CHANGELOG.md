@@ -14,6 +14,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   badges), and the Search page searches there with Fenix's own engine,
   no `rg` needed; a replace writes the files there. By the same keys as
   a local project's.
+- `updates.prereleases`, off by default: with `updates.check` on, Home
+  also says when a pre-release (`vX.Y.Z-rc.N`) newer than yours is out,
+  marked as one. Turned off again, it's back to releases alone at once.
 
 ## [1.5.2] - 2026-11-11
 

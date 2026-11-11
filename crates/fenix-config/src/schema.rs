@@ -474,6 +474,7 @@ Setting::stored("editor.wrap", Editor, "Wrap long lines", Kind::Bool, "A line wi
         s("session.restore_windows", Session, "Reopen windows", Kind::Bool, "Put Fenix's windows back where they were, on the monitors they were on.", field!(restore_windows, bool_get, bool_set)).default("on").restart(),
         s("session.restore_session", Session, "Reopen workspaces", Kind::Bool, "Reopen the workspaces and files you had open.", field!(restore_session, bool_get, bool_set)).default("on").restart(),
         Setting::stored("updates.check", Session, "Look for a newer Fenix", Kind::Bool, "Once a day, ask GitHub whether there's a newer release of Fenix, and say so on Home. Nothing is downloaded. app.check_for_updates looks whenever you ask, this on or off.").with_default("off"),
+        Setting::stored("updates.prereleases", Session, "Tell me about pre-releases", Kind::Bool, "The update check also says when a pre-release (vX.Y.Z-rc.N) newer than your Fenix is out, for trying what's next before it's released. Off: releases alone.").with_default("off"),
         s("session.workspace_per_project", Session, "A workspace per project", Kind::Bool, "Opening a project gives it a workspace of its own.", field!(workspace_per_project, bool_get, bool_set)).default("on"),
         // Extensions
         Setting::stored("extensions.store", Category::Extensions, "The store", Kind::Bool, "Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext).").with_default("on"),

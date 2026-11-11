@@ -447,6 +447,16 @@ downloaded or installed: get the new one from the releases page as you
 got this one. What it found last is kept in `updates.json` in Fenix's
 state folder, so a restart doesn't ask again.
 
+Pre-releases (tagged `vX.Y.Z-rc.N`, marked as pre-releases on GitHub)
+are left out unless you turn on `updates.prereleases`: then the check
+reads the recent releases rather than the latest, and Home says so when
+a pre-release newer than yours is out -- *Fenix 1.7.0-rc.1 (a
+pre-release) is out*. A release still counts, so a pre-release's
+release is offered when it comes. Turning it off again goes back to
+releases alone at once. Just turned on, it shows pre-releases from the
+next daily look; `app.check_for_updates` looks straight away. [Releasing](RELEASING.md) says what a
+pre-release is for.
+
 When an extension seems to be the trouble, `fenix --disable-extensions`
 starts in safe mode: the core alone, with nothing read from an installed
 extension, for that run only -- your settings,
@@ -578,6 +588,7 @@ when it's out of date).
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
 | `updates.check` | true / false | off | Once a day, ask GitHub whether there's a newer release of Fenix, and say so on Home. Nothing is downloaded. app.check_for_updates looks whenever you ask, this on or off. |
+| `updates.prereleases` | true / false | off | The update check also says when a pre-release (vX.Y.Z-rc.N) newer than your Fenix is out, for trying what's next before it's released. Off: releases alone. |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
 | **Extensions** | | | |
 | `extensions.store` | true / false | on | Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext). |
