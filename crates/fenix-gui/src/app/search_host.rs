@@ -76,11 +76,11 @@ pub(super) struct SearchHost {
 }
 
 impl App {
-    fn search_page_id(&self) -> Option<BufferId> {
+    pub(super) fn search_page_id(&self) -> Option<BufferId> {
         self.find_page(|m| matches!(m, PageModel::Search(_)))
     }
 
-    fn search_page_mut(&mut self, id: BufferId) -> Option<&mut SearchPage> {
+    pub(super) fn search_page_mut(&mut self, id: BufferId) -> Option<&mut SearchPage> {
         match self.pages.get_mut(&id).map(|s| &mut s.model) {
             Some(PageModel::Search(p)) => Some(p),
             _ => None,
@@ -620,7 +620,7 @@ impl App {
             let open = self.buffers.id_for_path(&file.path).filter(|&b| self.buffers.get(b).is_some_and(|ob| ob.kind == BufferKind::Text));
             let text = match open.and_then(|b| self.buffers.get(b)) {
                 Some(ob) => ob.buffer.text(),
-                None => match std::fs::read_to_string(&file.path) {
+                None => match read_text(&file.path) {
                     Ok(text) => text,
                     Err(err) => {
                         eprintln!("fenix: replace couldn't read {}: {err}", file.path.display());
@@ -650,7 +650,7 @@ impl App {
                     unsaved += 1;
                 }
                 None => {
-                    if let Err(err) = std::fs::write(&file.path, &after) {
+                    if let Err(err) = write_text(&file.path, &after) {
                         eprintln!("fenix: replace couldn't write {}: {err}", file.path.display());
                         stale += 1;
                         continue;
@@ -703,8 +703,8 @@ impl App {
                     restored += 1;
                 }
                 Some(_) => kept += 1,
-                None => match std::fs::read_to_string(&file.path) {
-                    Ok(now) if now == file.after => match std::fs::write(&file.path, &file.before) {
+                None => match read_text(&file.path) {
+                    Ok(now) if now == file.after => match write_text(&file.path, &file.before) {
                         Ok(()) => restored += 1,
                         Err(_) => kept += 1,
                     },
@@ -725,6 +725,22 @@ impl App {
         self.set_message(message);
         self.wake_caret();
     }
+}
+
+/// A file a replace changes, as text: on this machine or a remote
+/// project's.
+fn read_text(path: &Path) -> std::io::Result<String> {
+    if fenix_vfs::is_remote(path) {
+        return String::from_utf8(fenix_vfs::read(path)?).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "not UTF-8"));
+    }
+    std::fs::read_to_string(path)
+}
+
+fn write_text(path: &Path, text: &str) -> std::io::Result<()> {
+    if fenix_vfs::is_remote(path) {
+        return fenix_vfs::write(path, text.as_bytes(), fenix_vfs::Over::Anything).map(drop);
+    }
+    std::fs::write(path, text)
 }
 
 #[cfg(test)]
@@ -906,6 +922,34 @@ mod tests {
         app.search_undo();
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "helper one\nhelper two\n");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "helper three\n");
+    }
+
+    /// A remote project's search runs on its machine (the real helper,
+    /// in this process), and a replace writes the files there.
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_project_is_searched_and_replaced_in_on_its_machine() {
+        let _machine = fenix_ssh::testing::Loopback::mount("search-page-box").unwrap();
+        let dir = TempDir::new("search_host_remote");
+        let a = dir.write("a.txt", "helper one\n");
+        dir.write("b.txt", "nothing\n");
+        let mut app = App::with_file(None);
+        app.project_root = Some(fenix_vfs::remote("search-page-box", &dir.path().to_string_lossy()));
+        app.search_open(SearchOpen::Replace);
+        let id = app.search_page_id().unwrap();
+        type_into(&mut app, id, "helper");
+        press(&mut app, id, Key::Tab);
+        type_into(&mut app, id, "assist");
+        press(&mut app, id, Key::Enter);
+        let page = app.search_page(id).unwrap();
+        assert_eq!(page.files.len(), 1, "{:?}", page.status);
+        assert_eq!(page.files[0].path, fenix_vfs::remote("search-page-box", &a.to_string_lossy()));
+        app.search_page_mut(id).unwrap().following = false;
+        press(&mut app, id, Key::Char('R'));
+        press(&mut app, id, Key::Char('y'));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "assist one\n");
+        app.search_undo();
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "helper one\n");
     }
 
     /// A replace in a file that's open edits only the lines it matched:

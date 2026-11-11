@@ -844,6 +844,10 @@ impl App {
         if let Some(due) = self.lens_wake() {
             at(due);
         }
+        // Inlay hints likewise.
+        if let Some(due) = self.inlay_wake() {
+            at(due);
+        }
         // An extension's layer, while something on it moves.
         if let Some(due) = self.layers_next_wake(now) {
             at(due);

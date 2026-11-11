@@ -30,6 +30,42 @@ pub(crate) fn git_command(repo: &Path, args: &[&str]) -> Command {
     cmd
 }
 
+/// The variables `git_command` sets, for a `git` run on a remote
+/// project's machine.
+const GIT_ENV: [(&str, &str); 3] = [("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true"), ("GIT_TERMINAL_PROMPT", "0")];
+
+/// How a `git` run to its end went.
+pub(crate) struct Ran {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+impl Ran {
+    fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
+/// `git args...` in a repository on a remote project's machine, run
+/// there over its connection: `None` for a repository on this one.
+/// `env` is set over `git_command`'s own.
+fn run_there(repo: &Path, args: &[&str], env: &[(&str, &str)], stdin: Option<&[u8]>) -> Option<std::io::Result<Ran>> {
+    let mut all: Vec<(&str, &str)> = GIT_ENV.iter().filter(|(key, _)| !env.iter().any(|(set, _)| set == key)).copied().collect();
+    all.extend_from_slice(env);
+    let ran = fenix_vfs::run_there(repo, fenix_vfs::Run { program: "git", args, env: &all, stdin })?;
+    Some(ran.map(|ran| Ran { code: ran.code, stdout: ran.stdout, stderr: ran.stderr }))
+}
+
+/// `git args...` in `repo`, wherever it is, to its end.
+pub(crate) fn run(repo: &Path, args: &[&str]) -> std::io::Result<Ran> {
+    if let Some(ran) = run_there(repo, args, &[], None) {
+        return ran;
+    }
+    let out = git_command(repo, args).output()?;
+    Ok(Ran { code: out.status.code(), stdout: out.stdout, stderr: out.stderr })
+}
+
 /// Shells `git args...` with its working directory set to `repo` (every
 /// operation here targets a *specific* repository, unlike `fenix-docker`,
 /// which talks to one daemon regardless of cwd -- mirrors `fenix-project`'s
@@ -37,8 +73,8 @@ pub(crate) fn git_command(repo: &Path, args: &[&str]) -> Command {
 /// into lines on success, or empty on any failure (missing binary,
 /// non-zero exit, not a repo) -- never a hard error.
 pub(crate) fn run_lines(repo: &Path, args: &[&str]) -> Vec<String> {
-    let Ok(output) = git_command(repo, args).output() else { return Vec::new() };
-    if !output.status.success() {
+    let Ok(output) = run(repo, args) else { return Vec::new() };
+    if !output.success() {
         return Vec::new();
     }
     String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect()
@@ -57,12 +93,18 @@ pub(crate) fn run_action(repo: &Path, args: &[String]) -> Result<String, String>
 /// an interactive rebase's own `GIT_SEQUENCE_EDITOR`, say.
 pub(crate) fn run_action_env(repo: &Path, args: &[String], env: &[(&str, &str)]) -> Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut command = git_command(repo, &args);
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    match command.output() {
-        Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+    let ran = match run_there(repo, &args, env, None) {
+        Some(ran) => ran,
+        None => {
+            let mut command = git_command(repo, &args);
+            for (key, value) in env {
+                command.env(key, value);
+            }
+            command.output().map(|out| Ran { code: out.status.code(), stdout: out.stdout, stderr: out.stderr })
+        }
+    };
+    match ran {
+        Ok(out) if out.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(err) => Err(format!("couldn't run git: {err}")),
     }
@@ -70,8 +112,8 @@ pub(crate) fn run_action_env(repo: &Path, args: &[String], env: &[(&str, &str)])
 
 /// `git args...`'s stdout as raw bytes -- a blob's exact content.
 pub(crate) fn run_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    match git_command(repo, args).output() {
-        Ok(out) if out.status.success() => Ok(out.stdout),
+    match run(repo, args) {
+        Ok(out) if out.success() => Ok(out.stdout),
         Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
         Err(err) => Err(format!("couldn't run git: {err}")),
     }
@@ -80,7 +122,7 @@ pub(crate) fn run_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 /// Whether `git args...` exits 0 -- for the commands whose answer *is*
 /// the exit status (`merge-base --is-ancestor`).
 pub(crate) fn run_status(repo: &Path, args: &[&str]) -> bool {
-    git_command(repo, args).output().is_ok_and(|out| out.status.success())
+    run(repo, args).is_ok_and(|out| out.success())
 }
 
 /// `run_action`, but with `stdin` piped into the child -- what `git
@@ -95,6 +137,13 @@ pub(crate) fn run_action_stdin(repo: &Path, args: &[String], stdin: &str) -> Res
     use std::process::Stdio;
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some(ran) = run_there(repo, &args, &[], Some(stdin.as_bytes())) {
+        return match ran {
+            Ok(out) if out.success() => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr).into_owned()),
+            Err(err) => Err(format!("couldn't run git: {err}")),
+        };
+    }
     let mut cmd = git_command(repo, &args);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match cmd.spawn() {

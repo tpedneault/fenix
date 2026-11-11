@@ -1465,6 +1465,7 @@ impl App {
         }
         let key = match (keypress.code, keypress.mods.ctrl) {
             (KeyCode::Named(FenixNamedKey::Backspace), true) | (KeyCode::Char('w'), true) => PageKey::DeleteWordBack,
+            (KeyCode::Char('u'), true) => PageKey::DeleteToStart,
             (KeyCode::Named(FenixNamedKey::Left), true) => PageKey::WordLeft,
             (KeyCode::Named(FenixNamedKey::Right), true) => PageKey::WordRight,
             (_, true) => return,

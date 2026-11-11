@@ -81,6 +81,10 @@ they're set, and are never written to it; GitHub also uses the GitHub
 CLI's sign-in (`gh auth login`) when there's no token. (Keeping them in
 the operating system's credential store instead is planned.)
 
+Coming from another editor? `SPC h i` reads VS Code's, Vim's or
+Neovim's settings and shows what it would write here before it writes
+anything -- see [Coming from another editor](COMING_FROM.md#bringing-your-settings-over).
+
 ## A project's own settings
 
 A project can set some settings for itself in `.fenix/settings.toml`,
@@ -130,6 +134,44 @@ A project from before `.fenix/settings.toml` kept these in
 -- kind, Jira key, reviewers and serial monitor speed into
 `settings.toml`, its old `[tasks]` and `[launch]` into `tools.json` --
 and is deleted, so the change shows in `git status` for review.
+
+## .editorconfig
+
+Fenix reads [`.editorconfig`](https://editorconfig.org) files, so a
+repository's indentation and whitespace rules apply in Fenix as in every
+other editor. For a file, every `.editorconfig` from its folder up is
+read, stopping at one with `root = true`; a section whose glob matches
+the file (`[*]`, `[*.{js,ts}]`, `[src/**.rs]`, `[file{1..9}.txt]`...)
+gives its properties, a later section over an earlier one and a nearer
+file over a farther one. `SPC f c` (`file.editorconfig`) shows what
+applies to the focused file and from which files.
+
+| Property | What Fenix does |
+|---|---|
+| `indent_style` | `tab`: Tab, `>>` and the level Enter adds are a tab; `space`: spaces |
+| `indent_size` | Columns of a level, as `editor.indent_width` (`tab`: the tab width) |
+| `tab_width` | Columns a tab takes, as `editor.tab_width` |
+| `end_of_line` | `lf`, `crlf` or `cr`: every line ending made that one when the file is saved |
+| `charset` | `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, or `latin1` (written as Windows-1252): the file is saved in it |
+| `trim_trailing_whitespace` | `true`: spaces and tabs at line ends go when the file is saved |
+| `insert_final_newline` | `true`: a line ending is added at the end when the file is saved; `false` leaves the end as it is |
+
+What a save changes is one undo step. An auto-save leaves the line you're
+typing on untrimmed. `unset` takes a property back to what's below it.
+
+Where `.editorconfig` sits among the settings, highest first:
+
+1. the project's `.fenix/settings.toml` (an indent width set there is in
+   spaces, whatever `indent_style` says);
+2. `.editorconfig`;
+3. your `settings.toml`;
+4. Fenix's defaults.
+
+So a repository's `.editorconfig` beats your own preferences, as it does
+in every editor, and a project that wants Fenix to do otherwise says so
+in its own Fenix file. A `.editorconfig` is read again when you save one
+in Fenix, and on the disk check every few seconds. Files on a remote
+machine don't read theirs yet.
 
 ## Your own themes
 
@@ -330,7 +372,7 @@ An install replaces any other version of the same extension, and
 needs its dependencies installed first. From the Extensions page it's
 used at once, but for its themes and languages, which come with the
 next start; installed with `fenix --install-extension`, a running Fenix
-uses it from its next start. A package is checked before anything is written: its manifest, the Fenix
+notices within a few seconds and puts it in use the same way. A package is checked before anything is written: its manifest, the Fenix
 it's for, and that none of its files would land outside its own folder.
 
 ### Extensions that run code
@@ -484,11 +526,12 @@ when it's out of date).
 | Setting | Takes | Default | What it does |
 |---|---|---|---|
 | **Editor** | | | |
-| `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts; Fenix always indents with spaces. *A project can set it.* |
-| `editor.tab_width` | 1–16 | 8 | Columns a tab character already in a file takes up. *A project can set it.* |
+| `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts. A file's .editorconfig comes before it (indent_size, and indent_style = tab for tabs); the project's own setting before both. *A project can set it.* |
+| `editor.tab_width` | 1–16 | 8 | Columns a tab character takes up. A file's .editorconfig (tab_width) comes before it; the project's own setting before both. *A project can set it.* |
 | `editor.wrap` | true / false | off | A line wider than its pane goes on under itself, at the pane's width; SPC t w (Alt+Z with standard keys) turns it on or off for one buffer until it's closed or Fenix restarts. Not tables, diffs, Git pages, terminals or a side by side. |
 | `editor.wrap_languages` | a list | markdown, text | Languages whose lines wrap whatever Wrap long lines says (markdown; text for .txt and .text files). |
 | `editor.nowrap_languages` | a list | none | Languages whose lines never wrap unless SPC t w says so: over Wrap long lines and the list of those that do. |
+| `editor.line_numbers` | absolute / relative / off | absolute | The gutter's numbers: each line's own, how far each is from the cursor's line, or none. SPC t n cycles them until Fenix restarts. |
 | `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
@@ -498,7 +541,7 @@ when it's out of date).
 | `editor.multi_cursor_modifier` | alt / ctrl | alt | With standard keys: the key held while clicking to add a cursor. Ctrl, for desktops that move windows with Alt+drag; go to definition then moves to Alt+click. |
 | `editor.undo_pause_ms` | 0–10000 | 1000 | With standard keys: a pause this long, in milliseconds, between keys you type starts a new undo step; 0 never does. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
-| `terminal.shell` | text | PowerShell 7, else Windows PowerShell; $SHELL | The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. |
+| `terminal.shell` | text | PowerShell 7, else Windows PowerShell; $SHELL | The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. A remote project's terminal is your own shell on its machine. |
 | `search.smart_case` | true / false | on | A search in lower case matches any case; a capital letter makes it exact. For / and the Search page; Alt-c on the page, \C in /, match case anyway. |
 | `search.regex` | true / false | off | Whether the Search page (SPC /) starts reading the query as a regex rather than literal text. Alt-r flips it there; / and :s are always regexes. |
 | `search.exclude` | a list | – | Globs the Search page leaves out to begin with ("target", "*.lock"). Ignored files are left out anyway; f on the page edits the globs. |
@@ -507,6 +550,7 @@ when it's out of date).
 | **Appearance** | | | |
 | `editor.theme` | text | Orbit Dark | The colour theme; h and l preview each one. |
 | `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; Enter lists them to pick from, h and l step through them. |
+| `accessibility.screen_reader` | true / false | on | Fenix tells a screen reader (Narrator, NVDA, JAWS, Orca, VoiceOver) the text you're in with its cursor and selection, the modeline, prompts, and each change of mode and message. Nothing is worked out until one asks. Takes effect the next time Fenix starts. |
 | `editor.font_size` | 6–48 | 16 | Text size, in points. |
 | `appearance.corner_radius` | 0–16 | the theme's | Pixels of rounding on popups and floating boxes. 0 keeps them square. |
 | `appearance.shadows` | true / false | on | Popups cast a soft shadow. |
@@ -579,6 +623,9 @@ when it's out of date).
 | `lsp.code_lens` | true / false | off | What a language server offers for a function or test, on a row of its own above it (Run, Debug, 3 references), dimmed. Off for now: while a file has lenses its pane snaps rather than easing, and sticky scroll is off. Turned off, every lens goes in the next frame. Turned on, each file is asked at its next sync; a server started while it was off learns that Fenix takes its refreshes only once it's restarted (SPC q r). |
 | `lsp.code_lens_off` | a list | none | Languages whose files show no code lenses, whatever Code lens says. |
 | `lsp.code_lens_tests` | true / false | on | With Code lens on: a ▶ Run test lens over each test Fenix can run alone (a Rust #[test], a pytest test, a Go TestXxx) where the language server offers none, with or without a language server; it runs only in a trusted project. So with Code lens on, a file of tests goes by rows (it snaps, and sticky scroll is off) though no server offers lenses. |
+| `lsp.inlay_hints` | true / false | on | What a language server would write into the code without it being there -- a variable's type after its name, a parameter's name before an argument -- drawn dimmed in the line, where the server offers it. SPC t i turns them on and off. A server started while they were off learns that Fenix takes its refreshes only once it's restarted (SPC q r). |
+| `lsp.inlay_hints_off` | a list | none | Languages whose files show no inlay hints, whatever Inlay hints says. |
+| `lsp.offer_install` | true / false | on | When a file's built-in language server (rust-analyzer, pyright, clangd, gopls...) isn't installed, a notice says so and how to get it; SPC l i shows the command and runs it once you say y. Off, no notice: SPC l i still works. |
 | `lsp.servers` | language = command | – | A language server to run for a language, as the command line that starts it. |
 | `debug.trail_stops` | 1–10000 | 200 | How many of a debug session's stops the Ember Trail keeps, oldest first to go. Kept in memory only. |
 | **Git** | | | |

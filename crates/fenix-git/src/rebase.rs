@@ -76,9 +76,10 @@ pub fn todo(plan: &[Planned], messages: &dyn Fn(&str) -> Option<PathBuf>) -> Str
     out
 }
 
-/// A path the way git's own shell takes it on every platform.
+/// A path the way git's own shell takes it on every platform, on the
+/// machine the path is on.
 fn slashes(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    crate::disk::for_git(path)
 }
 
 /// Runs the rebase onto `base` (the root, when `None`) doing `plan`.
@@ -86,19 +87,19 @@ fn slashes(path: &Path) -> String {
 /// rebase in progress, like any other rebase here.
 pub fn rebase_interactive(repo: &Path, base: Option<&str>, plan: &[Planned]) -> Result<String, String> {
     let dir = run_lines(repo, &["rev-parse", "--absolute-git-dir"]).into_iter().next().ok_or("not a git repository")?;
-    let dir = PathBuf::from(dir).join("fenix").join("rebase");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dir = crate::disk::from_git(repo, &dir).join("fenix").join("rebase");
+    crate::disk::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let mut files = Vec::new();
     for p in plan {
         if let Step::Reword(message) = &p.step {
             let file = dir.join(format!("message-{}", &p.hash[..12.min(p.hash.len())]));
-            std::fs::write(&file, message).map_err(|e| e.to_string())?;
+            crate::disk::write(&file, message.as_bytes()).map_err(|e| e.to_string())?;
             files.push((p.hash.clone(), file));
         }
     }
     let list = todo(plan, &|hash| files.iter().find(|(h, _)| h == hash).map(|(_, f)| f.clone()));
     let todo_file = dir.join("todo");
-    std::fs::write(&todo_file, list).map_err(|e| e.to_string())?;
+    crate::disk::write(&todo_file, list.as_bytes()).map_err(|e| e.to_string())?;
     let editor = format!("cp '{}'", slashes(&todo_file));
     let mut args = vec!["rebase".to_string(), "-i".to_string(), "--autostash".to_string()];
     match base {

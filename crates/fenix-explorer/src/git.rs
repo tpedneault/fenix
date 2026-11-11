@@ -12,10 +12,13 @@ use crate::entry::{Entry, GitStatus};
 /// or without `git` on `PATH`; git status is an annotation on top of the
 /// listing, not something the listing should fail over.
 pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
-    // Git on a remote machine isn't read yet: no badges there, rather
-    // than a `git` started here in a folder this machine doesn't have.
-    if fenix_vfs::is_remote(dir) {
-        return HashMap::new();
+    // A folder on a remote machine: its `git`, run there.
+    let args = ["status", "--porcelain=v1", "--ignored", "--", "."];
+    if let Some(ran) = fenix_vfs::run_there(dir, fenix_vfs::Run { program: "git", args: &args, ..fenix_vfs::Run::default() }) {
+        return match ran {
+            Ok(ran) if ran.success() => parse_porcelain(dir, &String::from_utf8_lossy(&ran.stdout)),
+            _ => HashMap::new(),
+        };
     }
     let mut git = Command::new("git");
     #[cfg(windows)]
@@ -24,14 +27,17 @@ pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         git.creation_flags(CREATE_NO_WINDOW);
     }
-    let Ok(output) = git.args(["status", "--porcelain=v1", "--ignored", "--", "."]).current_dir(dir).output() else {
+    let Ok(output) = git.args(args).current_dir(dir).output() else {
         return HashMap::new();
     };
     if !output.status.success() {
         return HashMap::new();
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_porcelain(dir, &String::from_utf8_lossy(&output.stdout))
+}
 
+/// `git status --porcelain=v1`'s lines, as paths under `dir`.
+fn parse_porcelain(dir: &Path, stdout: &str) -> HashMap<PathBuf, GitStatus> {
     let mut map = HashMap::new();
     for line in stdout.lines() {
         if line.len() < 4 {
@@ -41,7 +47,7 @@ pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
         let rest = &line[3..];
         // Renames report "OLD -> NEW"; the path that exists now is what matters.
         let rel = rest.rsplit_once(" -> ").map_or(rest, |(_, new)| new).trim_matches('"');
-        map.insert(dir.join(rel), status);
+        map.insert(fenix_vfs::join(dir, rel), status);
     }
     map
 }

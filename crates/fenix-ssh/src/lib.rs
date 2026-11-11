@@ -17,10 +17,12 @@ pub mod bridge;
 pub mod config;
 mod host;
 mod local;
+mod machine;
 mod session;
 mod ssh;
+pub mod testing;
 
-pub use fenix_remote::{Entry, Exec, Failure, FailureCode, FileKind, Hello, Version};
+pub use fenix_remote::{Entry, Exec, Failure, FailureCode, FileKind, Hello, Pty, Search, Searched, Version};
 pub use host::{Host, Status};
-pub use session::{Error, Finished, Output, Process, ProcessInput, Session, StartError, DEADLINE};
+pub use session::{Error, Finished, Output, Process, ProcessInput, RemoteTerminal, Session, StartError, TerminalOutput, DEADLINE};
 pub use ssh::{connect, ConnectError, Connected, Helpers, Target};

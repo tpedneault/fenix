@@ -102,6 +102,9 @@ impl App {
         if !sweep.reloaded.is_empty() {
             return false;
         }
+        // The line being typed on keeps its trailing space.
+        let keep_line = (self.focused_buffer_id() == id).then(|| self.open().buffer.line_col(&self.cursor()).0);
+        self.editorconfig_before_save(id, keep_line);
         let Some(ob) = self.buffers.get_mut(id) else { return false };
         match ob.buffer.save() {
             Ok(()) => {

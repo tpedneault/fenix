@@ -13,23 +13,16 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
 
-use fenix_remote::{Entry, FailureCode, FileKind};
-use fenix_remote::Exec;
-use fenix_vfs::{Kind, Meta, Over, Ran, Run};
+use fenix_vfs::{Meta, Over, Ran, Run};
 
 use crate::askpass::Askpass;
 use crate::bridge::Bridge;
-use crate::session::{Error, Output, Session};
+use crate::machine;
+use crate::session::{Error, Session};
 use crate::ssh::{connect, ConnectError, Helpers, Target};
 
 /// How often the connection is looked at.
 const WATCH: Duration = Duration::from_millis(250);
-
-/// The most a program run to its end (`Remote::run`: a listing of the
-/// project's files, a Git command) may print before it's stopped. What a
-/// remote machine sends is kept in memory here, and a machine that never
-/// stops sending must not be able to fill it.
-const MOST_OUTPUT: usize = 256 * 1024 * 1024;
 
 /// The waits between tries to connect again; the last one repeats.
 const BACKOFF: [u64; 6] = [1, 2, 4, 8, 15, 30];
@@ -208,114 +201,52 @@ fn watch(host: &Weak<Host>, woken: &mpsc::Receiver<bool>) {
     }
 }
 
-fn meta(entry: Entry, name: Option<&str>) -> Meta {
-    let kind = match entry.kind {
-        FileKind::File => Kind::File,
-        FileKind::Dir => Kind::Dir,
-        FileKind::Other => Kind::Other,
-    };
-    // A listing names its entries; anything else was asked by its path.
-    let name = match name {
-        Some(path) => path.trim_end_matches('/').rsplit('/').next().unwrap_or_default().to_string(),
-        None => entry.name,
-    };
-    Meta { name, kind, symlink: entry.symlink, len: entry.len, version: fenix_vfs::Version { len: entry.len, mtime: entry.mtime }, mode: entry.mode }
-}
-
-fn io_error(error: Error) -> io::Error {
-    match error {
-        Error::Lost => io::Error::new(io::ErrorKind::NotConnected, "the connection to the remote machine was lost"),
-        Error::TimedOut => io::Error::new(io::ErrorKind::TimedOut, "the remote machine didn't answer in time"),
-        Error::Cancelled => io::Error::new(io::ErrorKind::Interrupted, "stopped"),
-        Error::Protocol(what) => io::Error::other(format!("unexpected from Fenix's helper: {what}")),
-        Error::Remote(failure) => match failure.code {
-            FailureCode::NotFound => io::Error::new(io::ErrorKind::NotFound, failure.message),
-            FailureCode::Denied => io::Error::new(io::ErrorKind::PermissionDenied, failure.message),
-            FailureCode::Exists => io::Error::new(io::ErrorKind::AlreadyExists, failure.message),
-            FailureCode::Cancelled => io::Error::new(io::ErrorKind::Interrupted, failure.message),
-            FailureCode::Changed => io::Error::other(fenix_vfs::Changed(failure.message)),
-            FailureCode::Other => io::Error::other(failure.message),
-        },
-    }
-}
-
 impl fenix_vfs::Remote for Host {
     fn home(&self) -> String {
         self.state.lock().unwrap().home.clone()
     }
 
     fn run(&self, cwd: &str, run: Run<'_>) -> io::Result<Ran> {
-        let exec = Exec {
-            program: run.program.to_string(),
-            args: run.args.iter().map(|arg| arg.to_string()).collect(),
-            cwd: Some(cwd.to_string()),
-            env: run.env.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect(),
-            stdin: run.stdin.is_some(),
-        };
-        let process = self.session().and_then(|session| session.exec(exec)).map_err(io_error)?;
-        if let Some(bytes) = run.stdin {
-            let input = process.input();
-            // In pieces, so a large patch doesn't hold the connection.
-            for piece in bytes.chunks(fenix_remote::PIECE) {
-                input.write(piece).map_err(io_error)?;
-            }
-            input.close().map_err(io_error)?;
-        }
-        let mut ran = Ran::default();
-        loop {
-            match process.next().map_err(io_error)? {
-                Output::Stdout(bytes) => ran.stdout.extend(bytes),
-                Output::Stderr(bytes) => ran.stderr.extend(bytes),
-                Output::Exit(code) => {
-                    ran.code = code;
-                    return Ok(ran);
-                }
-            }
-            if ran.stdout.len() + ran.stderr.len() > MOST_OUTPUT {
-                let _ = process.input().kill();
-                return Err(io::Error::other(format!("{} printed more than Fenix will hold, and was stopped", run.program)));
-            }
-        }
+        machine::run(self.session(), cwd, run)
     }
 
     fn stat(&self, path: &str) -> io::Result<Meta> {
-        self.session().and_then(|session| session.stat(path)).map(|entry| meta(entry, Some(path))).map_err(io_error)
+        machine::stat(self.session(), path)
     }
 
     fn list(&self, path: &str) -> io::Result<Vec<Meta>> {
-        let entries = self.session().and_then(|session| session.list(path)).map_err(io_error)?;
-        // A folder's entries are names in that folder. One that says it
-        // is elsewhere (`..`, `a/b`) is no name a file system gives, and
-        // comes from a machine that isn't to be believed: left out.
-        Ok(entries.into_iter().filter(|entry| fenix_vfs::path::is_one_name(&entry.name)).map(|entry| meta(entry, None)).collect())
+        machine::list(self.session(), path)
     }
 
     fn read(&self, path: &str) -> io::Result<(Vec<u8>, Meta)> {
-        self.session().and_then(|session| session.read(path)).map(|(bytes, entry)| (bytes, meta(entry, Some(path)))).map_err(io_error)
+        machine::read(self.session(), path)
     }
 
     fn write(&self, path: &str, contents: &[u8], over: Over) -> io::Result<Meta> {
-        let (expect, create_new) = match over {
-            Over::Anything => (None, false),
-            Over::Version(version) => (Some(fenix_remote::Version { len: version.len, mtime: version.mtime }), false),
-            Over::Nothing => (None, true),
-        };
-        self.session().and_then(|session| session.write(path, contents, expect, create_new)).map(|entry| meta(entry, Some(path))).map_err(io_error)
+        machine::write(self.session(), path, contents, over)
     }
 
     fn rename(&self, from: &str, to: &str, replace: bool) -> io::Result<()> {
-        self.session().and_then(|session| session.rename(from, to, replace)).map_err(io_error)
+        machine::rename(self.session(), from, to, replace)
     }
 
     fn remove(&self, path: &str, recursive: bool) -> io::Result<()> {
-        self.session().and_then(|session| session.remove(path, recursive)).map_err(io_error)
+        machine::remove(self.session(), path, recursive)
     }
 
     fn create_dir(&self, path: &str, parents: bool) -> io::Result<()> {
-        self.session().and_then(|session| session.create_dir(path, parents)).map(drop).map_err(io_error)
+        machine::create_dir(self.session(), path, parents)
     }
 
     fn copy(&self, from: &str, to: &str) -> io::Result<()> {
-        self.session().and_then(|session| session.copy(from, to)).map_err(io_error)
+        machine::copy(self.session(), from, to)
+    }
+
+    fn terminal(&self, cwd: &str, shell: fenix_vfs::Shell<'_>) -> io::Result<fenix_vfs::Terminal> {
+        machine::terminal(self.session(), cwd, shell)
+    }
+
+    fn search(&self, search: fenix_vfs::Search<'_>, found: &mut fenix_vfs::Finding<'_>) -> io::Result<fenix_vfs::Searched> {
+        machine::search(self.session(), search, found)
     }
 }

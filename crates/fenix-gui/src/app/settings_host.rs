@@ -192,11 +192,20 @@ impl App {
                     }
                 };
                 let restart = fenix_config::setting(key).is_some_and(|s| s.restart);
+                // An extension's that it reads only as it starts: it has
+                // started again (`code_setting_changed`), and says so.
+                let restarted = self.code_running_restarted_by(key);
                 if let Some(page) = self.settings_page(id) {
                     match result {
                         Ok(()) => {
                             page.refused = None;
-                            page.note = restart.then(|| ("saved -- it takes effect when Fenix restarts: SPC q r restarts now, where you are".to_string(), false));
+                            page.note = if restart {
+                                Some(("saved -- it takes effect when Fenix restarts: SPC q r restarts now, where you are".to_string(), false))
+                            } else if !restarted.is_empty() {
+                                Some((format!("saved -- {} started again to apply it", restarted.join(", ")), false))
+                            } else {
+                                None
+                            };
                         }
                         Err(why) => page.refused = Some((key, why)),
                     }
@@ -339,6 +348,7 @@ impl App {
                 let chars = self.effective_iskeyword();
                 self.vim.set_iskeyword_extra(chars);
             }
+            "editor.line_numbers" => self.line_number_mode = super::LineNumberMode::from_setting(&self.config),
             "explorer.width" => self.sidebar_width = self.config.explorer_width.map_or(text::SIDEBAR_WIDTH, |w| w as f32),
             "explorer.hide" | "explorer.compact" | "explorer.show_hidden" => self.reconfigure_explorers(),
             "search.smart_case" => self.vim.set_smart_case(self.config.search_smart_case != Some(false)),
@@ -391,6 +401,10 @@ impl App {
     /// the project changes, and on the disk poll's tick (`poll`), when
     /// its file may have been edited. What they change is applied.
     pub(super) fn refresh_project_settings(&mut self, poll: bool) {
+        // A `.editorconfig` may have been edited too: read again.
+        if poll {
+            self.editorconfig_cache.clear();
+        }
         let root = self.project_root.clone();
         let same = self.project_settings.as_ref().map(|(r, _)| r) == root.as_ref();
         if same && !poll {
@@ -424,20 +438,23 @@ impl App {
     }
 
     /// The project's settings as the disk probe read them, applied when
-    /// they changed -- and only if it's still the focused project.
-    pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) {
+    /// they changed -- and only if it's still the focused project. Whether
+    /// they did.
+    pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) -> bool {
         if self.project_root.as_ref() != Some(&root) {
-            return;
+            return false;
         }
         let before = self.project_settings.as_ref().map(|(_, p)| p.values());
         let same = self.project_settings.as_ref().is_some_and(|(r, _)| *r == root);
         self.project_settings = Some((root, settings));
         let after = self.project_settings.as_ref().map(|(_, p)| p.values());
-        if before != after || !same {
+        let changed = before != after || !same;
+        if changed {
             for key in ["editor.indent_width", "editor.iskeyword_extra"] {
                 self.apply_setting(key);
             }
         }
+        changed
     }
 
     /// The focused project's own value for `key`, if it sets one.
@@ -445,19 +462,21 @@ impl App {
         self.project_settings.as_ref().and_then(|(_, p)| p.get(key))
     }
 
-    /// Spaces an indent is: the project's, else yours, else 4.
+    /// Columns an indent is: the project's, else the focused file's
+    /// `.editorconfig`'s, else yours, else 4.
     pub(super) fn effective_indent_width(&self) -> usize {
         match self.project_value("editor.indent_width") {
             Some(fenix_config::Value::Int(n)) => *n as usize,
-            _ => self.config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH),
+            _ => self.editorconfig_indent_width().or(self.config.indent_width).unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH),
         }
     }
 
-    /// Columns a tab takes: the project's, else yours, else 8.
+    /// Columns a tab takes: the project's, else the focused file's
+    /// `.editorconfig`'s, else yours, else 8.
     pub(super) fn effective_tab_width(&self) -> usize {
         match self.project_value("editor.tab_width") {
             Some(fenix_config::Value::Int(n)) => *n as usize,
-            _ => self.config.tab_width.unwrap_or(DEFAULT_TAB_WIDTH),
+            _ => self.editorconfig_tab_width().or(self.config.tab_width).unwrap_or(DEFAULT_TAB_WIDTH),
         }
     }
 

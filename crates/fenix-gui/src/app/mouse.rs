@@ -212,14 +212,16 @@ impl App {
                 (line, state.scroll_col)
             }
         };
-        let col_map = self.line_col_map(buffer, line, cursor_line);
+        let (col_map, bidi) = self.line_col_map_and_order(buffer, line, cursor_line, scroll_col);
         let gutter = x < 0.0;
-        // The row it's on, through the pane's map of them.
+        // The row it's on, through the pane's map of them; in right-to-
+        // left text, the character drawn in the cell clicked.
         let map = super::rows::RowMap::lines(&[line], scroll_col);
-        let (_, vcol) = map.at(0, (x / char_width).floor().max(0.0) as usize)?;
+        let cell = (x / char_width).floor().max(0.0) as usize;
+        let (_, vcol) = map.at(0, bidi.as_ref().map_or(cell, |b| b.char_at(cell)))?;
         let (col, past_end) = char_col_at(&col_map, vcol);
         let shown_row = row.clamp(0, text::lines_that_fit(content.h, line_height) as isize);
-        let glyph_col = map.locate(line, tabstops::visual_col(&col_map, col)).map_or(0, |(_, x)| x);
+        let glyph_col = map.locate(line, tabstops::visual_col(&col_map, col)).map_or(0, |(_, x)| bidi.as_ref().map_or(x, |b| b.caret(x, true)));
         let glyph_x = content.x + text::PAD_LEFT + gutter_px + glyph_col as f32 * char_width;
         let glyph_bottom = content.y + text::PAD_TOP + (shown_row as f32 + 1.0 - frac) * line_height;
         Some(TextHit { buffer, line, col, past_end: past_end || index >= lines.len() as isize, gutter, anchor: (glyph_x, glyph_bottom) })
@@ -229,16 +231,34 @@ impl App {
     /// its tabs expanded, its decorations laid out (as on the cursor's
     /// line, `cursor_line`).
     pub(super) fn line_col_map(&self, buffer: BufferId, line: usize, cursor_line: usize) -> Vec<usize> {
-        let Some(ob) = self.buffers.get(buffer) else { return Vec::new() };
+        self.line_drawn(buffer, line, cursor_line).1
+    }
+
+    /// `line_col_map`, and for a line with right-to-left text where each
+    /// character of it is drawn, scrolled sideways to `scroll_col` (#17).
+    fn line_col_map_and_order(&self, buffer: BufferId, line: usize, cursor_line: usize, scroll_col: usize) -> (Vec<usize>, Option<crate::bidi::VisualOrder>) {
+        let (display, col_map) = self.line_drawn(buffer, line, cursor_line);
+        let order = if crate::bidi::has_rtl(&display) {
+            crate::bidi::visual_order(&display.chars().skip(scroll_col).take(super::MAX_ROW_CHARS).collect::<String>())
+        } else {
+            None
+        };
+        (col_map, order)
+    }
+
+    /// `line` as drawn, and its char column -> visual column map.
+    fn line_drawn(&self, buffer: BufferId, line: usize, cursor_line: usize) -> (String, Vec<usize>) {
+        let Some(ob) = self.buffers.get(buffer) else { return (String::new(), Vec::new()) };
         let start = ob.buffer.line_start_char(line);
         let len = ob.buffer.line_len(line);
         let line_text = ob.buffer.text_range(start, start + len);
         let tab_stops = self.tab_stops_for(buffer);
         let decorations: Vec<&crate::decorations::Decoration> = self.code_decorations(buffer).into_iter().filter(|d| d.start <= start + len && d.end >= start).collect();
         if decorations.is_empty() {
-            tabstops::expand_line(&line_text, &tab_stops).1
+            tabstops::expand_line(&line_text, &tab_stops)
         } else {
-            crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).col_map
+            let laid = crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line);
+            (laid.display, laid.col_map)
         }
     }
 
@@ -276,7 +296,7 @@ impl App {
                 // Past a row's end, on a line that goes on below: its
                 // last char (`RowMap::at` holds it there).
                 _ => {
-                    let (line, vcol) = map.at(r, cell)?;
+                    let (line, vcol) = map.at(r, self.row_logical_cell(&map, r, buffer, ob, state.cursor, cell))?;
                     (line, vcol, false)
                 }
             },
@@ -299,6 +319,21 @@ impl App {
         let glyph_x = content.x + text::PAD_LEFT + self.gutter_chars(ob) as f32 * char_width + glyph_col as f32 * char_width;
         let glyph_bottom = content.y + text::PAD_TOP + (glyph_row as f32 + 1.0) * line_height;
         Some(TextHit { buffer, line, col, past_end: past_end || past, gutter: x < 0.0, anchor: (glyph_x, glyph_bottom) })
+    }
+
+    /// Cell `cell` of row `r` of `map` as its line's own order counts
+    /// it: in right-to-left text, the character drawn there (#17).
+    fn row_logical_cell(&self, map: &super::rows::RowMap, r: usize, buffer: BufferId, ob: &super::OpenBuffer, cursor: Cursor, cell: usize) -> usize {
+        let Some(line) = map.row(r).map(|row| row.line) else { return cell };
+        let (display, _) = self.line_drawn(buffer, line, ob.buffer.line_col(&cursor).0);
+        if !crate::bidi::has_rtl(&display) {
+            return cell;
+        }
+        let lines = HashMap::from([(line, display)]);
+        match super::rows::bidi_rows(map, &lines).get(&r) {
+            Some((first, order)) if cell >= *first => first + order.char_at(cell - first),
+            _ => cell,
+        }
     }
 
     /// The char `hit` puts the cursor on: past the line's end is its last

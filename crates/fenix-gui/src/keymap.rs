@@ -15,14 +15,24 @@ pub use chords::{Chord, ChordContext, ChordMap, Scheme, When};
 /// typed without Ctrl or Alt. Returns `None` for keys with nothing
 /// sensible to bind (media keys, F13 and up, ...).
 pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
+    to_keypresses(&event.logical_key, event.physical_key, event.text.as_deref(), mods).into_iter().next()
+}
+
+/// Every keypress a winit key event stands for: usually one, from its
+/// logical key. A key with no logical key Fenix knows but with text --
+/// Windows' `VK_PACKET`, which is how `SendInput` with
+/// `KEYEVENTF_UNICODE` (dictation, the on-screen keyboard, auto-type,
+/// automation tools) delivers text -- is that text, a plain keypress per
+/// character, as if each had been typed on its own key (#37).
+pub fn to_keypresses(logical: &Key, physical: PhysicalKey, text: Option<&str>, mods: ModifiersState) -> Vec<KeyPress> {
     // Ctrl+Alt+Q is a second Escape. Synthetic input (UI automation,
     // some remote-desktop tools) can fail to deliver Escape itself; this
     // combination is bound to nothing else. Matched on the physical key
     // so the layout's idea of Ctrl+Alt+Q (AltGr on some) doesn't matter.
-    if mods.control_key() && mods.alt_key() && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) {
-        return Some(KeyPress { code: KeyCode::Named(FenixNamedKey::Escape), mods: Mods::default() });
+    if mods.control_key() && mods.alt_key() && physical == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) {
+        return vec![KeyPress { code: KeyCode::Named(FenixNamedKey::Escape), mods: Mods::default() }];
     }
-    let code = match &event.logical_key {
+    let code = match logical {
         Key::Named(NamedKey::Space) => KeyCode::Char(' '),
         Key::Named(NamedKey::Escape) => KeyCode::Named(FenixNamedKey::Escape),
         Key::Named(NamedKey::Enter) => KeyCode::Named(FenixNamedKey::Enter),
@@ -37,11 +47,46 @@ pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
         Key::Named(NamedKey::End) => KeyCode::Named(FenixNamedKey::End),
         Key::Named(NamedKey::PageUp) => KeyCode::Named(FenixNamedKey::PageUp),
         Key::Named(NamedKey::PageDown) => KeyCode::Named(FenixNamedKey::PageDown),
-        Key::Named(named) => KeyCode::Named(FenixNamedKey::F(function_key_number(named)?)),
-        Key::Character(s) => KeyCode::Char(s.chars().next()?),
-        _ => return None,
+        Key::Named(named) => match function_key_number(named) {
+            Some(n) => KeyCode::Named(FenixNamedKey::F(n)),
+            None => return Vec::new(),
+        },
+        Key::Character(s) => match s.chars().next() {
+            Some(c) => KeyCode::Char(c),
+            None => return Vec::new(),
+        },
+        // No key to go by, only what it typed.
+        Key::Unidentified(_) => return text.map(text_keypresses).unwrap_or_default(),
+        _ => return Vec::new(),
     };
-    Some(keypress_with(code, mods))
+    vec![keypress_with(code, mods)]
+}
+
+/// Text that arrived with no key of its own (a `VK_PACKET`, an input
+/// method's committed text), as keypresses: a character each, with no
+/// modifiers; a line break is Enter, a tab Tab, a backspace Backspace and
+/// an escape Escape, and other control characters are dropped.
+pub fn text_keypresses(text: &str) -> Vec<KeyPress> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(match c {
+            '\r' => {
+                // CRLF is one line break.
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                KeyPress::named(FenixNamedKey::Enter)
+            }
+            '\n' => KeyPress::named(FenixNamedKey::Enter),
+            '\t' => KeyPress::named(FenixNamedKey::Tab),
+            '\u{8}' | '\u{7f}' => KeyPress::named(FenixNamedKey::Backspace),
+            '\u{1b}' => KeyPress::named(FenixNamedKey::Escape),
+            c if c.is_control() => continue,
+            c => KeyPress::char(c),
+        });
+    }
+    out
 }
 
 /// `code` with the modifiers held, Shift kept as `KeyPress` says.
@@ -809,6 +854,57 @@ pub fn leader_keys() -> std::collections::HashMap<&'static str, String> {
 mod tests {
     use super::*;
 
+    // #37: `SendInput` with `KEYEVENTF_UNICODE` arrives as `VK_PACKET`, a
+    // key winit can't name, with the character in the event's text.
+    const VK_PACKET: u16 = 0xE7;
+
+    fn packet(text: &str, mods: ModifiersState) -> Vec<KeyPress> {
+        use winit::keyboard::{NativeKey, NativeKeyCode};
+        to_keypresses(&Key::Unidentified(NativeKey::Windows(VK_PACKET)), PhysicalKey::Unidentified(NativeKeyCode::Windows(0)), Some(text), mods)
+    }
+
+    #[test]
+    fn unicode_input_with_no_key_is_its_text() {
+        assert_eq!(packet("l", ModifiersState::empty()), vec![KeyPress::char('l')]);
+        assert_eq!(packet("ע", ModifiersState::empty()), vec![KeyPress::char('ע')]);
+        assert_eq!(packet("😀", ModifiersState::empty()), vec![KeyPress::char('😀')]);
+        // Held modifiers don't turn text into a chord.
+        assert_eq!(packet("L", ModifiersState::SHIFT), vec![KeyPress::char('L')]);
+        assert_eq!(packet("ab", ModifiersState::empty()), vec![KeyPress::char('a'), KeyPress::char('b')]);
+    }
+
+    #[test]
+    fn unicode_input_control_characters_are_their_keys() {
+        assert_eq!(packet("\r\n", ModifiersState::empty()), vec![KeyPress::named(FenixNamedKey::Enter)]);
+        assert_eq!(packet("\t", ModifiersState::empty()), vec![KeyPress::named(FenixNamedKey::Tab)]);
+        assert_eq!(packet("\u{8}", ModifiersState::empty()), vec![KeyPress::named(FenixNamedKey::Backspace)]);
+        assert_eq!(packet("\u{1b}", ModifiersState::empty()), vec![KeyPress::named(FenixNamedKey::Escape)]);
+        // Ctrl+letter's control character means nothing as text.
+        assert_eq!(packet("\u{1}", ModifiersState::CONTROL), vec![]);
+    }
+
+    #[test]
+    fn a_key_with_no_text_or_name_is_nothing() {
+        use winit::keyboard::{NativeKey, NativeKeyCode};
+        let none = to_keypresses(&Key::Unidentified(NativeKey::Unidentified), PhysicalKey::Unidentified(NativeKeyCode::Unidentified), None, ModifiersState::empty());
+        assert!(none.is_empty());
+        let dead = to_keypresses(&Key::Dead(Some('´')), PhysicalKey::Code(winit::keyboard::KeyCode::Quote), None, ModifiersState::empty());
+        assert!(dead.is_empty());
+    }
+
+    #[test]
+    fn ordinary_keys_still_go_by_their_logical_key() {
+        use winit::keyboard::KeyCode as Phys;
+        // The text a physical key carries doesn't replace its key: `C-s`
+        // stays a chord.
+        let ctrl_s = to_keypresses(&Key::Character("s".into()), PhysicalKey::Code(Phys::KeyS), Some("\u{13}"), ModifiersState::CONTROL);
+        assert_eq!(ctrl_s, vec![parse_key("C-s").unwrap()]);
+        let esc = to_keypresses(&Key::Named(NamedKey::Escape), PhysicalKey::Code(Phys::Escape), Some("\u{1b}"), ModifiersState::empty());
+        assert_eq!(esc, vec![KeyPress::named(FenixNamedKey::Escape)]);
+        let second_escape = to_keypresses(&Key::Character("q".into()), PhysicalKey::Code(Phys::KeyQ), None, ModifiersState::CONTROL | ModifiersState::ALT);
+        assert_eq!(second_escape, vec![KeyPress::named(FenixNamedKey::Escape)]);
+    }
+
     /// The chords that were an `if/else` in `route_keypress` before
     /// 1.5, as `[[keys]]`: every key that chain took, with and without
     /// Insert, runs what it ran then; nothing else is bound in Vim mode
@@ -908,6 +1004,37 @@ mod tests {
         assert_eq!(problems.len(), 2, "{problems:?}");
         let at = ChordContext { scheme: Scheme::Vim, ..ChordContext::default() };
         assert_eq!(map.lookup(KeyPress::named(FenixNamedKey::Enter).with_ctrl(), &at), Some("file.save"));
+    }
+
+    /// A keymap flavour -- a data-only extension's `keymaps/*.toml` -- goes
+    /// over Fenix's standard chords for its scheme, can take one away, and
+    /// leaves Vim keys as they were.
+    #[test]
+    fn a_flavour_s_chords_go_over_fenix_s_for_its_scheme_alone() {
+        let leak = |text: &str| -> &'static KeymapData { Box::leak(Box::new(toml::from_str(text).unwrap())) };
+        let registry = crate::commands::CommandRegistry::with_builtins();
+        let known = |id: &str| registry.get(id).is_some();
+        let mut map = ChordMap::new();
+        lay_chords(&mut map, default_keymap(), None, &known, ChordSource::Fenix, &mut Vec::new());
+        let flavour = leak(
+            "[[keys]]\nkeys = \"C-d\"\ncommand = \"edit.copy_lines_down\"\nscheme = \"standard\"\nwhen = \"text\"\n\n\
+             [[keys]]\nkeys = \"F9\"\ncommand = \"debug.start_or_continue\"\nscheme = \"standard\"\n\n\
+             [[keys]]\nkeys = \"C-F8\"\ncommand = \"debug.toggle_breakpoint\"\nscheme = \"standard\"\n\n\
+             [[keys]]\nkeys = \"C-S-l\"\nunbind = true\nscheme = \"standard\"\n",
+        );
+        let mut problems = Vec::new();
+        lay_chords(&mut map, flavour, Some("jetbrains"), &known, ChordSource::Extension, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        let standard = ChordContext { scheme: Scheme::Standard, text: true, ..ChordContext::default() };
+        let vim = ChordContext { scheme: Scheme::Vim, text: true, ..ChordContext::default() };
+        assert_eq!(map.lookup(parse_key("C-d").unwrap(), &standard), Some("edit.copy_lines_down"), "over Fenix's add-next-occurrence");
+        assert_eq!(map.lookup(parse_key("F9").unwrap(), &standard), Some("debug.start_or_continue"));
+        assert_eq!(map.lookup(parse_key("C-S-l").unwrap(), &standard), None, "taken away");
+        assert_eq!(map.lookup(parse_key("C-c").unwrap(), &standard), Some("edit.copy"), "the rest stay Fenix's");
+        assert_eq!(map.lookup(parse_key("C-d").unwrap(), &vim), None, "Vim keys untouched");
+        assert_eq!(map.lookup(parse_key("F9").unwrap(), &vim), None);
+        let in_use = map.in_use(Scheme::Standard);
+        assert_eq!(in_use.iter().find(|c| c.key == parse_key("C-d").unwrap()).and_then(|c| c.from), Some("jetbrains"), "the keys page says whose");
     }
 
     /// Fenix's own chords name commands Fenix has: a typo'd one would be

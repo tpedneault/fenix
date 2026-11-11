@@ -15,6 +15,10 @@ pub enum InsertEntry {
     LineEnd,
     NewlineBelow,
     NewlineAbove,
+    /// `gi`: where Insert was last left (the `^` mark).
+    LastInsert,
+    /// `gI`: the line's first column, indent or not.
+    LineColumnZero,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +35,12 @@ pub enum VimAction {
     ChangeLine,
     /// `s`: delete the char under the cursor and enter Insert (`cl`).
     SubstituteChar,
-    JoinLines,
+    /// `J` (`spaces`) and `gJ` (the lines put together as they are).
+    JoinLines { spaces: bool },
+    /// `R`: Replace mode.
+    EnterReplace,
+    /// `U`: every change on the last changed line taken back, at once.
+    UndoLine,
     ToggleCase,
     ReplaceChar,
     EnterInsert(InsertEntry),
@@ -187,8 +196,12 @@ pub enum VisualAction {
     TextObject(TextObject),
     /// `o`: the cursor goes to the other end of the selection.
     OtherEnd,
-    /// `J`: joins the selected lines.
-    Join,
+    /// `J` / `gJ`: joins the selected lines, with spaces or without.
+    Join { spaces: bool },
+    /// `Ctrl-A` / `Ctrl-X` (`delta`): the first number on each selected
+    /// line changed by it -- with `g` (`progressive`), by it on the first
+    /// line, twice it on the second, and so on.
+    Increment { delta: i64, progressive: bool },
     /// `A` in Visual Block: appends after the block on every line.
     BlockAppend,
 }
@@ -201,6 +214,8 @@ pub enum CaseChange {
     Toggle,
     Upper,
     Lower,
+    /// `g?`: rot13, letters only.
+    Rot13,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,15 +256,28 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('%')], "matching bracket", wrap(Motion::MatchingBracket));
     trie.insert(&[KeyPress::char('{')], "paragraph back", wrap(Motion::ParagraphBackward));
     trie.insert(&[KeyPress::char('}')], "paragraph forward", wrap(Motion::ParagraphForward));
+    trie.insert(&[KeyPress::char('g'), KeyPress::char('_')], "last non-blank", wrap(Motion::LineLastNonBlank));
+    trie.insert(&[KeyPress::char('g'), KeyPress::char('e')], "back to word end", wrap(Motion::WordEndBackward));
+    trie.insert(&[KeyPress::char('g'), KeyPress::char('E')], "back to WORD end", wrap(Motion::BigWordEndBackward));
+    trie.insert(&[KeyPress::char('|')], "to column", wrap(Motion::Column));
+    trie.insert(&[KeyPress::char('+')], "next line start", wrap(Motion::NextLineStart));
+    trie.insert(&[KeyPress::named(NamedKey::Enter)], "next line start", wrap(Motion::NextLineStart));
+    trie.insert(&[KeyPress::char('-')], "previous line start", wrap(Motion::PrevLineStart));
+    trie.insert(&[KeyPress::char('_')], "first non-blank, count lines down", wrap(Motion::LineDownFirstNonBlank));
+    trie.insert(&[KeyPress::char(')')], "sentence forward", wrap(Motion::SentenceForward));
+    trie.insert(&[KeyPress::char('(')], "sentence back", wrap(Motion::SentenceBackward));
+    trie.insert(&[KeyPress::char('H')], "window top", wrap(Motion::WindowTop));
+    trie.insert(&[KeyPress::char('M')], "window middle", wrap(Motion::WindowMiddle));
+    trie.insert(&[KeyPress::char('L')], "window bottom", wrap(Motion::WindowBottom));
 }
 
 fn build_normal_trie() -> KeyTrie<VimAction> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, VimAction::Motion);
 
-    t.insert(&[Operator::Delete.trigger_key()], "delete...", VimAction::Operator(Operator::Delete));
-    t.insert(&[Operator::Change.trigger_key()], "change...", VimAction::Operator(Operator::Change));
-    t.insert(&[Operator::Yank.trigger_key()], "yank...", VimAction::Operator(Operator::Yank));
+    for (op, label) in OPERATORS {
+        t.insert(&op_keys(op), label, VimAction::Operator(op));
+    }
 
     t.insert(&[KeyPress::char('x')], "delete char", VimAction::DeleteCharUnder);
     t.insert(&[KeyPress::char('X')], "delete char before", VimAction::DeleteCharBefore);
@@ -299,12 +327,14 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('Y')], "yank to eol", VimAction::OperatorToLineEnd(Operator::Yank));
     t.insert(&[KeyPress::char('S')], "change line", VimAction::ChangeLine);
     t.insert(&[KeyPress::char('s')], "substitute char", VimAction::SubstituteChar);
-    t.insert(&[KeyPress::char('J')], "join lines", VimAction::JoinLines);
+    t.insert(&[KeyPress::char('J')], "join lines", VimAction::JoinLines { spaces: true });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('J')], "join lines, no spaces", VimAction::JoinLines { spaces: false });
+    t.insert(&[KeyPress::char('R')], "replace mode", VimAction::EnterReplace);
+    t.insert(&[KeyPress::char('U')], "undo line", VimAction::UndoLine);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('i')], "insert where Insert was left", VimAction::EnterInsert(InsertEntry::LastInsert));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('I')], "insert at column 1", VimAction::EnterInsert(InsertEntry::LineColumnZero));
     t.insert(&[KeyPress::char('~')], "toggle case", VimAction::ToggleCase);
     t.insert(&[KeyPress::char('r')], "replace char", VimAction::ReplaceChar);
-
-    t.insert(&[KeyPress::char('>'), KeyPress::char('>')], "indent line", VimAction::IndentLine);
-    t.insert(&[KeyPress::char('<'), KeyPress::char('<')], "dedent line", VimAction::DedentLine);
 
     t.insert(&[KeyPress::char('f')], "find char", VimAction::FindCharPrompt { forward: true, till: false });
     t.insert(&[KeyPress::char('F')], "find char back", VimAction::FindCharPrompt { forward: false, till: false });
@@ -352,6 +382,26 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t
 }
 
+/// Every operator, with its which-key label.
+const OPERATORS: [(Operator, &str); 12] = [
+    (Operator::Delete, "delete..."),
+    (Operator::Change, "change..."),
+    (Operator::Yank, "yank..."),
+    (Operator::Upper, "uppercase..."),
+    (Operator::Lower, "lowercase..."),
+    (Operator::ToggleCase, "toggle case..."),
+    (Operator::Rot13, "rot13..."),
+    (Operator::Format, "wrap lines..."),
+    (Operator::FormatKeep, "wrap lines, cursor kept..."),
+    (Operator::Indent, "indent..."),
+    (Operator::Dedent, "dedent..."),
+    (Operator::Filter, "filter through a command..."),
+];
+
+fn op_keys(op: Operator) -> Vec<KeyPress> {
+    op.keys().iter().map(|&c| KeyPress::char(c)).collect()
+}
+
 fn build_visual_trie() -> KeyTrie<VisualAction> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, VisualAction::Motion);
@@ -364,7 +414,19 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('I')], "insert at block left", VisualAction::BlockInsertLeft);
     t.insert(&[KeyPress::char('A')], "append at block right", VisualAction::BlockAppend);
     t.insert(&[KeyPress::char('o')], "other end", VisualAction::OtherEnd);
-    t.insert(&[KeyPress::char('J')], "join lines", VisualAction::Join);
+    t.insert(&[KeyPress::char('J')], "join lines", VisualAction::Join { spaces: true });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('J')], "join lines, no spaces", VisualAction::Join { spaces: false });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('U')], "uppercase", VisualAction::ChangeCase(CaseChange::Upper));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('u')], "lowercase", VisualAction::ChangeCase(CaseChange::Lower));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('~')], "toggle case", VisualAction::ChangeCase(CaseChange::Toggle));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('?')], "rot13", VisualAction::ChangeCase(CaseChange::Rot13));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('q')], "wrap lines", VisualAction::Apply(Operator::Format));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('w')], "wrap lines, cursor kept", VisualAction::Apply(Operator::FormatKeep));
+    t.insert(&[KeyPress::char('!')], "filter through a command", VisualAction::Apply(Operator::Filter));
+    t.insert(&[KeyPress::char('a').with_ctrl()], "increment numbers", VisualAction::Increment { delta: 1, progressive: false });
+    t.insert(&[KeyPress::char('x').with_ctrl()], "decrement numbers", VisualAction::Increment { delta: -1, progressive: false });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('a').with_ctrl()], "increment numbers, a sequence", VisualAction::Increment { delta: 1, progressive: true });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('x').with_ctrl()], "decrement numbers, a sequence", VisualAction::Increment { delta: -1, progressive: true });
     add_text_objects(&mut t, VisualAction::TextObject);
     t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
     t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);

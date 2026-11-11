@@ -7,7 +7,9 @@
 // trade that directness for a type alias or a struct used once.
 #![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::large_enum_variant)]
 
+mod a11y;
 mod agent_page;
+mod bidi;
 mod agent_review;
 mod agent_usage_page;
 mod agent_tools;
@@ -64,6 +66,7 @@ mod folds;
 mod notify;
 mod notifications_page;
 mod welcome_page;
+mod import_page;
 mod merge_view;
 mod popup;
 mod profile;

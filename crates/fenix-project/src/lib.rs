@@ -1,6 +1,7 @@
 mod files;
 mod grep;
 pub mod search;
+pub mod server_install;
 mod process;
 mod root;
 

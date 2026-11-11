@@ -46,6 +46,9 @@ pub(crate) struct Goals {
 pub(crate) struct Screen<'a> {
     pub rows: &'a dyn ScreenRows,
     pub goals: &'a Goals,
+    /// The window's first and last line, for `H`/`M`/`L`: `None` for the
+    /// whole buffer.
+    pub viewport: Option<(usize, usize)>,
 }
 
 impl Screen<'_> {
