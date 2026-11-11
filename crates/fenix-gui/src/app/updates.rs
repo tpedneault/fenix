@@ -3,12 +3,13 @@
 //! (it's off unless you turn it on), or when asked
 //! (`app.check_for_updates`). A machine's `policy.toml` can say no for
 //! everyone (`update_check = false`). Nothing is downloaded or installed.
-//! Pre-releases are told about only with `updates.prereleases` on.
+//! Nightlies are told about only with `updates.channel = "nightly"`; a
+//! nightly build says what it is on Home whatever the channel.
 
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
-use fenix_extensions::update::{self, Seen};
+use fenix_extensions::update::{self, Channel, Newer, Seen};
 
 use super::{App, FenixUserEvent};
 
@@ -47,9 +48,9 @@ impl App {
         Ok(())
     }
 
-    /// Whether pre-releases are told about (`updates.prereleases`).
-    fn update_prereleases(&self) -> bool {
-        self.config.bool_value("updates.prereleases") == Some(true)
+    /// Which builds are told about (`updates.channel`).
+    fn update_channel(&self) -> Channel {
+        Channel::from_setting(self.config.text_value("updates.channel"))
     }
 
     /// What was found, read from its file the first time.
@@ -66,10 +67,20 @@ impl App {
         if self.updates_allowed().is_err() {
             return None;
         }
-        let prereleases = self.update_prereleases();
-        let newer = self.update_seen().newer_than(&crate::installed::release(), prereleases)?;
-        let what = if newer.pre.is_empty() { "" } else { " (a pre-release)" };
-        Some(format!("Fenix {newer}{what} is out -- {}", update::RELEASES_PAGE.trim_start_matches("https://")))
+        let channel = self.update_channel();
+        match self.update_seen().newer_than(&crate::installed::release(), crate::installed::COMMIT, channel)? {
+            Newer::Release(v) => Some(format!("Fenix {v} is out -- {}", update::RELEASES_PAGE.trim_start_matches("https://"))),
+            Newer::Nightly { version, commit } => {
+                let what = crate::installed::describe_with(&version.to_string(), commit.as_deref());
+                Some(format!("Fenix {what} (nightly) is out -- {}", update::NIGHTLY_PAGE.trim_start_matches("https://")))
+            }
+        }
+    }
+
+    /// Home's line under the date: a newer Fenix, or, on a nightly build
+    /// with nothing newer, which nightly this is.
+    pub(crate) fn home_update_line(&mut self) -> Option<String> {
+        self.update_notice().or_else(|| crate::installed::is_nightly().then(|| format!("Nightly {}", crate::installed::describe())))
     }
 
     /// `app.check_for_updates`: looks now, and says what it finds.
@@ -98,9 +109,9 @@ impl App {
         }
         let Some(proxy) = self.event_proxy.clone() else { return false };
         self.updates.looking = Some(asked);
-        let prereleases = self.update_prereleases();
+        let channel = self.update_channel();
         let spawned = std::thread::Builder::new().name("fenix-updates".into()).spawn(move || {
-            let result = update::check(&fenix_extensions::registry::Http, SystemTime::now(), prereleases);
+            let result = update::check(&fenix_extensions::registry::Http, SystemTime::now(), channel);
             let _ = proxy.send_event(FenixUserEvent::Updates(UpdateAnswer { asked, result }));
         });
         if spawned.is_err() {
@@ -127,7 +138,7 @@ impl App {
                 if answer.asked {
                     match self.update_notice() {
                         Some(notice) => self.set_message(notice),
-                        None => self.set_message(format!("Fenix {} is the newest", crate::installed::release())),
+                        None => self.set_message(format!("Fenix {} is the newest", crate::installed::describe())),
                     }
                 }
                 self.refresh_home_data(true);
@@ -184,24 +195,40 @@ mod tests {
 
     #[test]
     fn home_says_so_only_when_there_s_a_newer_release() {
-        let mut app = app_with(Seen { checked: 1, latest: Some("v99.0.0".into()), prerelease: None });
+        let mut app = app_with(Seen { checked: 1, latest: Some("v99.0.0".into()), nightly: None });
         let notice = app.update_notice().expect("a newer one");
         assert!(notice.starts_with("Fenix 99.0.0 is out"), "{notice}");
-        let mut app = app_with(Seen { checked: 1, latest: Some(format!("v{}", crate::installed::release())), prerelease: None });
+        let mut app = app_with(Seen { checked: 1, latest: Some(format!("v{}", crate::installed::release())), nightly: None });
         assert_eq!(app.update_notice(), None, "the one running");
         let mut app = app_with(Seen::default());
         assert_eq!(app.update_notice(), None, "never looked");
     }
 
     #[test]
-    fn a_pre_release_is_on_home_only_when_asked_for() {
-        let seen = Seen { checked: 1, latest: Some(format!("v{}", crate::installed::release())), prerelease: Some("v99.0.0-rc.1".into()) };
+    fn a_nightly_is_on_home_only_on_the_nightly_channel() {
+        let nightly = update::Nightly { version: "99.0.0-nightly.20991231".into(), commit: Some("0123456789abcdef0123456789abcdef01234567".into()) };
+        let seen = Seen { checked: 1, latest: Some(format!("v{}", crate::installed::release())), nightly: Some(nightly) };
         let mut app = app_with(seen);
-        assert_eq!(app.config.bool_value("updates.prereleases"), None, "off by default");
+        assert_eq!(app.config.text_value("updates.channel"), None, "stable by default");
         assert_eq!(app.update_notice(), None, "releases alone");
-        app.config.set_value("updates.prereleases", Some(fenix_config::Value::Bool(true)));
-        let notice = app.update_notice().expect("the pre-release");
-        assert!(notice.starts_with("Fenix 99.0.0-rc.1 (a pre-release) is out"), "{notice}");
+        app.config.set_value("updates.channel", Some(fenix_config::Value::Text("nightly".into())));
+        let notice = app.update_notice().expect("the nightly");
+        assert!(notice.starts_with("Fenix 99.0.0-nightly.20991231 (0123456789ab) (nightly) is out -- github.com/tpedneault/fenix/releases/tag/nightly"), "{notice}");
+        app.config.set_value("updates.channel", Some(fenix_config::Value::Text("stable".into())));
+        assert_eq!(app.update_notice(), None, "back to releases alone at once");
+    }
+
+    #[test]
+    fn home_s_line_is_the_notice_or_which_nightly_this_is() {
+        let mut app = app_with(Seen { checked: 1, latest: Some("v99.0.0".into()), nightly: None });
+        assert_eq!(app.home_update_line(), app.update_notice());
+        let mut app = app_with(Seen::default());
+        let line = app.home_update_line();
+        if crate::installed::is_nightly() {
+            assert_eq!(line, Some(format!("Nightly {}", crate::installed::describe())));
+        } else {
+            assert_eq!(line, None, "a release says nothing when nothing's newer");
+        }
     }
 
     #[test]
@@ -216,14 +243,14 @@ mod tests {
         assert!(next.is_some_and(|n| n > Instant::now() + std::time::Duration::from_secs(23 * 60 * 60)), "and not tried again at once");
         // Looked a moment ago: the next look is a day away.
         let checked = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
-        app.updates.seen = Some(Seen { checked, latest: None, prerelease: None });
+        app.updates.seen = Some(Seen { checked, latest: None, nightly: None });
         let next = app.update_tick(Instant::now()).expect("a day away");
         assert!(next > Instant::now() + std::time::Duration::from_secs(23 * 60 * 60));
     }
 
     #[test]
     fn a_machine_s_policy_switches_it_off_for_everyone() {
-        let mut app = app_with(Seen { checked: 1, latest: Some("v99.0.0".into()), prerelease: None });
+        let mut app = app_with(Seen { checked: 1, latest: Some("v99.0.0".into()), nightly: None });
         app.config.set_value("updates.check", Some(fenix_config::Value::Bool(true)));
         app.updates.policy = Some(fenix_extensions::Policy { update_check: Some(false), ..Default::default() });
         assert_eq!(app.update_notice(), None, "nothing on Home");
@@ -240,7 +267,7 @@ mod tests {
         app.updates.looking = Some(false);
         app.cmd_check_for_updates();
         assert_eq!(app.updates.looking, Some(true));
-        app.apply_update_answer(UpdateAnswer { asked: false, result: Ok(Seen { checked: 5, latest: Some(format!("v{}", crate::installed::release())), prerelease: None }) });
+        app.apply_update_answer(UpdateAnswer { asked: false, result: Ok(Seen { checked: 5, latest: Some(format!("v{}", crate::installed::release())), nightly: None }) });
         assert!(app.modeline_text().contains("is the newest"), "{}", app.modeline_text());
     }
 
@@ -255,7 +282,7 @@ mod tests {
     #[test]
     fn an_answer_is_kept_said_when_asked_and_a_failure_waits_a_day() {
         let mut app = app_with(Seen::default());
-        app.apply_update_answer(UpdateAnswer { asked: true, result: Ok(Seen { checked: 5, latest: Some("v99.0.0".into()), prerelease: None }) });
+        app.apply_update_answer(UpdateAnswer { asked: true, result: Ok(Seen { checked: 5, latest: Some("v99.0.0".into()), nightly: None }) });
         assert!(app.modeline_text().contains("Fenix 99.0.0 is out"), "{}", app.modeline_text());
         assert!(app.home_data.update.as_deref().is_some_and(|u| u.contains("99.0.0")), "on Home");
         app.apply_update_answer(UpdateAnswer { asked: false, result: Err("offline".into()) });
