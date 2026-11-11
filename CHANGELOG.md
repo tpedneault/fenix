@@ -22,6 +22,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `lsp.semantic_highlighting` (on) and `lsp.semantic_highlighting_off`
   turn it off globally and per language. Themes gain optional
   `syntax.interface`, `syntax.parameter` and `syntax.macro` keys (#105).
+- Code lens, off by default for now (`lsp.code_lens`): what a language
+  server offers for a function or test ("▶ Run", "3 references") on a
+  dimmed row of its own above it, run with a click or `SPC c l`. Fenix
+  adds its own "▶ Run test" over tests the server offers no run for
+  (`lsp.code_lens_tests`). While a file has lenses, its pane goes by
+  rows: it snaps rather than eases, and sticky scroll is off, which is
+  why it starts off (#106).
 
 ## [1.5.0] - 2026-11-10
 

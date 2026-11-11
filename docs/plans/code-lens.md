@@ -359,3 +359,22 @@ lenses are off by default until stage 6.
 - **`SPC c l`** (`code.lens`). One lens on the cursor's line runs.
   Several open a picker (`ActivePicker::Lenses`, "Code lenses") whose
   Enter runs the one chosen. With none, or lenses off, it says so.
+
+### Stage 5
+
+- **Fenix's own lenses** (`find_own_lenses`): "▶ Run test" over each
+  line `fenix_tasks::test_lines` finds (Rust `#[test]`, pytest, Go
+  `TestXxx`; the same finder as `SPC p r`), worked out again only after
+  an edit. Its command is `fenix.runTest`, run as `SPC p r` on that line.
+- **Changed from the plan:** they're shown for a file that has at least
+  one server offering lenses, not for every file. A file with no lens
+  server keeps its pane on the line path as in 1.5 (a file of tests
+  under a server without lenses would otherwise lose easing and sticky
+  headers until stage 6). On a line where a server's lens already runs
+  something (its command names "run", or its title has "▶"), Fenix's
+  own isn't added.
+- **Measured** (release, `measure_lenses_on_a_large_file`, ignored by
+  default): a 20 000-line Rust file of 5 000 tests, answered with 5 000
+  server lenses, 9 000 lens rows in all. The first sync with Fenix's own
+  lenses found 6.1 ms; laying out the answer 11.3 ms; an edit's sync
+  (lenses moved and laid out again) 10.2 ms; a frame's 60 rows 1.6 ms.
