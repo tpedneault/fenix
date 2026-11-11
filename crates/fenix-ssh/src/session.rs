@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use fenix_remote::{Entry, Exec, Exit, Failure, Frame, Hello, Kind, Request, Version, BANNER, MISSING, PIECE, PROTOCOL};
+use fenix_remote::{Entry, Exec, Exit, Failure, Found, FoundLine, Frame, Hello, Kind, Pty, Request, Search, Searched, Size, Version, BANNER, MISSING, PIECE, PROTOCOL};
 
 /// How long the helper may say nothing to a request before the
 /// connection is taken for dead. Nothing waits on a remote machine
@@ -293,7 +293,125 @@ impl Session {
     pub fn output(&self, exec: Exec) -> Result<Finished, Error> {
         self.exec(exec)?.finish()
     }
+
+    /// Starts a program in a terminal on the remote machine.
+    pub fn terminal(&self, pty: Pty) -> Result<RemoteTerminal, Error> {
+        let (id, frames) = self.shared.open();
+        if let Err(error) = self.shared.send(&[Frame::json(Kind::Request, id, &Request::Pty(pty))]) {
+            self.shared.close(id);
+            return Err(error);
+        }
+        let exit = Arc::new(Mutex::new(None));
+        let input = ProcessInput { id, shared: self.shared.clone() };
+        Ok(RemoteTerminal { output: TerminalOutput { frames, pending: Vec::new(), at: 0, exit: exit.clone() }, input, exit })
+    }
+
+    /// Searches files on the remote machine, handing `found` each file's
+    /// lines as they come (and `None` now and then while there's nothing
+    /// new); `found` answering no stops it, as `Error::Cancelled`.
+    pub fn search(&self, search: Search, found: &mut dyn FnMut(Option<(String, Vec<FoundLine>)>) -> bool) -> Result<Searched, Error> {
+        let (id, answers) = self.shared.open();
+        let result = (|| {
+            self.shared.send(&[Frame::json(Kind::Request, id, &Request::Search(search))])?;
+            loop {
+                // The helper says something at least every second while it
+                // searches: silence for the whole deadline is a machine
+                // that has stopped answering.
+                let frame = match answers.recv_timeout(DEADLINE) {
+                    Ok(frame) => frame,
+                    Err(RecvTimeoutError::Timeout) => {
+                        self.sever();
+                        self.shared.lost.store(true, Ordering::SeqCst);
+                        return Err(Error::TimedOut);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return Err(Error::Lost),
+                };
+                let go_on = match frame.kind {
+                    Kind::Found => match parse_slice::<Found>(&frame.payload)? {
+                        Found::File { path, lines } => found(Some((path, lines))),
+                        Found::Progress { .. } => found(None),
+                    },
+                    Kind::Ok => return parse_slice(&frame.payload),
+                    Kind::Err => return Err(Error::Remote(parse_slice(&frame.payload)?)),
+                    other => return Err(Error::Protocol(format!("{other:?} in answer to a search"))),
+                };
+                if !go_on {
+                    let _ = self.shared.send(&[Frame::new(Kind::Kill, id, [])]);
+                    return Err(Error::Cancelled);
+                }
+            }
+        })();
+        self.shared.close(id);
+        result
+    }
 }
+
+/// A program in a terminal on the remote machine: its output to read,
+/// and the way in, apart, so that a thread can read while another types.
+pub struct RemoteTerminal {
+    pub output: TerminalOutput,
+    pub input: ProcessInput,
+    /// How it ended, once it has: set as its output ends.
+    pub exit: Arc<Mutex<Option<Option<i32>>>>,
+}
+
+/// What a remote terminal prints, as a stream that ends when its program
+/// does.
+pub struct TerminalOutput {
+    frames: Receiver<Frame>,
+    pending: Vec<u8>,
+    at: usize,
+    exit: Arc<Mutex<Option<Option<i32>>>>,
+}
+
+impl TerminalOutput {
+    /// Its end. Why it couldn't start, or why it stopped, is shown where
+    /// its output was going to be.
+    fn end(&mut self, code: Option<i32>, said: Option<String>) {
+        self.exit.lock().unwrap().get_or_insert(code);
+        self.pending = said.map(|said| format!("\r\n[{said}]\r\n").into_bytes()).unwrap_or_default();
+        self.at = 0;
+    }
+}
+
+impl Read for TerminalOutput {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.at < self.pending.len() {
+                let n = buffer.len().min(self.pending.len() - self.at);
+                buffer[..n].copy_from_slice(&self.pending[self.at..self.at + n]);
+                self.at += n;
+                return Ok(n);
+            }
+            if self.exit.lock().unwrap().is_some() {
+                return Ok(0);
+            }
+            match self.frames.recv() {
+                Ok(frame) => match frame.kind {
+                    Kind::Stdout | Kind::Stderr => {
+                        self.pending = frame.payload;
+                        self.at = 0;
+                    }
+                    Kind::Exit => self.end(parse_slice::<Exit>(&frame.payload).ok().and_then(|exit| exit.code), None),
+                    Kind::Err => {
+                        let failure: Option<Failure> = parse_slice(&frame.payload).ok();
+                        self.end(None, Some(failure.map_or_else(|| "the terminal failed".into(), |failure| failure.message)));
+                    }
+                    _ => {}
+                },
+                Err(_) => self.end(None, Some("the connection to the remote machine was lost".into())),
+            }
+        }
+    }
+}
+
+impl ProcessInput {
+    /// Gives a terminal a new size.
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), Error> {
+        self.shared.send(&[Frame::json(Kind::Resize, self.id, &Size { rows, cols })])
+    }
+}
+
 
 impl Drop for Session {
     fn drop(&mut self) {
@@ -635,6 +753,100 @@ mod tests {
         for reader in readers {
             assert_eq!(reader.join().unwrap(), 200_000);
         }
+    }
+
+    /// Reads a terminal's output until `want` is in it, or it ends.
+    #[cfg(unix)]
+    fn read_until(output: &mut TerminalOutput, want: &str) -> String {
+        let mut seen = Vec::new();
+        let mut buffer = [0u8; 4096];
+        while !String::from_utf8_lossy(&seen).contains(want) {
+            match output.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => seen.extend_from_slice(&buffer[..n]),
+            }
+        }
+        String::from_utf8_lossy(&seen).into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_runs_a_shell_that_is_typed_into_resized_and_ended() {
+        let session = local();
+        let dir = tempfile::tempdir().unwrap();
+        let pty = Pty { program: Some("sh".into()), cwd: Some(remote(dir.path())), size: Size { rows: 24, cols: 80 }, ..Pty::default() };
+        let mut terminal = session.terminal(pty).unwrap();
+        // A terminal of its own: the shell sees a tty, of the size asked.
+        // (What's typed is echoed: the marks looked for are worked out.)
+        terminal.input.write(b"stty size; tty -s && echo TTY$((1+1)); pwd; echo END$((2+2))\n").unwrap();
+        let said = read_until(&mut terminal.output, "END4");
+        assert!(said.contains("24 80") && said.contains("TTY2"), "{said:?}");
+        assert!(said.contains(&*dir.path().file_name().unwrap().to_string_lossy()), "{said:?}");
+        terminal.input.resize(30, 100).unwrap();
+        terminal.input.write(b"stty size; echo END$((3+3))\n").unwrap();
+        assert!(read_until(&mut terminal.output, "END6").contains("30 100"));
+        terminal.input.write(b"exit 7\n").unwrap();
+        read_until(&mut terminal.output, "never said");
+        assert_eq!(*terminal.exit.lock().unwrap(), Some(Some(7)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_terminal_that_is_killed_ends_and_one_that_cannot_start_says_why() {
+        let session = local();
+        let pty = Pty { program: Some("sh".into()), size: Size { rows: 24, cols: 80 }, ..Pty::default() };
+        let mut terminal = session.terminal(pty).unwrap();
+        let marker = format!("{}", std::process::id() % 1000 + 9000);
+        terminal.input.write(format!("sleep {marker} & echo READY$((1+1))\n").as_bytes()).unwrap();
+        read_until(&mut terminal.output, "READY2");
+        terminal.input.kill().unwrap();
+        read_until(&mut terminal.output, "never said");
+        assert!(terminal.exit.lock().unwrap().is_some());
+        // A job started in it ends with it, in a group of its own or not.
+        #[cfg(target_os = "linux")]
+        {
+            let running = || std::process::Command::new("ps").args(["-eo", "args"]).output().map(|out| String::from_utf8_lossy(&out.stdout).lines().any(|line| line.trim() == format!("sleep {marker}"))).unwrap_or(false);
+            for _ in 0..100 {
+                if !running() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(!running(), "the job outlived its terminal");
+        }
+
+        let missing = Pty { program: Some("fenix-no-such-shell-0123".into()), size: Size { rows: 24, cols: 80 }, ..Pty::default() };
+        let mut terminal = session.terminal(missing).unwrap();
+        let said = read_until(&mut terminal.output, "never said");
+        assert!(said.contains("couldn't start fenix-no-such-shell-0123"), "{said:?}");
+    }
+
+    #[test]
+    fn a_search_streams_what_it_finds_and_can_be_stopped() {
+        let session = local();
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("{i}.txt")), format!("nothing\nneedle {i}\n")).unwrap();
+        }
+        let search = Search { folders: vec![remote(dir.path())], pattern: "needle".into(), ..Search::default() };
+        let mut files = Vec::new();
+        let searched = session
+            .search(search.clone(), &mut |found| {
+                if let Some((path, lines)) = found {
+                    files.push((path, lines));
+                }
+                true
+            })
+            .unwrap();
+        assert_eq!((files.len(), searched.files_searched), (5, 5));
+        assert!(files[0].0.ends_with("0.txt") && files[0].1[0].number == 2 && files[0].1[0].text == "needle 0", "{files:?}");
+
+        // Stopped after the first: the session goes on as before.
+        let stopped = session.search(search, &mut |found| found.is_none());
+        assert!(matches!(stopped, Err(Error::Cancelled)), "{stopped:?}");
+        let bad = session.search(Search { pattern: "(".into(), ..Search::default() }, &mut |_| true);
+        assert!(matches!(bad, Err(Error::Remote(_))), "{bad:?}");
+        assert!(session.stat(&remote(dir.path())).is_ok());
     }
 
     #[test]

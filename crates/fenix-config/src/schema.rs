@@ -413,7 +413,7 @@ Setting::stored("editor.wrap", Editor, "Wrap long lines", Kind::Bool, "A line wi
         Setting::stored("screenshot.long_lines", Appearance, "Screenshot long lines", Kind::Choice(&["wrap", "cut"]), "A line wider than the screenshot's width goes on under itself, or stops with an ellipsis.").with_default("wrap"),
         Setting::stored("screenshot.context", Appearance, "Screenshot context", Kind::Int { min: 0, max: 50 }, "Lines either side of the highlighted ones that SPC c S takes too.").with_default("3"),
         // Terminals (`SPC o t`, `SPC o T`)
-        Setting::stored("terminal.shell", Editor, "Terminal shell", Kind::Text, "The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere.").with_default("PowerShell 7, else Windows PowerShell; $SHELL"),
+        Setting::stored("terminal.shell", Editor, "Terminal shell", Kind::Text, "The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. A remote project's terminal is your own shell on its machine.").with_default("PowerShell 7, else Windows PowerShell; $SHELL"),
         Setting::stored("screenshot.folder", Appearance, "Screenshot folder", Kind::Path, "Where code screenshots are saved, besides the clipboard.").with_default("the Pictures folder"),
         // Files
         s("editor.watch_files", Files, "Watch files on disk", Kind::Bool, "Notice when an open file changes on disk, and reload it when you haven't edited it.", field!(watch_files, bool_get, bool_set)).default("on"),

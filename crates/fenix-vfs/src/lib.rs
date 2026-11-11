@@ -130,6 +130,81 @@ pub struct Run<'a> {
     pub stdin: Option<&'a [u8]>,
 }
 
+/// A program to run in a terminal on a machine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shell<'a> {
+    /// What to run; none for the user's own shell there, as a login
+    /// shell.
+    pub program: Option<&'a str>,
+    pub args: &'a [String],
+    /// Variables set over the machine's own.
+    pub env: &'a [(&'a str, &'a str)],
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// A terminal on a machine: what it prints, what's typed into it, and
+/// the rest.
+pub struct Terminal {
+    /// What the program prints, to its end.
+    pub reader: Box<dyn io::Read + Send>,
+    /// What's typed. A write may wait on the network: whoever types
+    /// from a thread that draws queues them.
+    pub writer: Box<dyn io::Write + Send>,
+    pub control: Box<dyn TerminalControl>,
+}
+
+/// A terminal's program: its size, its end.
+pub trait TerminalControl: Send + Sync {
+    fn resize(&self, rows: u16, cols: u16) -> io::Result<()>;
+    /// `None` while it runs; how it ended once it has (`Some(None)`
+    /// when a signal ended it, or the connection went).
+    fn exited(&self) -> Option<Option<i32>>;
+    /// Ends it, and all it started.
+    fn kill(&self);
+}
+
+/// A search through a machine's files, as ripgrep does one. Paths are
+/// the machine's own.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Search<'a> {
+    /// Folders walked, leaving out what `.gitignore` and the like do.
+    pub folders: &'a [String],
+    /// Files searched whatever the ignore files say; a folder among them
+    /// is walked.
+    pub files: &'a [String],
+    /// A regex, as the `regex` crate reads it.
+    pub pattern: &'a str,
+    /// Hidden files, and the ones the ignore files leave out, too.
+    pub hidden: bool,
+    pub globs: &'a [String],
+    /// Lines given around each match.
+    pub context: usize,
+    /// Files not to search.
+    pub skip: &'a [String],
+}
+
+/// A line a search found: a match, or context around one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundLine {
+    /// 1-based.
+    pub number: u64,
+    pub text: String,
+    pub matched: bool,
+}
+
+/// How a search through a machine's files ended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Searched {
+    pub files_searched: usize,
+    pub binary_skipped: usize,
+}
+
+/// What a search's caller is handed as it goes: a file's lines, or
+/// `None` now and then while there's nothing yet. It answers whether to
+/// go on.
+pub type Finding<'a> = dyn FnMut(Option<(String, Vec<FoundLine>)>) -> bool + 'a;
+
 /// A machine's files and programs. Paths are the machine's own:
 /// absolute, with `/`.
 ///
@@ -154,6 +229,17 @@ pub trait Remote: Send + Sync {
     fn create_dir(&self, path: &str, parents: bool) -> io::Result<()>;
     /// Copies within the machine.
     fn copy(&self, from: &str, to: &str) -> io::Result<()>;
+    /// Starts a program in a terminal there, in `cwd`.
+    fn terminal(&self, cwd: &str, shell: Shell<'_>) -> io::Result<Terminal> {
+        let _ = (cwd, shell);
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this machine has no terminals"))
+    }
+    /// Searches files there, handing each file's lines to `found` as
+    /// they come; `found` answering no stops it.
+    fn search(&self, search: Search<'_>, found: &mut Finding<'_>) -> io::Result<Searched> {
+        let _ = (search, found);
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this machine can't search its files"))
+    }
 }
 
 fn mounts() -> &'static RwLock<HashMap<String, Arc<dyn Remote>>> {
@@ -193,6 +279,51 @@ pub fn run_there(dir: &Path, run: Run<'_>) -> Option<io::Result<Ran>> {
         Ok(None) => None,
         Err(error) => Some(Err(error)),
     }
+}
+
+/// Starts a program in a terminal in `dir`, when `dir` is on a remote
+/// machine: `None` for a local folder, whose terminal is the caller's.
+pub fn terminal(dir: &Path, shell: Shell<'_>) -> Option<io::Result<Terminal>> {
+    match resolve(dir) {
+        Ok(Some((remote, there))) => Some(remote.terminal(&there, shell)),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
+    }
+}
+
+/// What to search on a remote machine: [`Search`], with this side's
+/// paths.
+#[derive(Debug, Clone, Default)]
+pub struct SearchPaths {
+    pub folders: Vec<std::path::PathBuf>,
+    pub files: Vec<std::path::PathBuf>,
+    pub skip: Vec<std::path::PathBuf>,
+}
+
+/// Searches on the remote machine `paths` are on, handing each file
+/// found (as a remote path) to `found`: `None` when they're local, for
+/// the caller to search its own way. Every path must be on the one
+/// machine.
+pub fn search(paths: &SearchPaths, search: Search<'_>, found: &mut dyn FnMut(Option<(std::path::PathBuf, Vec<FoundLine>)>) -> bool) -> Option<io::Result<Searched>> {
+    let first = paths.folders.iter().chain(&paths.files).next()?;
+    let host = host_of(first)?;
+    let there = |list: &[std::path::PathBuf]| -> io::Result<Vec<String>> {
+        list.iter()
+            .map(|path| match split(path) {
+                Some((on, there)) if on == host => Ok(there),
+                _ => Err(io::Error::new(io::ErrorKind::Unsupported, format!("{} isn't on {host}: a search stays on one machine", display(path)))),
+            })
+            .collect()
+    };
+    let mut run = || -> io::Result<Searched> {
+        let Some((machine, _)) = resolve(first)? else { unreachable!("a remote path resolves to its machine") };
+        let (folders, files) = (there(&paths.folders)?, there(&paths.files)?);
+        // What isn't on this machine can't be found on it: no need to say.
+        let skip: Vec<String> = paths.skip.iter().filter_map(|path| split(path).filter(|(on, _)| *on == host).map(|(_, there)| there)).collect();
+        let search = Search { folders: &folders, files: &files, skip: &skip, ..search };
+        machine.search(search, &mut |file| found(file.map(|(path, lines)| (remote(&host, &path), lines))))
+    };
+    Some(run())
 }
 
 /// The home folder of the machine `host` is mounted for, as a remote

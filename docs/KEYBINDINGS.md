@@ -272,7 +272,7 @@ keys'; the palette has the commands).
 | `SPC p ,` | Project settings |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
 | `SPC p y` | Look at the programs this project names (`.fenix/tools.json`) and allow or refuse them |
-| `SPC p R` | A project on another machine, over SSH: pick a host of `~/.ssh/config` or type `user@host`, then `S` on its folder |
+| `SPC p R` | A project on another machine, over SSH: pick a host of `~/.ssh/config` or type `user@host`, then `S` on its folder. Its terminals, Git and search are that machine's, by the same keys |
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |

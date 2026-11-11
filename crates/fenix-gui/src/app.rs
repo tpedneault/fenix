@@ -2418,6 +2418,22 @@ impl FenixUserEvent {
     }
 }
 
+/// Starts a terminal's program in `cwd`. In a folder on a remote
+/// project's machine, the terminal is there, and its shell the user's own
+/// there (`terminal.shell` names one on this machine). `one_tool`: the
+/// program is a tool of this machine's, which runs here as before.
+fn spawn_shell(rows: u16, cols: u16, cwd: Option<&Path>, program: Option<&(String, Vec<String>)>, one_tool: bool) -> std::io::Result<(fenix_terminal::Terminal, Box<dyn std::io::Read + Send>)> {
+    if let Some(cwd) = cwd.filter(|cwd| !one_tool && fenix_vfs::is_remote(cwd)) {
+        if let Some(remote) = fenix_terminal::Terminal::spawn_remote(rows, cols, cwd, None) {
+            return remote;
+        }
+    }
+    match program {
+        Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd, program, args),
+        None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd),
+    }
+}
+
 /// See `FenixUserEvent::TerminalSpawned`'s own doc comment for why this
 /// wrapper exists.
 pub struct TerminalSpawnResult(std::io::Result<(fenix_terminal::Terminal, Box<dyn std::io::Read + Send>)>);
@@ -7121,8 +7137,10 @@ impl App {
         // from this diff names paths from the top of the repository,
         // which is where `git apply` has to run.
         let repo_root = git_editor::repository_of(&path)?;
-        let absolute = std::fs::canonicalize(&path).unwrap_or(path);
-        let diff_text = fenix_git::file_diff(&repo_root, &absolute.to_string_lossy(), false).ok()?;
+        // A remote file is named to its machine's git from the top of its
+        // repository: this side's path for it means nothing there.
+        let named = if fenix_vfs::is_remote(&path) { git_editor::relative_to(&path, &repo_root) } else { std::fs::canonicalize(&path).unwrap_or(path).to_string_lossy().into_owned() };
+        let diff_text = fenix_git::file_diff(&repo_root, &named, false).ok()?;
         let file = fenix_diff::parse(&diff_text).into_iter().next()?;
         Some((repo_root, file))
     }
@@ -9708,10 +9726,7 @@ impl App {
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
             let shell = self.terminal_shell_to_spawn();
-            let spawn = move || match &shell {
-                Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
-                None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
-            };
+            let spawn = move || spawn_shell(rows, cols, cwd.as_deref(), shell.as_ref(), false);
             match self.event_proxy.clone() {
                 Some(proxy) => {
                     std::thread::spawn(move || {
@@ -9844,10 +9859,6 @@ impl App {
     pub(crate) fn open_terminal_buffer(&mut self) {
         let cwd = self.terminal_start_dir();
         self.open_terminal_buffer_in(cwd);
-        // Said, because the shell that just opened looks like any other.
-        if self.project_root.as_deref().is_some_and(fenix_vfs::is_remote) {
-            self.set_message("this shell is on this machine: terminals on a remote project's machine aren't there yet");
-        }
     }
 
     /// Where a shell starts unless asked to start somewhere: the project
@@ -9855,13 +9866,16 @@ impl App {
     /// working folder (your home, started from the Start menu).
     fn terminal_start_dir(&self) -> Option<PathBuf> {
         let folder_of = |id: BufferId| self.buffers.get(id).and_then(|ob| ob.buffer.path()).and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
+        // A remote project's folder is one on its machine, where its
+        // terminal then is.
+        let is_dir = |p: &PathBuf| if fenix_vfs::is_remote(p) { fenix_vfs::metadata(p).is_ok_and(|meta| meta.is_dir()) } else { p.is_dir() };
         self.project_root
             .clone()
-            .filter(|p| p.is_dir())
-            .or_else(|| folder_of(self.focused_buffer_id()).filter(|p| p.is_dir()))
+            .filter(is_dir)
+            .or_else(|| folder_of(self.focused_buffer_id()).filter(is_dir))
             // From Home or a page, with no project: where the file used
             // last is, rather than wherever Fenix itself was started.
-            .or_else(|| self.buffers.mru().iter().filter_map(|&id| folder_of(id)).find(|p| p.is_dir()))
+            .or_else(|| self.buffers.mru().iter().filter_map(|&id| folder_of(id)).find(is_dir))
     }
 
     /// `open_terminal_buffer`, starting the shell somewhere in
@@ -9930,11 +9944,10 @@ impl App {
         // Remembered rather than passed once, so a shell respawned after
         // `exit` comes back where it was rather than somewhere else.
         let cwd = self.terminal_buffer_cwds.get(&id).cloned();
-        let program = self.terminal_buffer_programs.get(&id).cloned().or_else(|| self.terminal_shell_to_spawn());
-        let spawn = move || match &program {
-            Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
-            None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
-        };
+        let named = self.terminal_buffer_programs.get(&id).cloned();
+        let one_tool = named.is_some();
+        let program = named.or_else(|| self.terminal_shell_to_spawn());
+        let spawn = move || spawn_shell(rows, cols, cwd.as_deref(), program.as_ref(), one_tool);
         self.terminal_buffers_spawning.insert(id);
         match self.event_proxy.clone() {
             Some(proxy) => {

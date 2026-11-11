@@ -171,7 +171,7 @@ pub fn fetch(repo: &Path) -> Result<String, String> {
 /// future. Purely informational: it answers "is what I'm looking at
 /// current?", and answering "unknown" is fine.
 pub fn seconds_since_fetch(repo: &Path) -> Option<u64> {
-    let modified = std::fs::metadata(repo.join(".git").join("FETCH_HEAD")).ok()?.modified().ok()?;
+    let (modified, _) = crate::disk::modified_and_len(&repo.join(".git").join("FETCH_HEAD")).ok()?;
     std::time::SystemTime::now().duration_since(modified).ok().map(|d| d.as_secs())
 }
 

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use crate::{Entry, Exec, Exit, Failure, FailureCode, FileKind, Frame, Hello, Kind, Request, Version, ENVIRONMENT, PIECE, PROTOCOL};
+use crate::{Entry, Exec, Exit, Failure, FailureCode, FileKind, Frame, Hello, Kind, Pty, Request, Size, Version, ENVIRONMENT, PIECE, PROTOCOL};
 
 /// How long the user's login shell gets to say what its environment is
 /// before programs are started with the helper's own.
@@ -79,9 +79,13 @@ fn failed(code: FailureCode, message: impl Into<String>) -> Failure {
 /// Something that goes on past its request, and can be fed or stopped.
 enum Ongoing {
     Program { stdin: Option<Sender<Vec<u8>>>, pid: u32 },
+    /// A program in a terminal: what's typed, and the terminal's end to
+    /// give a new size to.
+    Terminal { input: Sender<Vec<u8>>, pid: u32, master: Arc<crate::pty::Master> },
     /// A file being written: its pieces, then `None` for the end.
     Upload(Sender<Option<Vec<u8>>>),
-    Download(Arc<AtomicBool>),
+    /// A file being read, or a search: set to stop it.
+    Stoppable(Arc<AtomicBool>),
 }
 
 type Ongoings = Arc<Mutex<HashMap<u32, Ongoing>>>;
@@ -186,7 +190,7 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
                 }
                 Ok(Request::Read { path }) => {
                     let stop = Arc::new(AtomicBool::new(false));
-                    ongoing.lock().unwrap().insert(id, Ongoing::Download(stop.clone()));
+                    ongoing.lock().unwrap().insert(id, Ongoing::Stoppable(stop.clone()));
                     let (out, ongoing) = (out.clone(), ongoing.clone());
                     thread::spawn(move || {
                         let read = read(Path::new(&path), path.clone(), id, &out, &stop);
@@ -198,6 +202,20 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
                     });
                 }
                 Ok(Request::Exec(exec)) => start(id, exec, &out, &ongoing, environment.get()),
+                Ok(Request::Pty(pty)) => start_terminal(id, pty, &out, &ongoing, environment.get()),
+                Ok(Request::Search(search)) => {
+                    let stop = Arc::new(AtomicBool::new(false));
+                    ongoing.lock().unwrap().insert(id, Ongoing::Stoppable(stop.clone()));
+                    let (out, ongoing) = (out.clone(), ongoing.clone());
+                    thread::spawn(move || {
+                        let searched = crate::search::run(&search, &stop, &mut |found| out.send(Frame::json(Kind::Found, id, &found)));
+                        ongoing.lock().unwrap().remove(&id);
+                        match searched {
+                            Ok(searched) => out.ok(id, &searched),
+                            Err(failure) => out.fail(id, &failure),
+                        }
+                    });
+                }
                 Ok(request) => {
                     let out = out.clone();
                     thread::spawn(move || match answer(request) {
@@ -209,6 +227,7 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
             },
             Kind::Body => match ongoing.lock().unwrap().get(&id) {
                 Some(Ongoing::Program { stdin: Some(stdin), .. }) => drop(stdin.send(frame.payload)),
+                Some(Ongoing::Terminal { input, .. }) => drop(input.send(frame.payload)),
                 Some(Ongoing::Upload(pieces)) => drop(pieces.send(Some(frame.payload))),
                 _ => {}
             },
@@ -217,11 +236,20 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
                 Some(Ongoing::Upload(pieces)) => drop(pieces.send(None)),
                 _ => {}
             },
+            Kind::Resize => {
+                if let (Some(Ongoing::Terminal { master, .. }), Ok(size)) = (ongoing.lock().unwrap().get(&id), serde_json::from_slice::<Size>(&frame.payload)) {
+                    let _ = crate::pty::resize(master, size);
+                }
+            }
             Kind::Kill => {
                 let mut ongoing = ongoing.lock().unwrap();
                 match ongoing.get(&id) {
                     Some(Ongoing::Program { pid, .. }) => kill_tree(*pid),
-                    Some(Ongoing::Download(stop)) => stop.store(true, Ordering::SeqCst),
+                    Some(Ongoing::Terminal { pid, .. }) => {
+                        let pid = *pid;
+                        thread::spawn(move || hang_up(pid));
+                    }
+                    Some(Ongoing::Stoppable(stop)) => stop.store(true, Ordering::SeqCst),
                     Some(Ongoing::Upload(_)) | None => {}
                 }
                 // An upload's pieces end without the word that they're
@@ -236,12 +264,19 @@ pub fn serve(mut input: impl Read, output: impl Write + Send + 'static) -> io::R
     };
 
     // Dropping the uploads' senders ends each write without its file.
-    for (_, left) in ongoing.lock().unwrap().drain() {
+    let left: Vec<Ongoing> = ongoing.lock().unwrap().drain().map(|(_, left)| left).collect();
+    let terminals: Vec<u32> = left.iter().filter_map(|left| if let Ongoing::Terminal { pid, .. } = left { Some(*pid) } else { None }).collect();
+    let hanging_up: Vec<_> = terminals.into_iter().map(|pid| thread::spawn(move || hang_up(pid))).collect();
+    for left in left {
         match left {
             Ongoing::Program { pid, .. } => kill_tree(pid),
-            Ongoing::Download(stop) => stop.store(true, Ordering::SeqCst),
+            Ongoing::Terminal { .. } => {}
+            Ongoing::Stoppable(stop) => stop.store(true, Ordering::SeqCst),
             Ongoing::Upload(_) => {}
         }
+    }
+    for hanging_up in hanging_up {
+        let _ = hanging_up.join();
     }
     result
 }
@@ -267,7 +302,7 @@ fn answer(request: Request) -> io::Result<serde_json::Value> {
             }
             copy(Path::new(&from), Path::new(&to)).map(|()| serde_json::Value::Null)
         }
-        Request::Read { .. } | Request::Write { .. } | Request::Exec(_) => unreachable!("served where they're read"),
+        Request::Read { .. } | Request::Write { .. } | Request::Exec(_) | Request::Pty(_) | Request::Search(_) => unreachable!("served where they're read"),
     }
 }
 
@@ -509,6 +544,67 @@ fn start(id: u32, exec: Exec, out: &Out, ongoing: &Ongoings, environment: Option
     });
 }
 
+/// How long a terminal's last output has, once its program has ended,
+/// to come before the word that it ended.
+const LAST_OUTPUT: Duration = Duration::from_secs(2);
+
+/// Starts a program in a terminal: the user's shell, as a login shell,
+/// unless another is named.
+fn start_terminal(id: u32, pty: Pty, out: &Out, ongoing: &Ongoings, environment: Option<&[(OsString, OsString)]>) {
+    let shell = || {
+        let from_login = environment.and_then(|environment| environment.iter().find(|(key, _)| key == "SHELL").map(|(_, value)| value.clone()));
+        from_login.or_else(|| std::env::var_os("SHELL")).filter(|shell| !shell.is_empty()).unwrap_or_else(|| "/bin/sh".into())
+    };
+    let (program, args) = match pty.program {
+        Some(program) => (OsString::from(program), pty.args),
+        None => (shell(), vec!["-l".to_string()]),
+    };
+    let mut command = Command::new(&program);
+    command.args(&args);
+    if let Some(environment) = environment {
+        command.env_clear().envs(environment.iter().map(|(key, value)| (key, value)));
+    }
+    // What a terminal emulator says it is; Fenix's is xterm's kind.
+    command.env("TERM", "xterm-256color").env("COLORTERM", "truecolor");
+    command.envs(pty.env.iter().map(|(key, value)| (key, value)));
+    if let Some(cwd) = &pty.cwd {
+        command.current_dir(cwd);
+    }
+    let started = match crate::pty::start(command, pty.size) {
+        Ok(started) => started,
+        Err(error) => {
+            let message = format!("couldn't start {} in a terminal: {error}", program.to_string_lossy());
+            out.fail(id, &failure(&io::Error::new(error.kind(), message)));
+            return;
+        }
+    };
+    let crate::pty::Started { mut child, master, reader, mut writer } = started;
+    let (input, typed) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        for bytes in typed {
+            if writer.write_all(&bytes).and_then(|()| writer.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    let pid = child.id();
+    ongoing.lock().unwrap().insert(id, Ongoing::Terminal { input, pid, master: Arc::new(master) });
+    let pump = pump(reader, Kind::Stdout, id, out.clone());
+    let (out, ongoing) = (out.clone(), ongoing.clone());
+    thread::spawn(move || {
+        let code = wait(&mut child);
+        // What it left running in its session goes with it, as when a
+        // terminal is closed; then the pty has no one left to write.
+        kill_tree(pid);
+        let until = Instant::now() + LAST_OUTPUT;
+        while !pump.is_finished() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(10));
+        }
+        ongoing.lock().unwrap().remove(&id);
+        out.send(Frame::json(Kind::Exit, id, &Exit { code }));
+    });
+}
+
 fn wait(child: &mut Child) -> Option<i32> {
     child.wait().ok().and_then(|status| status.code())
 }
@@ -535,6 +631,64 @@ fn own_group(command: &mut Command) {
 
 #[cfg(not(unix))]
 fn own_group(_: &mut Command) {}
+
+/// How long a terminal's shell has, once hung up, to pass it on to its
+/// jobs and end, before it and its group are killed.
+#[cfg(unix)]
+const HANG_UP: Duration = Duration::from_millis(500);
+
+/// Ends a terminal as closing one does: its shell is hung up on, which
+/// a shell passes on to the jobs it started (each a process group of
+/// its own); what's left of its group after a moment is killed.
+#[cfg(unix)]
+fn hang_up(pid: u32) {
+    // SAFETY: a signal to a process group this helper created.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGHUP);
+    }
+    let until = Instant::now() + HANG_UP;
+    // SAFETY: asks whether the group has anyone left; sends nothing.
+    while Instant::now() < until && unsafe { libc::kill(-(pid as i32), 0) } == 0 {
+        thread::sleep(Duration::from_millis(10));
+    }
+    kill_tree(pid);
+    // A shell that doesn't pass the hang-up on leaves its jobs running,
+    // each in a group of its own but all in the terminal's session.
+    for member in session_members(pid) {
+        // SAFETY: a signal to a process of the session this helper made.
+        unsafe {
+            libc::kill(member as i32, libc::SIGKILL);
+        }
+    }
+}
+
+/// The processes of the session `leader` began (what was started in a
+/// terminal and stayed there), as Linux's `/proc` tells them.
+#[cfg(target_os = "linux")]
+fn session_members(leader: u32) -> Vec<u32> {
+    let Ok(entries) = fs::read_dir("/proc") else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|&pid| {
+            // `pid (name) state ppid pgrp session ...`: the name may hold
+            // spaces and brackets, so the fields are counted after it.
+            let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { return false };
+            let after = stat.rfind(')').map_or("", |end| &stat[end + 1..]);
+            after.split_whitespace().nth(3).and_then(|session| session.parse::<u32>().ok()) == Some(leader)
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn session_members(_: u32) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(not(unix))]
+fn hang_up(pid: u32) {
+    kill_tree(pid);
+}
 
 #[cfg(unix)]
 fn kill_tree(pid: u32) {

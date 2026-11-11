@@ -52,19 +52,20 @@ pub fn in_progress(repo: &Path) -> Option<InProgress> {
     // `rebase-merge` is the modern (and interactive) rebase backend;
     // `rebase-apply` is the older `am`-based one, still used by
     // `--apply` and by `git am` itself.
-    if git_dir.join("rebase-merge").is_dir() || git_dir.join("rebase-apply").is_dir() {
+    use crate::disk::{is_dir, is_file};
+    if is_dir(&git_dir.join("rebase-merge")) || is_dir(&git_dir.join("rebase-apply")) {
         return Some(InProgress::Rebase { step: rebase_step(&git_dir) });
     }
-    if git_dir.join("MERGE_HEAD").is_file() {
+    if is_file(&git_dir.join("MERGE_HEAD")) {
         return Some(InProgress::Merge);
     }
-    if git_dir.join("CHERRY_PICK_HEAD").is_file() {
+    if is_file(&git_dir.join("CHERRY_PICK_HEAD")) {
         return Some(InProgress::CherryPick);
     }
-    if git_dir.join("REVERT_HEAD").is_file() {
+    if is_file(&git_dir.join("REVERT_HEAD")) {
         return Some(InProgress::Revert);
     }
-    if git_dir.join("BISECT_LOG").is_file() {
+    if is_file(&git_dir.join("BISECT_LOG")) {
         return Some(InProgress::Bisect);
     }
     None
@@ -75,7 +76,7 @@ pub fn in_progress(repo: &Path) -> Option<InProgress> {
 /// `#` lines `git commit` would strip. `None` when there's none, or
 /// nothing but comments.
 pub fn merge_message(repo: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(repo.join(".git").join("MERGE_MSG")).ok()?;
+    let text = crate::disk::read_to_string(&repo.join(".git").join("MERGE_MSG")).ok()?;
     let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).map(str::trim_end).collect();
     let message = kept.join("\n").trim().to_string();
     (!message.is_empty()).then_some(message)
@@ -116,7 +117,7 @@ pub struct ConflictSides {
 /// a hash rather than being dressed up as something it isn't.
 pub fn conflict_sides(repo: &Path) -> Option<ConflictSides> {
     let git_dir = repo.join(".git");
-    let read = |rel: &str| std::fs::read_to_string(git_dir.join(rel)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let read = |rel: &str| crate::disk::read_to_string(&crate::disk::under(&git_dir, rel)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let current = || {
         crate::process::run_lines(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
             .into_iter()
@@ -189,7 +190,7 @@ fn name_rev(repo: &Path, sha: &str) -> String {
 fn rebase_step(git_dir: &Path) -> Option<(usize, usize)> {
     for (dir, current, total) in [("rebase-merge", "msgnum", "end"), ("rebase-apply", "next", "last")] {
         let base = git_dir.join(dir);
-        let read = |name: &str| std::fs::read_to_string(base.join(name)).ok()?.trim().parse::<usize>().ok();
+        let read = |name: &str| crate::disk::read_to_string(&base.join(name)).ok()?.trim().parse::<usize>().ok();
         if let (Some(n), Some(total)) = (read(current), read(total)) {
             return Some((n, total));
         }

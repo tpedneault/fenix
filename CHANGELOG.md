@@ -81,6 +81,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is put in use by the Fenix that's running within a few seconds, as one
   installed from the Extensions page is, rather than at the next start;
   the command says so. (#40)
+- Remote projects (preview): a terminal opened in one is a shell on its
+  machine, Git is that machine's `git` (the status page, staging,
+  commits, diffs, the gutter, the log, branches, rebases, the explorer's
+  badges), and the Search page searches there with Fenix's own engine,
+  no `rg` needed; a replace writes the files there. By the same keys as
+  a local project's.
 
 ## [1.5.2] - 2026-11-11
 

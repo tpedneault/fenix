@@ -55,6 +55,9 @@ pub(crate) struct QueryReplies {
     /// VT has no bytes for -- Ctrl-Space, Shift-Enter -- as the console
     /// gives them.
     pub(crate) win32_input: bool,
+    /// The machine the shell runs on, when it isn't this one: what it
+    /// says of its folder is a path there.
+    pub(crate) machine: Option<String>,
 }
 
 /// The path in an `OSC 7` file URL: its host dropped, `%xx` decoded, and
@@ -82,6 +85,14 @@ fn path_of_file_url(url: &str) -> Option<std::path::PathBuf> {
 }
 
 impl QueryReplies {
+    /// The folder a shell named, as this side names it.
+    fn folder(&self, path: std::path::PathBuf) -> std::path::PathBuf {
+        match &self.machine {
+            Some(machine) => fenix_vfs::remote(machine, &path.to_string_lossy().replace('\\', "/")),
+            None => path,
+        }
+    }
+
     /// Takes everything owed so far, leaving the buffer empty.
     pub(crate) fn take(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
@@ -128,7 +139,7 @@ impl vt100::Callbacks for QueryReplies {
         match params {
             [b"7", url, ..] => {
                 if let Some(path) = path_of_file_url(&text(url)) {
-                    self.cwd = Some(path);
+                    self.cwd = Some(self.folder(path));
                 }
             }
             [b"133", mark, ..] => match mark.first() {
@@ -140,7 +151,7 @@ impl vt100::Callbacks for QueryReplies {
                 let path = text(path);
                 let path = path.trim().trim_matches('"');
                 if !path.is_empty() {
-                    self.cwd = Some(std::path::PathBuf::from(path));
+                    self.cwd = Some(self.folder(std::path::PathBuf::from(path)));
                 }
             }
             _ => {}

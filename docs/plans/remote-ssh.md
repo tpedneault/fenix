@@ -1,15 +1,17 @@
 # Remote projects over SSH
 
-Status, 2026-11-09, on `claude/remote-ssh-spike`: Phase 0 (the spike),
-Phase 1 (the foundation) and Phase 2 (files) are done. See
+Status, 2026-11-11: Phase 0 (the spike), Phase 1 (the foundation),
+Phase 2 (files) and Phase 3 (terminal, Git, search) are done. See
 [Phase 0: what the spike found](#phase-0-what-the-spike-found),
-[Phase 1: what's built](#phase-1-whats-built) and
-[Phase 2: what's built](#phase-2-whats-built). `SPC p R` opens a remote
-project to browse and edit; Phase 3 (terminal, Git, search) is next.
-Phase 2 was tested in the app's own tests against a machine that is a
-folder, and by hand in the window against an `sshd` in a container (see
-the end of Phase 2's section), not yet against a machine across a
-network.
+[Phase 1: what's built](#phase-1-whats-built),
+[Phase 2: what's built](#phase-2-whats-built) and
+[Phase 3: what's built](#phase-3-whats-built). `SPC p R` opens a remote
+project to browse and edit; its terminals, Git and search are the
+machine's. Phase 4 (language servers, tasks, the debugger) is next.
+Phase 3 was tested in the app's own tests against the real helper in
+the test process, and through the system's `ssh` against a real `sshd`
+on the same Linux machine (see the end of Phase 3's section), not yet
+across a network, and not from Windows.
 
 The aim: open a folder on another machine as a Fenix project, over SSH,
 and work in it as in a local one. Files first (browse, open, edit, save),
@@ -218,7 +220,8 @@ Where it left the plan:
   language servers aren't started for its files; Git badges, branch and
   panels see no repository; extensions that open files (the PDF reader,
   the hex view) aren't offered them. A terminal opened there is a local
-  one. These are Phases 3 and 4.
+  one. These are Phases 3 and 4. (Phase 3 has since given it its
+  terminals and Git.)
 - Binary files open as text: telling needs the first bytes, and the
   helper only reads whole files.
 - The settings a project keeps in `.fenix/` aren't read from a remote
@@ -255,6 +258,126 @@ What that found, fixed since:
 Not tried in the window: the explorer's create, rename, copy, move and
 delete (covered by tests), declining a question, a key with a
 passphrase, a connection that stays down.
+
+## Phase 3: what's built
+
+A remote project's terminals, Git and search are the machine's own, by
+the same keys and commands as a local project's: nothing new to learn
+or bind.
+
+| What | How |
+|---|---|
+| Terminal (`SPC o t`, `SPC o T`) | The helper opens a pty there (`Request::Pty`: `openpty`, a session of its own, the pty its controlling terminal) and runs your login shell (`$SHELL -l`) in the project's folder, with `TERM=xterm-256color`. What it prints comes as `Stdout` frames, what's typed goes as `Body`, a new size as a new frame kind, `Resize`. `fenix-terminal`'s `Terminal` has a second backend behind the same type (`Terminal::spawn_remote`), so the panel and pane terminals, scrollback, selection and paste are as they were |
+| Closing a terminal | Hangs it up (`SIGHUP` to its group, which a shell passes on to its jobs), then after half a second kills what's left of the session, by `/proc`, so a job in a group of its own ends too. The same when the connection ends |
+| Where a shell is | `OSC 7` from a remote shell is a path on its machine (`fenix_vfs::remote`), so what reads it (a path in the output) gets a remote path |
+| Git | `fenix-git`'s six ways of running `git` all go through one door, which hands a repository on a remote machine to `fenix_vfs::run_there`: `git` runs there over the session, with the same `GIT_EDITOR`/`GIT_TERMINAL_PROMPT` as here. The files it reads and writes itself (`.git`'s state, the operation log, an interactive rebase's plan) go through `fenix-vfs`, and a path git prints is made a remote path again. `fenix-project`'s `repository_root` and `git_branch`, and the explorer's badges, likewise |
+| Search (the Search page, `SPC s T`) | The helper's own search (`Request::Search`): `ignore` and `grep-searcher` with the same settings as Fenix's, so no `rg` there. It sends the lines it finds, file by file (`Found` frames); Fenix works out the matches in them with the regex it shows and replaces with, so a remote search's results are made exactly as a local one's. Open buffers are searched here, their files skipped there. A replace reads and writes through `fenix-vfs` |
+
+New in the protocol (version 2): `Request::Pty`, `Request::Search`, and
+the frame kinds `Resize` and `Found`. A search says it's still at it
+(`Found::Progress`) when it has had nothing to say for a second, so a
+long walk with few matches isn't taken for a machine that stopped
+answering.
+
+New in `fenix-vfs`: `Remote::terminal` and `Remote::search` (both with
+a default that says the machine can't), and `fenix_vfs::terminal` and
+`fenix_vfs::search`, which take this side's paths, like the rest. A
+machine's implementation of all of `Remote` is now `fenix-ssh`'s
+`machine` module, shared by `Host` and by `fenix_ssh::testing::Loopback`:
+the real helper serving in the test process over two pipes, mounted as a
+machine, so tests of the crates above go through the whole protocol with
+no `ssh`. (It serves the test machine's own paths, so those tests are
+for Unix; on Windows the folder-backed `fenix_vfs::testing::Folder`
+covers Git.)
+
+Tested in the app's own tests: a remote project's terminal is remote
+and a local one's local, in the panel and in a pane; the Git page on a
+remote repository, and a file staged there; the Search page finding
+and replacing there, and undoing it. Below them: the helper's search
+(ignore files, globs, binary files, a bad regex, stopping, a file sent
+in pieces); a pty's size, resize, exit code and kill, a job started in
+it ending with it, and one that can't start saying why; `fenix-git`
+over a folder machine (status, stage, commit, `.git`'s state, a
+machine that's away) and over the loopback (the operation log kept in
+the repository's own git dir there); `fenix-project`'s search giving
+the same lines, matches and context as a local search, unsaved buffers,
+the cap, files named alone.
+
+Where it left the plan:
+
+- **The helper grew** from 0.8 MB to 3.1 MB (x86_64; aarch64 2.6 MB):
+  ripgrep's search libraries. It's sent once per version.
+- **Git runs over the session, not through the stand-in**: every
+  `fenix-git` call runs to its end, so `fenix_vfs::run_there` serves
+  them all, at 3 ms a `git status` against 5 ms through the stand-in
+  (on one machine; see below). The stand-in waits for what wants a
+  program's streams as they come: language servers, Phase 4.
+- **Agent forwarding is still never given** to the machine; there's no
+  per-host setting for it yet. A fetch or push there uses that
+  machine's own credentials, and fails rather than ask.
+- **A program a terminal is opened for** (an extension's, an agent's)
+  still runs on this machine: only the shell is the remote's. Those are
+  Phase 4 and 5.
+- **Some Git calls are on the UI thread**, as they are for a local
+  project (the gutter's marks on a buffer switch). Finding a remote
+  file's repository is a round trip per folder above it, so what's found
+  is kept for 30 seconds.
+- **On Windows, paths git prints** are joined onto a remote root with
+  `fenix_vfs::join`, never `PathBuf::join` (which would keep the `/` in
+  a name under `\\?\`). That's done where this phase touched; not
+  checked from Windows.
+
+### Tried against a real `sshd`
+
+On 2026-11-11, on Linux (Ubuntu 24.04, OpenSSH 9.6 both ends), against
+an `sshd` on `127.0.0.1:2222` set up as `dev/remote-ssh`'s container is
+(the user `tom`, a greeting `.bashrc`, `~/bin` on the login `PATH`, a
+Git repository), signing in with a key: the container itself couldn't
+be built here, the sandbox's network not reaching Debian's mirrors.
+
+- `fenix-ssh-check`, which `dev/remote-ssh/check.sh` runs and Linux CI
+  with it, has a section for this phase, and all of it passed: a login
+  shell answering in 20 ms, in a terminal of its own of the kind and
+  size asked, with the login `PATH`, in the project's folder; resized;
+  a background job ending when the terminal was closed; a shell's exit
+  code; a search finding the project's files as remote paths and
+  nothing of `.git`; `git status`, `git diff` and a patch staged
+  through `git apply`'s stdin, then put back. The earlier phases'
+  checks passed as before.
+- An app test against the machine (`#[ignore]`d; see
+  `dev/remote-ssh/README.md`): a remote project opened, a file edited
+  and saved, `git` there seeing it, the status page on the repository,
+  the Search page finding it, a terminal in the project remote and
+  alive. It passed, and left nothing running there.
+
+Not tried: the window itself on a remote project (the app tests stand
+in for it); Windows as the client, so not ConPTY's side of a remote
+terminal, Windows' `ssh.exe`, or the joining of git's paths above; a
+real network; `git push` and `fetch` against a remote that needs
+credentials; zsh and fish as the remote shell.
+
+### Where Phase 4 starts
+
+Found while doing this phase, for the next:
+
+- **Language servers**: `App::sync_lsp_for` returns early for a remote
+  path; that's the gate. A server there is started through the stand-in
+  (`Host::command`), which `LspClient::spawn_command` already takes. The
+  work is the URIs: `fenix_lsp::uri::path_to_uri` and `uri_to_path` are
+  free functions with no idea which machine a server is on, called from
+  about 35 places, most in `app.rs`. A server's URIs are its machine's
+  paths, so each place a URI comes back from a server needs the
+  session's machine (`uri_to_path` given the session's root, say),
+  rather than a guess from the path.
+- **Tasks**: `fenix_tasks::discover_tasks` reads the project's files
+  with `std::fs`, and a task's command is put to this machine's shell.
+  On a remote project both are the machine's: its files through
+  `fenix-vfs`, its `sh -c` through the stand-in, which `TaskRunner::
+  spawn_command` takes as it is. Killing a stand-in already ends what it
+  ran (Phase 1), so stopping a task carries over.
+- **The terminal programs** an extension or an agent opens with a
+  program of their own still run here (see above): Phase 4 and 5 decide
+  where those run.
 
 ## The design
 
