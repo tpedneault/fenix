@@ -14,6 +14,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   agent's prompt wraps. `gj` / `gk`, and with standard keys and in Insert
   the arrows, `Home` / `End` and `PageUp` / `PageDown`, go by screen rows
   (#107).
+- Colours from language servers (semantic highlighting): where a file's
+  server offers semantic tokens, they're laid over the grammar's colours
+  (parameters, macros, interfaces and constants told apart, mutable
+  names underlined). They follow your typing until the next answer, and
+  a large file is asked only for the lines in view.
+  `lsp.semantic_highlighting` (on) and `lsp.semantic_highlighting_off`
+  turn it off globally and per language. Themes gain optional
+  `syntax.interface`, `syntax.parameter` and `syntax.macro` keys (#105).
 
 ## [1.5.0] - 2026-11-10
 

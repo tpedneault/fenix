@@ -19,6 +19,21 @@ use super::{App, BufferId, LspKey, LspSession, PendingLspRequest};
 /// How long typing pauses before a document's tokens are asked again.
 pub(super) const SEMANTIC_PAUSE: Duration = Duration::from_millis(250);
 
+/// A document this many lines or bytes long is asked only for the lines
+/// in view, when its server answers that way.
+const RANGE_LINES: usize = 10_000;
+const RANGE_BYTES: usize = 1 << 20;
+/// Above this many lines, a server that can't answer for a range isn't
+/// asked for the whole document either.
+const MAX_FULL_LINES: usize = 50_000;
+/// Lines asked for above and below those in view.
+const RANGE_MARGIN: usize = 100;
+/// How many line ranges a document asked by range keeps as answered,
+/// when more are away from every view (those go, with their tokens).
+const MAX_COVERED: usize = 8;
+/// The most lines one ask by range is for.
+const MAX_RANGE_ASK: usize = 2_000;
+
 /// The longest wait before asking again after a refusal.
 const SEMANTIC_MAX_RETRY: Duration = Duration::from_secs(4);
 
@@ -50,11 +65,57 @@ pub(super) struct SemanticDoc {
     /// The server said its tokens changed (a refresh) while this wasn't
     /// drawn: asked once it is.
     pub(super) stale: bool,
+    /// The server's last whole-document answer, as sent, and its id: what
+    /// a delta is applied to.
+    result_id: Option<String>,
+    data: Vec<u32>,
+    /// The text's lines, size and end, as of the last sync: what decides
+    /// whether it's asked by range, the same for every ask and view.
+    extent: tokens::Extent,
+    /// Asked by range: the lines answered (or tried and refused) since
+    /// the last edit or refresh, and those each pane shows.
+    pub(super) covered: Vec<Range<usize>>,
+    pub(super) views: std::collections::HashMap<fenix_window::WindowId, Vec<Range<usize>>>,
+    /// The synced text as ropey holds it, built once a sync: what a
+    /// range's answer is decoded and its lines found against.
+    rope: tokens::Rope,
+    /// A refresh came while the ask out was: its answer is used, but its
+    /// lines aren't counted as answered.
+    refreshed_while_asking: bool,
+    /// The lines the ask out is for, when it's by range.
+    asked_lines: Option<Range<usize>>,
+}
+
+/// What was asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SemanticAsk {
+    Full,
+    Delta,
+    /// These lines.
+    Range(Range<usize>),
 }
 
 impl SemanticDoc {
     fn new(buffer: BufferId) -> Self {
-        SemanticDoc { buffer, tokens: Vec::new(), stamp: None, asking: None, asked: None, timed_out: false, due: None, retry: SEMANTIC_PAUSE, stale: false }
+        SemanticDoc {
+            buffer,
+            tokens: Vec::new(),
+            stamp: None,
+            asking: None,
+            asked: None,
+            timed_out: false,
+            due: None,
+            retry: SEMANTIC_PAUSE,
+            stale: false,
+            result_id: None,
+            data: Vec::new(),
+            extent: tokens::Extent::default(),
+            covered: Vec::new(),
+            views: std::collections::HashMap::new(),
+            rope: tokens::Rope::new(),
+            refreshed_while_asking: false,
+            asked_lines: None,
+        }
     }
 }
 
@@ -79,9 +140,65 @@ pub(super) enum SemanticSync {
 }
 
 /// Whether semantic tokens can be asked of `session`: it's said what it
-/// offers and that includes a whole document.
+/// offers, a whole document or a range.
 pub(super) fn offers(session: &LspSession) -> bool {
-    session.capabilities.as_ref().and_then(tokens::provider).is_some_and(|p| p.full)
+    session.capabilities.as_ref().and_then(tokens::provider).is_some()
+}
+
+/// Whether a document of `extent` is asked for by range: large and the
+/// server answers that way, or it answers no other. The one place this
+/// is decided, for the asks and the views alike.
+fn by_range(provider: &tokens::Provider, extent: &tokens::Extent) -> bool {
+    provider.range && (!provider.full || extent.lines > RANGE_LINES || extent.bytes > RANGE_BYTES)
+}
+
+impl SemanticDoc {
+    /// Whether any pane's view reaches into `lines`.
+    fn viewed(&self, lines: &Range<usize>) -> bool {
+        self.views.values().flatten().any(|v| v.start < lines.end && lines.start < v.end)
+    }
+
+    /// `range` counted as answered, joined with any it touches. Past
+    /// `MAX_COVERED`, ranges no view reaches into go, and their tokens
+    /// with them; one a view needs never does, so a document with more
+    /// views than that keeps a range for each.
+    fn cover(&mut self, range: Range<usize>) {
+        let mut joined = range;
+        self.covered.retain(|c| {
+            let touches = c.start <= joined.end && joined.start <= c.end;
+            if touches {
+                joined = joined.start.min(c.start)..joined.end.max(c.end);
+            }
+            !touches
+        });
+        self.covered.push(joined);
+        while self.covered.len() > MAX_COVERED {
+            let Some(far) = self.covered.iter().position(|c| !self.viewed(c)) else { break };
+            let lines = self.covered.remove(far);
+            let chars = tokens::line_chars_in(&self.rope, lines);
+            self.tokens.retain(|t| t.end <= chars.start || t.start >= chars.end);
+        }
+    }
+
+    /// `cover`, unless a refresh came while the ask was out: the server
+    /// may say otherwise now, so its lines are asked again.
+    fn cover_asked(&mut self, range: Range<usize>) {
+        if !std::mem::take(&mut self.refreshed_while_asking) {
+            self.cover(range);
+        }
+    }
+}
+
+/// The lines a view still needs asked: the first part of a view not
+/// covered, with a margin, as far as the document goes and no more than
+/// `MAX_RANGE_ASK` lines.
+fn uncovered_view(doc: &SemanticDoc) -> Option<Range<usize>> {
+    let mut views: Vec<&Range<usize>> = doc.views.values().flatten().collect();
+    views.sort_by_key(|v| v.start);
+    let view = views.into_iter().find(|v| !doc.covered.iter().any(|c| c.start <= v.start && v.end <= c.end))?;
+    let lines = doc.extent.lines.max(1);
+    let start = view.start.saturating_sub(RANGE_MARGIN).min(lines - 1);
+    Some(start..(view.end + RANGE_MARGIN).min(lines).min(start + MAX_RANGE_ASK))
 }
 
 /// After `sync_lsp_document` sent `canonical`'s text: on opening (or a
@@ -110,6 +227,8 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
     if let Some(buffer) = buffer {
         doc.buffer = buffer;
     }
+    doc.rope = tokens::Rope::from_str(new);
+    doc.extent = tokens::extent_of(&doc.rope);
     match change {
         Some((old, old_count)) => {
             if doc.stamp == Some(old_count) && !doc.tokens.is_empty() {
@@ -121,6 +240,9 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
             }
             doc.timed_out = false;
             doc.retry = SEMANTIC_PAUSE;
+            // The lines answered are of other text now: asked again as
+            // they're shown.
+            doc.covered.clear();
             // An agent's sync moved them as well: asked again too.
             doc.due = Some(if newly_shown { now } else { now + SEMANTIC_PAUSE });
         }
@@ -129,25 +251,57 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
     }
 }
 
-/// Sends `canonical`'s ask to `session` if one is due and none is out.
-/// One that can't be sent is no longer due.
+/// Sends `canonical`'s ask to `session` if one is due and none is out:
+/// by range for a large document (lines a pane shows that aren't
+/// covered yet), as a delta on the last answer when the server keeps
+/// them, else the whole of it. One that can't be sent is no longer due.
 fn ask(session: &mut LspSession, canonical: &Path, now: Instant) {
-    let edit_count = session.open_documents.get(canonical).map(|&(count, _)| count);
     let Some(doc) = session.semantic.get_mut(canonical) else { return };
     if doc.asking.is_some() || doc.due.is_none_or(|due| due > now) {
         return;
     }
     doc.due = None;
-    let (Some(edit_count), Some(uri)) = (edit_count, fenix_lsp::path_to_uri(canonical)) else { return };
-    let params = lsp_types::SemanticTokensParams {
-        text_document: lsp_types::TextDocumentIdentifier { uri },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
+    let edit_count = session.open_documents.get(canonical).map(|&(count, _)| count);
+    let provider = session.capabilities.as_ref().and_then(tokens::provider);
+    let (Some(edit_count), Some(provider), Some(uri)) = (edit_count, provider, fenix_lsp::path_to_uri(canonical)) else { return };
+    let text_document = lsp_types::TextDocumentIdentifier { uri };
+    let how = if by_range(&provider, &doc.extent) {
+        // Nothing shown that isn't answered: nothing to ask.
+        let Some(lines) = uncovered_view(doc) else { return };
+        SemanticAsk::Range(lines)
+    } else if !provider.full || doc.extent.lines > MAX_FULL_LINES {
+        return;
+    } else if provider.delta && doc.result_id.is_some() {
+        SemanticAsk::Delta
+    } else {
+        SemanticAsk::Full
     };
-    if let Ok(id) = session.client.request::<lsp_types::request::SemanticTokensFullRequest>(params) {
+    let (work_done_progress_params, partial_result_params) = (Default::default(), Default::default());
+    let sent = match &how {
+        SemanticAsk::Full => session.client.request::<lsp_types::request::SemanticTokensFullRequest>(lsp_types::SemanticTokensParams { text_document, work_done_progress_params, partial_result_params }),
+        SemanticAsk::Delta => session.client.request::<lsp_types::request::SemanticTokensFullDeltaRequest>(lsp_types::SemanticTokensDeltaParams {
+            text_document,
+            previous_result_id: doc.result_id.clone().unwrap_or_default(),
+            work_done_progress_params,
+            partial_result_params,
+        }),
+        SemanticAsk::Range(lines) => {
+            // No further than the document's end.
+            let end = if lines.end >= doc.extent.lines { doc.extent.end } else { lsp_types::Position { line: lines.end as u32, character: 0 } };
+            let range = lsp_types::Range { start: lsp_types::Position { line: lines.start as u32, character: 0 }, end };
+            session.client.request::<lsp_types::request::SemanticTokensRangeRequest>(lsp_types::SemanticTokensRangeParams { text_document, range, work_done_progress_params, partial_result_params })
+        }
+    };
+    if let Ok(id) = sent {
+        // Asked after any refresh there's been: that's answered.
+        doc.stale = false;
         doc.asking = Some(edit_count);
         doc.asked = Some((id, now));
-        session.pending.insert(id, PendingLspRequest::SemanticTokens { path: canonical.to_path_buf(), edit_count, request: id });
+        doc.asked_lines = match &how {
+            SemanticAsk::Range(lines) => Some(lines.clone()),
+            _ => None,
+        };
+        session.pending.insert(id, PendingLspRequest::SemanticTokens { path: canonical.to_path_buf(), edit_count, how, request: id });
     }
 }
 
@@ -161,6 +315,11 @@ fn time_out(session: &mut LspSession, canonical: &Path, now: Instant) {
     session.pending.remove(&id);
     doc.asking = None;
     doc.asked = None;
+    // Lines asked by range that timed out: tried, until an edit or a
+    // refresh, so a view on them doesn't ask again at once.
+    if let Some(lines) = doc.asked_lines.take() {
+        doc.cover_asked(lines);
+    }
     doc.due = (!doc.timed_out).then_some(now);
     doc.timed_out = true;
 }
@@ -254,6 +413,17 @@ impl App {
         if !self.semantic_highlighting_on() {
             self.semantic_of.clear();
         }
+        // Nothing held and nothing to ask for: nothing to work out.
+        if self.semantic_of.is_empty() && self.lsp_sessions.values().all(|s| s.semantic.is_empty()) {
+            self.semantic_protected.clear();
+            return;
+        }
+        // The panes on show in every frame, by what they show: a view of
+        // one that no longer shows its buffer doesn't ask.
+        let shown: std::collections::HashSet<(fenix_window::WindowId, BufferId)> = (0..self.frames.len())
+            .filter_map(|f| self.frame_workspaces(f))
+            .flat_map(|w| w.active().windows().into_iter().filter_map(move |p| w.active().content(p).map(|b| (p, *b))))
+            .collect();
         let buffers = &self.buffers;
         self.semantic_of.retain(|b, _| buffers.get(*b).is_some());
         let of = &self.semantic_of;
@@ -266,6 +436,11 @@ impl App {
             // Held only for a buffer showing it from this server now: not
             // one closed, renamed away, or asked of another server since.
             session.semantic.retain(|path, d| of.get(&d.buffer).is_some_and(|t| t.key == *key && t.path == *path));
+            // Views of panes that no longer show it don't ask.
+            for doc in session.semantic.values_mut() {
+                let buffer = doc.buffer;
+                doc.views.retain(|pane, _| shown.contains(&(*pane, buffer)));
+            }
             let paths: Vec<PathBuf> = session.semantic.keys().cloned().collect();
             for path in paths {
                 time_out(session, &path, now);
@@ -294,16 +469,21 @@ impl App {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         for doc in session.semantic.values_mut() {
             doc.stale = true;
+            doc.covered.clear();
+            doc.refreshed_while_asking = doc.asking.is_some();
         }
         self.request_redraw_all();
     }
 
-    /// An answer to `PendingLspRequest::SemanticTokens`: kept when the
-    /// document is still as it was asked, else asked again.
-    pub(super) fn semantic_tokens_answered(&mut self, key: &LspKey, path: PathBuf, edit_count: u64, request: i64, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
+    /// An answer to `PendingLspRequest::SemanticTokens` (asked `how`, by
+    /// request `request`): a whole document's or a delta's kept as the
+    /// server's last answer whatever happened since; a range's merged
+    /// into the tokens held for the rest; decoded when the document is
+    /// still as it was asked, else asked again.
+    pub(super) fn semantic_tokens_answered(&mut self, key: &LspKey, path: PathBuf, edit_count: u64, how: SemanticAsk, request: i64, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         let synced = session.open_documents.get(&path).map(|&(count, _)| count);
-        let (Some(doc), Some(text)) = (session.semantic.get_mut(&path), session.synced_text.get(&path)) else { return };
+        let Some(doc) = session.semantic.get_mut(&path) else { return };
         // Not the ask that's out (one before the document was shown again,
         // or cancelled): what it says isn't wanted.
         if doc.asked.map(|(id, _)| id) != Some(request) {
@@ -311,21 +491,66 @@ impl App {
         }
         doc.asking = None;
         doc.asked = None;
+        doc.asked_lines = None;
         let now = Instant::now();
-        let data = match result {
+        // Lines asked by range that came to nothing: tried, until an edit
+        // or a refresh.
+        // ...and the next view not covered asked, if one is.
+        let tried = |doc: &mut SemanticDoc| {
+            if let SemanticAsk::Range(lines) = &how {
+                doc.cover_asked(lines.clone());
+                if uncovered_view(doc).is_some() {
+                    doc.due = Some(doc.due.unwrap_or(now));
+                }
+            }
+        };
+        let answer = match result {
             Ok(value) => match tokens::read_answer(value) {
-                Ok(answer) => answer.and_then(|a| a.data).unwrap_or_default(),
-                Err(_) => return,
+                Ok(answer) => answer.unwrap_or_default(),
+                Err(_) => {
+                    tried(doc);
+                    return;
+                }
             },
-            // Cancelled or modified while it worked: asked again after
-            // a pause. Any other refusal: not asked again until an edit.
-            // RequestCancelled, ContentModified, ServerCancelled.
+            // RequestCancelled, ContentModified, ServerCancelled: asked
+            // again later, each time later still.
             Err(e) if (-32802..=-32800).contains(&e.code) => {
                 doc.due = Some(now + doc.retry);
                 doc.retry = (doc.retry * 2).min(SEMANTIC_MAX_RETRY);
                 return;
             }
-            Err(_) => return,
+            // A delta it can't give (it's let the last answer go): the
+            // whole document, after a pause. Any other: not asked again
+            // until an edit.
+            Err(_) => {
+                if how == SemanticAsk::Delta {
+                    doc.result_id = None;
+                    doc.due = Some(now + SEMANTIC_PAUSE);
+                }
+                tried(doc);
+                return;
+            }
+        };
+        let range = match &how {
+            SemanticAsk::Range(lines) => Some((lines.clone(), answer.data.unwrap_or_default())),
+            SemanticAsk::Full | SemanticAsk::Delta => {
+                match (answer.edits, answer.data) {
+                    (Some(edits), _) => match tokens::apply_edits(&doc.data, &edits) {
+                        Some(data) => doc.data = data,
+                        // Edits that don't fit what's kept: the whole of it
+                        // asked again.
+                        None => {
+                            doc.result_id = None;
+                            doc.data.clear();
+                            doc.due = Some(now);
+                            return;
+                        }
+                    },
+                    (None, data) => doc.data = data.unwrap_or_default(),
+                }
+                doc.result_id = answer.result_id;
+                None
+            }
         };
         // Edited since it was asked: what it says is of other text.
         if synced != Some(edit_count) {
@@ -333,7 +558,25 @@ impl App {
             return;
         }
         let Some(legend) = session.capabilities.as_ref().and_then(tokens::legend) else { return };
-        doc.tokens = tokens::decode(&data, text, &tokens::Styles::new(legend));
+        let styles = tokens::Styles::new(legend);
+        match range {
+            Some((lines, data)) => {
+                // Held tokens of other text can't be kept beside these.
+                if doc.stamp != Some(edit_count) {
+                    doc.tokens.clear();
+                    doc.covered.clear();
+                }
+                let chars = tokens::line_chars_in(&doc.rope, lines.clone());
+                let answered = tokens::decode_in(&data, &doc.rope, &styles);
+                tokens::merge(&mut doc.tokens, answered, chars);
+                doc.cover_asked(lines);
+                // The next view not covered, if one is.
+                if uncovered_view(doc).is_some() {
+                    doc.due = Some(now);
+                }
+            }
+            None => doc.tokens = tokens::decode_in(&doc.data, &doc.rope, &styles),
+        }
         doc.stamp = Some(edit_count);
         doc.retry = SEMANTIC_PAUSE;
         self.request_redraw_all();
@@ -357,6 +600,32 @@ impl App {
         if doc.stale && doc.asking.is_none() {
             doc.stale = false;
             doc.due = Some(Instant::now());
+        }
+    }
+
+    /// `pane` showing `runs` of buffer `id`'s lines (each a run of lines
+    /// shown together, a closed fold between two): for a document asked
+    /// by range, those lines asked for when they're not covered. Only a
+    /// pane's own view counts -- not sticky scroll's headers or a line
+    /// looked up on its own, which use what's held.
+    pub(super) fn note_semantic_view(&mut self, id: BufferId, pane: fenix_window::WindowId, runs: &[Range<usize>]) {
+        let Some(target) = self.semantic_of.get(&id) else { return };
+        let Some(session) = self.lsp_sessions.get_mut(&target.key) else { return };
+        let provider = session.capabilities.as_ref().and_then(tokens::provider);
+        let Some(doc) = session.semantic.get_mut(&target.path) else { return };
+        if !provider.is_some_and(|p| by_range(&p, &doc.extent)) {
+            return;
+        }
+        let lines = doc.extent.lines;
+        let view: Vec<Range<usize>> = runs.iter().map(|r| r.start.min(lines)..r.end.min(lines)).filter(|r| !r.is_empty()).collect();
+        if doc.views.get(&pane) == Some(&view) {
+            return;
+        }
+        doc.views.insert(pane, view);
+        // Due now, unless it's waiting for typing to pause: then then.
+        if doc.asking.is_none() && uncovered_view(doc).is_some() {
+            let now = Instant::now();
+            doc.due = Some(doc.due.map_or(now, |due| due.max(now)));
         }
     }
 

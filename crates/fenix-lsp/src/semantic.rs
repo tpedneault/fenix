@@ -8,6 +8,8 @@
 //! [`Style`] Fenix looks up a theme colour for. They can then be moved
 //! through an edit ([`shift`]) and looked up by window ([`within`]).
 
+use std::ops::Range;
+
 use lsp_types::{SemanticTokenModifier, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensServerCapabilities};
 
 /// What a server offers.
@@ -256,9 +258,13 @@ pub fn read_answer(value: serde_json::Value) -> Result<Option<Answer>, serde_jso
 /// one overlapping a token before it (Fenix doesn't ask for those). A
 /// token's length stops at its line's end (nor for multi-line ones).
 pub fn decode(data: &[u32], text: &str, styles: &Styles) -> Vec<Token> {
+    decode_in(data, &Rope::from_str(text), styles)
+}
+
+/// `decode`, against the text already in a rope.
+pub fn decode_in(data: &[u32], rope: &Rope, styles: &Styles) -> Vec<Token> {
     let mut out = Vec::with_capacity(data.len() / 5);
-    let rope = ropey::Rope::from_str(text);
-    let mut lines = Lines::new(&rope);
+    let mut lines = Lines::new(rope);
     let (mut line, mut start) = (0u32, 0u32);
     for t in data.as_chunks::<5>().0 {
         let [delta_line, delta_start, length, ty, modifiers] = *t;
@@ -386,6 +392,49 @@ pub fn apply_edits(data: &[u32], edits: &[Edit]) -> Option<Vec<u32>> {
         floor = start;
     }
     out.len().is_multiple_of(5).then_some(out)
+}
+
+/// What a document's ask by range needs of its text, worked out once a
+/// sync: how many lines it has (as ropey and every position sent count
+/// them) and where it ends, as a position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Extent {
+    pub lines: usize,
+    pub bytes: usize,
+    pub end: lsp_types::Position,
+}
+
+/// The text as ropey holds it: what a document's extent, its lines and
+/// its answers are worked out against, built once a sync.
+pub use ropey::Rope;
+
+pub fn extent(text: &str) -> Extent {
+    extent_of(&Rope::from_str(text))
+}
+
+pub fn extent_of(rope: &Rope) -> Extent {
+    Extent { lines: rope.len_lines(), bytes: rope.len_bytes(), end: crate::char_offset_to_position(rope, rope.len_chars()) }
+}
+
+/// The chars of `text`'s lines `lines` (a range of line numbers): from the
+/// first's start to the start of the line after the last, or the end.
+pub fn line_chars(text: &str, lines: Range<usize>) -> Range<usize> {
+    line_chars_in(&Rope::from_str(text), lines)
+}
+
+pub fn line_chars_in(rope: &Rope, lines: Range<usize>) -> Range<usize> {
+    let at = |line: usize| if line >= rope.len_lines() { rope.len_chars() } else { rope.line_to_char(line) };
+    at(lines.start)..at(lines.end)
+}
+
+/// `tokens` with those reaching into chars `chars` replaced by `answered`
+/// (what an ask for those lines found): the rest of the document's kept.
+/// Both in order and not overlapping, and so is what's left.
+pub fn merge(tokens: &mut Vec<Token>, answered: Vec<Token>, chars: Range<usize>) {
+    tokens.retain(|t| t.end <= chars.start || t.start >= chars.end);
+    let answered: Vec<Token> = answered.into_iter().filter(|t| t.start >= chars.start && t.end <= chars.end).collect();
+    let at = tokens.partition_point(|t| t.start < chars.start);
+    tokens.splice(at..at, answered);
 }
 
 /// `tokens` moved through one edit: chars `[start, old_end)` became
@@ -679,6 +728,45 @@ mod tests {
         assert_eq!(ranges(within(&tokens, 0, 100)).len(), 4);
         assert!(within(&tokens, 20, 30).is_empty());
         assert!(within(&[], 0, 1).is_empty());
+    }
+
+    /// How long a large answer takes to read (`--ignored --nocapture`,
+    /// in a release build): a million lines of five tokens each.
+    #[test]
+    #[ignore]
+    fn measure_decoding_a_million_lines() {
+        let text = "fn name(arg: Type) -> Out { body() }\n".repeat(1_000_000);
+        let line = [tok(1, 3, 4, 0, 0), tok(0, 5, 3, 1, 0), tok(0, 5, 4, 0, 0), tok(0, 9, 3, 0, 0), tok(0, 6, 4, 1, 0)];
+        let mut data: Vec<u32> = line.iter().cycle().take(5_000_000).flatten().copied().collect();
+        data[0] = 0;
+        let s = styles();
+        let started = std::time::Instant::now();
+        let got = decode(&data, &text, &s);
+        let decoded = started.elapsed();
+        let started = std::time::Instant::now();
+        let mut shifted = got.clone();
+        shift(&mut shifted, 1000, 1001, 1003);
+        let moved = started.elapsed();
+        let started = std::time::Instant::now();
+        let n: usize = (0..1000).map(|i| within(&got, i * 37_000, i * 37_000 + 6000).len()).sum();
+        let looked = started.elapsed();
+        println!("decoded {} tokens in {decoded:?}; shifted in {moved:?}; 1000 window lookups ({n} tokens) in {looked:?}", got.len());
+    }
+
+    #[test]
+    fn an_extent_and_line_chars_count_lines_as_positions_do() {
+        let e = extent("ab\ncd\u{c}ef");
+        assert_eq!(e.lines, 3, "a form feed breaks a line for ropey, so for every position sent");
+        assert_eq!(e.end, lsp_types::Position { line: 2, character: 2 });
+        assert_eq!(line_chars("ab\ncd\nef", 1..2), 3..6);
+        assert_eq!(line_chars("ab\ncd", 1..9), 3..5);
+    }
+
+    #[test]
+    fn a_range_s_answer_replaces_only_the_tokens_in_its_lines() {
+        let mut tokens = vec![t(0, 2), t(5, 7), t(9, 10), t(20, 22)];
+        merge(&mut tokens, vec![t(5, 6), t(8, 9), t(30, 31)], 4..12);
+        assert_eq!(ranges(&tokens), [(0, 2), (5, 6), (8, 9), (20, 22)], "one outside the lines asked isn't taken");
     }
 
     #[test]

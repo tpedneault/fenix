@@ -1,6 +1,6 @@
 # Plan: semantic highlighting
 
-- **Status:** stages 1 to 3 built, for the release after 1.5 (issue #105); see §5.
+- **Status:** built, for the release after 1.5 (issue #105); see §5.
 - **Scope:** code coloured by what its language server knows
   (`textDocument/semanticTokens`), on top of tree-sitter's colours:
   a parameter apart from a local, a macro apart from a function, an
@@ -448,3 +448,88 @@ These supersede the table and rules above where they differ.
   the buffer's tokens.
 - **Stage 2's tests changed.** A macro token is now drawn in the macro
   colour, not the function colour.
+
+### Stage 4
+
+- **Delta.** `full/delta` is asked once a whole-document answer gave a
+  `resultId`. The answer's raw array and id (`SemanticDoc::data`,
+  `result_id`) are kept as the server's last answer even when its text
+  has since moved on; only decoding waits for text that matches.
+  - A delta that doesn't apply (edits off a token boundary, past the
+    end, or overlapping) clears the id, and the whole document is asked
+    again.
+  - An error on a delta does the same after the pause.
+  - A delta answered with whole tokens is taken as a whole answer.
+- **Range.** A document is asked by range when its server offers range
+  and either it has more than 10 000 lines or 1 MiB, or the server
+  offers no full. `with_semantic_tokens` notes the lines its windows
+  show (`note_semantic_view`). When they aren't all covered, the next
+  ask is for them with 100 lines of margin, made due at once. A range
+  answer replaces the tokens and records the lines it covers. One
+  refused with an error counts as covered, so it isn't asked again
+  every frame. Edits don't move `covered`; the ask after the pause uses
+  the last lines in view.
+- **Revised after the third review.** These supersede the range notes
+  above where they differ.
+  - **Several answered ranges.** A document keeps up to 8 ranges of
+    answered lines (`covered`), joined where they touch. When there are
+    more, those no view reaches go first. A range's answer is merged
+    into the held tokens (`fenix_lsp::semantic::merge`), replacing only
+    those in its lines. So two panes on one file, or a view and sticky
+    scroll's header, don't take turns evicting each other.
+  - **Only a pane's own view asks.** `note_semantic_view` runs from the
+    frame for each pane, with the lines it shows. Sticky scroll's
+    headers and any line looked up on its own use what's held. Views are
+    kept per pane and dropped when the pane no longer shows the buffer,
+    in any frame.
+  - **One line count.** Range or full is decided from a
+    `fenix_lsp::semantic::Extent` (ropey's lines, the bytes, the end
+    position) worked out once per sync, the same for asks and views.
+    Nothing scans the text per frame.
+  - **Tried and failed.** A range that's refused, doesn't parse or times
+    out counts as covered until the next edit or refresh. An edit or a
+    refresh clears `covered`, so the lines shown are asked again.
+  - **The document's end.** A range ask ends at the document's last
+    position, not a line past it.
+- **Revised after the fourth review.**
+  - **Never evicting a viewed range.** The 8-range cap applies only to
+    ranges no view reaches, so a document with more views keeps a range
+    for each. An evicted range takes its tokens with it, so what's held
+    is what's been in view lately, not everything ever shown.
+  - **The document's rope.** Each document keeps the rope its sync
+    built. A range's answer is decoded, and its lines found, against
+    that rope, with no rebuild per answer.
+  - **Refresh while asking.** A refresh while a range ask is out marks
+    the ask: its answer is merged, but its lines aren't counted as
+    answered, so they're asked again. Any ask sent after a refresh
+    clears the refresh.
+  - **Views as runs.** A pane's view is the runs of lines it shows, with
+    each closed fold between them left out. One ask is for at most 2 000
+    lines.
+  - **Refusals move on.** A range refused or unreadable moves on to the
+    next view not covered.
+  - **The typing pause holds.** A view that moves while typing waits
+    for the pause.
+  - **Early out.** With nothing held, the frame does no work for tokens
+    (no set of shown panes is built).
+- **No range and over 50 000 lines:** not asked, and no wake is set.
+- **Wake.** `semantic_wake` gives the next due time, or now for one
+  already due (a draw just made it due). `ask` clears `due` on every
+  path that doesn't send, so a due that can't be sent doesn't keep
+  waking the loop.
+- **Measured** (`measure_decoding_a_million_lines` in `fenix-lsp`,
+  ignored; run with `--release -- --ignored --nocapture`), on 1M lines
+  with 5M tokens:
+  - decode: 340 ms (158 ms before decoding went through ropey's lines,
+    so its lines match the positions `didChange` sends);
+  - moving all tokens through one edit: 86 ms;
+  - 1000 window lookups: 1.8 ms.
+  The whole-document path stops at 50 000 lines (about 250 000 tokens),
+  so an answer there decodes in about 17 ms and an edit moves tokens in
+  about 4 ms. A larger document is
+  asked by range and holds only what's in view. Moving tokens is still
+  O(tokens) per edit; a tree or gap structure would fix that if it
+  shows up.
+- **Not done:**
+  - partial results;
+  - the theme colours picked by hand rather than by rule.
