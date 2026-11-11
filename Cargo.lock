@@ -1333,6 +1333,7 @@ dependencies = [
  "tempfile",
  "tiny-skia",
  "toml",
+ "unicode-bidi",
  "unicode-width",
  "vt100",
  "wgpu",

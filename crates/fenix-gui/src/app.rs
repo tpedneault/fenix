@@ -65,6 +65,8 @@ mod test_keys;
 mod standard_tests;
 #[cfg(test)]
 mod text_input_tests;
+#[cfg(test)]
+mod bidi_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;

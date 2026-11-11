@@ -13,6 +13,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keyboard, password managers' auto-type, automation tools) is typed
   into buffers, prompts, pickers and terminals, as is text an input
   method commits (#37).
+- Right-to-left text (Hebrew, Arabic) is shown in place: a line that
+  starts with it is no longer pushed off the pane's right edge with its
+  line number, and the caret, the selection, search matches and clicks
+  land on its characters as they're drawn (#17).
 
 ## [1.5.2] - 2026-11-11
 

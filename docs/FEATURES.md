@@ -818,6 +818,23 @@ its extension. The rest is built into Fenix.
   the same geometry at runtime, and the committed `fenix.ico` and
   `docs/brand/*.png` are regenerated with `cargo run -p fenix-brand
   --example write-icon` -- a test fails if they drift.
+- **Accessibility.**
+  - *Text that comes without a key.* Dictation, the on-screen
+    keyboard, password managers' auto-type and automation tools often
+    send text as characters rather than key presses (on Windows,
+    `SendInput` with `KEYEVENTF_UNICODE`); it's typed wherever typing
+    goes -- a buffer in Insert, a prompt, a picker, a terminal -- and in
+    Normal it's keys like any other. Text an input method commits is
+    typed the same way.
+  - *Right-to-left text.* A line in Hebrew or Arabic, or mixing them
+    with left-to-right text, is laid out left to right from the gutter,
+    as every line is, with its right-to-left runs reordered and shaped
+    so they read correctly; its line number stays. The caret, the
+    selection, search matches and a click go by the characters as
+    drawn: a block caret is on the letter it's on, a bar in Insert at
+    the edge you'd type at. Motions, edits and column numbers still go
+    by the text's own (logical) order, and a whole right-to-left
+    paragraph isn't right-aligned: Fenix has no right-to-left mode.
 
 ## Containers
 

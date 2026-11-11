@@ -8,6 +8,7 @@
 #![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::large_enum_variant)]
 
 mod agent_page;
+mod bidi;
 mod agent_review;
 mod agent_usage_page;
 mod agent_tools;
