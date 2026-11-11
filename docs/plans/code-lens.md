@@ -293,3 +293,36 @@ lenses are off by default until stage 6.
     rows above them.
   - Rows appearing and going keep the top text row in place, and with
     none left the pane is on the line path again.
+
+### Stage 3
+
+- **Settings.** `lsp.code_lens` (off) and `lsp.code_lens_off` (none).
+  `client_capabilities(semantic, lens)` advertises `codeLens` and its
+  refresh only when lenses are on.
+- **Where the code is.** `app/code_lens.rs` follows the semantic
+  module's final shape:
+  - a `LensDoc` per server and document, belonging to its buffer;
+  - asked only by a buffer's own sync, never by an agent's;
+  - asked on open and 500 ms after typing pauses;
+  - a 10 s timeout with `$/cancelRequest`, asked once more;
+  - back-off on cancelled or modified, from 500 ms to 4 s;
+  - an answer counts only if it's the current ask, and one for text
+    since edited is let go;
+  - a refresh asks each document when it's next drawn.
+- **Every server that offers lenses is asked** (`lens_servers`), and
+  their lenses share a row, in the order the servers are.
+  `App::lens_of` keeps each buffer's servers and path from its sync.
+- **Edits.** Every change sent moves the lenses by line
+  (`code_lens::after_sync`), and the rows are laid out again at once.
+- **Resolve.** When a pane draws lines (`note_lens_view`), lenses there
+  with no command are resolved, up to 16 at a time per server. An
+  answer from before the last full answer is let go (`generation`).
+- **Layout.** `lay_out_lenses` builds the rows with
+  `fenix_lsp::code_lens::rows` and hands their texts to
+  `set_virtual_rows` (which keeps the top text row in place), keeping
+  the `LensRow`s by line for stage 4's clicks.
+  - A server stopping takes its lenses with it.
+  - The setting going off takes every row away, and those panes are on
+    the line path again.
+- **Moved to stage 4:** the hover colour, which belongs with the click
+  it shows.

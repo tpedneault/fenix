@@ -553,6 +553,8 @@ when it's out of date).
 | `diagnostics.delay_ms` | 0–5000 | 400 | Milliseconds after you stop typing in Insert before new problems are drawn. |
 | `lsp.semantic_highlighting` | true / false | on | Code is coloured by what its language server knows (a parameter apart from a local, a macro apart from a function), over the grammar's colours, where the server offers it. Applies to servers started after it's changed (SPC q r). |
 | `lsp.semantic_highlighting_off` | a list | none | Languages whose files keep the grammar's colours alone, whatever Colours from language servers says. |
+| `lsp.code_lens` | true / false | off | What a language server offers for a function or test, on a row of its own above it (Run, Debug, 3 references), dimmed. Off for now: while a file has lenses its pane snaps rather than easing, and sticky scroll is off. Applies to servers started after it's changed (SPC q r). |
+| `lsp.code_lens_off` | a list | none | Languages whose files show no code lenses, whatever Code lens says. |
 | `lsp.servers` | language = command | – | A language server to run for a language, as the command line that starts it. |
 | `debug.trail_stops` | 1–10000 | 200 | How many of a debug session's stops the Ember Trail keeps, oldest first to go. Kept in memory only. |
 | **Git** | | | |
