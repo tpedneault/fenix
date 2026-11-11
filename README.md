@@ -167,6 +167,16 @@ it (`sudo apt install ./fenix_<version>_amd64.deb`, or
 applications menu, `fenix` on `PATH`. Or unpack the `.tar.gz` and run
 `fenix`. Any distribution with glibc 2.35 or newer.
 
+**The nightly**, to try what's next: `master` built each night it
+changed, on the
+[`nightly` release](https://github.com/tpedneault/fenix/releases/tag/nightly)
+-- the same installer, zip, archive, `.deb` and `.rpm`, under names
+that don't change (`fenix-nightly-x86_64-pc-windows-msvc-setup.exe`,
+`fenix-nightly_amd64.deb`, ...). It installs over a release, and the
+next release installs over it. `fenix --version` says which nightly it
+is and its commit. [Releasing](docs/RELEASING.md#for-users-running-the-nightly)
+has the rest.
+
 **From source**, with a recent stable [Rust](https://rustup.rs) toolchain:
 
 ```bash
@@ -186,9 +196,9 @@ supported, and CI tests on both. macOS isn't built yet (see
 
 **Updates:** Fenix can tell you on Home when a newer release is out
 (`updates.check`, off until you turn it on), and with
-`updates.prereleases` when a pre-release is out too. It never downloads
-anything itself: see [Releasing](docs/RELEASING.md) for what each kind
-of release carries.
+`updates.channel = "nightly"` when a newer nightly is out too. It never
+downloads anything itself: see [Releasing](docs/RELEASING.md) for what
+each kind of release carries.
 
 ## First steps
 

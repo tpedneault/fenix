@@ -8,9 +8,31 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `updates.prereleases`, off by default: with `updates.check` on, Home
-  also says when a pre-release (`vX.Y.Z-rc.N`) newer than yours is out,
-  marked as one. Turned off again, it's back to releases alone at once.
+- A nightly build: `master`, built each night it changed, on one rolling
+  pre-release tagged `nightly` (never "latest", so release links don't
+  move), versioned `1.6.0-nightly.YYYYMMDD` -- the Windows installer and
+  zip, the Linux archive, `.deb` and `.rpm`, under names that are the
+  same every night. It installs over a release, and the next release
+  over it. Nothing is built on a night `master` didn't change.
+- `updates.channel`, `stable` by default: `nightly` has Home say when a
+  newer nightly is out, as well as a newer release. On `stable`,
+  nightlies are never mentioned.
+- A nightly build says which it is: `fenix --version`, the window title
+  and Home give its version, and `--version` and Home the commit it was
+  built from.
+
+### Changed
+
+- Release candidates are dropped from the release process in favour of
+  the nightly ([how releases work](docs/RELEASING.md)), and the
+  unreleased `updates.prereleases` setting with them, replaced by
+  `updates.channel`.
+
+### Fixed
+
+- Extensions install and run on a pre-release build of Fenix, which
+  counts as the release it leads to for an extension's `engine.fenix`
+  range.
 
 ## [1.5.2] - 2026-11-11
 
