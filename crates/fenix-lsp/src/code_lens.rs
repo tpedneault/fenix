@@ -90,11 +90,14 @@ impl<T: Clone> LensRow<T> {
 /// The most chars of a title shown.
 pub const MAX_TITLE: usize = 200;
 
-/// A title as it's drawn on one row: line breaks, tabs and other control
-/// characters as spaces, runs of spaces as one, none at either end, and
-/// no longer than `MAX_TITLE` chars (cut with `…`).
+/// A title as it's drawn on one row: Unicode's format characters (the
+/// bidi controls, zero widths, the byte order mark) taken out, line
+/// breaks, tabs and other control characters as spaces, runs of spaces
+/// as one, none at either end, and no longer than `MAX_TITLE` chars (cut
+/// with `…`).
 pub fn clean_title(title: &str) -> String {
     let mut out = String::new();
+    let title: String = title.chars().filter(|&c| !is_format(c)).collect();
     for word in title.split(|c: char| c.is_control() || c.is_whitespace()).filter(|w| !w.is_empty()) {
         if !out.is_empty() {
             out.push(' ');
@@ -106,6 +109,14 @@ pub fn clean_title(title: &str) -> String {
         out.push_str(UNRESOLVED);
     }
     out
+}
+
+/// Whether `c` is one of Unicode's format characters (general category
+/// Cf): drawn as nothing, or turning the text around it.
+fn is_format(c: char) -> bool {
+    matches!(c as u32,
+        0xAD | 0x600..=0x605 | 0x61C | 0x6DD | 0x70F | 0x890..=0x891 | 0x8E2 | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x206F
+        | 0xFEFF | 0xFFF9..=0xFFFB | 0x110BD | 0x110CD | 0x13430..=0x1343F | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0001 | 0xE0020..=0xE007F)
 }
 
 /// `lenses` (each with its tag, in the order they're to be shown: the
@@ -330,6 +341,8 @@ mod tests {
     #[test]
     fn a_title_is_one_row_of_plain_text_and_no_longer_than_the_most_shown() {
         assert_eq!(clean_title("  Run\nDebug\r\n\tnow\u{7}x  "), "Run Debug now x");
+        assert_eq!(clean_title("\u{feff}Ru\u{200b}n \u{202e}tset\u{2066}"), "Run tset", "format characters taken out");
+        assert_eq!(clean_title("\u{200b}\u{202e}"), "", "nothing left");
         let long = clean_title(&"y".repeat(200_000));
         assert_eq!(long.chars().count(), MAX_TITLE);
         assert!(long.ends_with('…'));

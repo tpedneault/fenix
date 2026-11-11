@@ -302,8 +302,9 @@ lenses are off by default until stage 6.
     when the cursor is on the top line's first text row with the lens
     hidden, so `gg`, `k` and the wheel reach it.
   - Off the rows (above, below, right of a line's end, a drag past an
-    edge), a hit is where the line path has it, through the sideways
-    scroll. A lens row is no place in the text: a click, drag or hover
+    edge) in a pane that doesn't wrap, a hit is where the line path has
+    it, through the sideways scroll. A wrapped pane keeps soft wrap's
+    own: the line before the first row shown, or after the last. A lens row is no place in the text: a click, drag or hover
     there moves no cursor and scrolls nothing.
   - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
     lens rows counted (`page_by_rows`), as in a wrapped pane.
@@ -361,6 +362,11 @@ lenses are off by default until stage 6.
   - A lens row is cut to the pane's real width by whole titles
     (`LensRow::fit`), wrapped or not, and its indent is at most half the
     pane, so it stays in view.
+  - Resolves out when their answer is let go (a new answer, the
+    document dropped, the setting off) are cancelled, so no more than 16
+    are ever out. A lens whose resolve comes to nothing shows no title,
+    its row kept, so there's nothing to click. The last answer's titles
+    are found by place and data in a map, not a scan per lens.
 
 ### Stage 4
 
