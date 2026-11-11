@@ -15,6 +15,64 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the arrows, `Home` / `End` and `PageUp` / `PageDown`, go by screen rows
   (#107).
 
+## [1.5.1] - 2026-11-11
+
+### Added
+
+- `SPC a g` (`agents.pipeline_go`; `Ctrl+K a g` with standard keys) picks
+  up a pipeline run that stopped: on any of its steps, or `Alt+G` on its
+  run in `SPC a t`, the gate of the step it stopped at comes back as it
+  was. At a gate it goes on, as `y`. This holds across a restart: a run is
+  kept beside its threads (`runs/<run id>.json` in the agents' state
+  folder), written as it moves, so one Fenix was closed on comes back
+  stopped at the step it was on. It's kept until it's done, archived or
+  deleted; an older Fenix ignores it and reads the threads as before.
+- `r` at a pipeline's gate runs the step again, on a thread of its own,
+  with the prompt it had.
+
+### Changed
+
+- A pipeline step that ends badly asks at its gate rather than ending the
+  run, saying why: a command you refused (the agent's turn ends
+  `cancelled`), `SPC a k`, a token or request limit, a refusal, an agent
+  that stopped and was started again, a review with no findings list, a
+  command that still fails with its rounds used up. `y` goes on with what
+  the step got to (its plan, else its last answer; for a command, "go on
+  anyway"), `e` edits it first, `r` runs the step again, `n` stops; with
+  nothing to pass on, only `r` and `n`. So `SPC a k` on a step stops the
+  step and brings up its gate, where `n` stops the run: it stopped both at
+  once before.
+- A run that stops (`n` at a gate, `q` in the pane `e` opened, an agent
+  that can't take the prompt) is kept rather than dropped, and its notice
+  says how to go on: *stopped at plan's gate -- SPC a g picks it up*.
+- The built-in plan steps ask for the plan in the agent's answer, not
+  written to a file.
+- A question to run a command shows the command's own lines -- the first
+  five and the last, with how many more between -- in at most eight rows,
+  and `v` on it shows the whole command, then the input as the agent gave
+  it. Another question's title takes up to three rows, and once answered
+  its line keeps the answer whole and cuts the question.
+
+### Fixed
+
+- A permission card whose title had line breaks in it (a heredoc: `cat >
+  plan.md <<'EOF'`) moved every row under it off its background: the
+  highlight for `y` sat rows above *Yes*. A row of a page is one line now,
+  whatever text it's given: a line break, a tab or another control
+  character is a space. A tool card's title, an answer's name, a plan
+  entry and a field's title are made one line on purpose.
+- Wide characters (CJK, emoji) ran an agent's card, its answers and its
+  Markdown past the dock's edge: `fit` and `wrap` counted characters, not
+  cells. They count cells now, and a tint, a hairline or a card over wide
+  text keeps to its width.
+- In a short dock a question's answers could be below the view, the
+  card's first row being the one kept in view: the chosen answer is.
+- In a narrow dock, a queued prompt's note and the keys under an agent's
+  question ran past the edge; the keys go on to a second row.
+- A step's gate was taken back as soon as its thread's agent started,
+  though no round had begun: shown again after a restart, a step lost its
+  gate. Only a turn under way takes it back.
+
 ## [1.5.0] - 2026-11-10
 
 ### Security
@@ -973,7 +1031,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/tpedneault/fenix/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/tpedneault/fenix/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/tpedneault/fenix/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tpedneault/fenix/compare/v1.2.0...v1.3.0

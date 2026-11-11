@@ -206,6 +206,9 @@ impl Writer {
         }
         let right = self.width;
         let mut col = first_x;
+        // Where the line has got to in cells, a wide character two: what
+        // it's wrapped by. `col` is in characters, as the page is written.
+        let mut at = first_x;
         let mut lines = 1;
         self.bars(quote);
         for (piece, role, link) in pieces {
@@ -214,20 +217,22 @@ impl Writer {
                 lines += 1;
                 self.bars(quote);
                 col = x;
+                at = x;
                 continue;
             }
-            let len = piece.trim_end().chars().count();
-            if col > x && col + len > right {
+            let len = crate::page::str_cells(piece.trim_end());
+            if col > x && at + len > right {
                 self.y += 1;
                 lines += 1;
                 self.bars(quote);
                 col = x;
+                at = x;
                 if piece.trim().is_empty() {
                     continue;
                 }
             }
             // A word longer than the line is cut to it.
-            let shown: String = if len > right.saturating_sub(x) { piece.chars().take(right.saturating_sub(x).max(1)).collect() } else { piece.clone() };
+            let shown: String = if len > right.saturating_sub(x) { first_cells(&piece, right.saturating_sub(x).max(1)) } else { piece.clone() };
             let start = col;
             let trimmed = shown.trim_end();
             let end = self.g.put(self.y, col, trimmed, role);
@@ -239,6 +244,7 @@ impl Writer {
                 }
             }
             col = start + shown.chars().count();
+            at += crate::page::str_cells(&shown);
         }
         self.y += 1;
         lines
@@ -388,7 +394,7 @@ impl Writer {
         let lines: Vec<&str> = if text.is_empty() { vec![""] } else { text.lines().collect() };
         for (i, line) in lines.iter().enumerate() {
             self.bars(quote);
-            let shown: String = line.chars().take(self.width.saturating_sub(x0 + 2)).collect();
+            let shown = first_cells(line, self.width.saturating_sub(x0 + 2));
             self.g.panel(self.y, x0..self.width);
             // Coloured pieces and plain gaps, never overlapping: a run
             // of text is one colour.
@@ -533,6 +539,20 @@ impl Writer {
             write_row(self, row, false);
         }
     }
+}
+
+/// As much of the start of `text` as fits in `cells`, a wide character
+/// taking two (and at least one character, so a line goes on).
+fn first_cells(text: &str, cells: usize) -> String {
+    let mut used = 0;
+    text.chars()
+        .enumerate()
+        .take_while(|(i, c)| {
+            used += crate::page::char_cells(*c);
+            *i == 0 && cells > 0 || used <= cells
+        })
+        .map(|(_, c)| c)
+        .collect()
 }
 
 /// `text` in lines of at most `width` characters, broken between words,
