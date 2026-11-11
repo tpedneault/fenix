@@ -517,6 +517,16 @@ impl App {
         true
     }
 
+    /// Whether a lens may start a program in the project at `root`: only
+    /// once the project is trusted (`SPC p y`). Why not is said.
+    pub(super) fn lens_may_start(&mut self, root: &Path) -> bool {
+        if self.project_is_trusted(root) {
+            return true;
+        }
+        self.set_error("not run: a lens starts programs only in a trusted project (SPC p y)");
+        false
+    }
+
     /// Runs `pick`: the server's command sent back to it, or what Fenix
     /// does for a command it's expected to run itself; why not, when it
     /// can't.
@@ -549,6 +559,9 @@ impl App {
                 let root = runnable.cwd.as_ref().map_or_else(|| project.clone(), |cwd| super::refactor::identity(Path::new(cwd)));
                 if !root.starts_with(&project) {
                     self.set_error(format!("not run: {} is outside the project", root.display()));
+                    return;
+                }
+                if !self.lens_may_start(&project) {
                     return;
                 }
                 let mut args = runnable.cargo_args.clone();

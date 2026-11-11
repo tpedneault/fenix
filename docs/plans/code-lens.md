@@ -376,6 +376,10 @@ lenses are off by default until stage 6.
     gives when that's inside the project (else it says so and runs
     nothing), and only from the Rust server. Its task's name never
     picks a project task of the same name in its place.
+  - A lens that starts a program (rust-analyzer's run, Fenix's own
+    "▶ Run test") runs only in a trusted project; otherwise it says so
+    and names `SPC p y`. Lenses that ask the server to run a command, or
+    open the references list, aren't affected.
   - Fenix's own `fenix.runTest` runs as `SPC p r` does; in a server's
     lens it's one Fenix can't run.
   - Anything else is said: "Fenix can't run *title* (*command*)".
