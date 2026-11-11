@@ -28,9 +28,11 @@ const RANGE_BYTES: usize = 1 << 20;
 const MAX_FULL_LINES: usize = 50_000;
 /// Lines asked for above and below those in view.
 const RANGE_MARGIN: usize = 100;
-/// How many line ranges a document asked by range keeps as answered
-/// (those away from every view going first).
+/// How many line ranges a document asked by range keeps as answered,
+/// when more are away from every view (those go, with their tokens).
 const MAX_COVERED: usize = 8;
+/// The most lines one ask by range is for.
+const MAX_RANGE_ASK: usize = 2_000;
 
 /// The longest wait before asking again after a refusal.
 const SEMANTIC_MAX_RETRY: Duration = Duration::from_secs(4);
@@ -73,7 +75,13 @@ pub(super) struct SemanticDoc {
     /// Asked by range: the lines answered (or tried and refused) since
     /// the last edit or refresh, and those each pane shows.
     pub(super) covered: Vec<Range<usize>>,
-    pub(super) views: std::collections::HashMap<fenix_window::WindowId, Range<usize>>,
+    pub(super) views: std::collections::HashMap<fenix_window::WindowId, Vec<Range<usize>>>,
+    /// The synced text as ropey holds it, built once a sync: what a
+    /// range's answer is decoded and its lines found against.
+    rope: tokens::Rope,
+    /// A refresh came while the ask out was: its answer is used, but its
+    /// lines aren't counted as answered.
+    refreshed_while_asking: bool,
     /// The lines the ask out is for, when it's by range.
     asked_lines: Option<Range<usize>>,
 }
@@ -104,6 +112,8 @@ impl SemanticDoc {
             extent: tokens::Extent::default(),
             covered: Vec::new(),
             views: std::collections::HashMap::new(),
+            rope: tokens::Rope::new(),
+            refreshed_while_asking: false,
             asked_lines: None,
         }
     }
@@ -142,33 +152,53 @@ fn by_range(provider: &tokens::Provider, extent: &tokens::Extent) -> bool {
     provider.range && (!provider.full || extent.lines > RANGE_LINES || extent.bytes > RANGE_BYTES)
 }
 
-/// `range` counted into `covered`, joined with any it touches; past
-/// `MAX_COVERED`, those no view reaches into go first, then the first
-/// answered.
-fn cover(covered: &mut Vec<Range<usize>>, range: Range<usize>, views: &std::collections::HashMap<fenix_window::WindowId, Range<usize>>) {
-    let mut joined = range;
-    covered.retain(|c| {
-        let touches = c.start <= joined.end && joined.start <= c.end;
-        if touches {
-            joined = joined.start.min(c.start)..joined.end.max(c.end);
+impl SemanticDoc {
+    /// Whether any pane's view reaches into `lines`.
+    fn viewed(&self, lines: &Range<usize>) -> bool {
+        self.views.values().flatten().any(|v| v.start < lines.end && lines.start < v.end)
+    }
+
+    /// `range` counted as answered, joined with any it touches. Past
+    /// `MAX_COVERED`, ranges no view reaches into go, and their tokens
+    /// with them; one a view needs never does, so a document with more
+    /// views than that keeps a range for each.
+    fn cover(&mut self, range: Range<usize>) {
+        let mut joined = range;
+        self.covered.retain(|c| {
+            let touches = c.start <= joined.end && joined.start <= c.end;
+            if touches {
+                joined = joined.start.min(c.start)..joined.end.max(c.end);
+            }
+            !touches
+        });
+        self.covered.push(joined);
+        while self.covered.len() > MAX_COVERED {
+            let Some(far) = self.covered.iter().position(|c| !self.viewed(c)) else { break };
+            let lines = self.covered.remove(far);
+            let chars = tokens::line_chars_in(&self.rope, lines);
+            self.tokens.retain(|t| t.end <= chars.start || t.start >= chars.end);
         }
-        !touches
-    });
-    covered.push(joined);
-    while covered.len() > MAX_COVERED {
-        let far = covered.iter().position(|c| !views.values().any(|v| v.start < c.end && c.start < v.end)).unwrap_or(0);
-        covered.remove(far);
+    }
+
+    /// `cover`, unless a refresh came while the ask was out: the server
+    /// may say otherwise now, so its lines are asked again.
+    fn cover_asked(&mut self, range: Range<usize>) {
+        if !std::mem::take(&mut self.refreshed_while_asking) {
+            self.cover(range);
+        }
     }
 }
 
-/// The lines a view still needs asked: the first view not all covered,
-/// with a margin, as far as the document goes.
+/// The lines a view still needs asked: the first part of a view not
+/// covered, with a margin, as far as the document goes and no more than
+/// `MAX_RANGE_ASK` lines.
 fn uncovered_view(doc: &SemanticDoc) -> Option<Range<usize>> {
-    let mut views: Vec<&Range<usize>> = doc.views.values().collect();
+    let mut views: Vec<&Range<usize>> = doc.views.values().flatten().collect();
     views.sort_by_key(|v| v.start);
     let view = views.into_iter().find(|v| !doc.covered.iter().any(|c| c.start <= v.start && v.end <= c.end))?;
     let lines = doc.extent.lines.max(1);
-    Some(view.start.saturating_sub(RANGE_MARGIN).min(lines - 1)..(view.end + RANGE_MARGIN).min(lines))
+    let start = view.start.saturating_sub(RANGE_MARGIN).min(lines - 1);
+    Some(start..(view.end + RANGE_MARGIN).min(lines).min(start + MAX_RANGE_ASK))
 }
 
 /// After `sync_lsp_document` sent `canonical`'s text: on opening (or a
@@ -197,7 +227,8 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
     if let Some(buffer) = buffer {
         doc.buffer = buffer;
     }
-    doc.extent = tokens::extent(new);
+    doc.rope = tokens::Rope::from_str(new);
+    doc.extent = tokens::extent_of(&doc.rope);
     match change {
         Some((old, old_count)) => {
             if doc.stamp == Some(old_count) && !doc.tokens.is_empty() {
@@ -262,6 +293,8 @@ fn ask(session: &mut LspSession, canonical: &Path, now: Instant) {
         }
     };
     if let Ok(id) = sent {
+        // Asked after any refresh there's been: that's answered.
+        doc.stale = false;
         doc.asking = Some(edit_count);
         doc.asked = Some((id, now));
         doc.asked_lines = match &how {
@@ -285,7 +318,7 @@ fn time_out(session: &mut LspSession, canonical: &Path, now: Instant) {
     // Lines asked by range that timed out: tried, until an edit or a
     // refresh, so a view on them doesn't ask again at once.
     if let Some(lines) = doc.asked_lines.take() {
-        cover(&mut doc.covered, lines, &doc.views);
+        doc.cover_asked(lines);
     }
     doc.due = (!doc.timed_out).then_some(now);
     doc.timed_out = true;
@@ -380,6 +413,11 @@ impl App {
         if !self.semantic_highlighting_on() {
             self.semantic_of.clear();
         }
+        // Nothing held and nothing to ask for: nothing to work out.
+        if self.semantic_of.is_empty() && self.lsp_sessions.values().all(|s| s.semantic.is_empty()) {
+            self.semantic_protected.clear();
+            return;
+        }
         // The panes on show in every frame, by what they show: a view of
         // one that no longer shows its buffer doesn't ask.
         let shown: std::collections::HashSet<(fenix_window::WindowId, BufferId)> = (0..self.frames.len())
@@ -388,6 +426,8 @@ impl App {
             .collect();
         let buffers = &self.buffers;
         self.semantic_of.retain(|b, _| buffers.get(*b).is_some());
+        let of = &self.semantic_of;
+        self.semantic_protected.retain(|b, _| of.contains_key(b));
         let of = &self.semantic_of;
         for (key, session) in self.lsp_sessions.iter_mut() {
             if session.semantic.is_empty() {
@@ -430,6 +470,7 @@ impl App {
         for doc in session.semantic.values_mut() {
             doc.stale = true;
             doc.covered.clear();
+            doc.refreshed_while_asking = doc.asking.is_some();
         }
         self.request_redraw_all();
     }
@@ -442,7 +483,7 @@ impl App {
     pub(super) fn semantic_tokens_answered(&mut self, key: &LspKey, path: PathBuf, edit_count: u64, how: SemanticAsk, request: i64, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         let synced = session.open_documents.get(&path).map(|&(count, _)| count);
-        let (Some(doc), Some(text)) = (session.semantic.get_mut(&path), session.synced_text.get(&path)) else { return };
+        let Some(doc) = session.semantic.get_mut(&path) else { return };
         // Not the ask that's out (one before the document was shown again,
         // or cancelled): what it says isn't wanted.
         if doc.asked.map(|(id, _)| id) != Some(request) {
@@ -454,9 +495,13 @@ impl App {
         let now = Instant::now();
         // Lines asked by range that came to nothing: tried, until an edit
         // or a refresh.
+        // ...and the next view not covered asked, if one is.
         let tried = |doc: &mut SemanticDoc| {
             if let SemanticAsk::Range(lines) = &how {
-                cover(&mut doc.covered, lines.clone(), &doc.views);
+                doc.cover_asked(lines.clone());
+                if uncovered_view(doc).is_some() {
+                    doc.due = Some(doc.due.unwrap_or(now));
+                }
             }
         };
         let answer = match result {
@@ -521,15 +566,16 @@ impl App {
                     doc.tokens.clear();
                     doc.covered.clear();
                 }
-                let chars = tokens::line_chars(text, lines.clone());
-                tokens::merge(&mut doc.tokens, tokens::decode(&data, text, &styles), chars);
-                cover(&mut doc.covered, lines, &doc.views);
+                let chars = tokens::line_chars_in(&doc.rope, lines.clone());
+                let answered = tokens::decode_in(&data, &doc.rope, &styles);
+                tokens::merge(&mut doc.tokens, answered, chars);
+                doc.cover_asked(lines);
                 // The next view not covered, if one is.
                 if uncovered_view(doc).is_some() {
                     doc.due = Some(now);
                 }
             }
-            None => doc.tokens = tokens::decode(&doc.data, text, &styles),
+            None => doc.tokens = tokens::decode_in(&doc.data, &doc.rope, &styles),
         }
         doc.stamp = Some(edit_count);
         doc.retry = SEMANTIC_PAUSE;
@@ -557,11 +603,12 @@ impl App {
         }
     }
 
-    /// `pane` showing `rows` lines of buffer `id` from line `base`: for a
-    /// document asked by range, those lines asked for when they're not
-    /// covered. Only a pane's own view counts -- not sticky scroll's
-    /// headers or a line looked up on its own, which use what's held.
-    pub(super) fn note_semantic_view(&mut self, id: BufferId, pane: fenix_window::WindowId, base: usize, rows: usize) {
+    /// `pane` showing `runs` of buffer `id`'s lines (each a run of lines
+    /// shown together, a closed fold between two): for a document asked
+    /// by range, those lines asked for when they're not covered. Only a
+    /// pane's own view counts -- not sticky scroll's headers or a line
+    /// looked up on its own, which use what's held.
+    pub(super) fn note_semantic_view(&mut self, id: BufferId, pane: fenix_window::WindowId, runs: &[Range<usize>]) {
         let Some(target) = self.semantic_of.get(&id) else { return };
         let Some(session) = self.lsp_sessions.get_mut(&target.key) else { return };
         let provider = session.capabilities.as_ref().and_then(tokens::provider);
@@ -570,14 +617,15 @@ impl App {
             return;
         }
         let lines = doc.extent.lines;
-        let view = base.min(lines)..(base + rows).min(lines);
+        let view: Vec<Range<usize>> = runs.iter().map(|r| r.start.min(lines)..r.end.min(lines)).filter(|r| !r.is_empty()).collect();
         if doc.views.get(&pane) == Some(&view) {
             return;
         }
         doc.views.insert(pane, view);
+        // Due now, unless it's waiting for typing to pause: then then.
         if doc.asking.is_none() && uncovered_view(doc).is_some() {
             let now = Instant::now();
-            doc.due = Some(doc.due.map_or(now, |due| due.min(now)));
+            doc.due = Some(doc.due.map_or(now, |due| due.max(now)));
         }
     }
 
