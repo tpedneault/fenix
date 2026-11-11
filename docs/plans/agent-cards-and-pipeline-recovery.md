@@ -179,7 +179,12 @@ file.* It makes the card that started this rarer; it isn't what fixes it.
 
 ## Tests
 
-Two that fail today, kept as the regressions:
+Two that fail today, kept as the regressions. Both were written and run
+against 1.5.0 for this plan: with a six-line heredoc as the title, *Yes*
+is on line 28 of the page and its chip and panel on row 23, one row off
+for each newline; and after a turn that ends `cancelled` there is no
+run, no gate and no strip, the thread marked `stopped: step plan ended:
+cancelled`, and a further turn on it that ends well brings nothing back.
 
 - `agent_page`: a permission card titled with a heredoc. The row of the
   text *Yes* is the row of its chosen chip and of its panel.
