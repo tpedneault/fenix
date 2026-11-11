@@ -131,6 +131,44 @@ A project from before `.fenix/settings.toml` kept these in
 `settings.toml`, its old `[tasks]` and `[launch]` into `tools.json` --
 and is deleted, so the change shows in `git status` for review.
 
+## .editorconfig
+
+Fenix reads [`.editorconfig`](https://editorconfig.org) files, so a
+repository's indentation and whitespace rules apply in Fenix as in every
+other editor. For a file, every `.editorconfig` from its folder up is
+read, stopping at one with `root = true`; a section whose glob matches
+the file (`[*]`, `[*.{js,ts}]`, `[src/**.rs]`, `[file{1..9}.txt]`...)
+gives its properties, a later section over an earlier one and a nearer
+file over a farther one. `SPC f c` (`file.editorconfig`) shows what
+applies to the focused file and from which files.
+
+| Property | What Fenix does |
+|---|---|
+| `indent_style` | `tab`: Tab, `>>` and the level Enter adds are a tab; `space`: spaces |
+| `indent_size` | Columns of a level, as `editor.indent_width` (`tab`: the tab width) |
+| `tab_width` | Columns a tab takes, as `editor.tab_width` |
+| `end_of_line` | `lf`, `crlf` or `cr`: every line ending made that one when the file is saved |
+| `charset` | `utf-8`, `utf-8-bom`, `utf-16le`, `utf-16be`, or `latin1` (written as Windows-1252): the file is saved in it |
+| `trim_trailing_whitespace` | `true`: spaces and tabs at line ends go when the file is saved |
+| `insert_final_newline` | `true`: a line ending is added at the end when the file is saved; `false` leaves the end as it is |
+
+What a save changes is one undo step. An auto-save leaves the line you're
+typing on untrimmed. `unset` takes a property back to what's below it.
+
+Where `.editorconfig` sits among the settings, highest first:
+
+1. the project's `.fenix/settings.toml` (an indent width set there is in
+   spaces, whatever `indent_style` says);
+2. `.editorconfig`;
+3. your `settings.toml`;
+4. Fenix's defaults.
+
+So a repository's `.editorconfig` beats your own preferences, as it does
+in every editor, and a project that wants Fenix to do otherwise says so
+in its own Fenix file. A `.editorconfig` is read again when you save one
+in Fenix, and on the disk check every few seconds. Files on a remote
+machine don't read theirs yet.
+
 ## Your own themes
 
 A theme is a `.toml` file in `themes\` beside `settings.toml`, in the
@@ -461,8 +499,8 @@ when it's out of date).
 | Setting | Takes | Default | What it does |
 |---|---|---|---|
 | **Editor** | | | |
-| `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts; Fenix always indents with spaces. *A project can set it.* |
-| `editor.tab_width` | 1–16 | 8 | Columns a tab character already in a file takes up. *A project can set it.* |
+| `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts. A file's .editorconfig comes before it (indent_size, and indent_style = tab for tabs); the project's own setting before both. *A project can set it.* |
+| `editor.tab_width` | 1–16 | 8 | Columns a tab character takes up. A file's .editorconfig (tab_width) comes before it; the project's own setting before both. *A project can set it.* |
 | `editor.wrap` | true / false | off | A line wider than its pane goes on under itself, at the pane's width; SPC t w (Alt+Z with standard keys) turns it on or off for one buffer until it's closed or Fenix restarts. Not tables, diffs, Git pages, terminals or a side by side. |
 | `editor.wrap_languages` | a list | markdown, text | Languages whose lines wrap whatever Wrap long lines says (markdown; text for .txt and .text files). |
 | `editor.nowrap_languages` | a list | none | Languages whose lines never wrap unless SPC t w says so: over Wrap long lines and the list of those that do. |

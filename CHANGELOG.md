@@ -16,6 +16,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Linux), the notice links to how. The doctor and Tool Status offer the
   same commands, Go and Lua included (#43). `lsp.offer_install` (on)
   turns the notice off.
+- `.editorconfig` is read: `indent_style` (tabs included), `indent_size`,
+  `tab_width`, and on save `end_of_line`, `charset`,
+  `trim_trailing_whitespace` and `insert_final_newline`, with `root =
+  true` and glob sections. It comes after a project's
+  `.fenix/settings.toml` and before your `settings.toml`. `SPC f c` shows
+  what applies to the file.
 
 ## [1.5.2] - 2026-11-11
 

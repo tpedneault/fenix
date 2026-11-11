@@ -186,6 +186,7 @@ keys'; the palette has the commands).
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |
 | `SPC f R` | Rename the current file on disk |
+| `SPC f c` | What `.editorconfig` says of this file (indent, line endings, whitespace), and from which files |
 | `SPC f D` | Delete the current file (with confirmation) |
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |

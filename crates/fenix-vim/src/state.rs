@@ -502,6 +502,9 @@ pub struct VimState {
     /// sw=N` (see `substitute::run_ex_command`), persisted by the host
     /// app the same way it already persists the theme/font size.
     indent_width: usize,
+    /// A level is a tab, not `indent_width` spaces: the host's to say,
+    /// for a file whose `.editorconfig` has `indent_style = tab`.
+    indent_tabs: bool,
     /// Whether the next Enter in Insert mode indents a level more, by the
     /// language's own rules (a grammar's `indents.scm`), over and above
     /// the bracket before the cursor: the host's to say, just before.
@@ -582,6 +585,7 @@ impl VimState {
             sub_confirm: None,
             last_visual_lines: None,
             indent_width: indent::DEFAULT_INDENT_WIDTH,
+            indent_tabs: false,
             syntax_indent: None,
             iskeyword_extra: crate::charclass::DEFAULT_ISKEYWORD_EXTRA.to_vec(),
             screen: std::sync::Arc::new(crate::screen::LineRows),
@@ -607,6 +611,25 @@ impl VimState {
     /// or not; `None` leaves it to the bracket before the cursor.
     pub fn set_syntax_indent(&mut self, indent: Option<bool>) {
         self.syntax_indent = indent;
+    }
+
+    /// Whether a level is a tab (`true`) or `indent_width` spaces: Tab,
+    /// `>>`, and the level Enter adds after an opening bracket.
+    pub fn set_indent_tabs(&mut self, tabs: bool) {
+        self.indent_tabs = tabs;
+    }
+
+    pub fn indent_tabs(&self) -> bool {
+        self.indent_tabs
+    }
+
+    /// One indent level, as typed.
+    fn indent_unit(&self) -> String {
+        if self.indent_tabs {
+            "\t".to_string()
+        } else {
+            " ".repeat(self.indent_width)
+        }
     }
 
     /// Sets the indent width directly -- used by the host app to apply a
@@ -1281,7 +1304,7 @@ impl VimState {
                 } else {
                     let mut new_indent = base_indent.clone();
                     if bumps {
-                        new_indent.push_str(&" ".repeat(self.indent_width));
+                        new_indent.push_str(&self.indent_unit());
                     }
                     // Enter right between an open/close bracket pair
                     // (`{|}`, almost always auto-paired a moment ago)
@@ -1322,18 +1345,21 @@ impl VimState {
                 }
             }
             KeyCode::Named(NamedKey::Tab) => {
-                // Soft-tab: spaces up to the next stop, not a literal
-                // '\t' -- the render pipeline has no tab-stop logic (see
-                // `indent.rs`'s doc comment), so a raw tab wouldn't align
-                // to anything. A char-at-a-time loop, not `insert_str`,
-                // so it coalesces with the surrounding Insert-mode run.
-                let (_, col) = buffer.line_col(cursor);
-                let n = indent::spaces_to_next_stop(col, self.indent_width);
-                for _ in 0..n {
-                    buffer.insert_char(cursor, ' ');
+                // Soft-tab: spaces up to the next stop, or a literal '\t'
+                // where the file indents with tabs (`indent_tabs`). A
+                // char-at-a-time loop, not `insert_str`, so it coalesces
+                // with the surrounding Insert-mode run.
+                let typed = if self.indent_tabs {
+                    "\t".to_string()
+                } else {
+                    let (_, col) = buffer.line_col(cursor);
+                    " ".repeat(indent::spaces_to_next_stop(col, self.indent_width))
+                };
+                for c in typed.chars() {
+                    buffer.insert_char(cursor, c);
                 }
                 if let Some(bi) = &mut self.block_insert {
-                    bi.typed.push_str(&" ".repeat(n));
+                    bi.typed.push_str(&typed);
                 }
             }
             KeyCode::Named(NamedKey::Left) => buffer.move_left(cursor),
@@ -1574,7 +1600,7 @@ impl VimState {
                 for line in first..=last {
                     for _ in 0..by {
                         if right {
-                            indent::indent_line(buffer, cursor, line, self.indent_width);
+                            indent::indent_line_with(buffer, cursor, line, &self.indent_unit());
                         } else {
                             indent::dedent_line(buffer, cursor, line, self.indent_width);
                         }
@@ -2093,7 +2119,7 @@ impl VimState {
                 let end_line = (line + count as usize - 1).min(motion::last_line(buffer));
                 for l in line..=end_line {
                     if action == VimAction::IndentLine {
-                        indent::indent_line(buffer, cursor, l, self.indent_width);
+                        indent::indent_line_with(buffer, cursor, l, &self.indent_unit());
                     } else {
                         indent::dedent_line(buffer, cursor, l, self.indent_width);
                     }
@@ -3195,7 +3221,7 @@ impl VimState {
                     let (line_lo, line_hi) = if anchor_was_top { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
                     for l in line_lo..=line_hi {
                         if *action == VisualAction::Indent {
-                            indent::indent_line(buffer, cursor, l, self.indent_width);
+                            indent::indent_line_with(buffer, cursor, l, &self.indent_unit());
                         } else {
                             indent::dedent_line(buffer, cursor, l, self.indent_width);
                         }
@@ -5857,6 +5883,23 @@ two
         keys(&mut vim, &mut b, &mut c, "0");
         keys(&mut vim, &mut b, &mut c, ">>");
         assert_eq!(b.text(), "      foo\n");
+    }
+
+    /// With tabs (`.editorconfig`'s `indent_style = tab`), a level is a
+    /// tab: Tab types one, `>>` adds one, `<<` takes one away.
+    #[test]
+    fn with_indent_tabs_a_level_is_a_tab() {
+        let mut b = buf("x\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_indent_tabs(true);
+        keys(&mut vim, &mut b, &mut c, ">>");
+        assert_eq!(b.text(), "\tx\n");
+        keys(&mut vim, &mut b, &mut c, "<<");
+        assert_eq!(b.text(), "x\n");
+        keys(&mut vim, &mut b, &mut c, "I");
+        named(&mut vim, &mut b, &mut c, NamedKey::Tab);
+        assert_eq!(b.text(), "\tx\n");
     }
 
     #[test]

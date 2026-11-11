@@ -345,8 +345,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
     use Category::*;
     vec![
         // Editor
-        s("editor.indent_width", Editor, "Indent width", Kind::Int { min: 1, max: 16 }, "Spaces a Tab or >> inserts; Fenix always indents with spaces.", field!(indent_width, usize_get, usize_set)).default("4").project(),
-        s("editor.tab_width", Editor, "Tab width", Kind::Int { min: 1, max: 16 }, "Columns a tab character already in a file takes up.", field!(tab_width, usize_get, usize_set)).default("8").project(),
+        s("editor.indent_width", Editor, "Indent width", Kind::Int { min: 1, max: 16 }, "Spaces a Tab or >> inserts. A file's .editorconfig comes before it (indent_size, and indent_style = tab for tabs); the project's own setting before both.", field!(indent_width, usize_get, usize_set)).default("4").project(),
+        s("editor.tab_width", Editor, "Tab width", Kind::Int { min: 1, max: 16 }, "Columns a tab character takes up. A file's .editorconfig (tab_width) comes before it; the project's own setting before both.", field!(tab_width, usize_get, usize_set)).default("8").project(),
 Setting::stored("editor.wrap", Editor, "Wrap long lines", Kind::Bool, "A line wider than its pane goes on under itself, at the pane's width; SPC t w (Alt+Z with standard keys) turns it on or off for one buffer until it's closed or Fenix restarts. Not tables, diffs, Git pages, terminals or a side by side.").with_default("off"),
         Setting::stored("editor.wrap_languages", Editor, "Languages that wrap", Kind::List, "Languages whose lines wrap whatever Wrap long lines says (markdown; text for .txt and .text files).").with_default("markdown, text"),
         Setting::stored("editor.nowrap_languages", Editor, "Languages that don't wrap", Kind::List, "Languages whose lines never wrap unless SPC t w says so: over Wrap long lines and the list of those that do.").with_default("none"),

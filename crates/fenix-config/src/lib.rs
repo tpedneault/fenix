@@ -16,6 +16,7 @@
 //! changes only the lines of the settings that changed (`toml_edit`), so
 //! comments and hand edits survive it.
 
+pub mod editorconfig;
 mod project;
 pub mod schema;
 pub mod keychain;

@@ -57,6 +57,14 @@ its extension. The rest is built into Fenix.
   stops at the end of `testing` -- `:set iskeyword+=X`/`iskeyword=X,Y`
   add to or replace the set outright. Persisted across restarts the
   same way `shiftwidth` already is.
+- **`.editorconfig`**: a repository's `.editorconfig` sets the focused
+  file's indent (spaces or tabs, how wide) and tab width as you move
+  between files, and on save its line endings, charset, trailing
+  whitespace and final newline -- one undo step. Sections, `root = true`
+  and the specification's globs are honoured; a project's
+  `.fenix/settings.toml` comes before it and your own settings after.
+  `SPC f c` shows what applies and from where. See
+  [CONFIGURATION.md](CONFIGURATION.md#editorconfig).
 - **Macros** (`q{a-zA-Z}` to record, a second bare `q` to stop, `@
   {register}` to replay, `@@` to repeat whichever was last played,
   `3@a`-style count prefix): real Vim's own model, not a separate

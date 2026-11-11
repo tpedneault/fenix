@@ -30,6 +30,7 @@ mod row_scroll;
 mod semantic;
 mod code_lens;
 mod server_install;
+mod editorconfig_host;
 use server_install::spawn_lsp_server;
 mod git_log_page;
 mod graph_draw;
@@ -5575,6 +5576,8 @@ pub struct App {
     lsp_failures: HashMap<LspKey, String>,
     /// A missing language server offered, asked about, or installing.
     server_install: server_install::InstallState,
+    /// What `.editorconfig` says of each file looked at, by path.
+    editorconfig_cache: HashMap<PathBuf, fenix_config::editorconfig::Properties>,
     /// Each project root's additional servers (`tools.json`'s
     /// `lsp.additional`), read once and again on `:lsp-restart`.
     lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
@@ -6436,6 +6439,7 @@ impl App {
             lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
             server_install: Default::default(),
+            editorconfig_cache: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
             next_lsp_fanout: 1,
@@ -7255,6 +7259,7 @@ impl App {
             }
         }
         self.refresh_project_settings(false);
+        self.apply_editorconfig();
         self.tell_extensions(Happened::FocusChanged);
         // Said before its servers would have started: they won't, yet.
         self.project_trust_notice();
@@ -8475,7 +8480,7 @@ impl App {
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return false };
         let params = lsp_types::DocumentFormattingParams {
             text_document,
-            options: lsp_types::FormattingOptions { tab_size: 4, insert_spaces: true, ..Default::default() },
+            options: lsp_types::FormattingOptions { tab_size: self.vim.indent_width() as u32, insert_spaces: !self.vim.indent_tabs(), ..Default::default() },
             work_done_progress_params: Default::default(),
         };
         match session.client.request::<lsp_types::request::Formatting>(params) {
@@ -9360,6 +9365,7 @@ impl App {
                 return;
             }
         }
+        self.editorconfig_before_save(id, None);
         let ob = self.open_mut();
         match ob.buffer.save() {
             Ok(()) => {
@@ -9401,6 +9407,10 @@ impl App {
         if let Some(project) = lsp_settings_file(path) {
             let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             self.lsp_settings_changed(&project, Some(&server));
+        }
+        // A `.editorconfig` of yours, saved: read again.
+        if path.file_name().is_some_and(|n| n == ".editorconfig") {
+            self.editorconfig_changed();
         }
     }
 
@@ -9519,6 +9529,7 @@ impl App {
         }
         for id in dirty {
             let name = self.buffer_display_name(id);
+            self.editorconfig_before_save(id, None);
             let Some(ob) = self.buffers.get_mut(id) else { continue };
             if let Err(err) = ob.buffer.save() {
                 self.set_error(format!("save failed for {name}: {err}"));

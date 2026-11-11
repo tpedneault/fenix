@@ -90,6 +90,11 @@ label = "rename file"
 command = "file.rename"
 
 [[leader]]
+keys = "SPC f c"
+label = "what .editorconfig says"
+command = "file.editorconfig"
+
+[[leader]]
 keys = "SPC f D"
 label = "delete file"
 command = "file.delete"
