@@ -19,7 +19,7 @@ mod test_at;
 pub use defs::{merge as merge_tasks, TaskDef};
 pub use location::{parse_path_position, PathPosition};
 pub use output::{find_location, parse_line, ParsedLine, TaskLocation};
-pub use test_at::test_at;
+pub use test_at::{test_at, test_lines};
 
 mod tests_count;
 pub use tests_count::test_counts;

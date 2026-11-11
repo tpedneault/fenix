@@ -30,6 +30,22 @@ pub fn test_at(path: &Path, text: &str, line: usize, root: &Path) -> Result<Task
     }
 }
 
+/// The lines (0-based) of `text` (the file at `path`, of the project at
+/// `root`) that declare a test `test_at` can run alone: where Fenix's own
+/// "Run test" lens goes.
+pub fn test_lines(path: &Path, text: &str, root: &Path) -> Vec<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    (0..lines.len())
+        .filter(|&i| match extension {
+            "rs" => rust_fn_name(lines[i]).is_some() && rust_is_test(&lines, i),
+            "py" => (python_def(lines[i], "def").is_some() || python_def(lines[i], "class").is_some()) && python_test(path, &lines, i, root).is_ok(),
+            "go" => lines[i].starts_with("func Test") && go_test(path, &lines, i, root).is_ok(),
+            _ => false,
+        })
+        .collect()
+}
+
 fn no_test(path: &Path, at: usize) -> String {
     format!("line {} of {} isn't in a test", at + 1, file_name(path))
 }
@@ -326,6 +342,17 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn a_file_s_test_lines_are_those_declaring_one() {
+        let rust = "fn helper() {}\n\n#[test]\nfn adds() {}\n\n#[cfg(test)]\nmod tests {\n    #[tokio::test]\n    async fn waits() {}\n}\n";
+        assert_eq!(test_lines(Path::new("/p/src/lib.rs"), rust, Path::new("/p")), [3, 8]);
+        let py = "def helper():\n    pass\n\ndef test_adds():\n    pass\n\nclass TestThings:\n    def test_one(self):\n        pass\n";
+        assert_eq!(test_lines(Path::new("/p/test_x.py"), py, Path::new("/p")), [3, 6, 7]);
+        let go = "package x\n\nfunc Add() {}\n\nfunc TestAdd(t *testing.T) {}\n";
+        assert_eq!(test_lines(Path::new("/p/x_test.go"), go, Path::new("/p")), [4]);
+        assert!(test_lines(Path::new("/p/a.txt"), "x", Path::new("/p")).is_empty());
     }
 
     const LIB: &str = r#"pub fn add(a: i32, b: i32) -> i32 {

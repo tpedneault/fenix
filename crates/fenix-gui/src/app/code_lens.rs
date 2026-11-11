@@ -52,8 +52,12 @@ impl LensDoc {
     }
 }
 
-/// What a lens on a row runs: its server and which of its lenses.
-pub(super) type LensTag = (LspKey, usize);
+/// What a lens on a row runs: its server and which of its lenses, or
+/// (`None`) which of Fenix's own.
+pub(super) type LensTag = (Option<LspKey>, usize);
+
+/// The title of Fenix's own lens over a test.
+const RUN_TEST_TITLE: &str = "▶ Run test";
 
 /// Whether `session` offers lenses.
 pub(super) fn offers(session: &LspSession) -> bool {
@@ -132,6 +136,40 @@ impl App {
         self.config.bool_value("lsp.code_lens").unwrap_or(false)
     }
 
+    /// Buffer `id`'s own "Run test" lenses, one over each test Fenix can
+    /// run alone (`fenix_tasks::test_lines`), worked out again only after
+    /// an edit. None with `lsp.code_lens_tests` off, lenses off, or no
+    /// lens layout for the buffer.
+    fn find_own_lenses(&mut self, id: BufferId) {
+        let wanted = self.code_lens_on() && self.config.bool_value("lsp.code_lens_tests").unwrap_or(true) && self.lens_of.contains_key(&id);
+        let Some(ob) = self.buffers.get(id).filter(|_| wanted) else {
+            self.own_lenses.remove(&id);
+            return;
+        };
+        let edit_count = ob.buffer.edit_count();
+        if self.own_lenses.get(&id).is_some_and(|(at, _)| *at == edit_count) {
+            return;
+        }
+        let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { return };
+        let root = super::tool_sessions::root_for_path(&path);
+        let own = fenix_tasks::test_lines(&path, &ob.buffer.text(), &root)
+            .into_iter()
+            .map(|line| {
+                let at = lsp_types::Position { line: line as u32, character: 0 };
+                lsp_types::CodeLens {
+                    range: lsp_types::Range { start: at, end: at },
+                    command: Some(lsp_types::Command {
+                        title: RUN_TEST_TITLE.into(),
+                        command: lens::RUN_TEST.into(),
+                        arguments: Some(vec![serde_json::json!(path.to_string_lossy()), serde_json::json!(line + 1)]),
+                    }),
+                    data: None,
+                }
+            })
+            .collect();
+        self.own_lenses.insert(id, (edit_count, own));
+    }
+
     /// Whether buffer `id`'s lenses may be asked for and drawn: the
     /// setting on, and its language not in `lsp.code_lens_off`.
     pub(super) fn code_lens_wanted(&self, id: BufferId) -> bool {
@@ -169,6 +207,7 @@ impl App {
             if self.buffers.get(buffer).is_none() {
                 self.lens_of.remove(&buffer);
                 self.lens_rows.remove(&buffer);
+                self.own_lenses.remove(&buffer);
             } else if let Some((keys, _)) = self.lens_of.get_mut(&buffer) {
                 // A server stopped: its lenses with it, the view kept.
                 let running: Vec<LspKey> = keys.iter().filter(|k| self.lsp_sessions.contains_key(*k)).cloned().collect();
@@ -317,13 +356,20 @@ impl App {
     /// laid out as rows above their lines (`App::set_virtual_rows`), and
     /// kept by line for what a click on one runs.
     pub(super) fn lay_out_lenses(&mut self, id: BufferId) {
+        self.find_own_lenses(id);
         let mut rows: BTreeMap<usize, LensRow<LensTag>> = BTreeMap::new();
         if let Some((keys, path)) = self.lens_of.get(&id) {
-            let all: Vec<(LensTag, &lsp_types::CodeLens)> = keys
+            let mut all: Vec<(LensTag, &lsp_types::CodeLens)> = keys
                 .iter()
                 .filter_map(|key| self.lsp_sessions.get(key).and_then(|s| s.lenses.get(path)).filter(|d| d.buffer == id).map(|d| (key, d)))
-                .flat_map(|(key, d)| d.lenses.iter().enumerate().map(move |(i, l)| ((key.clone(), i), l)))
+                .flat_map(|(key, d)| d.lenses.iter().enumerate().map(move |(i, l)| ((Some(key.clone()), i), l)))
                 .collect();
+            // Fenix's own "Run test", on a test's line where no server
+            // offers to run it.
+            let runs: HashSet<u32> = all.iter().filter(|(_, l)| l.command.as_ref().is_some_and(|c| c.command.to_lowercase().contains("run") || c.title.contains('▶'))).map(|(_, l)| l.range.start.line).collect();
+            if let Some((_, own)) = self.own_lenses.get(&id) {
+                all.extend(own.iter().enumerate().filter(|(_, l)| !runs.contains(&l.range.start.line)).map(|(i, l)| ((None, i), l)));
+            }
             rows = lens::rows(all);
         }
         let texts: BTreeMap<usize, Vec<String>> = rows.iter().map(|(&line, row)| (line, vec![row.text.clone()])).collect();
@@ -339,10 +385,12 @@ impl App {
     }
 }
 
-/// A lens to run: its server, its document, which of its lenses.
+/// A lens to run: its buffer, its server (`None`: one of Fenix's own),
+/// its document, which of its lenses.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct LensPick {
-    pub key: LspKey,
+    pub buffer: BufferId,
+    pub key: Option<LspKey>,
     pub path: PathBuf,
     pub index: usize,
 }
@@ -375,7 +423,7 @@ impl App {
         let lens_row = rows.get(&r.line)?;
         let (cols, (key, index)) = lens_row.spans.iter().find(|(c, _)| c.contains(&col))?;
         let path = self.lens_of.get(&buffer)?.1.clone();
-        Some((LensPick { key: key.clone(), path, index: *index }, r.line, cols.clone()))
+        Some((LensPick { buffer, key: key.clone(), path, index: *index }, r.line, cols.clone()))
     }
 
     /// The pointer moved to `pos` over `pane`: the lens under it (if any)
@@ -399,7 +447,15 @@ impl App {
     /// does for a command it's expected to run itself; why not, when it
     /// can't.
     pub(super) fn run_lens(&mut self, pick: &LensPick) {
-        let Some(session) = self.lsp_sessions.get_mut(&pick.key) else { return };
+        let Some(key) = &pick.key else {
+            // One of Fenix's own: the test at its line.
+            let Some(own) = self.own_lenses.get(&pick.buffer).and_then(|(_, own)| own.get(pick.index)).cloned() else { return };
+            if let lens::Action::RunTest { path, line } = lens::action(&own, |_| false) {
+                let _ = self.run_test_at(Path::new(&path), line);
+            }
+            return;
+        };
+        let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         let Some(code_lens) = session.lenses.get(&pick.path).and_then(|d| d.lenses.get(pick.index)).cloned() else { return };
         let caps = session.capabilities.clone().unwrap_or_default();
         match lens::action(&code_lens, |c| lens::executes(&caps, c)) {
@@ -416,7 +472,7 @@ impl App {
             lens::Action::ShowReferences { locations } if locations.is_empty() => self.set_message("no references"),
             lens::Action::ShowReferences { locations } => self.apply_lsp_references(locations),
             lens::Action::CargoRun(runnable) => {
-                let root = runnable.cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| pick.key.root.clone());
+                let root = runnable.cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| key.root.clone());
                 let mut args = runnable.cargo_args.clone();
                 if !runnable.executable_args.is_empty() {
                     args.push("--".into());
@@ -452,7 +508,7 @@ impl App {
         let picks: Vec<(String, LensPick)> = row
             .spans
             .iter()
-            .map(|(cols, (key, index))| (row.text.chars().skip(cols.start).take(cols.len()).collect(), LensPick { key: key.clone(), path: path.clone(), index: *index }))
+            .map(|(cols, (key, index))| (row.text.chars().skip(cols.start).take(cols.len()).collect(), LensPick { buffer, key: key.clone(), path: path.clone(), index: *index }))
             .collect();
         if let [(_, pick)] = picks.as_slice() {
             let pick = pick.clone();
