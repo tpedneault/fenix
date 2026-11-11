@@ -8,7 +8,7 @@
 //! The prompt itself is written in a buffer of its own under this page,
 //! with Vim's keys (`app/agents.rs`, the composer).
 
-use crate::page::{fit, frame, wrap, CardLook, Chip, Filter, Grid, Key, Page, Role};
+use crate::page::{fit, frame, one_line, str_cells, wrap, CardLook, Chip, Filter, Grid, Key, Page, Role};
 use fenix_acp::hub::{Link, ThreadId, Turn};
 use fenix_acp::protocol::{ContentBlock, PermissionKind, PlanStatus, ToolContent, ToolKind, ToolStatus};
 use fenix_acp::thread::{ElicitationState, Entry, NoticeKind, PermissionState, Thread};
@@ -105,8 +105,48 @@ fn command_shown(call: &fenix_acp::thread::ToolCall, status: &Status) -> Option<
             _ => None,
         })
     })?;
-    let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!line.is_empty() && !call.title.contains(&line)).then_some(line)
+    let line = one_line(&line);
+    (!line.is_empty() && !one_line(&call.title).contains(&line)).then_some(line)
+}
+
+/// The command a permission asks to run, whole: from the call's input,
+/// else its title when it's a command's (`execute`).
+fn asked_command(call: &fenix_acp::protocol::ToolCallFields) -> Option<String> {
+    let as_call = fenix_acp::thread::ToolCall { id: call.id.clone(), title: String::new(), kind: ToolKind::Other, status: ToolStatus::Pending, content: Vec::new(), locations: Vec::new(), raw_input: call.raw_input.clone(), raw_output: None };
+    let line = as_call.command_line().or_else(|| (call.kind == Some(ToolKind::Execute)).then(|| call.title.clone()).flatten())?;
+    (!line.trim().is_empty()).then_some(line)
+}
+
+/// Rows of a command, the most a question shows of it: its first.
+const COMMAND_HEAD: usize = 5;
+/// The rows of a command a question shows whole, at most; one longer
+/// shows its first five, how many more, and its last.
+const COMMAND_ROWS: usize = 8;
+
+/// A command's lines as rows `width` cells wide: `$ ` before the first,
+/// the rest under it, each wrapped where it has to be. Its indentation is
+/// kept; a tab is four spaces.
+fn command_rows(command: &str, width: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut rows = Vec::new();
+    for (i, line) in command.trim_end().lines().enumerate() {
+        let line: String = line.trim_end().replace('\t', "    ").chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let lead = if i == 0 { "$ " } else { "  " };
+        let mut piece = String::from(lead);
+        let mut used = 2;
+        for c in line.chars() {
+            let w = crate::page::char_cells(c);
+            if used + w > width {
+                rows.push(std::mem::take(&mut piece));
+                piece.push_str("  ");
+                used = 2;
+            }
+            used += w;
+            piece.push(c);
+        }
+        rows.push(piece);
+    }
+    rows
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -405,7 +445,18 @@ pub fn entry_text(entry: &Entry) -> String {
             }
             out
         }
-        Entry::Permission(card) => card.tool_call.title.clone().unwrap_or_default(),
+        // The whole command, then what the agent gave, as it gave it:
+        // what's asked can be read to its end before it's answered.
+        Entry::Permission(card) => {
+            let call = &card.tool_call;
+            let mut out = asked_command(call).or_else(|| call.title.clone()).unwrap_or_default();
+            if let Some(input) = &call.raw_input {
+                let input = serde_json::to_string_pretty(input).unwrap_or_default();
+                out.push_str("\n\n");
+                out.push_str(&input);
+            }
+            out
+        }
         Entry::Elicitation(card) => card.request.message.clone(),
         Entry::Notice(n) => n.text.clone(),
     }
@@ -458,6 +509,14 @@ fn diff_lines(old: &str, new: &str) -> Vec<String> {
         .filter(|(k, l)| !l.starts_with(' ') || changed.get(k.wrapping_sub(1)).copied().unwrap_or(false) || changed.get(k + 1).copied().unwrap_or(false))
         .map(|(_, l)| l)
         .collect()
+}
+
+/// A question answered, on a line: `✓ {what} — {answer}`, the question
+/// cut to leave the answer whole.
+fn answered(mark: &str, what: &str, answer: &str, width: usize) -> String {
+    let answer = fit(answer, width.saturating_sub(4).max(1));
+    let room = width.saturating_sub(str_cells(mark) + 1 + 3 + str_cells(&answer));
+    fit(&format!("{mark} {} — {answer}", fit(what, room)), width)
 }
 
 fn kind_mark(kind: ToolKind) -> &'static str {
@@ -557,11 +616,12 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
         let entry = &thread.entries[i];
         let top = y;
         let open = page.is_open(i, entry);
+        let mut focused = false;
         match entry {
             Entry::User { blocks, queued } => {
                 let mut x = g.put(y, left + 1, "› You", Role::Accent);
                 if *queued {
-                    g.put(y, x + 1, "(queued — C-c takes it back)", Role::Muted);
+                    g.put(y, x + 1, &fit("(queued — C-c takes it back)", (left + width).saturating_sub(x + 2)), Role::Muted);
                 }
                 y += 1;
                 for block in blocks {
@@ -612,7 +672,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 let (mark, role) = status_mark(call.status);
                 let mut x = g.put(y, left + 1, mark, role) + 1;
                 x = g.put(y, x, kind_mark(call.kind), Role::Muted) + 1;
-                g.put(y, x, &fit(&call.title, (left + width).saturating_sub(x + 1)), Role::Text);
+                g.put(y, x, &fit(&one_line(&call.title), (left + width).saturating_sub(x + 1)), Role::Text);
                 y += 1;
                 if let Some(command) = command_shown(call, status) {
                     g.put(y, left + 3, &fit(&format!("$ {command}"), inner.saturating_sub(1)), Role::Accent);
@@ -684,35 +744,82 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 }
             }
             Entry::Permission(card) => {
-                let title = card.tool_call.title.clone().unwrap_or_else(|| "a tool".into());
+                let title = one_line(card.tool_call.title.as_deref().unwrap_or(""));
+                let title = if title.is_empty() { "a tool".to_string() } else { title };
+                let fenix = card.tool_call.id.starts_with("fenix-pipeline-");
                 match &card.state {
                     PermissionState::Pending => {
-                        g.put(y, left + 1, &fit(&if card.tool_call.id.starts_with("fenix-pipeline-") { format!("? Fenix asks: {title}") } else { format!("? The agent asks to: {title}") }, width.saturating_sub(2)), Role::Warn);
-                        y += 1;
+                        let command = (!fenix).then(|| asked_command(&card.tool_call)).flatten();
+                        let room = width.saturating_sub(2);
+                        match &command {
+                            // What's asked to run, its own lines: the start
+                            // says what it is, the end is where a `&& rm -rf`
+                            // would be.
+                            Some(command) => {
+                                let lines = command.trim_end().lines().count();
+                                let head = if lines > 1 { format!("? The agent asks to run a command ({lines} lines)") } else { "? The agent asks to run a command".to_string() };
+                                g.put(y, left + 1, &fit(&head, room), Role::Warn);
+                                y += 1;
+                                let rows = command_rows(command, inner.saturating_sub(2));
+                                let shown: Vec<(String, Role)> = if rows.len() <= COMMAND_ROWS {
+                                    rows.into_iter().map(|r| (r, Role::Accent)).collect()
+                                } else {
+                                    let more = rows.len() - COMMAND_HEAD - 1;
+                                    let mut shown: Vec<(String, Role)> = rows[..COMMAND_HEAD].iter().map(|r| (r.clone(), Role::Accent)).collect();
+                                    shown.push((format!("  … {more} more lines · v shows it all …"), Role::Muted));
+                                    shown.push((rows[rows.len() - 1].clone(), Role::Accent));
+                                    shown
+                                };
+                                for (row, role) in shown {
+                                    g.put(y, left + 3, &fit(&row, inner.saturating_sub(2)), role);
+                                    y += 1;
+                                }
+                            }
+                            // Anything else: its title, on three rows at most.
+                            None => {
+                                let said = if fenix { format!("? Fenix asks: {title}") } else { format!("? The agent asks to: {title}") };
+                                let rows = wrap(&said, room.saturating_sub(2).max(1));
+                                let n = rows.len().min(3);
+                                for (i, row) in rows.iter().take(n).enumerate() {
+                                    let row = if i + 1 == n && rows.len() > n { fit(&format!("{row} {}", rows[n]), room.saturating_sub(2)) } else { row.clone() };
+                                    g.put(y, if i == 0 { left + 1 } else { left + 3 }, &row, Role::Warn);
+                                    y += 1;
+                                }
+                            }
+                        }
                         // One answer a line, each on its key's cap; the one
                         // `j` and `k` are on in the accent.
                         let on = page.chosen(card);
+                        let mut chosen_row = top;
                         for (n, option) in card.options.iter().enumerate() {
                             let chosen = n == on;
                             if chosen {
                                 // Its whole row, not only its cap.
                                 g.panels.push((y, left + 2..(left + width).saturating_sub(1)));
+                                chosen_row = y;
                             }
                             let x = g.chip(y, left + 3, &option_key(option, n), Role::Accent, if chosen { Chip::Chosen } else { Chip::Key });
-                            g.put(y, x + 2, &fit(&option.name, (left + width).saturating_sub(x + 3)), if chosen { Role::Accent } else { Role::Text });
+                            g.put(y, x + 2, &fit(&one_line(&option.name), (left + width).saturating_sub(x + 3)), if chosen { Role::Accent } else { Role::Text });
                             y += 1;
                         }
                         g.put(y, left + 3, &fit("j k choose · Enter answers · or its key, from anywhere", inner.saturating_sub(2)), Role::Muted);
                         y += 1;
                         // Waiting on you: outlined.
                         g.card(top..y, left..left + width, CardLook::Ask);
+                        // The answer chosen is the row kept in view, so the
+                        // answers are there in a dock too short for the
+                        // whole card.
+                        if i == page.focus {
+                            g.focus(chosen_row, left..left + width);
+                            focused = true;
+                        }
                     }
                     PermissionState::Answered(name) => {
-                        g.put(y, left, &fit(&format!("✓ {title} — {name}"), width), Role::Muted);
+                        g.put(y, left, &answered("✓", &title, &one_line(name), width), Role::Muted);
                         y += 1;
                     }
                     PermissionState::Withdrawn => {
-                        g.put(y, left, &fit(&format!("– {title} — not answered"), width), Role::Muted);
+                        g.put(y, left, &answered("–", &title, "not answered", width), Role::Muted);
                         y += 1;
                     }
                 }
@@ -722,7 +829,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 let url = e.mode == fenix_acp::protocol::ElicitMode::Url;
                 match &card.state {
                     ElicitationState::Pending => {
-                        for (i, line) in wrap(&format!("? The agent asks: {}", e.message), width).into_iter().enumerate() {
+                        for (i, line) in wrap(&format!("? The agent asks: {}", e.message), width.saturating_sub(2)).into_iter().enumerate() {
                             g.put(y, if i == 0 { left } else { left + 2 }, &line, Role::Warn);
                             y += 1;
                         }
@@ -759,10 +866,15 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                         } else {
                             &[("y", "answer"), ("n", "decline"), ("x", "cancel")]
                         };
+                        // As many a row as fit, the rest on the next.
                         let mut x = left + 2;
                         for (k, what) in keys {
+                            if x > left + 2 && x + k.chars().count() + 1 + what.chars().count() > left + width {
+                                y += 1;
+                                x = left + 2;
+                            }
                             x = g.chip(y, x, k, Role::Accent, Chip::Key) + 1;
-                            x = g.put(y, x, what, Role::Text) + 3;
+                            x = g.put(y, x, &fit(what, (left + width).saturating_sub(x)), Role::Text) + 3;
                         }
                         y += 1;
                         g.card(top..y, left..left + width, CardLook::Ask);
@@ -800,7 +912,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 }
             }
         }
-        if i == page.focus {
+        if i == page.focus && !focused {
             g.focus(top, left..left + width);
         }
         // A tool call starts or carries on a card; the next entry being
@@ -1100,6 +1212,167 @@ mod tests {
         page.key(&t, Key::Enter);
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
         assert!(text.contains("cargo test") && !text.contains("Fixed it."), "{text}");
+    }
+
+    /// The plan step's command that started this: a heredoc as the title.
+    fn heredoc() -> String {
+        "cat > /tmp/plan.md <<'EOF'\n# Plan\n1. Change a.rs\n2. Test it\n3. Ship\nEOF".to_string()
+    }
+
+    fn asking_with(tool_call: ToolCallFields) -> Thread {
+        let mut t = thread();
+        t.push_permission(PermissionCard {
+            key: "9".into(),
+            tool_call,
+            options: vec![
+                PermissionOption { id: "allow-once".into(), name: "Yes".into(), kind: PermissionKind::AllowOnce },
+                PermissionOption { id: "reject".into(), name: "No".into(), kind: PermissionKind::RejectOnce },
+            ],
+            state: PermissionState::Pending,
+        });
+        t
+    }
+
+    /// A permission card titled with a heredoc: the row of the text *Yes*
+    /// is the row of its chosen chip and of its panel, not one off for
+    /// each newline in the title.
+    #[test]
+    fn a_heredoc_title_keeps_the_answers_on_their_rows() {
+        let t = asking_with(ToolCallFields { id: "t9".into(), title: Some(heredoc()), kind: Some(ToolKind::Execute), ..Default::default() });
+        let mut page = AgentPage::new(ThreadId("x".into()));
+        page.follow_up(&t);
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100);
+        let yes = laid.text.lines().position(|l| l.contains("y  Yes")).expect("the answer is on the page");
+        let chosen: Vec<usize> = laid.chips.iter().filter(|(_, _, c)| *c == Chip::Chosen).map(|(l, _, _)| *l).collect();
+        assert_eq!(chosen, [yes], "the chip is on the text\n{}", laid.text);
+        assert!(laid.panels.iter().any(|(l, _)| *l == yes), "the panel is on the text: {:?}\n{}", laid.panels, laid.text);
+        assert_eq!(laid.text.lines().count(), laid.text.split('\n').count());
+    }
+
+    /// Text no row should break on: line breaks, tabs, `\r\n`, a control
+    /// character, a very long word, wide characters.
+    fn hostile() -> Vec<String> {
+        vec![
+            "one\ntwo\n\nthree\r\nfour\tfive\u{1b}[31m".to_string(),
+            "x".repeat(10_000),
+            "日本語のテキスト😀 ".repeat(40),
+            format!("{}\n{}", "長い".repeat(300), "a\tb\r\nc"),
+        ]
+    }
+
+    /// Every kind of entry in each of its states, each of its strings `s`.
+    fn hostile_thread(s: &str) -> Thread {
+        use fenix_acp::protocol::{ElicitMode, Elicitation, Field, FieldKind};
+        use fenix_acp::thread::ElicitationCard;
+        let mut t = Thread::default();
+        t.push_user(vec![ContentBlock::text(s)], false);
+        t.push_user(vec![ContentBlock::text(s)], true);
+        let mut updates = vec![
+            json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": s } }),
+            json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": s } }),
+            json!({ "sessionUpdate": "plan", "entries": [{ "content": s, "priority": "high", "status": "completed" }, { "content": s, "priority": "low", "status": "pending" }] }),
+        ];
+        for (n, status) in ["pending", "in_progress", "completed", "failed"].iter().enumerate() {
+            updates.push(json!({ "sessionUpdate": "tool_call", "toolCallId": format!("e{n}"), "title": s, "kind": "execute", "status": status, "rawInput": { "command": s }, "content": [{ "type": "content", "content": { "type": "text", "text": s } }, { "type": "terminal", "terminalId": "term" }] }));
+            updates.push(json!({ "sessionUpdate": "tool_call", "toolCallId": format!("d{n}"), "title": s, "kind": "edit", "status": status, "content": [{ "type": "diff", "path": s, "oldText": s, "newText": format!("{s}\nmore") }], "locations": [{ "path": s, "line": 3 }] }));
+        }
+        for u in updates {
+            t.apply(SessionUpdate::parse(&u), false);
+        }
+        let options = vec![
+            PermissionOption { id: "allow-once".into(), name: s.into(), kind: PermissionKind::AllowOnce },
+            PermissionOption { id: "reject".into(), name: s.into(), kind: PermissionKind::RejectOnce },
+        ];
+        for (n, state) in [PermissionState::Answered(s.into()), PermissionState::Withdrawn, PermissionState::Pending].into_iter().enumerate() {
+            for (m, kind) in [Some(ToolKind::Execute), Some(ToolKind::Edit), None].into_iter().enumerate() {
+                let id = if m == 2 { format!("fenix-pipeline-gate-{n}") } else { format!("p{n}{m}") };
+                t.push_permission(PermissionCard { key: format!("{n}{m}"), tool_call: ToolCallFields { id, title: Some(s.into()), kind, raw_input: (m == 0).then(|| json!({ "command": s })), ..Default::default() }, options: options.clone(), state: state.clone() });
+            }
+        }
+        let field = Field { name: "f".into(), title: s.into(), description: Some(s.into()), kind: FieldKind::Choice { options: vec![("a".into(), s.into())], multi: false }, default: Some(json!(s)), required: true };
+        for state in [ElicitationState::Answered { action: s.into(), summary: s.into() }, ElicitationState::Completed, ElicitationState::Withdrawn, ElicitationState::Pending] {
+            for mode in [ElicitMode::Url, ElicitMode::Form] {
+                let request = Elicitation { mode, message: s.into(), tool_call_id: None, fields: vec![field.clone()], url: Some(s.into()), elicitation_id: None };
+                t.push_elicitation(ElicitationCard { key: "e".into(), request, state: state.clone() });
+            }
+        }
+        for kind in [NoticeKind::Error, NoticeKind::Warning, NoticeKind::Login, NoticeKind::Interrupted, NoticeKind::Info] {
+            t.notice(kind, s);
+        }
+        t.modes = Some(fenix_acp::protocol::Modes { current: "m".into(), available: vec![fenix_acp::protocol::Mode { id: "m".into(), name: s.into(), description: None }] });
+        t
+    }
+
+    /// Whatever text it's given, at 30, 60 and 110 columns, open or
+    /// folded: as many lines as rows, nothing past the edge in cells,
+    /// every chip on its own text, no control character drawn.
+    #[test]
+    fn hostile_text_keeps_every_card_to_its_rows_and_width() {
+        for s in hostile() {
+            let t = hostile_thread(&s);
+            let mut status = Status { agent: s.clone(), state: s.clone(), logins: vec![("a".into(), s.clone())], ..status() };
+            status.terminals.insert("term".into(), TermView { line: s.clone(), tail: s.clone(), exit: Some(fenix_acp::protocol::ExitStatus { code: Some(1), signal: None }) });
+            for open in [false, true] {
+                let mut page = AgentPage::new(ThreadId("x".into()));
+                page.follow_up(&t);
+                if open {
+                    page.open = (0..t.entries.len()).collect();
+                }
+                for cols in [30, 60, 110] {
+                    let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status, cols);
+                    let lines: Vec<&str> = laid.text.split('\n').collect();
+                    let what = format!("{cols} columns, open {open}, text {:?}", s.chars().take(20).collect::<String>());
+                    assert!(laid.text.chars().all(|c| c == '\n' || !c.is_control()), "a control character drawn: {what}");
+                    let over = crate::page::overflow(&laid, cols);
+                    assert!(over.is_empty(), "{what}: {over:#?}");
+                    for (line, range, chip) in &laid.chips {
+                        if matches!(chip, Chip::Switch(_)) {
+                            continue;
+                        }
+                        let text: String = lines[*line].chars().skip(range.start).take(range.len()).collect();
+                        assert!(!text.trim().is_empty(), "{what}: a chip on line {line} {range:?} over {:?}", lines[*line]);
+                    }
+                    for card in &laid.cards {
+                        assert!(card.lines.end <= lines.len(), "{what}: a card past the page");
+                    }
+                }
+            }
+        }
+    }
+
+    /// In a dock too short for the whole card, the row kept in view is the
+    /// answer chosen, not the card's first: the answers are on screen.
+    #[test]
+    fn the_answers_stay_in_view_in_a_short_dock() {
+        let command = (1..=30).map(|n| format!("echo {n}")).collect::<Vec<_>>().join("\n");
+        let t = asking_with(ToolCallFields { id: "t9".into(), title: Some(command.clone()), kind: Some(ToolKind::Execute), raw_input: Some(json!({ "command": command })), ..Default::default() });
+        let mut page = AgentPage::new(ThreadId("x".into()));
+        page.follow_up(&t);
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 70);
+        let yes = laid.text.lines().position(|l| l.contains("y  Yes")).unwrap();
+        assert_eq!(page.focus, t.entries.len() - 1);
+        assert_eq!(laid.cursor().0, yes, "the chosen answer is the row kept in view\n{}", laid.text);
+        let ask = laid.text.lines().position(|l| l.contains("asks to run a command (30 lines)")).unwrap();
+        assert!(yes - ask <= 9, "at most eight rows of the command above the answers\n{}", laid.text);
+        let text = laid.text.clone();
+        for want in ["$ echo 1", "echo 5", "… 24 more lines · v shows it all …", "echo 30"] {
+            assert!(text.contains(want), "missing {want:?}\n{text}");
+        }
+        assert!(!text.contains("echo 6\n"), "{text}");
+        // `v`: the whole command, then its input as the agent gave it.
+        let Action::View(shown) = page.key(&t, Key::Char('v')) else { panic!() };
+        assert!(shown.starts_with("echo 1\necho 2\n") && shown.contains("echo 30\n\n{"), "{shown}");
+    }
+
+    /// A long title cut on the line it's answered on keeps the answer.
+    #[test]
+    fn an_answered_question_keeps_its_answer() {
+        let mut t = thread();
+        t.push_permission(PermissionCard { key: "1".into(), tool_call: ToolCallFields { id: "t".into(), title: Some(format!("{}\nmore", "long ".repeat(40))), ..Default::default() }, options: Vec::new(), state: PermissionState::Answered("Yes, and don't ask again".into()) });
+        let page = AgentPage::new(ThreadId("x".into()));
+        let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 60).text;
+        let line = text.lines().find(|l| l.contains("✓ long")).unwrap();
+        assert!(line.ends_with("— Yes, and don't ask again") && line.contains("…"), "{line}");
     }
 
     #[test]
