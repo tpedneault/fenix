@@ -1612,7 +1612,7 @@ impl VimState {
                 for c in typed.chars() {
                     buffer.insert_char(cursor, c);
                 }
-                self.insert_typed.push_str(&" ".repeat(n));
+                self.insert_typed.push_str(&typed);
                 if let Some(bi) = &mut self.block_insert {
                     bi.typed.push_str(&typed);
                 }
