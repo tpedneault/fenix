@@ -29,14 +29,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checked against real Vim (`dev/vim-conformance/check.py`) that `cargo
   test` holds Fenix to.
 
-### Fixed
-
-- Vim: `dj`, `dk`, `cj`, `yk` and the like take whole lines, as in Vim
-  (they took the text between the two cursor positions); `dd` lands on
-  the first non-blank; deleting the last lines takes the line break
-  before them; `yy` leaves the cursor where it was; linewise `p` after a
-  last line with no line break; `{count}r` and `5x` leave the cursor where
-  Vim does; `J` adds no space before a `)` or after a blank.
 - A file whose built-in language server isn't installed (rust-analyzer,
   pyright, clangd, gopls, ...) brings a notice with the command that
   installs it; `SPC l i` (or the notice's action) shows the command and
@@ -65,22 +57,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `fenix/state` reports `stats`: frames drawn and wake-ups since Fenix
   started, to check that an idle Fenix stays idle. (#74)
 
-### Fixed
-
-- An idle window draws nothing and hardly wakes: the disk check and the
-  modeline's Git status, every two seconds, no longer redraw the window
-  when they find nothing new, nor does the Git page's status rewrite
-  itself; and the clock that times extensions' calls sleeps while none
-  runs, rather than waking 100 times a second. With 40 extensions on
-  Linux, 20 s idle went from 20 frames and 170 thread wake-ups a second
-  to none and 3. (#74)
-- The extensions that start with Fenix load once its window has drawn
-  its first frame, rather than alongside it: with 40, the first frame
-  came about 200 ms sooner, as soon as with none. (#33)
-- An extension installed from a terminal (`fenix --install-extension`)
-  is put in use by the Fenix that's running within a few seconds, as one
-  installed from the Extensions page is, rather than at the next start;
-  the command says so. (#40)
 - Remote projects (preview): a terminal opened in one is a shell on its
   machine, Git is that machine's `git` (the status page, staging,
   commits, diffs, the gutter, the log, branches, rebases, the explorer's
@@ -106,11 +82,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   page (`SPC h ?`) says whose each chord is. Writing extensions has a
   section on them, and the store's JetBrains keys is the first.
 
-### Fixed
-
-- With standard keys, `Alt+F5` and `Alt+Shift+F5` go to the next and
-  previous changed hunk, as the keys table says, rather than starting
-  or stopping the debugger.
 - Screen readers, a first step: Fenix tells Narrator, NVDA, JAWS, Orca
   or VoiceOver the text you're in with its cursor and selection, an
   open prompt, the modeline, and each change of mode and message,
@@ -120,6 +91,32 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (docs/plans/screen-reader.md).
 
 ### Fixed
+
+- Vim: `dj`, `dk`, `cj`, `yk` and the like take whole lines, as in Vim
+  (they took the text between the two cursor positions); `dd` lands on
+  the first non-blank; deleting the last lines takes the line break
+  before them; `yy` leaves the cursor where it was; linewise `p` after a
+  last line with no line break; `{count}r` and `5x` leave the cursor where
+  Vim does; `J` adds no space before a `)` or after a blank.
+
+- An idle window draws nothing and hardly wakes: the disk check and the
+  modeline's Git status, every two seconds, no longer redraw the window
+  when they find nothing new, nor does the Git page's status rewrite
+  itself; and the clock that times extensions' calls sleeps while none
+  runs, rather than waking 100 times a second. With 40 extensions on
+  Linux, 20 s idle went from 20 frames and 170 thread wake-ups a second
+  to none and 3. (#74)
+- The extensions that start with Fenix load once its window has drawn
+  its first frame, rather than alongside it: with 40, the first frame
+  came about 200 ms sooner, as soon as with none. (#33)
+- An extension installed from a terminal (`fenix --install-extension`)
+  is put in use by the Fenix that's running within a few seconds, as one
+  installed from the Extensions page is, rather than at the next start;
+  the command says so. (#40)
+
+- With standard keys, `Alt+F5` and `Alt+Shift+F5` go to the next and
+  previous changed hunk, as the keys table says, rather than starting
+  or stopping the debugger.
 
 - Text sent as Unicode characters rather than key presses (Windows'
   `SendInput` with `KEYEVENTF_UNICODE`: dictation, the on-screen
