@@ -302,8 +302,9 @@ lenses are off by default until stage 6.
     when the cursor is on the top line's first text row with the lens
     hidden, so `gg`, `k` and the wheel reach it.
   - Off the rows (above, below, right of a line's end, a drag past an
-    edge), a hit is where the line path has it, through the sideways
-    scroll. A lens row is no place in the text: a click, drag or hover
+    edge) in a pane that doesn't wrap, a hit is where the line path has
+    it, through the sideways scroll. A wrapped pane keeps soft wrap's
+    own: the line before the first row shown, or after the last. A lens row is no place in the text: a click, drag or hover
     there moves no cursor and scrolls nothing.
   - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
     lens rows counted (`page_by_rows`), as in a wrapped pane.
