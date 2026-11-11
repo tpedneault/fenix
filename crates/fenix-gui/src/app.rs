@@ -54,11 +54,13 @@ mod polish;
 mod which_key;
 mod keys_host;
 pub(crate) use keys_host::translate_leader;
+pub(crate) use a11y_host::{adapter_for as a11y_adapter_for, wanted as a11y_wanted};
 mod edit_commands;
 mod carets;
 mod updates;
 mod auto_save;
 mod problems;
+mod a11y_host;
 #[cfg(test)]
 mod test_keys;
 #[cfg(test)]
@@ -1909,6 +1911,9 @@ struct GitPrompt {
 /// do* -- `App::user_event` decides the "do."
 #[derive(Debug)]
 pub enum FenixUserEvent {
+    /// The main window's accessibility adapter: the tree asked for, an
+    /// action, the assistive technology gone (`a11y_host`).
+    Accessibility(accesskit_winit::Event),
     /// The machine was asleep this long (`watchdog`). Winit doesn't say.
     Woke(Duration),
     /// One decoded event from a language server's connection (a
@@ -2366,6 +2371,7 @@ impl FenixUserEvent {
     /// Which event this is, for the hang log (`watchdog`).
     fn label(&self) -> &'static str {
         match self {
+            Self::Accessibility(_) => "Accessibility",
             Self::Woke(_) => "Woke",
             Self::Lsp { .. } => "Lsp",
             Self::LspStarted(_) => "LspStarted",
@@ -4763,6 +4769,8 @@ struct FrameState {
 }
 
 pub struct App {
+    /// What a screen reader is told (`a11y_host`).
+    a11y: a11y_host::A11yHost,
     /// Every open frame, in a stable order -- `frames[0]` is the one
     /// the app started with. Each entry holds that frame's state *while
     /// it is parked*, and is `None` for exactly one index --
@@ -6512,6 +6520,7 @@ impl App {
             frames_presented: 0,
             first_frame_due: None,
             status_message: None,
+            a11y: Default::default(),
             quit_confirm: false,
         }
     }
@@ -16507,6 +16516,7 @@ impl App {
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
+            FenixUserEvent::Accessibility(event) => self.a11y_event(event),
             FenixUserEvent::Woke(slept) => self.machine_woke(slept, Instant::now()),
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
             FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
@@ -22977,6 +22987,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => "the window's size",
             _ => "a window event",
         });
+        self.a11y_window_event(id, &event);
         let Some(frame) = self.frame_index_of(id) else { return };
         // Every event is handled with the frame it arrived from active,
         // so the handlers below -- all written against one implicit
@@ -23204,6 +23215,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _profile = crate::profile::Scope::new("about_to_wait");
+        // A screen reader hears what the events just handled changed.
+        self.a11y_update();
         let now = Instant::now();
         let mut needs_redraw = false;
 

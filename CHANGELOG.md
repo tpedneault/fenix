@@ -6,6 +6,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Screen readers, a first step: Fenix tells Narrator, NVDA, JAWS, Orca
+  or VoiceOver the text you're in with its cursor and selection, an
+  open prompt, the modeline, and each change of mode and message,
+  through AccessKit. Nothing is worked out until a screen reader asks;
+  `accessibility.screen_reader` turns it off. Pickers, which-key, the
+  terminal and the other panes are the next steps
+  (docs/plans/screen-reader.md).
+
 ### Fixed
 
 - Text sent as Unicode characters rather than key presses (Windows'

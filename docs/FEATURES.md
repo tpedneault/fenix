@@ -835,6 +835,15 @@ its extension. The rest is built into Fenix.
     the edge you'd type at. Motions, edits and column numbers still go
     by the text's own (logical) order, and a whole right-to-left
     paragraph isn't right-aligned: Fenix has no right-to-left mode.
+  - *Screen readers.* Fenix tells a screen reader (Narrator, NVDA,
+    JAWS, Orca, VoiceOver) about the text you're in: its lines around
+    the cursor, the cursor and the selection, so moving reads the line,
+    word or character you land on; a prompt (`:`, `/`, a rename) as you
+    type in it; the modeline; and each change of mode and each message
+    as it comes, errors at once. Nothing is worked out until a screen
+    reader asks. Pickers, which-key, the terminal and the other panes
+    come next -- see [the plan](plans/screen-reader.md).
+    `accessibility.screen_reader` (on) turns it off, from the next start.
 
 ## Containers
 

@@ -63,6 +63,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "1"
 unicode-width = "0.2"
 unicode-bidi = "0.3.18"
+accesskit = "0.25.2"
+accesskit_winit = "0.34.2"
 fenix-storage = { path = "../fenix-storage" }
 vt100 = "0.16"
 wgpu = "30.0.1"
@@ -77,4 +79,5 @@ fenix-brand = { path = "../fenix-brand", features = ["ico"] }
 
 [dev-dependencies]
 tempfile = "3"
+accesskit_consumer = "0.39.2"
 minisign-verify = "0.2"
