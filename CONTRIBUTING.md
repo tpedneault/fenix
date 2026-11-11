@@ -70,7 +70,7 @@ From the user's point of view:
 
 So a release whose changelog has an **Added** section is a minor, not a
 patch. [docs/RELEASING.md](docs/RELEASING.md) says what each kind may
-carry, the cadence proposed for them, and how pre-releases would work.
+carry, how often they come, and how the nightly is built.
 
 To release, move the **Unreleased** entries in the changelog under the
 new version, bump `version` in `Cargo.toml`, merge the release branch to

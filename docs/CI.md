@@ -74,5 +74,18 @@ Inno Setup 6), and the Linux archive with its `.deb` and `.rpm`
 the workspace version in `Cargo.toml`, and `CHANGELOG.md` must have an
 entry for it.
 
+The nightly, `nightly.yml`, runs every night (03:41 UTC) and by hand
+(Actions, Nightly, Run workflow; `force` builds even when nothing
+changed). Its first job takes seconds on Linux: when `master`'s head is
+the commit the `nightly` tag already points at, nothing else runs, so a
+quiet night costs no build minutes. Otherwise it builds `master`'s head
+with the same reusable workflow as a release, `build.yml`, stamped
+`1.6.0-nightly.YYYYMMDD`, and replaces the files and notes of the
+rolling `nightly` pre-release. What it decides is `scripts/nightly.sh`,
+whose tests (`scripts/nightly-test.sh`) run in the Linux job above,
+with a check that `dpkg` (and `rpm`, where installed) sort the nightly's
+package versions between the releases around it.
+[Releasing](RELEASING.md#the-nightly) has the details.
+
 Action references: [checkout](https://github.com/actions/checkout) and
 [upload-artifact](https://github.com/actions/upload-artifact).

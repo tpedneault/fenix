@@ -33,7 +33,8 @@ pub struct HomeData {
     pub sections: Vec<HomeSection>,
     /// Unsaved buffers a previous session left recoverable (`SPC f v`).
     pub recovery: usize,
-    /// A newer Fenix is out: "Fenix 1.6.0 is out -- ..." (`updates.check`).
+    /// A newer Fenix is out: "Fenix 1.6.0 is out -- ..." (`updates.check`),
+    /// or which nightly this is: "Nightly 1.6.0-nightly.20261112 (...)".
     pub update: Option<String>,
 }
 

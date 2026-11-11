@@ -489,15 +489,28 @@ downloaded or installed: get the new one from the releases page as you
 got this one. What it found last is kept in `updates.json` in Fenix's
 state folder, so a restart doesn't ask again.
 
-Pre-releases (tagged `vX.Y.Z-rc.N`, marked as pre-releases on GitHub)
-are left out unless you turn on `updates.prereleases`: then the check
-reads the recent releases rather than the latest, and Home says so when
-a pre-release newer than yours is out -- *Fenix 1.7.0-rc.1 (a
-pre-release) is out*. A release still counts, so a pre-release's
-release is offered when it comes. Turning it off again goes back to
-releases alone at once. Just turned on, it shows pre-releases from the
-next daily look; `app.check_for_updates` looks straight away. [Releasing](RELEASING.md) says what a
-pre-release is for.
+`updates.channel` says which builds it tells you about. `stable`, the
+default, is releases alone: the nightly is never mentioned. With
+`nightly`, the check also reads the rolling `nightly` release (built
+from `master` each night it changed, versioned
+`1.6.0-nightly.20261112`), and Home says so when a nightly newer than
+yours is out -- *Fenix 1.6.0-nightly.20261113 (0123456789ab) (nightly)
+is out*, with the commit it was built from. A release newer than the
+nightly you're running is still offered, so a nightly's release comes
+when it's out. Back on `stable`, Home goes back to releases alone at
+once. Just switched to `nightly`, it shows nightlies from the next daily
+look; `app.check_for_updates` looks straight away.
+
+```toml
+[updates]
+check = true
+channel = "nightly"
+```
+
+A nightly build says which one it is on Home, under the date, when
+nothing newer is out (*Nightly 1.6.0-nightly.20261112 (0123456789ab)*),
+and in `fenix --version`. [Releasing](RELEASING.md) says how to get
+one and what it's for.
 
 When an extension seems to be the trouble, `fenix --disable-extensions`
 starts in safe mode: the core alone, with nothing read from an installed
@@ -635,7 +648,7 @@ when it's out of date).
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
 | `updates.check` | true / false | off | Once a day, ask GitHub whether there's a newer release of Fenix, and say so on Home. Nothing is downloaded. app.check_for_updates looks whenever you ask, this on or off. |
-| `updates.prereleases` | true / false | off | The update check also says when a pre-release (vX.Y.Z-rc.N) newer than your Fenix is out, for trying what's next before it's released. Off: releases alone. |
+| `updates.channel` | stable / nightly | stable | Which builds the update check tells you about. Stable: releases alone. Nightly: also the nightly build of master (1.6.0-nightly.YYYYMMDD), for trying what's next before it's released; a release newer than your nightly is still offered. |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
 | **Extensions** | | | |
 | `extensions.store` | true / false | on | Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext). |

@@ -150,7 +150,7 @@ impl App {
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
         let sections = self.home_sections(None);
-        let update = self.update_notice();
+        let update = self.home_update_line();
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {

@@ -1,0 +1,175 @@
+name: Nightly
+
+# The nightly build: master's head, built each night it changed, as one
+# rolling GitHub release tagged `nightly` -- a pre-release, never
+# "latest", so the stable download links and `releases/latest` don't
+# move. Its files are a release's (build.yml) under names that are the
+# same every night (fenix-nightly-...), stamped with a version like
+# 1.6.0-nightly.20261112 (the next minor, dated: scripts/nightly.sh).
+# Nothing is committed to master for it.
+#
+# When master hasn't moved since the last nightly, nothing is built: the
+# first job, on Linux and in seconds, compares master's head with the
+# commit the `nightly` tag points at (and its notes' record of it) and
+# every other job waits on its answer. Run by hand (Actions, Nightly,
+# Run workflow) it builds master's head the same way; `force` builds it
+# even when it hasn't changed.
+
+on:
+  schedule:
+    # Every night, at a time few other schedules want.
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Build even if master has no new commits since the last nightly'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  check:
+    name: Anything new on master?
+    # Not on a fork's schedule.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'tpedneault/fenix'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      commit: ${{ steps.decide.outputs.commit }}
+      last: ${{ steps.decide.outputs.last }}
+      version: ${{ steps.decide.outputs.version }}
+      numeric: ${{ steps.decide.outputs.numeric }}
+      date: ${{ steps.decide.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: master
+      - name: Decide
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORCE: ${{ inputs.force && 'true' || 'false' }}
+        run: |
+          head=$(git rev-parse HEAD)
+          # What the last nightly was built from: where its tag points,
+          # when its notes' record says the same. When they disagree, the
+          # last publish didn't finish, and it's built again.
+          tagged=$(gh api "repos/$GH_REPO/git/ref/tags/nightly" --jq '.object.sha' 2> /dev/null || true)
+          last_version="" recorded=""
+          if gh release view nightly --json body --jq .body > last-notes.md 2> /dev/null; then
+            read -r last_version recorded < <(scripts/nightly.sh record last-notes.md) || true
+          fi
+          echo "master: $head; the nightly tag: ${tagged:-none}; its notes: ${recorded:-none} (${last_version:-no version})"
+          built=""
+          if [ -n "$tagged" ] && [ "$tagged" = "$recorded" ]; then
+            built=$tagged
+          elif [ -n "$tagged$recorded" ]; then
+            echo "::warning::the nightly tag and its notes disagree: building again"
+          fi
+          build=$(scripts/nightly.sh needs-build "$head" "$built" "$FORCE")
+          workspace=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          date=$(date -u +%Y%m%d)
+          version=$(scripts/nightly.sh version "$workspace" "$date" "$last_version")
+          {
+            echo "build=$build"
+            echo "commit=$head"
+            echo "last=$recorded"
+            echo "version=$version"
+            # Windows' version resource: the numbers alone.
+            echo "numeric=${version%%-*}.0"
+            echo "date=$(date -u +%F)"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$build" = true ]; then
+            echo "Building Fenix $version from $head" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "master is still at $head, the last nightly's commit: nothing built" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    name: Build
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    # build.yml's jobs may upload to a release; this run's keep their
+    # files as artifacts instead.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+      name: fenix-nightly
+      ref: ${{ needs.check.outputs.commit }}
+      stamp: true
+      packages-name: fenix-nightly
+      numeric-version: ${{ needs.check.outputs.numeric }}
+
+  publish:
+    name: Publish the nightly
+    needs: [check, build]
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.check.outputs.version }}
+      COMMIT: ${{ needs.check.outputs.commit }}
+      LAST: ${{ needs.check.outputs.last }}
+      DATE: ${{ needs.check.outputs.date }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ needs.check.outputs.commit }}
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: build-*
+          path: dist
+          merge-multiple: true
+      - name: Check the files
+        run: |
+          cd dist
+          ls -l
+          sha256sum -c ./*.sha256
+          for f in fenix-nightly-x86_64-pc-windows-msvc.zip fenix-nightly-x86_64-pc-windows-msvc-setup.exe \
+                   fenix-nightly-x86_64-unknown-linux-gnu.tar.gz fenix-nightly_amd64.deb fenix-nightly.x86_64.rpm; do
+            test -f "$f" && test -f "$f.sha256" || { echo "::error::no $f"; exit 1; }
+          done
+      - name: The notes
+        run: |
+          scripts/nightly.sh notes "$VERSION" "$COMMIT" "$DATE" "$GH_REPO" "$LAST" < CHANGELOG.md > notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish
+        run: |
+          # The tag first, at the commit built (made, or moved).
+          if gh api "repos/$GH_REPO/git/ref/tags/nightly" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$COMMIT" -F force=true > /dev/null
+          else
+            gh api -X POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/nightly -f sha="$COMMIT" > /dev/null
+          fi
+          if gh release view nightly > /dev/null 2>&1; then
+            # Last night's files replaced by tonight's, of the same names;
+            # any other is removed.
+            gh release upload nightly dist/* --clobber
+            gh release view nightly --json assets --jq '.assets[].name' | while read -r asset; do
+              [ -e "dist/$asset" ] || gh release delete-asset nightly "$asset" --yes
+            done
+            # The notes last: their record says the publish finished.
+            gh release edit nightly --title "Fenix $VERSION" --notes-file notes.md --prerelease --latest=false
+          else
+            gh release create nightly --verify-tag --title "Fenix $VERSION" --notes-file notes.md --prerelease --latest=false dist/*
+          fi
+          echo "Published Fenix $VERSION: https://github.com/$GH_REPO/releases/tag/nightly" >> "$GITHUB_STEP_SUMMARY"

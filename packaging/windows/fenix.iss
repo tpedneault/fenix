@@ -2,6 +2,14 @@
 ;
 ;   iscc /DAppVersion=2.2.1 /DSourceDir=<folder with fenix.exe> /DOutputDir=<where> packaging\windows\fenix.iss
 ;
+; The nightly workflow builds it too, with a pre-release AppVersion
+; (1.6.0-nightly.20261112), the numbers alone for Windows' version
+; resource (/DNumericVersion=1.6.0.0) and a name that's the same every
+; night (/DOutputName=fenix-nightly-x86_64-pc-windows-msvc-setup). It's
+; the same AppId, so a nightly installs over a release, and the next
+; release over it, in place: every file is copied whatever its version
+; (ignoreversion), and Programs and Features shows AppVersion.
+;
 ; For you alone by default -- no administrator needed, in
 ; %LOCALAPPDATA%\Programs\Fenix -- or for everyone on the machine, in
 ; Program Files, when you pick that. A newer installer upgrades the one
@@ -16,6 +24,14 @@
 #endif
 #ifndef OutputDir
   #define OutputDir "..\..\dist"
+#endif
+; Windows' version resource takes numbers alone (a.b.c.d): a release's
+; version is that already.
+#ifndef NumericVersion
+  #define NumericVersion AppVersion
+#endif
+#ifndef OutputName
+  #define OutputName "fenix-" + AppVersion + "-x86_64-pc-windows-msvc-setup"
 #endif
 
 [Setup]
@@ -45,8 +61,8 @@ RestartApplications=no
 ChangesEnvironment=yes
 ChangesAssociations=yes
 OutputDir={#OutputDir}
-OutputBaseFilename=fenix-{#AppVersion}-x86_64-pc-windows-msvc-setup
-VersionInfoVersion={#AppVersion}
+OutputBaseFilename={#OutputName}
+VersionInfoVersion={#NumericVersion}
 VersionInfoProductName=Fenix
 VersionInfoDescription=Fenix installer
 

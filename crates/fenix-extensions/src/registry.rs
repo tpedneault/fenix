@@ -165,7 +165,7 @@ impl Listing {
                 crate::manifest::Runtime::Wasm => r.api.as_deref().is_some_and(crate::manifest::api_fits),
                 crate::manifest::Runtime::Lua => false,
             })
-            .filter(|r| semver::VersionReq::parse(&r.fenix).is_ok_and(|req| req.matches(fenix)))
+            .filter(|r| semver::VersionReq::parse(&r.fenix).is_ok_and(|req| crate::manifest::fenix_fits(&req, fenix)))
             .filter_map(|r| semver::Version::parse(&r.version).ok().map(|v| (v, r)))
             .max_by(|a, b| a.0.cmp(&b.0))
             .map(|(_, r)| r)
@@ -379,6 +379,8 @@ mod tests {
         let index = registry.index(&fake).unwrap();
         let dusk = &index.extensions[0];
         assert_eq!(dusk.latest_for(&fenix()).map(|r| r.version.as_str()), Some("1.1.0"), "not 2.0.0 (a later Fenix) nor 1.5.0 (code for no API)");
+        let nightly = semver::Version { pre: semver::Prerelease::new("nightly.20261112").unwrap(), ..fenix() };
+        assert_eq!(dusk.latest_for(&nightly).map(|r| r.version.as_str()), Some("1.1.0"), "a nightly is offered what its release is");
         let mut code = dusk.clone();
         code.versions[3].api = Some("1.0".into());
         assert_eq!(code.latest_for(&fenix()).map(|r| r.version.as_str()), Some("1.5.0"), "code for this API");
