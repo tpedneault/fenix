@@ -825,6 +825,7 @@ impl App {
             (KeyCode::Named(FenixNamedKey::Right), true) if typing => Key::WordRight,
             (KeyCode::Named(FenixNamedKey::Backspace), true) if typing => Key::DeleteWordBack,
             (KeyCode::Char('w'), true) if typing => Key::DeleteWordBack,
+            (KeyCode::Char('u'), true) if typing => Key::DeleteToStart,
             (_, true) => return false,
             (KeyCode::Char(' '), false) if claims_space => Key::Space,
             (KeyCode::Char(':'), false) if typing => Key::Char(':'),

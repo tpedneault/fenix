@@ -11,6 +11,32 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `updates.prereleases`, off by default: with `updates.check` on, Home
   also says when a pre-release (`vX.Y.Z-rc.N`) newer than yours is out,
   marked as one. Turned off again, it's back to releases alone at once.
+- Vim: the motions `ge` `gE` `g_` `|` `+` `-` `_` `Enter` `(` `)` and `H`
+  `M` `L`; searches (`d/foo<CR>`, `dn`, `d*`) and marks (`d'a`, `` y`a ``)
+  as an operator's target, and Visual's; ``` `` ``` and `''` back to
+  where the last jump left (#22).
+- Vim: `R` (Replace mode, Backspace putting back what was there), the
+  `gU` `gu` `g~` `g?` operators, `gq` and `gw` (wrap at `:set tw=N`, 79
+  without), `>` and `<` with any motion, `!{motion}` and `:{range}!` to
+  filter lines through a command, `gJ`, `gi`, `gI`, `U`, Visual `Ctrl-A`
+  and `g Ctrl-A`, and counts on `.` (`2.`), `i`, `a`, `o` and `R` (#23).
+- Vim: Insert's `Ctrl-W`, `Ctrl-U`, `Ctrl-H`, `Ctrl-R {register}`,
+  `Ctrl-T` and `Ctrl-D`; pickers' queries (find file and the rest) take
+  `Ctrl-W` and `Ctrl-U`, and a page's fields `Ctrl-U` (#25).
+- `edit.wrap_lines`, `edit.upper_case`, `edit.lower_case` and
+  `edit.join_lines`, for either key scheme, in the palette.
+- [Differences from Vim](docs/VIM_DIFFERENCES.md), and a suite of cases
+  checked against real Vim (`dev/vim-conformance/check.py`) that `cargo
+  test` holds Fenix to.
+
+### Fixed
+
+- Vim: `dj`, `dk`, `cj`, `yk` and the like take whole lines, as in Vim
+  (they took the text between the two cursor positions); `dd` lands on
+  the first non-blank; deleting the last lines takes the line break
+  before them; `yy` leaves the cursor where it was; linewise `p` after a
+  last line with no line break; `{count}r` and `5x` leave the cursor where
+  Vim does; `J` adds no space before a `)` or after a blank.
 
 ## [1.5.2] - 2026-11-11
 

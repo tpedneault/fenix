@@ -1,0 +1,1050 @@
+# Vim conformance: each case is a start text (`|` is the cursor), the keys
+# typed (Vim's notation: <Esc>, <CR>, <BS>, <C-w>, <lt> for `<`), and what
+# Vim leaves -- the text and cursor (`end:`) and, where given, the unnamed
+# register (`reg:`).
+#
+# `cargo test -p fenix-vim --test vim_conformance` holds Fenix to every
+# case. `python3 dev/vim-conformance/check.py` runs them through real Vim
+# (`--write` takes Vim's results). A case Fenix means to do differently
+# says so in `differs:` and isn't checked against Vim; each one is in
+# docs/VIM_DIFFERENCES.md.
+#
+# Values are JSON strings: "\n" is a newline.
+
+# -- Motions -------------------------------------------------------------
+
+w moves to the next word
+  start: "|foo bar.baz"
+  keys: ww
+  end: "foo bar|.baz"
+
+b and e
+  start: "foo bar |baz"
+  keys: bbe
+  end: "fo|o bar baz"
+
+ge goes back to the end of the previous word
+  start: "one two |three"
+  keys: ge
+  end: "one tw|o three"
+
+ge from inside a word
+  start: "one tw|o"
+  keys: ge
+  end: "on|e two"
+
+ge stops at punctuation
+  start: "foo.b|ar"
+  keys: ge
+  end: "foo|.bar"
+
+gE skips punctuation
+  start: "a foo.b|ar"
+  keys: gE
+  end: "|a foo.bar"
+
+ge crosses lines
+  start: "one\n|two"
+  keys: ge
+  end: "on|e\ntwo"
+
+ge stops at an empty line
+  start: "one\n\n|two"
+  keys: ge
+  end: "one\n|\ntwo"
+
+2ge
+  start: "a b c |d"
+  keys: 2ge
+  end: "a |b c d"
+
+dge deletes back to the previous word's end, inclusive
+  start: "one two |three"
+  keys: dge
+  end: "one tw|hree"
+  reg: "o t"
+
+g_ goes to the last non-blank
+  start: "|  foo bar   "
+  keys: g_
+  end: "  foo ba|r   "
+
+2g_ goes a line down
+  start: "|one\ntwo  \nthree"
+  keys: 2g_
+  end: "one\ntw|o  \nthree"
+
+dg_ keeps trailing blanks
+  start: "a|bc   "
+  keys: dg_
+  end: "a|   "
+
+| goes to a column
+  start: "|abcdefgh"
+  keys: 5|
+  end: "abcd|efgh"
+
+| without a count goes to column 1
+  start: "abc|def"
+  keys: |
+  end: "|abcdef"
+
+d| is exclusive
+  start: "abcde|fgh"
+  keys: d2|
+  end: "a|fgh"
+
++ and - go to the first non-blank
+  start: "|a\n  b\n    c"
+  keys: ++-
+  end: "a\n  |b\n    c"
+
+Enter goes down a line
+  start: "|a\n  b"
+  keys: <CR>
+  end: "a\n  |b"
+
+d+ deletes two lines
+  start: "|a\nb\nc"
+  keys: d+
+  end: "|c"
+  reg: "a\nb\n"
+
+d- deletes this line and the one before
+  start: "a\nb\n|c"
+  keys: d-
+  end: "|a"
+
+_ is the first non-blank, a count lines down
+  start: "  a|b\n  cd"
+  keys: 2_
+  end: "  ab\n  |cd"
+
+d2_ deletes two lines
+  start: "|a\nb\nc"
+  keys: d2_
+  end: "|c"
+
+) goes to the next sentence
+  start: "|One two. Three four. Five."
+  keys: )
+  end: "One two. |Three four. Five."
+
+2) goes two sentences on
+  start: "|One two. Three four. Five."
+  keys: 2)
+  end: "One two. Three four. |Five."
+
+( goes to the start of the sentence
+  start: "One two. Three fo|ur. Five."
+  keys: (
+  end: "One two. |Three four. Five."
+
+(( goes to the sentence before
+  start: "One two. Three fo|ur. Five."
+  keys: ((
+  end: "|One two. Three four. Five."
+
+) stops at an empty line
+  start: "|One two\n\nThree."
+  keys: )
+  end: "One two\n|\nThree."
+
+) after an empty line
+  start: "One two\n|\nThree."
+  keys: )
+  end: "One two\n\n|Three."
+
+d) deletes to the next sentence
+  start: "|One two. Three."
+  keys: d)
+  end: "|Three."
+
+) after a closing quote
+  start: "|He said \"hi.\" Then left."
+  keys: )
+  end: "He said \"hi.\" |Then left."
+
+H goes to the window's first line
+  start: "a\nb\n|c\nd\ne"
+  keys: H
+  end: "|a\nb\nc\nd\ne"
+
+L goes to the last line
+  start: "|a\nb\nc"
+  keys: L
+  end: "a\nb\n|c"
+
+M goes to the middle line
+  start: "|a\nb\nc\nd\ne"
+  keys: M
+  end: "a\nb\n|c\nd\ne"
+
+dL deletes to the window's last line
+  start: "a\n|b\nc\nd"
+  keys: dL
+  end: "|a"
+
+2H
+  start: "a\nb\n|c"
+  keys: 2H
+  end: "a\n|b\nc"
+
+dj deletes two lines
+  start: "|one\ntwo\nthree"
+  keys: dj
+  end: "|three"
+  reg: "one\ntwo\n"
+
+dk deletes this line and the one above
+  start: "one\n|two\nthree"
+  keys: dk
+  end: "|three"
+
+dj on the last line does nothing
+  start: "one\n|two"
+  keys: dj
+  end: "one\n|two"
+
+cj changes two lines, keeping one
+  start: "|  one\n  two\nthree"
+  keys: cjX<Esc>
+  end: "  |X\nthree"
+
+yj yanks two lines
+  start: "o|ne\ntwo\nthree"
+  keys: yj
+  end: "o|ne\ntwo\nthree"
+  reg: "one\ntwo\n"
+
+gg and G
+  start: "a\nb\n|c"
+  keys: ggjG
+  end: "a\nb\n|c"
+
+3G goes to line 3
+  start: "|a\nb\nc\nd"
+  keys: 3G
+  end: "a\nb\n|c\nd"
+
+{ and }
+  start: "|a\nb\n\nc\n\nd"
+  keys: }}{
+  end: "a\nb\n|\nc\n\nd"
+
+f t ; ,
+  start: "|a,b,c,d"
+  keys: f,;;,
+  end: "a,b|,c,d"
+
+dt deletes till a char
+  start: "|foo(bar)"
+  keys: dt(
+  end: "|(bar)"
+
+% jumps to the matching bracket
+  start: "|(a [b] c)"
+  keys: %
+  end: "(a [b] c|)"
+
+d% deletes through the match
+  start: "x |(a b) y"
+  keys: d%
+  end: "x | y"
+
+0 ^ $
+  start: "  a|bc"
+  keys: 0^$
+  end: "  ab|c"
+
+# -- Searches and marks as an operator's target --------------------------
+
+d/ deletes up to the match
+  start: "|alpha beta gamma"
+  keys: d/gamma<CR>
+  end: "|gamma"
+  reg: "alpha beta "
+
+d? deletes back to the match
+  start: "alpha beta |gamma"
+  keys: d?alpha<CR>
+  end: "|gamma"
+
+dn deletes to the next match of the last search
+  start: "|x a x b x"
+  keys: /x<CR>0dn
+  end: "|x b x"
+
+y/ yanks up to the match, across lines
+  start: "|one\ntwo three"
+  keys: y/three<CR>
+  end: "|one\ntwo three"
+  reg: "one\ntwo "
+
+d* deletes to the next occurrence of the word
+  start: "|foo bar foo"
+  keys: d*
+  end: "|foo"
+
+d'a deletes by lines to a mark
+  start: "|a\nb\nc\nd"
+  keys: majjd'a
+  end: "|d"
+
+d`a deletes exactly to a mark
+  start: "ab|cdef"
+  keys: mallld`a
+  end: "ab|f"
+
+y`a yanks to a mark
+  start: "ab|cdef"
+  keys: ma$y`a
+  end: "ab|cdef"
+  reg: "cde"
+
+# -- Operators -----------------------------------------------------------
+
+dw
+  start: "|one two"
+  keys: dw
+  end: "|two"
+  reg: "one "
+
+d2w and 2dw
+  start: "|a b c d e"
+  keys: d2w2dw
+  end: "|e"
+
+cw stops at the word's end
+  start: "|foo bar"
+  keys: cwX<Esc>
+  end: "|X bar"
+
+dd lands on the first non-blank
+  start: "|a\n   b\nc"
+  keys: dd
+  end: "   |b\nc"
+  reg: "a\n"
+
+3dd
+  start: "|a\nb\nc\nd"
+  keys: 3dd
+  end: "|d"
+
+yy and p
+  start: "|a\nb"
+  keys: yyp
+  end: "a\n|a\nb"
+
+x and P
+  start: "|abc"
+  keys: xP
+  end: "|abc"
+
+da( deletes the brackets too
+  start: "f(a, \"hello\" |b)"
+  keys: da(
+  end: "|f"
+
+ci" changes inside quotes
+  start: "f(a, \"he|llo\")"
+  keys: ci"X<Esc>
+  end: "f(a, \"|X\")"
+
+ciw
+  start: "foo b|ar baz"
+  keys: ciwX<Esc>
+  end: "foo |X baz"
+
+gUiw uppercases a word
+  start: "foo b|ar baz"
+  keys: gUiw
+  end: "foo |BAR baz"
+
+gUw from the cursor
+  start: "|foo bar"
+  keys: gUw
+  end: "|FOO bar"
+
+gU$ to the line's end
+  start: "foo |bar baz"
+  keys: gU$
+  end: "foo |BAR BAZ"
+
+gUU uppercases the line, cursor kept
+  start: "foo b|ar"
+  keys: gUU
+  end: "|FOO BAR"
+
+gUgU too
+  start: "foo b|ar"
+  keys: gUgU
+  end: "|FOO BAR"
+
+2gUU two lines
+  start: "|a\nb\nc"
+  keys: 2gUU
+  end: "|A\nB\nc"
+
+gUj two lines
+  start: "|ab\ncd\nef"
+  keys: gUj
+  end: "|AB\nCD\nef"
+
+guiw lowercases
+  start: "FOO B|AR"
+  keys: guiw
+  end: "FOO |bar"
+
+guu lowercases the line
+  start: "FOO |BAR"
+  keys: guu
+  end: "|foo bar"
+
+g~w toggles case
+  start: "|Hello World"
+  keys: g~w
+  end: "|hELLO World"
+
+g~~ toggles the line
+  start: "|Hello World"
+  keys: g~~
+  end: "|hELLO wORLD"
+
+g?? rot13s the line
+  start: "|Hello, World"
+  keys: g??
+  end: "|Uryyb, Jbeyq"
+
+g?w rot13s a word
+  start: "|abc xyz"
+  keys: g?w
+  end: "|nop xyz"
+
+g?g? too
+  start: "|abc"
+  keys: g?g?
+  end: "|nop"
+
+gU{motion} backwards moves to the start
+  start: "foo ba|r"
+  keys: gUb
+  end: "foo |BAr"
+
+>> indents a line
+  start: "|a\nb"
+  keys: >>
+  end: "    |a\nb"
+
+>j indents two lines
+  start: "|a\nb\nc"
+  keys: >j
+  end: "    |a\n    b\nc"
+
+>ip indents a paragraph
+  start: "|a\nb\n\nc"
+  keys: >ip
+  end: "    |a\n    b\n\nc"
+
+<< dedents
+  start: "      |a"
+  keys: <lt><lt>
+  end: "  |a"
+
+3>> indents three lines
+  start: "|a\nb\nc\nd"
+  keys: 3>>
+  end: "    |a\n    b\n    c\nd"
+
+# -- J and gJ ------------------------------------------------------------
+
+J joins with a space
+  start: "|one\n   two"
+  keys: J
+  end: "one| two"
+
+3J joins three lines
+  start: "|a\nb\nc\nd"
+  keys: 3J
+  end: "a b| c\nd"
+
+J before a closing paren adds no space
+  start: "|foo(\n)"
+  keys: J
+  end: "foo(|)"
+
+J after a trailing space adds none
+  start: "|one \ntwo"
+  keys: J
+  end: "one |two"
+
+J with an empty next line
+  start: "|one\n\ntwo"
+  keys: J
+  end: "on|e\ntwo"
+
+gJ joins with nothing between
+  start: "|one\n   two"
+  keys: gJ
+  end: "one|   two"
+
+3gJ joins three lines
+  start: "|a\nb\nc"
+  keys: 3gJ
+  end: "ab|c"
+
+# -- gq and gw -----------------------------------------------------------
+
+gqq wraps a long line at 79
+  start: "|aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp qqqq rrrr"
+  keys: gqq
+  end: "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp\n|qqqq rrrr"
+
+gqip joins a paragraph's short lines
+  start: "|one\ntwo\nthree\n\nfour"
+  keys: gqip
+  end: "|one two three\n\nfour"
+
+gqap goes past the paragraph
+  start: "|one\ntwo\n\nfour"
+  keys: gqap
+  end: "one two\n|\nfour"
+
+gq keeps the indent
+  start: "|    one\n    two"
+  keys: gqj
+  end: "    |one two"
+
+gwip keeps the cursor on its word
+  start: "one\nt|wo\nthree"
+  keys: gwip
+  end: "one t|wo three"
+
+# -- R -------------------------------------------------------------------
+
+R overwrites
+  start: "|abcdef"
+  keys: RXY<Esc>
+  end: "X|Ycdef"
+
+R types past the line's end
+  start: "a|b\nc"
+  keys: RXYZ<Esc>
+  end: "aXY|Z\nc"
+
+R and Backspace puts the text back
+  start: "|abcdef"
+  keys: RXYZ<BS><BS><Esc>
+  end: "|Xbcdef"
+
+3R repeats
+  start: "|abcdefgh"
+  keys: 3Rxy<Esc>
+  end: "xyxyx|ygh"
+
+# -- U -------------------------------------------------------------------
+
+U undoes every change on the line
+  start: "|one two three"
+  keys: xxwdw$x0U
+  end: "|one two three"
+
+U again redoes them
+  start: "|one two"
+  keys: xxUU
+  end: "|e two"
+
+u undoes U
+  start: "|abc"
+  keys: xUu
+  end: "|bc"
+
+# -- gi and gI -----------------------------------------------------------
+
+gi inserts where Insert was left
+  start: "|one two three"
+  keys: wiX<Esc>0giY<Esc>
+  end: "one X|Ytwo three"
+
+gI inserts at column 1
+  start: "    |foo"
+  keys: gIX<Esc>
+  end: "|X    foo"
+
+# -- Counts on Insert ----------------------------------------------------
+
+3i repeats what's typed
+  start: "|x"
+  keys: 3iab<Esc>
+  end: "ababa|bx"
+
+2o opens two lines
+  start: "|a"
+  keys: 2ob<Esc>
+  end: "a\nb\n|b"
+
+3a
+  start: "|x"
+  keys: 3a-<Esc>
+  end: "x--|-"
+
+# -- Insert-mode keys ----------------------------------------------------
+
+Ctrl-W deletes the word before the cursor
+  start: "|"
+  keys: afoo bar<C-w>baz<Esc>
+  end: "foo ba|z"
+
+Ctrl-W deletes punctuation by itself
+  start: "|"
+  keys: afoo.bar<C-w><C-w>X<Esc>
+  end: "foo|X"
+
+Ctrl-W over blanks takes the word before them
+  start: "|"
+  keys: aone two   <C-w>X<Esc>
+  end: "one |X"
+
+Ctrl-W at a line's start joins
+  start: "one\n|two"
+  keys: i<C-w><Esc>
+  end: "on|etwo"
+
+Ctrl-U deletes to the indent
+  start: "    |"
+  keys: Afoo bar<C-u>X<Esc>
+  end: "    |X"
+
+Ctrl-U at the indent deletes it
+  start: "    |"
+  keys: A<C-u>X<Esc>
+  end: "|X"
+
+Ctrl-H is Backspace
+  start: "|"
+  keys: aabc<C-h>X<Esc>
+  end: "ab|X"
+
+Ctrl-R inserts a register
+  start: "|foo"
+  keys: yiwA <C-r>"<Esc>
+  end: "foo fo|o"
+
+Ctrl-R a named register
+  start: "|foo bar"
+  keys: "ayiwA <C-r>a<Esc>
+  end: "foo bar fo|o"
+
+Ctrl-R Ctrl-R inserts literally too
+  start: "|foo"
+  keys: yiwA-<C-r><C-r>"<Esc>
+  end: "foo-fo|o"
+
+Ctrl-R . inserts what was last typed
+  start: "|"
+  keys: ihi<Esc>A <C-r>.<Esc>
+  end: "hi h|i"
+
+Ctrl-T indents the line
+  start: "|foo"
+  keys: A<C-t>X<Esc>
+  end: "    foo|X"
+
+Ctrl-D dedents the line
+  start: "        |foo"
+  keys: A<C-d>X<Esc>
+  end: "    foo|X"
+
+Ctrl-T keeps the cursor on its text
+  start: "fo|o"
+  keys: i<C-t>X<Esc>
+  end: "    fo|Xo"
+
+# -- Visual --------------------------------------------------------------
+
+v d
+  start: "|abcdef"
+  keys: vlld
+  end: "|def"
+  reg: "abc"
+
+V y p
+  start: "|a\nb"
+  keys: Vyjp
+  end: "a\nb\n|a"
+
+Visual gU
+  start: "|abc def"
+  keys: vegU
+  end: "|ABC def"
+
+Visual g?
+  start: "|abc def"
+  keys: veg?
+  end: "|nop def"
+
+Visual U and u
+  start: "|abc DEF"
+  keys: veUwveu
+  end: "ABC |def"
+
+Visual gJ
+  start: "|a\n b\n c"
+  keys: VjjgJ
+  end: "a b| c"
+
+Visual J
+  start: "|a\n b\n c"
+  keys: VjjJ
+  end: "a b| c"
+
+Visual gq
+  start: "|a\nb\nc"
+  keys: Vjjgq
+  end: "|a b c"
+
+Visual Ctrl-A increments every line's number
+  start: "|x 1\nx 1\nx 1"
+  keys: VG<C-a>
+  end: "|x 2\nx 2\nx 2"
+
+Visual g Ctrl-A makes a sequence
+  start: "|x 0\nx 0\nx 0"
+  keys: VGg<C-a>
+  end: "|x 1\nx 2\nx 3"
+
+Visual 2g Ctrl-A steps by two
+  start: "|0\n0\n0"
+  keys: VG2g<C-a>
+  end: "|2\n4\n6"
+
+Visual / extends the selection to a match
+  start: "|one two three"
+  keys: v/thr<CR>d
+  end: "|hree"
+
+Visual n extends to the next match
+  start: "|a x b x c"
+  keys: /x<CR>0vnd
+  end: "| b x c"
+
+Visual ' extends to a mark
+  start: "|a\nb\nc"
+  keys: majjV'ad
+  end: "|"
+
+Visual iw then c
+  start: "foo b|ar"
+  keys: viwcX<Esc>
+  end: "foo |X"
+
+# -- Registers, counts and repeats ---------------------------------------
+
+"a yank and paste
+  start: "|one two"
+  keys: "ayiww"aP
+  end: "one on|etwo"
+
+the 0 register keeps the last yank
+  start: "|a\nb"
+  keys: yyjdd"0P
+  end: "|a\na"
+
+~ toggles case and moves on
+  start: "|abc"
+  keys: 2~
+  end: "AB|c"
+
+r replaces a char
+  start: "|abc"
+  keys: 2rx
+  end: "x|xc"
+
+Ctrl-A increments a number
+  start: "|x 9 y"
+  keys: 3<C-a>
+  end: "x 1|2 y"
+
+u and Ctrl-R
+  start: "|abc"
+  keys: xxu<C-r>
+  end: "|c"
+
+
+# -- More edges ----------------------------------------------------------
+
+| past the line's end stops at its last char
+  start: "|abc"
+  keys: 9|
+  end: "ab|c"
+
+v g_ selects to the last non-blank
+  start: "|ab cd  "
+  keys: vg_d
+  end: "|  "
+
+v ge goes back
+  start: "ab c|d"
+  keys: vged
+  end: "|a"
+
+y) yanks to the next sentence
+  start: "|One. Two."
+  keys: y)
+  end: "|One. Two."
+  reg: "One. "
+
+c) changes to the next sentence
+  start: "|One. Two."
+  keys: c)X <Esc>
+  end: "X| Two."
+
+g~ip toggles a paragraph
+  start: "|ab\ncd\n\nef"
+  keys: g~ip
+  end: "|AB\nCD\n\nef"
+
+gU2w with a count after the operator
+  start: "|aa bb cc"
+  keys: gU2w
+  end: "|AA BB cc"
+
+2gUw with a count before it
+  start: "|aa bb cc"
+  keys: 2gUw
+  end: "|AA BB cc"
+
+"agUU leaves the register alone
+  start: "|abc"
+  keys: yy"agUU
+  end: "|ABC"
+  reg: "abc\n"
+
+gqip with comment leaders
+  start: "|// one\n// two\n// three"
+  keys: gqip
+  end: "|// one two three"
+
+gqip on a list item
+  start: "|- one\n  two"
+  keys: gqip
+  end: "|- one two"
+
+dH deletes to the window's first line
+  start: "a\nb\n|c\nd"
+  keys: dH
+  end: "|d"
+
+yL yanks to the last line
+  start: "|a\nb\nc"
+  keys: yL
+  end: "|a\nb\nc"
+  reg: "a\nb\nc\n"
+
+d'a upward
+  start: "a\nb\nc\n|d"
+  keys: kkmaGd'a
+  end: "|a"
+
+3R with Backspace
+  start: "|abcdefgh"
+  keys: 3Rxyz<BS><Esc>
+  end: "xyxyx|ygh"
+
+R over a line's end, then Backspace
+  start: "|ab\ncd"
+  keys: RWXYZ<BS><BS><BS><Esc>
+  end: "|Wb\ncd"
+
+Ctrl-W after the indent deletes the indent
+  start: "    |"
+  keys: A<C-w>X<Esc>
+  end: "|X"
+
+Ctrl-W in the middle of a word
+  start: "foo b|ar"
+  keys: i<C-w>X<Esc>
+  end: "foo |Xar"
+
+Ctrl-U with text before and after the cursor
+  start: "  ab|cd"
+  keys: i<C-u>X<Esc>
+  end: "  |Xcd"
+
+Ctrl-U twice reaches the line's start
+  start: "    |"
+  keys: Aab<C-u><C-u>X<Esc>
+  end: "|X"
+
+Ctrl-D at no indent does nothing
+  start: "|foo"
+  keys: A<C-d>X<Esc>
+  end: "foo|X"
+
+Ctrl-R a linewise register
+  start: "|one\ntwo"
+  keys: yyjA <C-r>"<Esc>
+  end: "one\ntwo one\n|"
+
+U after changes on another line forgets the first
+  start: "|ab\ncd"
+  keys: xjxU
+  end: "b\n|cd"
+
+gJ with a count of 1 joins two
+  start: "|a\nb\nc"
+  keys: 1gJ
+  end: "a|b\nc"
+
+J on the last line does nothing
+  start: "a\n|b"
+  keys: J
+  end: "a\n|b"
+
+X deletes before the cursor
+  start: "ab|c"
+  keys: 2X
+  end: "|c"
+  reg: "ab"
+
+D and C
+  start: "a|bc\ndef"
+  keys: DjCX<Esc>
+  end: "a\n|X"
+
+s and S
+  start: "|abc\n  def"
+  keys: sX<Esc>jSY<Esc>
+  end: "Xbc\n  |Y"
+
+3x stops at the line's end
+  start: "a|b\nc"
+  keys: 5x
+  end: "|a\nc"
+
+p of a word
+  start: "|foo bar"
+  keys: yiwwP
+  end: "foo fo|obar"
+
+P of lines
+  start: "a\n|b"
+  keys: yyP
+  end: "a\n|b\nb"
+
+dap
+  start: "|a\nb\n\nc"
+  keys: dap
+  end: "|c"
+
+ci( from inside
+  start: "f(a|, b)"
+  keys: ci(X<Esc>
+  end: "f(|X)"
+
+yi" then p
+  start: "x \"a|b\" y"
+  keys: yi"$p
+  end: "x \"ab\" ya|b"
+
+gv reselects
+  start: "|abc def"
+  keys: viw<Esc>wgvd
+  end: "| def"
+
+Visual block I
+  start: "|ab\ncd\nef"
+  keys: <C-v>jjIX<Esc>
+  end: "|Xab\nXcd\nXef"
+
+Visual block c
+  start: "|abc\ndef"
+  keys: <C-v>jlcX<Esc>
+  end: "|Xc\nXf"
+
+Visual block $A
+  start: "|a\nbcd"
+  keys: <C-v>j$AX<Esc>
+  end: "|aX\nbcdX"
+
+Visual > indents
+  differs: Visual `>` and `<` keep the selection (Vim's common `>gv` map, built in)
+  start: "|a\nb"
+  keys: Vj>
+  end: "    a\n    |b"
+
+Visual o swaps ends
+  start: "a|bcd"
+  keys: vlohd
+  end: "|d"
+
+Visual ~ toggles
+  start: "|aBc"
+  keys: v$~
+  end: "|AbC"
+
+Visual r replaces
+  start: "|abc"
+  keys: vlrx
+  end: "|xxc"
+
+* searches the word
+  start: "|foo bar foo"
+  keys: *
+  end: "foo bar |foo"
+
+hash (#) goes back
+  start: "foo bar |foo"
+  keys: #
+  end: "|foo bar foo"
+
+/ then n then N
+  start: "|a x b x c x"
+  keys: /x<CR>nN
+  end: "a |x b x c x"
+
+? goes back
+  start: "a x b |c"
+  keys: ?x<CR>
+  end: "a |x b c"
+
+dfx with a count
+  start: "|a-b-c-d"
+  keys: d2f-
+  end: "|c-d"
+
+c$ and A
+  start: "a|bc"
+  keys: c$X<Esc>AY<Esc>
+  end: "aX|Y"
+
+o and O keep the indent
+  start: "  |a"
+  keys: ob<Esc>Oc<Esc>
+  end: "  a\n  |c\n  b"
+
+I goes to the first non-blank
+  start: "  a|b"
+  keys: IX<Esc>
+  end: "  |Xab"
+
+e at a word's end goes to the next
+  start: "fo|o bar"
+  keys: e
+  end: "foo ba|r"
+
+W B E
+  start: "|a.b c.d e"
+  keys: WEB
+  end: "a.b |c.d e"
+
+ysiw" surrounds a word
+  differs: vim-surround is a plugin, not in Vim
+  start: "|foo"
+  keys: ysiw"
+  end: "|\"foo\""
+
+& repeats the last :s on the line
+  start: "|a a\na a"
+  keys: :s/a/b/<CR>j&
+  end: "b a\n|b a"
