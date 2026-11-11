@@ -173,7 +173,7 @@ pub struct AgentCaller {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloResult {
     pub protocol: u32,
-    /// Fenix's version, `1.5.0`.
+    /// Fenix's version, `1.5.1`.
     pub version: String,
     /// Fenix's process id: what a client on Windows passes to
     /// `AllowSetForegroundWindow` so Fenix may come to the front.
