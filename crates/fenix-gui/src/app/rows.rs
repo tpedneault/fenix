@@ -65,6 +65,8 @@ pub(crate) struct RowMap {
     /// The columns of text the pane has room for, when they're known:
     /// what a `Virtual` row is cut to, its lead with it.
     view_cols: Option<usize>,
+    /// The pane it's laid out for, when it's a pane's.
+    pane: Option<fenix_window::WindowId>,
 }
 
 impl RowMap {
@@ -94,7 +96,7 @@ impl RowMap {
             }
         }
         debug_assert!(firsts.windows(2).all(|w| w[0].0 < w[1].0), "a pane's lines go down in order");
-        RowMap { rows, scroll_col, firsts, width: None, virtuals: Vec::new(), view_cols: None }
+        RowMap { rows, scroll_col, firsts, width: None, virtuals: Vec::new(), view_cols: None, pane: None }
     }
 
     /// What `RowKind::Virtual(i)` rows draw: `texts[i]`.
@@ -267,7 +269,8 @@ pub(super) fn shown_char_columns(map: &RowMap, line: usize, col_map: Option<&Vec
 /// How far in a row above `line` that isn't text (a code lens's) is
 /// drawn: the line's indent in display columns, a tab as wide as it's
 /// drawn, at most half of `cols` (the pane's columns of text), so a row
-/// that isn't scrolled sideways stays in view under a deep indent.
+/// that isn't scrolled sideways stays in view under a deep indent. What
+/// a click on one is measured from.
 pub(super) fn virtual_row_lead(ob: &super::OpenBuffer, line: usize, tab_stops: &super::TabStops, cols: usize) -> usize {
     let leading: String = ob.buffer.rope().line(line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
     tabstops::expand_line(&leading, tab_stops).0.chars().count().min(cols / 2)
@@ -566,7 +569,9 @@ impl App {
             wrap,
             view_cols: if wrapped { wrap } else { Some(self.pane_text_cols.get(&pane).copied().unwrap_or(80)) },
         };
-        self.pane_layout(buffer, want, cursor_line, dashboard)
+        let mut layout = self.pane_layout(buffer, want, cursor_line, dashboard);
+        layout.map.pane = Some(pane);
+        layout
     }
 
     /// `buffer`'s text on the rows `want` asks for: the rows, each line's
@@ -697,7 +702,20 @@ impl App {
                 Some(row) if let RowKind::Virtual(i) = row.kind => {
                     // Cut to the pane when it was laid out.
                     let lead = virtual_row_lead(ob, row.line, tab_stops, map.view_cols());
-                    spans.push((format!("{}{}", " ".repeat(gutter_chars + lead), map.virtual_text(i)), theme.gutter_fg));
+                    let text = map.virtual_text(i).to_string();
+                    spans.push((" ".repeat(gutter_chars + lead), theme.gutter_fg));
+                    // The lens under the pointer, in the text's colour: a
+                    // click runs it.
+                    match self.lens_hover.as_ref().filter(|(pane, line, _)| *line == row.line && map.pane == Some(*pane)) {
+                        Some((_, _, cols)) => {
+                            let part = |r: std::ops::Range<usize>| text.chars().skip(r.start).take(r.len()).collect::<String>();
+                            let n = text.chars().count();
+                            spans.push((part(0..cols.start.min(n)), theme.gutter_fg));
+                            spans.push((part(cols.start.min(n)..cols.end.min(n)), theme.fg));
+                            spans.push((part(cols.end.min(n)..n), theme.gutter_fg));
+                        }
+                        None => spans.push((text, theme.gutter_fg)),
+                    }
                 }
                 Some(row) if row.kind == RowKind::Text && row.line < visual_lines => {
                     if row.first {

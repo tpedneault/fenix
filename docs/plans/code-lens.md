@@ -367,3 +367,60 @@ lenses are off by default until stage 6.
     are ever out. A lens whose resolve comes to nothing shows no title,
     its row kept, so there's nothing to click. The last answer's titles
     are found by place and data in a map, not a scan per lens.
+
+### Stage 4
+
+- **Running** (`App::run_lens`): `fenix_lsp::code_lens::action` decides
+  what a lens does.
+  - A command the server lists in `executeCommandProvider` goes back as
+    `workspace/executeCommand`, and an error answer is said. Edits the
+    server then asks to apply (`workspace/applyEdit`) are refused, as
+    they always have been.
+  - `showReferences` fills the references list, as `gr` does.
+  - rust-analyzer's `runSingle` runs `cargo <cargoArgs> -- <executableArgs>`
+    in Task Output, by its arguments with no shell, in the `cwd` it
+    gives when that's a folder in the project (else it says so and runs
+    nothing), and only from the Rust server. Its task's name never
+    picks a project task of the same name in its place.
+  - A lens that starts a program (rust-analyzer's run, Fenix's own
+    "▶ Run test") runs only in a trusted project; otherwise it says so
+    and names `SPC p y`. Lenses that ask the server to run a command, or
+    open the references list, aren't affected.
+  - Fenix's own `fenix.runTest` runs as `SPC p r` does; in a server's
+    lens it's one Fenix can't run.
+  - Anything else is said: "Fenix can't run *title* (*command*)".
+- **Changed from the plan: `debugSingle`.** Fenix has no way yet to
+  debug a single test: `SPC p r` runs one, and `SPC u u` starts the
+  debugger from a launch configuration. A Debug lens says "Fenix can't
+  debug from a lens yet: SPC u u starts the debugger". Mapping
+  rust-analyzer's runnable to a debug session (building with
+  `--no-run`, finding the test binary, launching codelldb or lldb-dap)
+  is follow-up work.
+- **Click.** `text_press` checks `lens_at` first: on a lens row
+  (`RowKind::Virtual`), the cell less the row's lead
+  (`rows::virtual_row_lead`, shared with drawing) is the column in the
+  row's text, and the `LensRow` span there is the lens. Separators and
+  the space after the titles run nothing. The cursor doesn't move. The
+  spans are those of the row as drawn, cut to the pane by whole titles,
+  so a title cut off isn't clicked.
+- **Hover.** `update_hover_cursor` keeps `lens_hover`, the lens under
+  the pointer. `row_content_spans` draws that title in the text colour,
+  the rest in the gutter's, and the pointer becomes a hand over it.
+  Nothing is worked out while no buffer has lenses.
+- **`SPC c l`** (`code.lens`). One lens on the cursor's line runs.
+  Several open a picker (`ActivePicker::Lenses`, "Code lenses") whose
+  Enter runs the one chosen. With none, or lenses off, it says so.
+- **After review.**
+  - A pick keeps the answer it came in and what the lens was (place,
+    command, arguments): a lens answered again since is found again by
+    that, or not run ("the lenses changed").
+  - A double or triple click on a title runs it once.
+  - The lit title is worked out again whenever the rows are laid out,
+    and only in the pane the pointer is over.
+  - A line whose lenses all have empty titles has none to run, not an
+    empty picker.
+  - A run's folder must be one that exists in the project. The task is
+    the project's, run in that folder, so a member crate's lens doesn't
+    count as another project.
+  - Standard keys have no chord for `code.lens`: it's in the palette,
+    and a click runs a lens.

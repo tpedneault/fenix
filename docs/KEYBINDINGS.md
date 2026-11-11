@@ -428,6 +428,7 @@ keys'; the palette has the commands).
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
 | `SPC c i` | Where the trait, interface or method under the cursor is implemented: jumped to, or listed when there are several (LSP) |
+| `SPC c l` | The code lenses on the cursor's line (Run, Debug, 3 references): the one there is run, or several listed to choose from. A click on a lens runs it too. Needs `lsp.code_lens` on (LSP). Standard keys have no chord for it: the palette's "Run a code lens on the cursor's line", or a click |
 | `SPC c h` | Who calls the function under the cursor, listed as `gr` lists references (LSP call hierarchy) |
 | `SPC c a` | Choose a code action and preview its edits (LSP) |
 | `SPC c f` | Indent region -- reindent the active Visual selection structurally, or (with an attached language server) reformat the whole document (LSP) |

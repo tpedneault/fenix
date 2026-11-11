@@ -484,6 +484,223 @@ impl App {
             self.set_virtual_rows(id, texts);
             self.request_redraw_all();
         }
+        self.refresh_lens_hover();
+    }
+}
+
+/// A lens to run: its server, its document, which of its lenses, and
+/// what it was when it was picked -- the answer it came in (`generation`)
+/// and what it is (`identity`), so a lens answered again since isn't
+/// mistaken for another.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LensPick {
+    pub key: LspKey,
+    pub path: PathBuf,
+    pub index: usize,
+    pub generation: u64,
+    pub identity: LensIdentity,
+}
+
+/// What a lens is, as it was shown: its place, its command and that
+/// command's arguments.
+pub(super) type LensIdentity = (lsp_types::Range, Option<String>, Option<String>);
+
+fn identity(lens: &lsp_types::CodeLens) -> LensIdentity {
+    let command = lens.command.as_ref();
+    (lens.range, command.map(|c| c.command.clone()), command.and_then(|c| c.arguments.as_ref()).map(|a| serde_json::Value::from(a.clone()).to_string()))
+}
+
+impl App {
+    /// `key`'s lens `index` of `path`, as a pick: `None` if it isn't there.
+    fn lens_pick(&self, key: &LspKey, path: &Path, index: usize) -> Option<LensPick> {
+        let doc = self.lsp_sessions.get(key)?.lenses.get(path)?;
+        let (_, shown) = doc.shown().nth(index)?;
+        Some(LensPick { key: key.clone(), path: path.to_path_buf(), index, generation: doc.generation, identity: identity(&shown) })
+    }
+
+    /// After lens rows are laid out again: the lens under a pointer that
+    /// hasn't moved worked out afresh, so no title stays lit that isn't
+    /// there now, nor the hand over none.
+    fn refresh_lens_hover(&mut self) {
+        if self.lens_hover.is_none() {
+            return;
+        }
+        match (self.cursor_pos, self.gpu.as_ref().map(|g| (g.size.width as f32, g.size.height as f32))) {
+            (Some(pos), Some((w, h))) => self.update_hover_cursor(pos, w, h),
+            _ => self.lens_hover = None,
+        }
+    }
+}
+
+impl App {
+    /// The lens under `pos` in `pane` (laid out at `rect`), if the pointer
+    /// is on one's title: what a click runs, and its row's line and
+    /// columns, for the hover.
+    pub(super) fn lens_at(&self, pane: fenix_window::WindowId, rect: fenix_window::Rect, pos: (f32, f32)) -> Option<(LensPick, usize, std::ops::Range<usize>)> {
+        let buffer = self.mouse_text_buffer(pane)?;
+        // Nothing to look for: no layout worked out.
+        let rows = self.lens_rows.get(&buffer)?;
+        let ob = self.buffers.get(buffer)?;
+        let (char_width, line_height) = self.cell_size();
+        let content = super::pane_content_rect(rect, line_height, self.pane_has_breadcrumb(pane));
+        let row = ((pos.1 - content.y - crate::text::PAD_TOP) / line_height).floor();
+        let x = pos.0 - content.x - crate::text::PAD_LEFT - self.gutter_chars(ob) as f32 * char_width;
+        if row < 0.0 || x < 0.0 || pos.1 > content.y + content.h {
+            return None;
+        }
+        let state = *self.pane_state(pane);
+        let top = state.rendered_scroll.floor().max(0.0) as usize;
+        let map = self.pane_rows(pane, buffer, top, state.scroll_row, row as usize + 1);
+        let r = map.row(row as usize)?;
+        if !matches!(r.kind, super::rows::RowKind::Virtual(_)) {
+            return None;
+        }
+        // The row as it's drawn: cut to the pane by whole titles
+        // (`App::virtual_row_shown`), so only a title on show is clicked.
+        let view_cols = map.view_cols();
+        let lead = super::rows::virtual_row_lead(ob, r.line, &self.tab_stops_for(buffer), view_cols);
+        let col = ((x / char_width).floor() as usize).checked_sub(lead)?;
+        let lens_row = rows.get(&r.line)?.fit(view_cols.saturating_sub(1).saturating_sub(lead));
+        let (cols, (key, index)) = lens_row.spans.iter().find(|(c, _)| c.contains(&col))?;
+        let path = &self.lens_of.get(&buffer)?.1;
+        Some((self.lens_pick(key, path, *index)?, r.line, cols.clone()))
+    }
+
+    /// The pointer moved to `pos` over `pane`: the lens under it (if any)
+    /// drawn as the one a click runs. Whether that changed.
+    pub(super) fn hover_lens(&mut self, pane: Option<(fenix_window::WindowId, fenix_window::Rect)>, pos: (f32, f32)) -> bool {
+        if self.lens_rows.is_empty() && self.lens_hover.is_none() {
+            return false;
+        }
+        let now = pane.and_then(|(p, rect)| self.lens_at(p, rect, pos).map(|(_, line, cols)| (p, line, cols)));
+        if now == self.lens_hover {
+            return false;
+        }
+        self.lens_hover = now;
+        true
+    }
+
+    /// Whether a lens may start a program in the project at `root`: only
+    /// once the project is trusted (`SPC p y`). Why not is said.
+    pub(super) fn lens_may_start(&mut self, root: &Path) -> bool {
+        if self.project_is_trusted(root) {
+            return true;
+        }
+        self.set_error("not run: a lens starts programs only in a trusted project (SPC p y)");
+        false
+    }
+
+    /// Runs `pick`: the server's command sent back to it, or what Fenix
+    /// does for a command it's expected to run itself; why not, when it
+    /// can't.
+    pub(super) fn run_lens(&mut self, pick: &LensPick) {
+        // Answered again since it was picked: the same lens, if it's still
+        // there, else none.
+        let found = self.lsp_sessions.get(&pick.key).and_then(|s| s.lenses.get(&pick.path)).and_then(|doc| {
+            let same = |i: usize| doc.shown().nth(i).is_some_and(|(_, l)| identity(&l) == pick.identity);
+            if doc.generation == pick.generation && same(pick.index) {
+                Some(pick.index)
+            } else {
+                doc.shown().find(|(_, l)| identity(l) == pick.identity).map(|(i, _)| i)
+            }
+        });
+        let Some(index) = found else {
+            self.set_error("not run: the lenses changed since; try again");
+            return;
+        };
+        let Some(session) = self.lsp_sessions.get_mut(&pick.key) else { return };
+        let Some(code_lens) = session.lenses.get(&pick.path).and_then(|d| d.lenses.get(index)).cloned() else { return };
+        let caps = session.capabilities.clone().unwrap_or_default();
+        match lens::action(&code_lens, |c| lens::executes(&caps, c)) {
+            lens::Action::Server { command, arguments } => {
+                let title = code_lens.command.as_ref().map_or(String::new(), |c| c.title.clone());
+                let params = lsp_types::ExecuteCommandParams { command, arguments, work_done_progress_params: Default::default() };
+                match session.client.request::<lsp_types::request::ExecuteCommand>(params) {
+                    Ok(id) => {
+                        session.pending.insert(id, PendingLspRequest::LensCommand { title });
+                    }
+                    Err(e) => self.set_error(format!("couldn't ask the server to run {title}: {e}")),
+                }
+            }
+            lens::Action::ShowReferences { locations } if locations.is_empty() => self.set_message("no references"),
+            lens::Action::ShowReferences { locations } => self.apply_lsp_references(locations),
+            // rust-analyzer's own runs, from rust-analyzer only.
+            lens::Action::CargoRun(_) | lens::Action::CargoDebug(_) if !pick.key.is_primary_for(fenix_syntax::LanguageId::Rust) => {
+                let command = code_lens.command.as_ref().map_or(String::new(), |c| c.command.clone());
+                self.set_error(format!("Fenix runs {command} only from rust-analyzer"));
+            }
+            lens::Action::CargoRun(runnable) => {
+                // Run where the server says, only inside its project: cargo
+                // itself by its arguments, no shell between.
+                let project = super::refactor::identity(&pick.key.root);
+                // Where it is, not where its name says: a path that can't be
+                // followed isn't run in.
+                let cwd = match &runnable.cwd {
+                    None => Some(project.clone()),
+                    Some(cwd) => std::fs::canonicalize(cwd).ok().map(fenix_lsp::normalize),
+                };
+                let Some(cwd) = cwd.filter(|cwd| cwd.starts_with(&project)) else {
+                    self.set_error(format!("not run: {} isn't a folder in the project", runnable.cwd.as_deref().unwrap_or_default()));
+                    return;
+                };
+                if !self.lens_may_start(&project) {
+                    return;
+                }
+                let mut args = runnable.cargo_args.clone();
+                if !runnable.executable_args.is_empty() {
+                    args.push("--".into());
+                    args.extend(runnable.executable_args.iter().cloned());
+                }
+                let mut name = if runnable.label.is_empty() { format!("cargo {}", args.join(" ")) } else { runnable.label.clone() };
+                // Not a project task of the same name in its place.
+                if self.project_tools(&project).is_ok_and(|tools| tools.tasks.contains_key(&name)) {
+                    name.push_str(" (code lens)");
+                }
+                // The project's task, run in the crate's folder.
+                let mut spec = fenix_project::tools::CommandSpec::new("cargo".to_string(), args.clone());
+                spec.cwd = Some(cwd.clone());
+                self.run_task_as(fenix_tasks::TaskDef { name, command: "cargo".into(), args }, project, Some(spec));
+            }
+            lens::Action::CargoDebug(runnable) => {
+                self.set_error(format!("Fenix can't debug from a lens yet ({}): SPC u u starts the debugger", runnable.label));
+            }
+            // Fenix's own command, which no server's lens runs.
+            lens::Action::RunTest { .. } => self.set_error(format!("Fenix can't run {} ({})", code_lens.command.as_ref().map_or("", |c| c.title.as_str()), lens::RUN_TEST)),
+            lens::Action::Unknown { title, command } => self.set_error(format!("Fenix can't run {title} ({command})")),
+            lens::Action::Unresolved => self.set_message("that lens is still being worked out"),
+        }
+    }
+
+    /// `code.lens` (`SPC c l`): the cursor line's lenses -- one runs, more
+    /// are listed to choose from.
+    pub(crate) fn code_lens_at_cursor(&mut self) {
+        let buffer = self.focused_buffer_id();
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let Some(path) = self.lens_of.get(&buffer).map(|(_, p)| p.clone()) else {
+            self.set_message(if self.code_lens_on() { "no code lenses here" } else { "code lens is off: lsp.code_lens turns it on" });
+            return;
+        };
+        let Some(row) = self.lens_rows.get(&buffer).and_then(|rows| rows.get(&line)) else {
+            self.set_message("no code lenses on this line");
+            return;
+        };
+        let picks: Vec<(String, LensPick)> = row
+            .spans
+            .iter()
+            .filter_map(|(cols, (key, index))| Some((row.text.chars().skip(cols.start).take(cols.len()).collect(), self.lens_pick(key, &path, *index)?)))
+            .collect();
+        // Titles all empty: none to run.
+        if picks.is_empty() {
+            self.set_message("no code lenses on this line");
+            return;
+        }
+        if let [(_, pick)] = picks.as_slice() {
+            let pick = pick.clone();
+            self.run_lens(&pick);
+            return;
+        }
+        let candidates = picks.into_iter().map(|(label, pick)| fenix_picker::Candidate::new(label, pick)).collect();
+        self.enter_picker(super::ActivePicker::Lenses(fenix_picker::PickerState::new(candidates)));
     }
 }
 

@@ -1430,6 +1430,8 @@ enum PendingLspRequest {
     CodeLens { path: PathBuf, edit_count: u64, request: i64 },
     /// `codeLens/resolve` for lens `index` of `path`'s answer `generation`.
     CodeLensResolve { path: PathBuf, generation: u64, index: usize },
+    /// `workspace/executeCommand` for the lens titled `title`.
+    LensCommand { title: String },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -2530,6 +2532,9 @@ enum ActivePicker {
     /// `code.problems` (Ctrl+Shift+M): every problem reported, in every
     /// file, as places to go -- confirming goes there, as `ProjectTodos`.
     Problems(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `code.lens` (`SPC c l`): the cursor line's code lenses -- confirming
+    /// runs the one chosen.
+    Lenses(fenix_picker::PickerState<code_lens::LensPick>),
     /// `code.project_symbols` (Ctrl+T): what the language servers find
     /// for what's typed (`workspace/symbol`), asked again as it changes.
     ProjectSymbols(fenix_picker::PickerState<fenix_project::GrepMatch>),
@@ -2659,6 +2664,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::BufferTodos(s) => s.push_char(c),
         ActivePicker::ProjectTodos(s) => s.push_char(c),
         ActivePicker::Problems(s) => s.push_char(c),
+        ActivePicker::Lenses(s) => s.push_char(c),
         ActivePicker::ProjectSymbols(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
@@ -2697,6 +2703,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::BufferTodos(s) => s.backspace(),
         ActivePicker::ProjectTodos(s) => s.backspace(),
         ActivePicker::Problems(s) => s.backspace(),
+        ActivePicker::Lenses(s) => s.backspace(),
         ActivePicker::ProjectSymbols(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
@@ -2735,6 +2742,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::BufferTodos(s) => s.move_selection(delta),
         ActivePicker::ProjectTodos(s) => s.move_selection(delta),
         ActivePicker::Problems(s) => s.move_selection(delta),
+        ActivePicker::Lenses(s) => s.move_selection(delta),
         ActivePicker::ProjectSymbols(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
@@ -2776,6 +2784,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::BufferTodos(s) => s.toggle_mark(),
         ActivePicker::ProjectTodos(s) => s.toggle_mark(),
         ActivePicker::Problems(s) => s.toggle_mark(),
+        ActivePicker::Lenses(s) => s.toggle_mark(),
         ActivePicker::ProjectSymbols(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
@@ -2814,6 +2823,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::BufferTodos(s) => s.query(),
         ActivePicker::ProjectTodos(s) => s.query(),
         ActivePicker::Problems(s) => s.query(),
+        ActivePicker::Lenses(s) => s.query(),
         ActivePicker::ProjectSymbols(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
@@ -2852,6 +2862,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::BufferTodos(s) => s.len(),
         ActivePicker::ProjectTodos(s) => s.len(),
         ActivePicker::Problems(s) => s.len(),
+        ActivePicker::Lenses(s) => s.len(),
         ActivePicker::ProjectSymbols(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
@@ -2890,6 +2901,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::BufferTodos(s) => s.selected_row(),
         ActivePicker::ProjectTodos(s) => s.selected_row(),
         ActivePicker::Problems(s) => s.selected_row(),
+        ActivePicker::Lenses(s) => s.selected_row(),
         ActivePicker::ProjectSymbols(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
@@ -2933,6 +2945,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::BufferTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Problems(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Lenses(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectSymbols(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5333,6 +5346,8 @@ pub struct App {
     lens_of: code_lens::LensOf,
     /// Each buffer's rows of lenses, by line: what a click on one runs.
     lens_rows: HashMap<BufferId, std::collections::BTreeMap<usize, fenix_lsp::code_lens::LensRow<code_lens::LensTag>>>,
+    /// The lens under the pointer: its buffer, its row's line, its columns.
+    lens_hover: Option<(fenix_window::WindowId, usize, std::ops::Range<usize>)>,
     /// A test's seam: every pane that could wrap goes by rows (at
     /// `rows::UNBOUNDED` when it doesn't wrap), with or without rows
     /// above its lines, so the row path can be checked against the
@@ -6335,6 +6350,7 @@ impl App {
             semantic_of: HashMap::new(),
             lens_of: HashMap::new(),
             lens_rows: HashMap::new(),
+            lens_hover: None,
             force_row_path: false,
             semantic_protected: HashMap::new(),
             screen_decorations: None,
@@ -7794,6 +7810,11 @@ impl App {
             PendingLspRequest::SemanticTokens { path, edit_count, how, request } => self.semantic_tokens_answered(&key, path, edit_count, how, request, result),
             PendingLspRequest::CodeLens { path, edit_count, request } => self.lenses_answered(&key, path, edit_count, request, result),
             PendingLspRequest::CodeLensResolve { path, generation, index } => self.lens_resolved(&key, path, generation, index, result),
+            PendingLspRequest::LensCommand { title } => {
+                if let Err(e) = result {
+                    self.set_error(format!("{title} failed: {}", e.message));
+                }
+            }
             PendingLspRequest::PullDiagnostics { path } => {
                 let name = self.lsp_server_name(&key);
                 let read = result.map_err(|e| (e.code, e.data)).and_then(|value| fenix_lsp::pull::report(value).map_err(|_| (0, None)));
@@ -14971,6 +14992,12 @@ impl App {
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
             }
+            Some(ActivePicker::Lenses(state)) => {
+                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.run_lens(&pick);
+            }
             Some(ActivePicker::SwitchWorkspace(state)) => {
                 let Some(idx) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -18066,6 +18093,7 @@ impl App {
                 Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
                 Some(picker @ (ActivePicker::BufferTodos(_) | ActivePicker::ProjectTodos(_))) => ("TODOS", picker_len(picker)),
                 Some(picker @ ActivePicker::Problems(_)) => ("PROBLEMS", picker_len(picker)),
+                Some(picker @ ActivePicker::Lenses(_)) => ("LENSES", picker_len(picker)),
                 Some(picker @ ActivePicker::ProjectSymbols(_)) => ("SYMBOLS", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
@@ -19950,14 +19978,23 @@ impl App {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        // A lens under the pointer: drawn as the one a click runs.
+        let over = hit_test(&geometry, pos).and_then(|t| match t {
+            ScrollTarget::Pane(p) => geometry.panes.iter().find(|(id, _)| *id == p).copied(),
+            _ => None,
+        });
+        if self.hover_lens(over, pos) {
+            self.request_redraw_all();
+        }
         let icon = if self.sidebar_drag || self.on_sidebar_edge(pos) {
             winit::window::CursorIcon::ColResize
         } else if let Some(icon) = self.divider_icon(&geometry, pos) {
             icon
         } else if self.tab_drag.is_some() {
             winit::window::CursorIcon::Grabbing
-        } else if self.term_hover.is_some() {
-            // Ctrl over a terminal's link: a click follows it.
+        } else if self.term_hover.is_some() || self.lens_hover.is_some() {
+            // Ctrl over a terminal's link, or over a code lens: a click
+            // follows it.
             winit::window::CursorIcon::Pointer
         } else {
             cursor_icon_for(&geometry, pos, line_height)
@@ -37374,6 +37411,210 @@ name = \"orbit\"
 
     fn lens_rows_of(app: &App) -> Vec<(usize, String)> {
         app.virtual_rows.get(&app.focused_buffer_id()).map(|rows| rows.iter().map(|(l, t)| (*l, t.join("/"))).collect()).unwrap_or_default()
+    }
+
+    /// A lens fixture whose server runs `x.run` and answers with `lenses`
+    /// for line 0.
+    fn lensed(name: &str, lenses: serde_json::Value) -> (TempDir, App, LspKey) {
+        let (dir, mut app, _path, key) = lens_fixture(name);
+        app.lsp_sessions.get_mut(&key).unwrap().capabilities = Some(capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {}, "executeCommandProvider": {"commands": ["x.run"]}})));
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, lenses);
+        (dir, app, key)
+    }
+
+    fn said_now(app: &App) -> String {
+        app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn spc_c_l_runs_the_one_lens_on_the_line_and_lists_several() {
+        let (_dir, mut app, key) = lensed("lens_run_one", serde_json::json!([lens_json(0, Some("▶ Run"))]));
+        app.run_cmd("code.lens");
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::LensCommand { ref title } if title == "▶ Run"), "sent back to the server");
+        let (_dir, mut app, _key) = lensed("lens_run_several", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        app.run_cmd("code.lens");
+        assert!(matches!(app.active_picker, Some(ActivePicker::Lenses(ref s)) if s.len() == 2), "several to choose from");
+        app.press("Escape");
+        app.press("j");
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "no code lenses on this line");
+    }
+
+    fn titled(title: &str, command: &str) -> serde_json::Value {
+        serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": title, "command": command}})
+    }
+
+    fn answer_lenses_again(app: &mut App, key: &LspKey, lenses: serde_json::Value) {
+        app.refresh_lenses(key);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(app, key, id, lenses);
+    }
+
+    fn lens_commands_sent(app: &App, key: &LspKey) -> Vec<String> {
+        app.lsp_sessions[key].pending.values().filter_map(|p| match p {
+            PendingLspRequest::LensCommand { title } => Some(title.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn the_lens_picked_is_the_one_run_though_the_lenses_were_answered_again() {
+        let caps = |app: &mut App, key: &LspKey| app.lsp_sessions.get_mut(key).unwrap().capabilities = Some(capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {}, "executeCommandProvider": {"commands": ["x.run", "x.debug", "x.delete"]}})));
+        let (_dir, mut app, key) = lensed("lens_pick_moved", serde_json::json!([titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        caps(&mut app, &key);
+        app.run_cmd("code.lens");
+        assert!(matches!(app.active_picker, Some(ActivePicker::Lenses(_))));
+        answer_lenses_again(&mut app, &key, serde_json::json!([titled("Delete all", "x.delete"), titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        app.press("Enter");
+        assert_eq!(lens_commands_sent(&app, &key), vec!["▶ Run".to_string()], "the one shown, found again");
+        // Gone when it's chosen: none run, and it's said.
+        let (_dir, mut app, key) = lensed("lens_pick_gone", serde_json::json!([titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        caps(&mut app, &key);
+        app.run_cmd("code.lens");
+        answer_lenses_again(&mut app, &key, serde_json::json!([titled("Delete all", "x.delete"), titled("Debug", "x.debug")]));
+        app.press("Enter");
+        assert!(lens_commands_sent(&app, &key).is_empty());
+        assert!(said_now(&app).contains("the lenses changed"), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn a_line_whose_lenses_have_no_titles_has_none_to_run() {
+        let (_dir, mut app, _key) = lensed("lens_no_titles", serde_json::json!([titled("\u{200b}", "x.run"), titled("", "x.run")]));
+        app.run_cmd("code.lens");
+        assert!(app.active_picker.is_none(), "no empty picker");
+        assert_eq!(said_now(&app), "no code lenses on this line");
+    }
+
+    #[test]
+    fn a_run_s_folder_must_be_a_real_one_in_the_project_and_the_task_is_the_project_s() {
+        let (dir, mut app, _key) = lensed("lens_run_cwd", serde_json::json!([]));
+        let root = dir.path().to_path_buf();
+        let run = |cwd: &str| serde_json::json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "t", "kind": "cargo", "args": {"cargoArgs": ["--version"], "cwd": cwd}}]}}]);
+        let key = app.lsp_sessions.keys().next().unwrap().clone();
+        // A path that can't be followed, though its name is inside.
+        answer_lenses_again(&mut app, &key, run(&format!("{}/nope/../../..", root.display())));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("isn't a folder in the project"), "{}", said_now(&app));
+        assert!(app.task_session.is_none());
+        // A member crate's folder: run there, as the project's task.
+        std::fs::create_dir_all(root.join("member")).unwrap();
+        answer_lenses_again(&mut app, &key, run(&root.join("member").display().to_string()));
+        app.run_cmd("code.lens");
+        let session = app.task_session.as_ref().expect("started");
+        assert_eq!(session.root, fenix_lsp::normalize(refactor::identity(&root)), "the project's");
+        assert!(session.cwd.ends_with("member"), "{:?}", session.cwd);
+    }
+
+    #[test]
+    fn a_double_click_on_a_lens_runs_it_once_and_its_hover_follows_the_rows() {
+        let (_dir, mut app, key) = lensed("lens_double", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        let pane = app.focused_pane_id();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let (char_width, line_height) = app.cell_size();
+        let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+        let gutter = app.gutter_chars(app.open()) as f32 * char_width;
+        let at = |col: f32| (content.x + text::PAD_LEFT + gutter + (col + 0.5) * char_width, content.y + text::PAD_TOP + line_height * 0.5);
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        app.mouse_release();
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        app.mouse_release();
+        assert_eq!(lens_commands_sent(&app, &key).len(), 1, "once");
+        // Lit, then the lenses go under a pointer that doesn't move.
+        assert!(app.hover_lens(Some((pane, rect)), at(9.0)));
+        assert_eq!(app.lens_hover.as_ref().map(|(p, _, _)| *p), Some(pane), "by pane");
+        answer_lenses_again(&mut app, &key, serde_json::json!([]));
+        assert!(app.lens_hover.is_none(), "not lit over nothing");
+    }
+
+    #[test]
+    fn a_lens_starts_cargo_only_in_a_trusted_project() {
+        let run = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["--version"]}}]}});
+        let (dir, mut app, _key) = lensed("lens_run_trust", serde_json::json!([run]));
+        // The project names a program, and nobody has allowed it yet.
+        dir.write(".fenix/tools.json", r#"{"tasks": {"build": {"executable": "make"}}}"#);
+        let state = TempDir::new("lens_run_trust_state");
+        app.known_projects = fenix_project::KnownProjects::load_or_default(state.path().join("projects.txt"));
+        app.project_trust_begin(Some(state.path().join("trusted-projects.json")));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("only in a trusted project (SPC p y)"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        // Trusted: it runs.
+        app.trust_project_as_written(dir.path());
+        app.run_cmd("code.lens");
+        assert!(app.task_session.is_some(), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn lenses_fenix_runs_itself_or_says_why_not() {
+        let location = serde_json::json!({"uri": "file:///tmp/a.rs", "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}});
+        let refs = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "1 reference", "command": "rust-analyzer.showReferences", "arguments": ["file:///tmp/a.rs", {"line": 0, "character": 0}, [location]]}});
+        let (_dir, mut app, _key) = lensed("lens_refs", serde_json::json!([refs]));
+        app.run_cmd("code.lens");
+        assert_eq!(app.quickfix.len(), 1, "the references listed");
+        let debug = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Debug", "command": "rust-analyzer.debugSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["test"]}}]}});
+        let (_dir, mut app, _key) = lensed("lens_debug", serde_json::json!([debug]));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("can't debug from a lens yet"), "{}", said_now(&app));
+        // A run where the server says, outside the project: not run.
+        let away = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["test"], "cwd": "/"}}]}});
+        let (_dir, mut app, _key) = lensed("lens_run_away", serde_json::json!([away]));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("isn't a folder in the project"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        // Fenix's own command in a server's lens: not run.
+        let own = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run test", "command": "fenix.runTest", "arguments": ["/elsewhere/t.rs", 1]}});
+        let (_dir, mut app, _key) = lensed("lens_run_own_from_server", serde_json::json!([own]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run ▶ Run test (fenix.runTest)");
+        assert!(app.task_session.is_none());
+        let other = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Peek", "command": "editor.peek"}});
+        let (_dir, mut app, _key) = lensed("lens_unknown", serde_json::json!([other]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run Peek (editor.peek)");
+    }
+
+    #[test]
+    fn a_click_on_a_lens_title_runs_it_and_the_pointer_over_one_lights_it() {
+        let (_dir, mut app, key) = lensed("lens_click", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        let pane = app.focused_pane_id();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let (char_width, line_height) = app.cell_size();
+        let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+        let gutter = app.gutter_chars(app.open()) as f32 * char_width;
+        // Scrolled up to line 0's lenses (they came above the top line,
+        // out of view): row 0, "▶ Run | Debug", "Debug" from column 8.
+        app.pane_state_mut(pane).scroll_row = 0;
+        let at = |col: f32| (content.x + text::PAD_LEFT + gutter + (col + 0.5) * char_width, content.y + text::PAD_TOP + line_height * 0.5);
+        assert!(app.hover_lens(Some((pane, rect)), at(9.0)));
+        assert_eq!(app.lens_hover.as_ref().map(|(_, line, cols)| (*line, cols.clone())), Some((0, 8..13)));
+        assert!(!app.hover_lens(Some((pane, rect)), at(10.0)), "the same one");
+        let layout = app.focused_layout(3);
+        let ob = app.open();
+        let spans = app.row_content_spans(ob, &layout.map, 3, app.gutter_chars(ob), &[], 0, &app.tab_stops_for(app.focused_buffer_id()), &HashSet::new(), &layout.decorated);
+        assert!(spans.iter().any(|(t, c)| t == "Debug" && *c == app.theme.fg), "drawn in the text's colour: {spans:?}");
+        assert!(spans.iter().any(|(t, c)| t.contains("▶ Run") && *c == app.theme.gutter_fg));
+        assert!(app.hover_lens(Some((pane, rect)), at(6.0)), "the separator: none");
+        assert!(app.lens_hover.is_none());
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::LensCommand { ref title } if title == "▶ Run"));
+        assert_eq!(app.line_col(), (0, 0), "the cursor stays");
+        // A pane too narrow for both: "▶ Run …" drawn, and "Debug", not
+        // drawn, isn't there to click.
+        app.set_pane_text_cols(pane, 12);
+        let layout = app.focused_layout(3);
+        let rows::RowKind::Virtual(i) = layout.map.row(0).unwrap().kind else { panic!("a lens row") };
+        assert_eq!(layout.map.virtual_text(i), "▶ Run …");
+        app.hover_lens(Some((pane, rect)), at(9.0));
+        assert!(app.lens_hover.is_none(), "cut off");
+        app.hover_lens(Some((pane, rect)), at(1.0));
+        assert_eq!(app.lens_hover.as_ref().map(|(_, _, cols)| cols.clone()), Some(0..5));
     }
 
     #[test]

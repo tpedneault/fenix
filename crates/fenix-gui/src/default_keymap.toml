@@ -849,6 +849,11 @@ label = "implementations (LSP)"
 command = "code.implementations"
 
 [[leader]]
+keys = "SPC c l"
+label = "code lens on this line"
+command = "code.lens"
+
+[[leader]]
 keys = "SPC c h"
 label = "callers (LSP)"
 command = "code.callers"
