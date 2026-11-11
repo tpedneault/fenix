@@ -411,6 +411,10 @@ These supersede the table and rules above where they differ.
     when the setting goes off.
   - A buffer with no grammar works out its windows only when it has
     tokens to lay.
+  - **One writer.** Every writer of `synced_text` and `open_documents`
+    goes through `record_lsp_sync`, which moves held tokens through the
+    change sent. There were two: `sync_lsp_document` and a refactor's
+    own sync (`sync_refactor_buffers`), which used to skip it.
 - **Not yet:**
   - the theme keys and the modifier rules' underline (stage 3);
   - delta and range (stage 4).

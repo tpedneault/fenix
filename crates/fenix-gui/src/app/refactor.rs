@@ -329,7 +329,7 @@ impl App {
         self.wake_caret();
     }
 
-    fn sync_refactor_buffers(&mut self, ids: &[BufferId]) {
+    pub(super) fn sync_refactor_buffers(&mut self, ids: &[BufferId]) {
         for id in ids {
             let ob = self.buffers.get(*id).unwrap();
             let Some(path) = ob.buffer.path() else { continue };
@@ -370,8 +370,9 @@ impl App {
                     continue;
                 };
                 if let Ok(next) = result {
-                    session.open_documents.insert(canonical.clone(), (revision, next));
-                    session.synced_text.insert(canonical.clone(), text.clone());
+                    // Its tokens move with what was sent, and are asked
+                    // again, as after any other sync.
+                    super::record_lsp_sync(session, &canonical, &text, revision, next, super::semantic::SemanticSync::Follow);
                 }
             }
         }

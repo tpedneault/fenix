@@ -1340,10 +1340,8 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
         None => {
             let params = lsp_types::DidOpenTextDocumentParams { text_document: lsp_types::TextDocumentItem { uri, language_id, version: 0, text: text.to_string() } };
             if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
-                session.open_documents.insert(canonical.to_path_buf(), (edit_count, 1));
-                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                record_lsp_sync(session, canonical, text, edit_count, 1, semantic);
                 pull_lsp_diagnostics(session, canonical);
-                semantic::after_sync(session, canonical, None, text, edit_count, semantic);
             }
         }
         Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count || session.synced_text.get(canonical).is_none_or(|t| t != text) => {
@@ -1354,10 +1352,8 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
                 content_changes: vec![change],
             };
             if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
-                session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version + 1));
-                let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                record_lsp_sync(session, canonical, text, edit_count, next_version + 1, semantic);
                 pull_lsp_diagnostics(session, canonical);
-                semantic::after_sync(session, canonical, old.as_deref().map(|old| (old, last_synced_edit_count)), text, edit_count, semantic);
             }
         }
         // Already open and already in sync -- the common case, most
@@ -1376,6 +1372,18 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
             }
         }
     }
+}
+
+/// What `session` was just sent of `canonical` (`didOpen` or
+/// `didChange`): its text at `edit_count`, the next version to send. The
+/// one place that's recorded, so what's held by position (semantic
+/// tokens) always moves with it -- every writer of `synced_text` and
+/// `open_documents` comes through here.
+fn record_lsp_sync(session: &mut LspSession, canonical: &Path, text: &str, edit_count: u64, next_version: i32, semantic: semantic::SemanticSync) {
+    let old_count = session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version)).map(|(count, _)| count);
+    let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+    let change = old.as_deref().zip(old_count);
+    semantic::after_sync(session, canonical, change, text, edit_count, semantic);
 }
 
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
@@ -36801,6 +36809,21 @@ name = \"orbit\"
         app.sync_lsp_for_focused_buffer();
         app.ask_due_semantic_tokens();
         assert!(!app.lsp_sessions[&key].semantic.contains_key(&old));
+    }
+
+    #[test]
+    fn a_refactor_s_sync_moves_semantic_tokens_and_asks_again() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refactor");
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        // An edit a refactor made, synced as a refactor syncs.
+        app.test_insert_str("  ");
+        let buffer = app.focused_buffer_id();
+        app.sync_refactor_buffers(&[buffer]);
+        assert!(app.drawn_tokens(buffer).is_some(), "moved with the change, still drawn");
+        assert_eq!(colour_at(&mut app, 18), Some(macro_colour(&app)));
+        assert!(app.semantic_wake().is_some(), "and asked again");
     }
 
     #[test]
