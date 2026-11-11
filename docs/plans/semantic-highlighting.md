@@ -1,0 +1,305 @@
+# Plan: semantic highlighting
+
+- **Status:** planned, for the release after 1.5 (issue #105).
+- **Scope:** code coloured by what its language server knows
+  (`textDocument/semanticTokens`), on top of tree-sitter's colours:
+  a parameter apart from a local, a macro apart from a function, an
+  interface apart from a type, a mutable variable apart from an
+  immutable one.
+- **Lands as:** the stages in §4. Each compiles and passes. With the
+  setting off, Fenix behaves exactly as before: nothing is advertised,
+  asked for or drawn.
+
+## 1. What it is
+
+- A server that offers semantic tokens is asked for a document's tokens
+  when it opens, after typing pauses, and when the server asks for a
+  refresh. Its tokens are drawn over the grammar's colours. Tree-sitter
+  colours a file at once; the server's colours land on top when they
+  arrive, and only where it named something.
+- Each token type maps to a theme colour. Themes may name the new
+  colours, and a theme that doesn't falls back to the nearest one it
+  has. A token Fenix has no mapping for leaves the grammar's colour.
+- While typing, the tokens Fenix holds move with each edit until the
+  server's next answer, so colours don't flicker or slide.
+- `lsp.semantic_highlighting` turns it on or off. A language can be
+  left out with `lsp.semantic_highlighting_off`.
+
+## 2. Where Fenix stands (1.5)
+
+- **Highlighting.** `App::syntax_highlights_in_columns` (`app.rs`)
+  returns `(byte range, colour)` for the rows being drawn. It drains the
+  buffer's edits into tree-sitter, asks the grammar for captures in the
+  visible byte windows, and maps each capture name to one of the theme's
+  eleven `syntax_*` colours (`Theme::syntax_color`). Two limits keep it
+  bounded:
+  - `MAX_HIGHLIGHT_CHARS` (64 Ki chars) on the visible span;
+  - per line, `MAX_ROW_CHARS` (4096) columns on very long lines. In a
+    wrapped pane this is the columns its rows show.
+  The drawers (`row_content_spans` for wrapped panes, the
+  line-per-row path otherwise) cut lines by these ranges with
+  `split_line_by_highlights`. So anything that ends up in that `Vec` is
+  drawn in wrapped and unwrapped panes alike, by rows.
+- **LSP.** One `LspSession` per server (`app.rs`). It holds:
+  - the capabilities;
+  - `open_documents` (edit count and version per path);
+  - `synced_text`, the text last sent;
+  - `pending`, for routing answers;
+  - `pulls`, for pulled diagnostics. Pulled diagnostics are the model
+    to copy: one ask out at a time per document, a second marked due,
+    and `workspace/diagnostic/refresh` asks again.
+  `sync_lsp_document` sends `didOpen`/`didChange`. It works out one
+  replaced range per change by comparing the text last sent with the
+  text now (`fenix_lsp::change_event`), whatever sync kind the server
+  asked for. Several servers can serve one buffer
+  (`cached_lsp_keys`).
+- **Positions** are UTF-16 (`fenix_lsp::position`). Fenix doesn't
+  advertise `general.positionEncodings`, so every server uses UTF-16.
+- **Capabilities** are fixed at connect time
+  (`crate::lsp::client_capabilities`), with no dynamic registration.
+
+## 3. Design
+
+### Requests: full, delta, range
+
+- **`full`** when a document opens and after each pause in typing. This
+  is the baseline: every server that offers tokens answers it.
+- **`full/delta`** in place of `full` when the server offers it and an
+  earlier answer gave a `resultId`. A delta's edits apply to the raw
+  `u32` array of the answer it's relative to, so that array is kept
+  (5 × tokens × 4 bytes; 400 KB for 20 000 tokens). On a typical
+  keystroke the answer is a handful of numbers instead of the whole
+  file. If a delta can't be applied (indices out of range), Fenix asks
+  `full` again.
+- **`range`** only for a large document (more than 10 000 lines, or
+  more than 1 MiB). It asks for the lines shown in each pane on that
+  document, with 100 lines of margin, when the view moves past the
+  margin or after an edit. It is used when the server offers it;
+  otherwise `full` is used up to 50 000 lines, and the document gets
+  none above that. Range answers aren't kept beyond what they cover: a
+  new range answer replaces the last.
+- One ask out per server and document at a time. An ask made while one
+  is out is marked due and sent when the answer lands, as pulled
+  diagnostics already do.
+- `workspace/semanticTokens/refresh` asks again for every open document
+  of that server. It's already accepted with a null reply by
+  `server_request_reply`.
+- An answer is decoded against the text it was asked for. If the
+  document was edited after the ask, its edit count no longer matches,
+  so the answer is thrown away and the ask is made again. The old,
+  shifted tokens stay drawn meanwhile. A delta's `resultId` is only
+  taken from an answer that was kept.
+- `ContentModified` (-32801) and `ServerCancelled` (-32802) mean "ask
+  again later". They're treated like a thrown-away answer.
+
+### Debounce and what's drawn meanwhile
+
+- The ask after an edit waits until typing has paused for
+  `SEMANTIC_PAUSE` (250 ms), measured from the last `didChange` sent.
+  The frame loop checks what's due, and a wake is set for the deadline,
+  so an idle editor still asks.
+- Tokens are kept as char offsets (`start`, `end`, type, modifiers)
+  against the text they describe, stamped with its edit count.
+- Every `didChange` `sync_lsp_document` sends is one replaced range
+  `[start, old_end) → new_end`, in chars. Tokens are moved with it:
+  - those before `start` stay;
+  - those after `old_end` shift by `new_end − old_end`;
+  - those touching the range are dropped (the grammar's colour shows
+    there until the answer).
+  The stamp then moves to the new edit count. This is the same range
+  that's sent, so the two can't drift apart. It's done for every
+  server whatever sync kind it asked for: the range is worked out
+  anyway.
+- Tokens are drawn only when their stamp equals the buffer's edit count.
+  A buffer edited by something that didn't go through
+  `sync_lsp_document` yet (another pane's buffer, an agent) shows
+  tree-sitter alone until the next sync, rather than tokens in the
+  wrong place.
+
+### Legend → theme
+
+- Each server's legend (token types and modifiers by index) is read
+  once from its capabilities. Types index into a table built once per
+  session that maps each index to a `Style`:
+  - a theme colour slot;
+  - or "none", which leaves the grammar's colour.
+- Standard types and their slots. A new slot falls back to the slot
+  after the arrow when the theme doesn't name it:
+
+  | Token type | Slot |
+  |---|---|
+  | `namespace`, `type`, `class`, `enum`, `struct`, `typeParameter` | type |
+  | `interface` | **interface** → type |
+  | `parameter` | **parameter** → variable |
+  | `variable`, `property`, `event`, `label` | variable |
+  | `enumMember` | constant |
+  | `function`, `method` | function |
+  | `macro` | **macro** → function |
+  | `keyword`, `modifier` | keyword |
+  | `comment` | comment |
+  | `string`, `regexp` | string |
+  | `number` | number |
+  | `operator` | operator |
+  | `decorator` | attribute |
+
+- Common non-standard types are mapped too:
+  - rust-analyzer's `builtinType`, `selfType` and `typeAlias` to type, `trait` to interface;
+  - `selfKeyword` and `lifetime` to keyword;
+  - `boolean` to constant;
+  - `attribute` and `derive` to attribute;
+  - `formatSpecifier` and `escapeSequence` to string.
+  Any other type (`unresolvedReference`, `generic`, ...) maps to "none".
+- **Modifiers:**
+  - `mutable` (rust-analyzer) draws a thin underline under the token, in
+    the token's colour, as VS Code does;
+  - `readonly` or `constant` on a `variable` or `property` takes the
+    constant slot;
+  - `deprecated` takes the comment slot;
+  - every other modifier is ignored.
+- The new theme keys are optional, under `[syntax]`: `interface`,
+  `parameter` and `macro`. The built-in themes get values chosen from
+  their own palettes, so the distinctions the issue asks for show out of
+  the box. A user theme without them still loads, and falls back as
+  above.
+
+### Layering over tree-sitter
+
+- `syntax_highlights_in_columns` produces the grammar's ranges as now.
+  When the buffer has drawable tokens, those inside the same byte
+  windows are converted to byte ranges and laid over them:
+  - the grammar's ranges are cut where a token starts and ends;
+  - the token's colour wins inside it;
+  - the grammar's colour stays outside.
+- A token mapped to "none" isn't laid at all.
+- Tokens never colour inside a comment or string the grammar found.
+  Servers sometimes send a token for a doc comment's code. Laying it
+  would split a comment into colours the grammar already got right, so
+  the grammar wins there.
+- TODO captures and conflict markers are untouched: conflict markers
+  return before syntax runs, and TODO spans are taken from the grammar's
+  captures.
+- Because the result is the same `Vec` of byte ranges, both drawers
+  cut by row columns as they do now. That covers wrapped panes, tabs and
+  the long-line column windows.
+
+### Servers, buffers, sizes
+
+- **Servers that don't offer it:** none of the buffer's servers has
+  `semanticTokensProvider` (or it offers neither `full` nor `range`).
+  Nothing is asked, and the buffer stays tree-sitter only.
+- **Multi-server buffers:** the first of the buffer's servers, in
+  `cached_lsp_keys` order, that offers tokens is the one asked. Tokens
+  from two servers are not merged: two legends' opinions on the same
+  word would fight.
+- **Large files and long lines:**
+  - Decoding happens once per answer, not per frame. Each frame only
+    looks up the tokens inside the visible windows (a binary search on
+    `start`) and converts those to bytes.
+  - A line beyond `MAX_ROW_CHARS` only gets tokens in the columns shown,
+    since the windows are those columns already.
+  - Range requests (above) keep a huge file from producing a huge answer.
+- **Position encoding:** UTF-16 stays. A token's line and UTF-16 start
+  and length are turned into char offsets through the text the ask was
+  made against (`synced_text`), one line at a time while decoding, so
+  a non-BMP character before a token on its line doesn't shift it.
+  Advertising `utf-8` too would save that walk, but it adds a second
+  path everywhere else positions cross. Not worth it for this alone.
+
+### Settings
+
+| Setting | Default | What it does |
+|---|---|---|
+| `lsp.semantic_highlighting` | on | Ask servers for semantic tokens and draw them. Off: the capability isn't advertised, and nothing is asked or drawn. A change applies to servers started after it (`SPC q r` or reopening). |
+| `lsp.semantic_highlighting_off` | none | Languages whose files are never asked, by the same names `editor.wrap_languages` uses. Applies at once. |
+
+**Why on:** with the fallbacks, a token in a theme that doesn't name the
+new slots takes the colour the grammar would most likely have given it.
+Where they differ, it's because the server knows better (a call the
+grammar took for a variable, a type it took for a function). The
+setting is there for anyone who prefers the grammar alone. The
+per-language list covers a server whose tokens are poor.
+
+### Revised after review
+
+These supersede the table and rules above where they differ.
+
+- **Plain names keep the grammar's colour.** `variable`, `property`,
+  `namespace` and `lifetime` map to none, so the grammar's colour stays.
+  In themes where the variable colour isn't the text colour, colouring
+  every local and field would change most of a file. A path like
+  `std::collections` isn't a type. A modifier still counts:
+  - a constant is a `variable` or `property` with rust-analyzer's
+    `constant` modifier (its `const` and `static` items), or with
+    `readonly` together with `static` (a `static final`, a C# `const`,
+    a TypeScript `static readonly`). `readonly` alone (every TypeScript
+    `const` local) keeps the grammar's colour;
+  - deprecated makes a comment;
+  - mutable underlines the name in its grammar colour.
+- **Layers.** Each type says how it's laid.
+  - `Over`, for what only the server knows (types, parameters,
+    functions, macros, enum members and the like): over the grammar,
+    but never inside its comments and strings.
+  - `Fill`, for what the grammar knows as well (keywords, strings,
+    numbers, operators): only where the grammar coloured nothing, as in
+    a language with a server but no grammar.
+  - `Wins`, for `comment`: over everything. clangd marks an inactive
+    `#if` region with comment tokens, and that region greys whole,
+    literals and all.
+- **Enum members take the constant colour.** That's intended: the
+  grammar's `constructor` guess gave them the attribute colour.
+- **Numbers are Fill**, so the grammar's colour for a literal stays.
+- **Lines in `decode`** are ropey's, measured with
+  `position::line_content_char_len`. That's the same pair every position
+  sent with `didChange` uses: LF, CR and CRLF, plus VT, FF, NEL, LS and
+  PS with ropey's default features. So the two can't disagree.
+- **Overlap.** Tokens out of order are sorted, and of two that overlap,
+  the first is kept.
+- **Answers stay raw.** They're read as plain numbers
+  (`semantic::Answer`, `read_answer`). A delta's edits apply to that
+  array at any index, and only the result must be whole tokens.
+- **`provider` copies no legend**, and `legend` borrows it.
+- **`range: {}`** (allowed by the spec, refused by lsp-types) is
+  rewritten to `true` before an `initialize` result is read
+  (`normalize_initialize_result`).
+
+### What's not done
+
+- Partial results (`partialResultToken`): answers are taken whole.
+- Dynamic registration of the provider (Fenix has none for anything).
+- Token modifiers beyond the four above: bold and italic would need
+  font variants per span, which the text drawer doesn't have.
+
+## 4. Stages
+
+1. **Plan and decoding.** This document, and `fenix_lsp::semantic`
+   (pure, tested):
+   - reading the provider from capabilities (`full`, `delta`, `range`);
+   - the legend → `Style` table;
+   - decoding relative tokens into char-offset tokens against a text;
+   - applying a delta's edits to the raw array;
+   - shifting tokens through one replaced range;
+   - finding the tokens inside a char window.
+   No GUI change.
+2. **Asking and drawing (`full`).**
+   - The settings, and the client capability advertised when on.
+   - Session state per document; asks on open, after the pause and on
+     refresh; answers decoded and stamped.
+   - Shifting on each `didChange`.
+   - Layering in `syntax_highlights_in_columns`; the multi-server choice;
+     clearing on close and disconnect.
+3. **Theme.**
+   - The `interface`, `parameter` and `macro` keys, with values in the
+     built-in themes.
+   - The modifier rules, including the `mutable` underline in both
+     drawers (in a wrapped pane, an underline split at a row break goes
+     on each row).
+   - Settings page and docs.
+4. **Delta and range, and hardening.**
+   - `full/delta` with the kept array.
+   - `range` for large documents, re-asked as the view moves.
+   - A measurement on a large file, like soft wrap's.
+   - CHANGELOG, FEATURES and "As built".
+
+## 5. As built
+
+To be filled in as the stages land.
