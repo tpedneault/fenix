@@ -393,6 +393,7 @@ fn option_key(option: &fenix_acp::protocol::PermissionOption, n: usize) -> Strin
         PermissionKind::RejectOnce => "n".to_string(),
         PermissionKind::RejectAlways => "N".to_string(),
         PermissionKind::Other if option.id == "edit" => "e".to_string(),
+        PermissionKind::Other if option.id == "retry" => "r".to_string(),
         PermissionKind::Other => (n + 1).to_string(),
     }
 }
@@ -421,8 +422,9 @@ pub fn answer_for(thread: &Thread, key: Key) -> Option<Action> {
         Key::Char('n') => by_kind(PermissionKind::RejectOnce).or_else(|| by_kind(PermissionKind::RejectAlways)),
         Key::Char('N') => by_kind(PermissionKind::RejectAlways),
         Key::Char(c @ '1'..='9') => card.options.get(c as usize - '1' as usize).map(|o| o.id.clone()),
-        // A pipeline's gate: edit what's passed on.
+        // A pipeline's gate: edit what's passed on, run the step again.
         Key::Char('e') => card.options.iter().find(|o| o.id == "edit").map(|o| o.id.clone()),
+        Key::Char('r') => card.options.iter().find(|o| o.id == "retry").map(|o| o.id.clone()),
         _ => None,
     }?;
     Some(Action::Permission { key: card.key.clone(), option })

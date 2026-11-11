@@ -95,7 +95,7 @@ pub(crate) struct AgentHost {
     clients: HashMap<ConnId, AcpClient>,
     /// Each connection's log, kept after it stops (`SPC h a`).
     logs: BTreeMap<ConnId, (String, Arc<Mutex<Log>>)>,
-    store: Option<Store>,
+    pub(crate) store: Option<Store>,
     /// Threads read from the store, by id (the rest aren't loaded yet).
     loaded: HashSet<ThreadId>,
     pub(super) dirty: HashSet<ThreadId>,

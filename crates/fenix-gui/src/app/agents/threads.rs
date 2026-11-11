@@ -12,7 +12,7 @@ pub(crate) const PAGE_EXT: &str = "fenix:agents";
 
 impl AgentHost {
     /// Reads one thread from the store into the hub, if it's not there.
-    pub(super) fn load_one(&mut self, id: &ThreadId) -> bool {
+    pub(crate) fn load_one(&mut self, id: &ThreadId) -> bool {
         if self.hub.view(id).is_some() {
             return true;
         }
@@ -139,6 +139,11 @@ impl App {
     }
 
     pub(super) fn agents_delete(&mut self, thread: &ThreadId) {
+        // A step of a stopped run, deleted: the run is no longer kept to be
+        // picked up.
+        if let Some(run) = self.agents.hub.meta(thread).and_then(|m| m.run.as_ref().map(|r| r.id.clone())) {
+            self.pipeline_forget(&run);
+        }
         let fx = self.agents.hub.delete(thread, Instant::now());
         self.agents_run(fx);
         self.agents.baselines.remove(thread);

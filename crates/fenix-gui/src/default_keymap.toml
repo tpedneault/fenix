@@ -1281,6 +1281,11 @@ label = "pipeline"
 command = "agents.pipeline"
 
 [[leader]]
+keys = "SPC a g"
+label = "pipeline: go on"
+command = "agents.pipeline_go"
+
+[[leader]]
 keys = "SPC a i"
 label = "import a session"
 command = "agents.import"

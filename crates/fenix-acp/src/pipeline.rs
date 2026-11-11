@@ -33,13 +33,18 @@
 //!
 //! A step with `run` is a command, no agent in it: its exit code says
 //! whether the run goes on, and what it printed goes back to `on_failure`.
+//!
+//! A step that ends badly -- cancelled, refused, cut off, a review with no
+//! findings list, a command out of rounds -- asks at its gate rather than
+//! ending the run, saying why. A run stopped keeps the step it stopped at,
+//! and `resume` brings that gate back; `retry` runs the step again.
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// What a step hands the next.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Passes {
     /// Its last answer.
@@ -53,7 +58,7 @@ pub enum Passes {
     Transcript,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct StepSpec {
     pub name: String,
     /// The agent; empty for the default.
@@ -107,7 +112,7 @@ impl StepSpec {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PipelineSpec {
     #[serde(default)]
     pub name: String,
@@ -203,22 +208,33 @@ pub enum Next {
     Start { step: usize, prompt: String },
     /// Run step `step`'s command, and say how it went (`command_ended`).
     Run { step: usize, command: String },
-    /// Ask you whether to go on, showing what step `step` passes.
-    Gate { step: usize, passing: String },
+    /// Ask you whether to go on, showing what step `step` passes (empty:
+    /// it has nothing to pass, so only running it again or stopping are
+    /// offered). `trouble`: why it's asked though the step didn't end
+    /// well.
+    Gate { step: usize, passing: String, trouble: Option<String> },
     Done { summary: String },
     Stopped { why: String },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum State {
     Running(usize),
     AtGate(usize),
     Done,
-    Stopped(String),
+    /// Stopped at step `step`, and why: `resume` brings its gate back.
+    Stopped { step: usize, why: String },
+}
+
+/// The gate up at a step, kept while the run is stopped there.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GateUp {
+    pub passing: String,
+    pub trouble: Option<String>,
 }
 
 /// A finding a review step reported.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Finding {
     #[serde(default)]
     pub path: String,
@@ -230,8 +246,10 @@ pub struct Finding {
     pub message: String,
 }
 
-/// A pipeline under way.
-#[derive(Clone, Debug)]
+/// A pipeline under way. Kept as it is (`store::SavedRun`), so a field
+/// added later needs a default.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Run {
     pub spec: PipelineSpec,
     pub input: String,
@@ -247,6 +265,13 @@ pub struct Run {
     follow_up: bool,
     /// Times each command step's failure went back.
     failures: BTreeMap<String, u32>,
+    /// What the step under way was started with: its prompt, or its
+    /// command. `retry` starts it with the same.
+    #[serde(default)]
+    prompt: String,
+    /// The gate up, or the one the run stopped at.
+    #[serde(default)]
+    pub gate: Option<GateUp>,
 }
 
 /// The JSON block in an answer: the first ```json fence, else the first
@@ -301,18 +326,61 @@ fn findings_text(findings: &[Finding]) -> String {
 impl Run {
     /// A run of `spec` on what you wrote, and its first step.
     pub fn start(spec: PipelineSpec, input: &str) -> (Run, Next) {
-        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new(), follow_up: false, failures: BTreeMap::new() };
+        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new(), follow_up: false, failures: BTreeMap::new(), prompt: String::new(), gate: None };
         let next = run.begin(0);
         (run, next)
     }
 
     /// Step `i` is next: its prompt to send, or its command to run.
     fn begin(&mut self, i: usize) -> Next {
+        self.prompt = match &self.spec.steps[i].run {
+            Some(command) => command.clone(),
+            None => self.prompt_for(i),
+        };
+        self.again(i)
+    }
+
+    /// Step `i` started with what it was started with last.
+    fn again(&mut self, i: usize) -> Next {
         self.state = State::Running(i);
-        match self.spec.steps[i].run.clone() {
-            Some(command) => Next::Run { step: i, command },
-            None => Next::Start { step: i, prompt: self.prompt_for(i) },
+        self.gate = None;
+        self.follow_up = false;
+        match &self.spec.steps[i].run {
+            Some(_) => Next::Run { step: i, command: self.prompt.clone() },
+            None => Next::Start { step: i, prompt: self.prompt.clone() },
         }
+    }
+
+    /// The gate at step `i`, up: what it passes, and why it's asked when
+    /// the step didn't end well.
+    fn gate_at(&mut self, i: usize, passing: String, trouble: Option<String>) -> Next {
+        self.state = State::AtGate(i);
+        self.gate = Some(GateUp { passing: passing.clone(), trouble: trouble.clone() });
+        Next::Gate { step: i, passing, trouble }
+    }
+
+    /// What step `i` has to pass on that went badly: kept for the next
+    /// step if you go on, unless there's nothing.
+    fn gate_on_trouble(&mut self, i: usize, passing: String, trouble: String) -> Next {
+        if !passing.trim().is_empty() {
+            self.passed.insert(self.spec.steps[i].name.clone(), passing.clone());
+            self.previous = passing.clone();
+        }
+        let passing = if passing.trim().is_empty() { String::new() } else { passing };
+        self.gate_at(i, passing, Some(trouble))
+    }
+
+    /// The step a stopped run stopped at.
+    pub fn stopped_at(&self) -> Option<usize> {
+        match self.state {
+            State::Stopped { step, .. } => Some(step),
+            _ => None,
+        }
+    }
+
+    /// It's under way: a step at work or at its gate.
+    pub fn is_live(&self) -> bool {
+        matches!(self.state, State::Running(_) | State::AtGate(_))
     }
 
     /// The step under way is a command, so no agent's turn is its end.
@@ -343,10 +411,11 @@ impl Run {
             .steps
             .iter()
             .enumerate()
-            .map(|(i, s)| match at {
-                Some(a) if i < a => format!("{} ✓", s.name),
-                Some(a) if i == a => format!("{} ●", s.name),
-                None if self.state == State::Done => format!("{} ✓", s.name),
+            .map(|(i, s)| match (at, self.stopped_at()) {
+                (Some(a), _) | (None, Some(a)) if i < a => format!("{} ✓", s.name),
+                (Some(a), _) if i == a => format!("{} ●", s.name),
+                (None, Some(a)) if i == a => format!("{} ■", s.name),
+                (None, None) if self.state == State::Done => format!("{} ✓", s.name),
                 _ => s.name.clone(),
             })
             .collect::<Vec<_>>()
@@ -356,17 +425,10 @@ impl Run {
     /// The current step's turn ended.
     pub fn step_ended(&mut self, end: StepEnd) -> Next {
         let Some(i) = self.step() else { return Next::Stopped { why: "the pipeline isn't running".into() } };
-        let follow_up = std::mem::take(&mut self.follow_up);
-        if end.stop != "end_turn" {
-            // Another round given up on: what the step had still stands.
-            if follow_up {
-                self.state = State::AtGate(i);
-                return Next::Gate { step: i, passing: self.previous.clone() };
-            }
-            let why = format!("step {} ended: {}", self.spec.steps[i].name, end.stop);
-            self.state = State::Stopped(why.clone());
-            return Next::Stopped { why };
+        if !matches!(self.state, State::Running(_)) {
+            return Next::Stopped { why: "the pipeline isn't running".into() };
         }
+        let follow_up = std::mem::take(&mut self.follow_up);
         let step = self.spec.steps[i].clone();
         let passing = match step.passes {
             Passes::Answer => end.answer.clone(),
@@ -374,11 +436,19 @@ impl Run {
             Passes::Changes => if end.changes.trim().is_empty() { NO_CHANGES.to_string() } else { end.changes.clone() },
             Passes::Transcript => end.transcript.clone(),
         };
+        if end.stop != "end_turn" {
+            // Another round given up on: what the step had still stands.
+            if follow_up {
+                let previous = self.previous.clone();
+                return self.gate_at(i, previous, None);
+            }
+            // Refused, cancelled, cut off: you say whether what it has
+            // goes on, or it runs again.
+            return self.gate_on_trouble(i, passing, format!("{} stopped early ({})", step.name, end.stop));
+        }
         if step.findings {
             let Some(findings) = findings_in(&end.answer) else {
-                let why = format!("step {}'s answer has no findings list", step.name);
-                self.state = State::Stopped(why.clone());
-                return Next::Stopped { why };
+                return self.gate_on_trouble(i, end.answer.clone(), format!("{}'s answer has no findings list", step.name));
             };
             self.findings = findings.clone();
             if !findings.is_empty() {
@@ -403,16 +473,17 @@ impl Run {
         // to work on, so you say whether it's worth going on.
         let nothing_done = step.passes == Passes::Changes && end.changes.trim().is_empty() && i + 1 < self.spec.steps.len();
         if step.gate || nothing_done || follow_up {
-            self.state = State::AtGate(i);
-            return Next::Gate { step: i, passing };
+            return self.gate_at(i, passing, None);
         }
         self.advance(i)
     }
 
     fn advance(&mut self, i: usize) -> Next {
+        let troubled = self.gate.take().is_some_and(|g| g.trouble.is_some());
         if i + 1 >= self.spec.steps.len() {
             self.state = State::Done;
-            return Next::Done { summary: if self.spec.steps[i].findings { "the review found nothing to fix".into() } else { "every step is done".into() } };
+            let found_nothing = self.spec.steps[i].findings && !troubled;
+            return Next::Done { summary: if found_nothing { "the review found nothing to fix".into() } else { "every step is done".into() } };
         }
         self.begin(i + 1)
     }
@@ -421,19 +492,18 @@ impl Run {
     /// stopped. Passed, what the step before gave goes on to the next.
     /// Failed, its output goes to `on_failure` while rounds are left.
     pub fn command_ended(&mut self, exit: Option<i32>, output: &str) -> Next {
-        let Some(i) = self.step() else { return Next::Stopped { why: "the pipeline isn't running".into() } };
+        let Some(i) = self.step().filter(|_| self.at_command()) else { return Next::Stopped { why: "the pipeline isn't running".into() } };
         let step = self.spec.steps[i].clone();
         let command = step.run.clone().unwrap_or_default();
         let kept = output_kept(output);
         self.passed.insert(step.name.clone(), kept.to_string());
+        // At its gate, what came before it is what goes on: the command
+        // passes it on untouched.
+        let before = self.previous.clone();
         let failure = match exit {
             Some(0) => return self.advance(i),
             Some(code) => code,
-            None => {
-                let why = format!("step {} was stopped", step.name);
-                self.state = State::Stopped(why.clone());
-                return Next::Stopped { why };
-            }
+            None => return self.gate_at(i, before, Some(format!("`{command}` was stopped"))),
         };
         let back = step.on_failure.as_ref().and_then(|b| self.spec.steps.iter().position(|s| &s.name == b));
         let used = self.failures.entry(step.name.clone()).or_default();
@@ -446,8 +516,7 @@ impl Run {
             Some(_) => format!("`{command}` still fails (exit {failure}) after {used} round(s)"),
             None => format!("`{command}` failed (exit {failure})"),
         };
-        self.state = State::Stopped(why.clone());
-        Next::Stopped { why }
+        self.gate_at(i, before, Some(why))
     }
 
     /// You wrote to the step at its gate: it's working again, and its end
@@ -456,6 +525,7 @@ impl Run {
         if let State::AtGate(i) = self.state {
             self.state = State::Running(i);
             self.follow_up = true;
+            self.gate = None;
         }
     }
 
@@ -464,8 +534,9 @@ impl Run {
     pub fn gate_answered(&mut self, go: bool, edited: Option<String>) -> Next {
         let State::AtGate(i) = self.state else { return Next::Stopped { why: "not at a gate".into() } };
         if !go {
+            // The gate is kept: `resume` brings it back as it was.
             let why = format!("stopped at {}'s gate", self.spec.steps[i].name);
-            self.state = State::Stopped(why.clone());
+            self.state = State::Stopped { step: i, why: why.clone() };
             return Next::Stopped { why };
         }
         if let Some(text) = edited {
@@ -475,9 +546,41 @@ impl Run {
         self.advance(i)
     }
 
-    /// You stopped it.
+    /// It stops where it is, for `why`: a gate up is kept.
     pub fn stop(&mut self, why: &str) {
-        self.state = State::Stopped(why.to_string());
+        let step = match self.state {
+            State::Running(i) | State::AtGate(i) => i,
+            State::Stopped { step, .. } => step,
+            State::Done => return,
+        };
+        if matches!(self.state, State::Running(_)) {
+            self.gate = None;
+        }
+        self.follow_up = false;
+        self.state = State::Stopped { step, why: why.to_string() };
+    }
+
+    /// A stopped run picked up: the gate of the step it stopped at, as it
+    /// was -- or, when it stopped at work, asking with why it stopped and
+    /// nothing to pass on yet. `None` unless it's stopped.
+    pub fn resume(&mut self) -> Option<Next> {
+        let State::Stopped { step, why } = self.state.clone() else { return None };
+        let gate = self.gate.clone().unwrap_or(GateUp { passing: String::new(), trouble: Some(why) });
+        Some(self.gate_at(step, gate.passing, gate.trouble))
+    }
+
+    /// `r` at a gate (or on a stopped run): the step starts again, with
+    /// the prompt it had.
+    pub fn retry(&mut self) -> Next {
+        let i = match self.state {
+            State::AtGate(i) => i,
+            State::Stopped { step, .. } => step,
+            _ => return Next::Stopped { why: "not at a gate".into() },
+        };
+        if self.prompt.is_empty() {
+            return self.begin(i);
+        }
+        self.again(i)
     }
 }
 
@@ -558,17 +661,20 @@ mod tests {
         assert!(prompt.contains("`cargo test` failed (exit 101)") && prompt.contains("assertion failed"), "{prompt}");
         assert!(matches!(run.step_ended(ended("fixed")), Next::Run { step: 1, .. }), "run again");
         let next = run.command_ended(Some(101), "assertion failed");
-        assert_eq!(next, Next::Stopped { why: "`cargo test` still fails (exit 101) after 1 round(s)".into() });
+        assert_eq!(next, Next::Gate { step: 1, passing: "+a".into(), trouble: Some("`cargo test` still fails (exit 101) after 1 round(s)".into()) }, "out of rounds, it asks");
+        let Next::Start { step: 2, prompt } = run.gate_answered(true, None) else { panic!() };
+        assert!(prompt.starts_with("+a / "), "y goes on anyway: {prompt}");
     }
 
     #[test]
-    fn a_command_with_nowhere_to_go_stops_and_one_stopped_stops() {
+    fn a_command_with_nowhere_to_go_asks_and_one_stopped_asks() {
         let spec = "[[steps]]\nname = \"test\"\nrun = \"make\"\n";
         let (mut run, first) = Run::start(PipelineSpec::parse("p", spec).unwrap(), "x");
         assert_eq!(first, Next::Run { step: 0, command: "make".into() }, "it can come first");
-        assert_eq!(run.command_ended(Some(2), ""), Next::Stopped { why: "`make` failed (exit 2)".into() });
+        assert_eq!(run.command_ended(Some(2), ""), Next::Gate { step: 0, passing: String::new(), trouble: Some("`make` failed (exit 2)".into()) });
+        assert_eq!(run.retry(), Next::Run { step: 0, command: "make".into() }, "r runs it again");
         let (mut run, _) = Run::start(PipelineSpec::parse("p", spec).unwrap(), "x");
-        assert_eq!(run.command_ended(None, ""), Next::Stopped { why: "step test was stopped".into() });
+        assert_eq!(run.command_ended(None, ""), Next::Gate { step: 0, passing: String::new(), trouble: Some("`make` was stopped".into()) });
         let (mut run, _) = Run::start(PipelineSpec::parse("p", spec).unwrap(), "x");
         assert_eq!(run.command_ended(Some(0), ""), Next::Done { summary: "every step is done".into() });
     }
@@ -606,7 +712,7 @@ mod tests {
         let Next::Start { step: 0, prompt } = next else { panic!("{next:?}") };
         assert!(prompt.contains("Add a --verbose flag"));
         let next = run.step_ended(StepEnd { plan: Some("1. Parse it\n2. Print more".into()), ..ended("I'd do this") });
-        assert_eq!(next, Next::Gate { step: 0, passing: "1. Parse it\n2. Print more".into() });
+        assert_eq!(next, Next::Gate { step: 0, passing: "1. Parse it\n2. Print more".into(), trouble: None });
         assert_eq!(run.progress(), "plan ● → build → review");
         let next = run.gate_answered(true, Some("1. Parse it".into()));
         let Next::Start { step: 1, prompt } = next else { panic!("{next:?}") };
@@ -643,16 +749,16 @@ mod tests {
         run.step_ended(ended("plan one"));
         run.gate_reopened();
         assert_eq!(run.state, State::Running(0));
-        assert_eq!(run.step_ended(ended("plan two")), Next::Gate { step: 0, passing: "plan two".into() });
+        assert_eq!(run.step_ended(ended("plan two")), Next::Gate { step: 0, passing: "plan two".into(), trouble: None });
         let Next::Start { step: 1, prompt } = run.gate_answered(true, None) else { panic!() };
         assert!(prompt.contains("plan two") && !prompt.contains("plan one"), "{prompt}");
         // Build: a second round's changes are what's passed, and one you
         // cancel leaves the gate as it was.
         run.step_ended(StepEnd { changes: "+one".into(), ..ended("built") });
         run.gate_reopened();
-        assert_eq!(run.step_ended(StepEnd { changes: "+one\n+two".into(), ..ended("more") }), Next::Gate { step: 1, passing: "+one\n+two".into() });
+        assert_eq!(run.step_ended(StepEnd { changes: "+one\n+two".into(), ..ended("more") }), Next::Gate { step: 1, passing: "+one\n+two".into(), trouble: None });
         run.gate_reopened();
-        assert_eq!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Gate { step: 1, passing: "+one\n+two".into() });
+        assert_eq!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Gate { step: 1, passing: "+one\n+two".into(), trouble: None });
         let Next::Start { step: 2, prompt } = run.gate_answered(true, None) else { panic!() };
         assert!(prompt.contains("+one\n+two"), "{prompt}");
     }
@@ -663,7 +769,7 @@ mod tests {
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
         let next = run.step_ended(StepEnd { changes: String::new(), ..ended("I updated the plan") });
-        assert_eq!(next, Next::Gate { step: 1, passing: NO_CHANGES.to_string() });
+        assert_eq!(next, Next::Gate { step: 1, passing: NO_CHANGES.to_string(), trouble: None });
         assert_eq!(run.state, State::AtGate(1));
         assert!(matches!(run.gate_answered(false, None), Next::Stopped { .. }), "stopped, not reviewed");
     }
@@ -677,10 +783,11 @@ mod tests {
         run.gate_answered(true, None);
         assert_eq!(run.step_ended(ended("Nothing to fix: ```json\n{\"findings\": []}\n```")), Next::Done { summary: "the review found nothing to fix".into() });
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
-        assert!(matches!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Stopped { .. }));
+        assert_eq!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Gate { step: 0, passing: String::new(), trouble: Some("plan stopped early (cancelled)".into()) });
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
         run.step_ended(ended("plan"));
         assert!(matches!(run.gate_answered(false, None), Next::Stopped { .. }));
+        assert_eq!(run.stopped_at(), Some(0));
     }
 
     #[test]
@@ -690,7 +797,91 @@ mod tests {
         run.gate_answered(true, None);
         run.step_ended(ended("built"));
         run.gate_answered(true, None);
-        assert!(matches!(run.step_ended(ended("Looks fine to me")), Next::Stopped { .. }));
+        assert_eq!(run.step_ended(ended("Looks fine to me")), Next::Gate { step: 2, passing: "Looks fine to me".into(), trouble: Some("review's answer has no findings list".into()) });
+        assert_eq!(run.gate_answered(true, None), Next::Done { summary: "every step is done".into() }, "y goes on anyway, and says nothing it doesn't know");
+    }
+
+    /// Every way a step can end badly comes to a gate, or a stopped run
+    /// that `resume` brings back to one: none leaves nothing to go on from.
+    #[test]
+    fn every_bad_ending_asks_or_can_be_picked_up() {
+        let cancelled = |stop: &str| StepEnd { stop: stop.into(), plan: Some("1. Change a.rs".into()), ..Default::default() };
+        let at_plan = || Run::start(PipelineSpec::review(), "x").0;
+        // A command refused, `SPC a k`, a token or request limit, a refusal, a crash.
+        for stop in ["cancelled", "max_tokens", "max_turn_requests", "refusal", "error"] {
+            let mut run = at_plan();
+            let next = run.step_ended(cancelled(stop));
+            assert_eq!(next, Next::Gate { step: 0, passing: "1. Change a.rs".into(), trouble: Some(format!("plan stopped early ({stop})")) }, "{stop}");
+            let Next::Start { step: 1, prompt } = run.gate_answered(true, None) else { panic!("{stop}") };
+            assert!(prompt.contains("1. Change a.rs"), "y goes on with what it had: {prompt}");
+        }
+        // Nothing to pass: `y` isn't offered (the passing is empty), `r` is.
+        let mut run = at_plan();
+        let Next::Gate { passing, .. } = run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }) else { panic!() };
+        assert!(passing.is_empty());
+        let Next::Start { step: 0, prompt } = run.retry() else { panic!() };
+        assert!(prompt.contains("Plan this change") && prompt.contains("x"), "the prompt it had: {prompt}");
+        // `n` at a gate, `q` in the pane `e` opened (the same answer), the
+        // gate taken back when its agent stopped: stopped there, and
+        // brought back as it was.
+        let mut run = at_plan();
+        run.step_ended(StepEnd { plan: Some("the plan".into()), ..ended("") });
+        assert_eq!(run.gate_answered(false, None), Next::Stopped { why: "stopped at plan's gate".into() });
+        assert_eq!(run.progress(), "plan ■ → build → review");
+        assert_eq!(run.resume(), Some(Next::Gate { step: 0, passing: "the plan".into(), trouble: None }));
+        assert!(matches!(run.gate_answered(true, None), Next::Start { step: 1, .. }));
+        // Stopped at work (its agent couldn't take the prompt; Fenix was
+        // closed): its gate, saying why, with nothing to pass yet.
+        let mut run = at_plan();
+        run.stop("interrupted, when Fenix closed");
+        assert!(!run.is_live());
+        assert_eq!(run.resume(), Some(Next::Gate { step: 0, passing: String::new(), trouble: Some("interrupted, when Fenix closed".into()) }));
+        assert!(matches!(run.retry(), Next::Start { step: 0, .. }));
+        // `r` offered at every gate: the step again, as it was asked.
+        let mut run = at_plan();
+        run.step_ended(ended("a plan"));
+        let Next::Start { step: 0, prompt } = run.retry() else { panic!() };
+        assert!(prompt.contains("Plan this change"), "{prompt}");
+        // A step that's done isn't picked up: there's nothing to.
+        let (mut run, _) = Run::start(PipelineSpec::parse("p", "[[steps]]\nname = \"a\"\nprompt = \"p\"\n").unwrap(), "x");
+        assert!(matches!(run.step_ended(ended("ok")), Next::Done { .. }));
+        assert_eq!(run.resume(), None);
+    }
+
+    /// A run read back goes on from the same step, with the same prompt.
+    #[test]
+    fn a_run_kept_and_read_back_goes_on_where_it_was() {
+        let (mut run, _) = Run::start(PipelineSpec::review(), "Add a flag");
+        run.step_ended(StepEnd { plan: Some("1. Parse it".into()), ..ended("") });
+        run.gate_answered(true, None);
+        let text = serde_json::to_string(&run).unwrap();
+        let mut back: Run = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.state, State::Running(1));
+        assert_eq!(back.spec, run.spec);
+        back.stop("interrupted, when Fenix closed");
+        assert!(matches!(back.resume(), Some(Next::Gate { step: 1, .. })));
+        let (Next::Start { step: 1, prompt }, Next::Start { step: 1, prompt: was }) = (back.retry(), run.retry_for_test()) else { panic!() };
+        assert_eq!(prompt, was);
+        assert!(prompt.contains("1. Parse it"), "{prompt}");
+    }
+
+    impl Run {
+        /// Step under way, started again.
+        fn retry_for_test(&mut self) -> Next {
+            let i = self.step().unwrap();
+            self.again(i)
+        }
+    }
+
+    /// The steps that plan say where the plan goes: in the answer, not a
+    /// file (a file's command is a card that can't be read whole).
+    #[test]
+    fn a_plan_step_gives_its_plan_in_its_answer() {
+        for spec in PipelineSpec::built_in() {
+            for step in spec.steps.iter().filter(|s| s.mode.as_deref() == Some("plan") && s.passes == Passes::Plan) {
+                assert!(step.prompt.contains("Give the plan in your answer; don't write it to a file."), "{}: {}", spec.name, step.name);
+            }
+        }
     }
 
     #[test]

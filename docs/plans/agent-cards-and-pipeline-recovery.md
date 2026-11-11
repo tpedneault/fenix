@@ -208,15 +208,33 @@ And for the rules:
 
 ## In what order
 
-1. **The card** (1.5.1): the grid's rule, `one_line`, the command on
-   the question, the tests. A fix only; nothing stored changes.
-2. **The gate on a bad ending, `r`, `SPC a g`** (1.5.1 if `SPC a k`
-   keeping the run counts as a fix, else 1.6.0), with
+All of it ships together, as 1.5.1: the owner decided that `SPC a k` on
+a step stopping the step and bringing up its gate, where `n` stops the
+run, counts as a fix.
+
+1. **The card**: the grid's rule, `one_line`, the command on the
+   question, the tests. Nothing stored changes.
+2. **The gate on a bad ending, `r`, `SPC a g`**, with
    [AGENTS.md](../AGENTS.md)'s *Pipelines* and
    [KEYBINDINGS.md](../KEYBINDINGS.md).
-3. **Runs stored across a restart** (1.6.0): a new file in the state
-   folder.
+3. **Runs stored across a restart**: a new file in the state folder
+   (`runs/<run id>.json` beside the threads), which an older Fenix
+   doesn't read.
 
 Nothing here is in fenix-extensions: the card and the pipeline are both
 Fenix's own. Whether its `ui-kit` has the same hole (a newline in a
-cell) is worth one look while doing step 1; it wasn't looked at here.
+cell) is worth one look; it wasn't looked at here.
+
+### What the two open questions came to
+
+- **Wide characters** did run a card past the dock's edge: `fit` and
+  `wrap` counted characters, and so did the Markdown an agent writes.
+  They count cells now, and a tint, a hairline or a card over wide text
+  keeps to its width in cells (`page::box_cells`).
+- **A short dock**: with the card's first row as the focused one, a
+  command's eight rows put the answers below the view. The focused row is
+  the chosen answer's now, so it's the one kept in view.
+
+`SPC a g` "on its heading in `SPC a t`" is `Alt+G` there: the list is a
+picker, where what's typed is its query, so its keys are `Alt+`'s, as
+`Alt+R` reviews a run.

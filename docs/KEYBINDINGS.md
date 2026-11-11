@@ -333,15 +333,16 @@ keys'; the palette has the commands).
 | `Enter` (any diff) | Open the real file at the line under the cursor |
 | `SPC a a` | The agents' dock at the right, on the project's last thread or a new one, ready to write in; from the dock, put it away |
 | `SPC a A` | Show or put away the agents' dock, wherever you are |
-| `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads, a pipeline's run as one entry (in the list: `Tab` folds a run, `Alt+A` archives, `Alt+H` shows archived, `Alt+P` every project, `Alt+R` a run's changes) |
+| `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads, a pipeline's run as one entry (in the list: `Tab` folds a run, `Alt+A` archives, `Alt+H` shows archived, `Alt+P` every project, `Alt+R` a run's changes, `Alt+G` picks up a run that stopped) |
 | `SPC a l` | Every project's threads, by project, the current one first |
 | `SPC a z` | Archive the thread the agents' panel shows (its whole run, for a step), or bring it back |
 | `SPC a T` | Every thread at work or waiting on you, in any project or workspace: the one picked is shown in its workspace |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
 | `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
+| `SPC a g` | On a pipeline's step: pick up a run that stopped, its gate back at the step it stopped at (after a restart too); at a gate, go on (`agents.pipeline_go`) |
 | `[s` / `]s` (in a thread) | A pipeline's step before or after |
 | `SPC a m` / `SPC a M` | The agent's mode / its model and other settings |
-| `SPC a k` / `SPC a R` | Cancel the agent's turn / start its agent again |
+| `SPC a k` / `SPC a R` | Cancel the agent's turn (a pipeline's step: stop it, its gate up) / start its agent again |
 | `SPC a i` | Continue a session the agent started outside Fenix |
 | `SPC a r` | What the thread changed, hunk by hunk: keep or reject |
 | `SPC a y` / `SPC a x` / `SPC a v` | Keep / reject / see what it replaced: the agent's change under the cursor |
@@ -795,6 +796,7 @@ and for the followed parameter `value:` `raw:` `limits:out` (`in`,
 | `y` / `Y` | Copy the card / the agent's answer (or the whole thread) |
 | `v` | The card's text in a buffer of its own |
 | `y` `Y` `n` `N` / `1`…`9` (a question) | Allow once, always / reject once, always / that option |
+| `e` / `r` (a pipeline's gate) | Edit what's passed on, then go on / run the step again |
 | `Ctrl-C` | Cancel the turn (or take back a queued prompt) |
 | `/` | Filter the cards |
 | `C` | Continue a read-only thread in a new session |
