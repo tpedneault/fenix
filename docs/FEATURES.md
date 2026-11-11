@@ -1597,9 +1597,11 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   blades lighting in turn; the mode colour blends between modes; the
   active tab's accent slides to the next tab; sideways scrolling eases;
   a theme change cross-fades. The caret blinks for 30 seconds after the
-  last key or click, then stays lit, so an idle window draws nothing; an
+  last key or click, then stays lit, so an idle window draws nothing --
+  nor does a look at the disk, or at Git, that finds nothing new, and
+  the extensions' deadline clock sleeps while none of their code runs; an
   extension's layer that moves (a pet walking) is drawn at most 30 times
-  a second. `full` adds the caret gliding along a
+  a second. `fenix/state`'s `stats` counts frames and wake-ups, to check. `full` adds the caret gliding along a
   motion, unfolded rows opening downwards, and panes moving to a split
   or close. Popups get rounded corners and soft shadows; problems from
   language servers are underlined with a wave, with the cursor line's
@@ -1990,10 +1992,16 @@ An extension installed, switched on or off, or removed is put in use
 at once, in the running editor: its code starts or stops (its pages,
 language servers, tasks and checks with it), and its commands, keys,
 snippets, templates and launches come and go. Only its themes and
-languages wait for the next start, and the Extensions page says so.
+languages wait for the next start, and the Extensions page says so. One
+installed from a terminal (`fenix --install-extension`) is noticed and
+put in use the same way within a few seconds. An extension's setting it
+reads only as it starts (its manifest says `restart = true`) starts that
+extension again when it's changed, in the running editor, and the
+settings page says so. Those that start with Fenix load once the
+window has drawn, so they don't hold it up.
 `SPC q r` restarts Fenix where you are -- the session, unsaved text
-included, comes back -- for those, and for a setting only read at start
-(the settings page marks it).
+included, comes back -- for themes and languages, and for a setting of
+Fenix's own only read at start (the settings page marks it).
 `:lsp-restart` reloads language services for the current project;
 `:lsp-restart NAME` restarts one server. Task rerun history is per project; debugger
 and task controls guard against operating on another project's active process.

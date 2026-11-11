@@ -58,6 +58,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   typing until then, and soft wrap, extra carets and selections go by
   where they're drawn. `lsp.inlay_hints` (on), `lsp.inlay_hints_off`
   per language, and `SPC t i` to turn them off and on.
+- `restart = true` on an extension's setting (`[[contributes.settings]]`):
+  one it reads only as it starts. Changing it starts that extension again,
+  in the running editor, and the settings page says so, rather than the
+  new value waiting for Fenix to restart. (#40)
+- `fenix/state` reports `stats`: frames drawn and wake-ups since Fenix
+  started, to check that an idle Fenix stays idle. (#74)
+
+### Fixed
+
+- An idle window draws nothing and hardly wakes: the disk check and the
+  modeline's Git status, every two seconds, no longer redraw the window
+  when they find nothing new, nor does the Git page's status rewrite
+  itself; and the clock that times extensions' calls sleeps while none
+  runs, rather than waking 100 times a second. With 40 extensions on
+  Linux, 20 s idle went from 20 frames and 170 thread wake-ups a second
+  to none and 3. (#74)
+- The extensions that start with Fenix load once its window has drawn
+  its first frame, rather than alongside it: with 40, the first frame
+  came about 200 ms sooner, as soon as with none. (#33)
+- An extension installed from a terminal (`fenix --install-extension`)
+  is put in use by the Fenix that's running within a few seconds, as one
+  installed from the Extensions page is, rather than at the next start;
+  the command says so. (#40)
 
 ## [1.5.2] - 2026-11-11
 

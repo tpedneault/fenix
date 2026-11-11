@@ -160,22 +160,27 @@ impl App {
     /// What a probe saw, acted on: files changed on disk are reloaded
     /// (or flagged), MIBs re-read, the project's
     /// settings applied.
-    pub(super) fn apply_disk_probe(&mut self, result: ProbeResult) {
+    /// Whether anything it found shows: a file reloaded or in conflict,
+    /// the project's settings changed. Most probes find nothing, and an
+    /// idle window isn't drawn again for them (#74).
+    pub(super) fn apply_disk_probe(&mut self, result: ProbeResult) -> bool {
         self.disk_probe_out = None;
-        if let Some((root, settings)) = result.project {
-            self.apply_project_settings(root, settings);
-        }
+        let settings_changed = match result.project {
+            Some((root, settings)) => self.apply_project_settings(root, settings),
+            None => false,
+        };
         if !self.config.watch_files.unwrap_or(true) {
-            return;
+            return settings_changed;
         }
         let sweep = self.reload_buffers_seen(&result.buffers);
-        let Some(message) = sweep.message() else { return };
+        let Some(message) = sweep.message() else { return settings_changed || !sweep.is_empty() };
         if sweep.is_bad() {
             self.set_error(message);
         } else {
             self.set_message(message);
         }
         self.wake_caret();
+        true
     }
 }
 
@@ -197,6 +202,27 @@ mod tests {
     fn a_volume_is_the_root() {
         assert_eq!(volume_of(Path::new("/home/me/work/a.rs")), PathBuf::from("/"));
         assert_eq!(volume_of(Path::new("work/a.rs")), PathBuf::new());
+    }
+
+    /// A probe that finds every file as it was says nothing changed, so
+    /// the window isn't drawn again for it; one that finds a file changed
+    /// says so (#74).
+    #[test]
+    fn a_probe_that_finds_nothing_new_asks_for_no_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        let probe = |app: &mut App| {
+            app.disk_probe_basis = app.disk_state.clone();
+            ProbeResult { buffers: HashMap::from([(id, DiskFingerprint::of(&file))]), project: None }
+        };
+        let same = probe(&mut app);
+        assert!(!app.apply_disk_probe(same), "nothing changed on disk");
+        std::fs::write(&file, "one, and changed elsewhere\n").unwrap();
+        let changed = probe(&mut app);
+        assert!(app.apply_disk_probe(changed), "the file was reloaded");
     }
 
     #[test]

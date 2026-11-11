@@ -951,7 +951,9 @@ impl App {
                 self.apply_git_compare_event(event)
             }
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
-            PageEvent::ChromeGit(state) => self.apply_chrome_git(state.map(|s| *s)),
+            PageEvent::ChromeGit(state) => {
+                self.apply_chrome_git(state.map(|s| *s));
+            }
             PageEvent::SidebarGit { dir, statuses } => self.apply_sidebar_git(dir, statuses),
             PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
             PageEvent::SearchFound { buffer, generation, files } => self.apply_search_found(buffer, generation, files),

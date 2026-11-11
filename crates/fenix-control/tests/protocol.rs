@@ -6,7 +6,7 @@ use std::io::{Cursor, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use fenix_control::protocol::{code, method, OpenProjectParams, CAPABILITIES, MAX_BODY, PROTOCOL};
+use fenix_control::protocol::{code, method, OpenProjectParams, Stats, CAPABILITIES, MAX_BODY, PROTOCOL};
 use fenix_control::{
     serve, AgendaTask, AgendaTimer, Call, CaptureParams, CaptureResult, CaptureTarget, Client,
     ClientError, ClockInParams, CommandInfo, CommandsResult, Endpoint, OpenParams, OpenPath,
@@ -62,6 +62,7 @@ fn editor(calls: Arc<Mutex<Vec<Call>>>) -> impl FnMut(Call) -> Result<Value, Rpc
                     title: "Write the report".into(),
                     since: "2026-10-12T09:30:00+02:00".into(),
                 }),
+                stats: Some(Stats { frames: 12, wakes: 30, extension_clock_wakes: 0 }),
             })
             .unwrap()),
             Call::OpenProject(p) if p.root.is_empty() => {
@@ -224,6 +225,7 @@ fn several_requests_on_one_connection_each_get_an_answer() {
     client.open_project("C:\\work\\fenix").unwrap();
     let state = client.state().unwrap();
     assert_eq!(state.agenda_timer.as_ref().map(|t| t.task_id), Some(1));
+    assert_eq!(state.stats.as_ref().map(|s| (s.frames, s.wakes)), Some((12, 30)), "the counts come through");
     assert_eq!(state.project.as_deref(), Some("C:\\work\\fenix"));
     assert_eq!(state.file.as_deref(), Some("C:\\work\\fenix\\Cargo.toml"));
     assert_eq!(state.line, Some(3));

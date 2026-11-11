@@ -232,6 +232,23 @@ pub struct StateResult {
         skip_serializing_if = "Option::is_none"
     )]
     pub agenda_timer: Option<AgendaTimer>,
+    /// How much this Fenix has drawn and woken since it started: an idle
+    /// window's counts stand still.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<Stats>,
+}
+
+/// `fenix/state`'s `stats`: counts since Fenix started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    /// Frames that reached the screen, every window's.
+    pub frames: u64,
+    /// Times the event loop woke up.
+    pub wakes: u64,
+    /// Times the extensions' deadline clock woke up; it sleeps while no
+    /// extension code runs.
+    pub extension_clock_wakes: u64,
 }
 
 /// The agenda clock that's running: on which task, since when.

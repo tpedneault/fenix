@@ -799,6 +799,11 @@ pub struct SettingContribution {
     /// extension reads the project's over yours.
     #[serde(default)]
     pub project: bool,
+    /// The extension reads it only as it starts (a debug adapter, a
+    /// server it sets up then): changed, the extension is started again,
+    /// in the running editor, rather than told (#40).
+    #[serde(default)]
+    pub restart: bool,
 }
 
 fn text_kind() -> String {

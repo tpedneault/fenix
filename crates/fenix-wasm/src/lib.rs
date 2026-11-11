@@ -8,8 +8,8 @@
 //! Pulley bytecode (`Backend`); without it, only precompiled ones load.
 //! See `docs/adr/0001-wasm-runtime.md` for why it's set up this way.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 pub use wasmtime;
@@ -72,11 +72,45 @@ pub fn limits(memory: usize) -> wasmtime::StoreLimits {
 /// `Ticker`'s sleep running this far over is the machine having slept.
 const SLEPT_AFTER: Duration = Duration::from_secs(5);
 
-/// Moves `engine`'s epoch on every `TICK` until dropped, so a call given
-/// a deadline of `n` ticks traps about `n * TICK` after it starts.
+/// Moves `engine`'s epoch on every `TICK` while a call is running
+/// (`calling`), until dropped, so a call given a deadline of `n` ticks
+/// traps about `n * TICK` after it starts.
+///
+/// With no call running it sleeps until one starts, rather than waking
+/// a hundred times a second for nothing: a deadline is counted from the
+/// epoch the call started at, so the epoch standing still between calls
+/// changes no call's deadline (#74).
 pub struct Ticker {
     stop: Arc<AtomicBool>,
+    /// How many times it has woken: what shows it sleeps while nothing
+    /// runs.
+    wakes: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// How many calls into extensions are running now, on every engine; the
+/// tickers wait on it.
+static CALLS: Mutex<usize> = Mutex::new(0);
+static CALL_STARTED: Condvar = Condvar::new();
+
+/// A call into an extension, running while this is held: the epoch moves
+/// on, so its deadline comes. Hold one around anything that runs guest
+/// code under a deadline.
+#[must_use = "the call is only timed while this is held"]
+pub struct Calling(());
+
+/// Starts timing a call; see `Calling`.
+pub fn calling() -> Calling {
+    *CALLS.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    CALL_STARTED.notify_all();
+    Calling(())
+}
+
+impl Drop for Calling {
+    fn drop(&mut self) {
+        let mut calls = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+        *calls = calls.saturating_sub(1);
+    }
 }
 
 /// How many ticks to make up, `due` being where the clock says the count
@@ -91,17 +125,33 @@ fn ticks_owed(ticked: u128, due: u128) -> u128 {
 impl Ticker {
     pub fn start(engine: &wasmtime::Engine) -> Ticker {
         let stop = Arc::new(AtomicBool::new(false));
-        let (engine, flag) = (engine.clone(), stop.clone());
+        let wakes = Arc::new(AtomicU64::new(0));
+        let (engine, flag, woke) = (engine.clone(), stop.clone(), wakes.clone());
         let thread = std::thread::Builder::new()
             .name("fenix-wasm-epoch".into())
             .spawn(move || {
                 // By the clock, not by how many sleeps there were: a sleep
                 // runs long (Windows' timer, a busy machine), and a deadline
                 // counted in sleeps would then run long with it.
-                let started = std::time::Instant::now();
+                let mut started = std::time::Instant::now();
                 let mut ticked: u128 = 0;
                 while !flag.load(Ordering::Relaxed) {
+                    // Nothing running: wait for a call, and count from it.
+                    {
+                        let mut calls = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+                        if *calls == 0 {
+                            while *calls == 0 && !flag.load(Ordering::Relaxed) {
+                                calls = CALL_STARTED.wait(calls).unwrap_or_else(|e| e.into_inner());
+                            }
+                            started = std::time::Instant::now();
+                            ticked = 0;
+                        }
+                    }
+                    if flag.load(Ordering::Relaxed) {
+                        break;
+                    }
                     std::thread::sleep(TICK);
+                    woke.fetch_add(1, Ordering::Relaxed);
                     let due = started.elapsed().as_nanos() / TICK.as_nanos();
                     let owed = ticks_owed(ticked, due);
                     for _ in 0..owed {
@@ -111,13 +161,21 @@ impl Ticker {
                 }
             })
             .expect("a thread for the epoch");
-        Ticker { stop, thread: Some(thread) }
+        Ticker { stop, wakes, thread: Some(thread) }
+    }
+
+    /// How many times it has woken to move the epoch on so far.
+    pub fn wakes(&self) -> u64 {
+        self.wakes.load(Ordering::Relaxed)
     }
 }
 
 impl Drop for Ticker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Under the lock, so a ticker about to wait sees `stop` first.
+        drop(CALLS.lock().unwrap_or_else(|e| e.into_inner()));
+        CALL_STARTED.notify_all();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -144,6 +202,7 @@ mod tests {
         let mut store = Store::new(engine, limits(16 << 20));
         store.limiter(|l| l);
         store.set_epoch_deadline(deadline);
+        let _calling = calling();
         let instance = Instance::new(&mut store, &module, &[])?;
         instance.get_typed_func::<(), i32>(&mut store, export)?.call(&mut store, ())
     }
@@ -166,6 +225,7 @@ mod tests {
         let instance = Instance::new(&mut store, &module, &[]).unwrap();
         let spin = instance.get_typed_func::<(), i32>(&mut store, "spin").unwrap();
         store.set_epoch_deadline(5);
+        let _calling = calling();
         let started = std::time::Instant::now();
         let err = spin.call(&mut store, ()).unwrap_err();
         assert_eq!(err.downcast_ref::<wasmtime::Trap>(), Some(&wasmtime::Trap::Interrupt), "{err:?}");

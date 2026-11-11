@@ -66,6 +66,8 @@ mod problems;
 #[cfg(test)]
 mod test_keys;
 #[cfg(test)]
+mod idle_tests;
+#[cfg(test)]
 mod standard_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
@@ -152,6 +154,10 @@ const LAYER_TICK: Duration = Duration::from_millis(33);
 /// The longest the loop sleeps with nothing due: other deadlines (the
 /// disk check) come sooner anyway.
 const IDLE_WAIT: Duration = Duration::from_secs(60);
+/// The extensions that start with Fenix start once the window has drawn
+/// its first frame (#33), or this long after Fenix started without one: a
+/// window stuck on the splash (#65), or one never shown, still has them.
+const STARTUP_EXTENSIONS_WITHIN: Duration = Duration::from_secs(3);
 /// How long after the splash hands over the editor's first frame may
 /// take before the window is taken to be stuck on the splash (#65).
 const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(10);
@@ -1252,7 +1258,7 @@ fn no_debug_adapter(language: fenix_syntax::LanguageId) -> String {
     let name = crate::lsp::language_config_name(language);
     format!(
         "no debug adapter for {name}: the project's .fenix/tools.json names none, no extension running gives one, and Fenix has none built in \
-         -- an extension's adapter needs its tool on PATH (SPC p h checks), and one installed or set up since Fenix started needs SPC q r"
+         -- an extension's adapter needs its tool on PATH (SPC p h, the project doctor, names what's missing), and SPC h l shows what the extension said as it started"
     )
 }
 
@@ -5757,6 +5763,10 @@ pub struct App {
     /// When `settings.toml` last changed, as the disk poll last saw it:
     /// a change it didn't make is read again.
     settings_stamp: Option<std::time::SystemTime>,
+    /// `extensions.toml`, yours and the machine's, as last seen: one
+    /// changed from outside (`fenix --install-extension`) is put in use
+    /// (`extensions_installed_if_changed`).
+    extensions_stamp: Option<Vec<Option<std::time::SystemTime>>>,
     /// The focused project's own settings (`.fenix/settings.toml`),
     /// with the root they're for.
     project_settings: Option<(PathBuf, fenix_config::ProjectSettings)>,
@@ -5800,9 +5810,11 @@ pub struct App {
     splash_fade: Option<crate::splash::SplashFade>,
     /// Getting the windows drawing again when they stop: see `gpu_host`.
     gpu_watch: crate::gpu::GpuWatch,
-    /// Frames that have reached the screen: what the live tests watch.
-    #[cfg(test)]
+    /// Frames that have reached the screen, and how many times the event
+    /// loop has woken: what the live tests watch, and `fenix/state`'s
+    /// `stats` reports, so an idle window can be seen to draw nothing (#74).
     frames_presented: u64,
+    loop_wakes: u64,
     /// When the editor's first frame is overdue, from the splash's hand-off:
     /// past it with nothing presented, the window is still showing the
     /// splash, so its surface is made again and why it's stuck is said
@@ -6111,9 +6123,10 @@ impl App {
         // The file opened at start was given its project before the
         // packs' markers were known: again, now they are. Then those that
         // start with Fenix start, in it (or a moment later, after it, each
-        // would start again there).
+        // would start again there) -- once the window has drawn its first
+        // frame, so forty of them loading don't hold the window up (#33).
         app.refresh_project_root();
-        app.code_extensions_at_startup();
+        app.wasm.startup_due = Some(Instant::now() + STARTUP_EXTENSIONS_WITHIN);
         // What the keychain said as settings were read (a token too long
         // for it, kept in settings.toml).
         let said = startup::said_later();
@@ -6506,6 +6519,7 @@ impl App {
             theme,
             config,
             settings_stamp: None,
+            extensions_stamp: None,
             project_settings: None,
             snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
             snippets_origin: None,
@@ -6523,8 +6537,8 @@ impl App {
             motion: motion_host::MotionState::default(),
             splash_fade: None,
             gpu_watch: Default::default(),
-            #[cfg(test)]
             frames_presented: 0,
+            loop_wakes: 0,
             first_frame_due: None,
             status_message: None,
             quit_confirm: false,
@@ -12627,8 +12641,13 @@ impl App {
     /// and re-renders the Status pane -- mirrors `DockerHost::apply_stats`,
     /// including its "reset to top is harmless, Status is a small read-
     /// only info pane" reasoning.
-    fn apply_git_status(&mut self, status: Option<fenix_git::RepoStatus>) {
-        let Some(session) = self.git_session.as_mut() else { return };
+    /// Whether it changed: the poller asks every couple of seconds, and
+    /// the same status isn't written out and drawn again (#74).
+    fn apply_git_status(&mut self, status: Option<fenix_git::RepoStatus>) -> bool {
+        let Some(session) = self.git_session.as_mut() else { return false };
+        if session.status == status {
+            return false;
+        }
         session.status = status.clone();
         let (staged, unstaged, untracked) = file_counts(&session.files);
         let (status_buffer, conflicts) = (session.status_buffer, conflict_count(&session.files));
@@ -12638,6 +12657,7 @@ impl App {
             status_buffer,
             git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflicts, sides.as_ref()),
         );
+        true
     }
 
     /// `u` (on any pane), and after every mutating action (stage/unstage/
@@ -13354,6 +13374,7 @@ impl App {
         self.refresh_python_environments();
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
+        self.extensions_installed_if_changed();
         // The files themselves -- open buffers, PDFs, the MIBs, the
         // project's settings -- are looked at off the UI thread.
         self.start_disk_probe();
@@ -16607,6 +16628,26 @@ impl App {
     /// -- same reasoning `handle_key`/`test_vim_key` already established
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
+        // What comes back on its own every couple of seconds, and most
+        // often finds nothing new, says whether it did: an idle window
+        // isn't drawn again for nothing (#74). Everything else is drawn.
+        let redraw = match event {
+            FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
+            FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
+            FenixUserEvent::Page(pages::PageEvent::ChromeGit(state)) => self.apply_chrome_git(state.map(|s| *s)),
+            event => {
+                self.handle_drawn_user_event(event);
+                true
+            }
+        };
+        if redraw {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    fn handle_drawn_user_event(&mut self, event: FenixUserEvent) {
         match event {
             FenixUserEvent::Woke(slept) => self.machine_woke(slept, Instant::now()),
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
@@ -16616,7 +16657,8 @@ impl App {
             FenixUserEvent::Dap { generation, event } => {
                 if self.debug_session.as_ref().is_some_and(|s| s.generation == generation || s.children.iter().any(|c| c.generation == generation)) { self.apply_dap_event_on(generation, event); }
             },
-            FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
+            // Said whether they changed anything, in `handle_user_event`.
+            FenixUserEvent::GitStatusReady(_) | FenixUserEvent::DiskProbed(_) => {}
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
@@ -16627,7 +16669,6 @@ impl App {
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
             FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
-            FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
             FenixUserEvent::RemoteQuestion(question) => self.remote_question(question),
             FenixUserEvent::RemoteConnected(connected) => self.remote_connected(*connected),
             FenixUserEvent::RemoteStatus(host, status) => self.remote_status(host, status),
@@ -16669,9 +16710,6 @@ impl App {
                     let _ = reply.send(answer);
                 }
             }
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
         }
     }
 
@@ -22958,10 +22996,7 @@ impl App {
             crate::watchdog::note("the window's surface is drawing again");
         }
         self.gpu_watch.presented();
-        #[cfg(test)]
-        {
-            self.frames_presented += 1;
-        }
+        self.frames_presented += 1;
         if self.first_frame_due.take().is_some_and(|due| Instant::now() > due) {
             eprintln!("fenix: the first frame came late, {:?} after the splash handed over", FIRST_FRAME_WITHIN);
         }
@@ -23075,7 +23110,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
     /// part so it's directly testable" reasoning `handle_key`/
     /// `test_vim_key` already established for keyboard input).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
-        let _busy = crate::watchdog::enter(event.label());
+        // Timed with FENIX_PROFILE, and named in the hang log while it runs.
+        let _busy = crate::profile::Scope::new(event.label());
         self.handle_user_event(event);
     }
 
@@ -23321,6 +23357,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
+                // The window is up: the extensions that start with Fenix,
+                // now (#33).
+                if self.frames_presented > 0 {
+                    self.code_startup_now();
+                }
                 // Code extensions' pages that came into view or left it;
                 // their layers' glides that ended, and the layout.
                 let sized = std::mem::take(&mut self.wasm.sized);
@@ -23337,18 +23378,42 @@ impl ApplicationHandler<FenixUserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _profile = crate::profile::Scope::new("about_to_wait");
-        let now = Instant::now();
-        let mut needs_redraw = false;
-
+        self.loop_wakes += 1;
         // Frames requested by a `fenix --new-window` hand-off, which
         // arrived somewhere without an `&ActiveEventLoop` to open a
         // window with. See `App::pending_frames`.
+        let mut opened = false;
         for (files, focus) in std::mem::take(&mut self.pending_frames) {
             self.new_frame(event_loop);
             self.open_positions(&files, focus);
-            needs_redraw = true;
+            opened = true;
         }
+        let plan = self.plan_wake(Instant::now());
+        if plan.redraw || opened {
+            for frame in 0..self.frames.len() {
+                if let Some(window) = self.frame_window(frame) {
+                    window.request_redraw();
+                }
+            }
+        }
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(plan.wait_until));
+    }
+}
 
+/// What the event loop does before it sleeps: draw a frame or not, and
+/// when to wake with nothing else to wake it (`App::plan_wake`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WakePlan {
+    redraw: bool,
+    wait_until: Instant,
+}
+
+impl App {
+    /// `about_to_wait`'s work, without the event loop: what's due now
+    /// done, whether the windows need a frame, and when the next thing is
+    /// due. An idle editor plans no frame and a long sleep (#74).
+    fn plan_wake(&mut self, now: Instant) -> WakePlan {
+        let mut needs_redraw = false;
         if self.blink_tick(now) {
             needs_redraw = true;
         }
@@ -23393,14 +23458,6 @@ impl ApplicationHandler<FenixUserEvent> for App {
             needs_redraw = true;
         }
 
-        if needs_redraw {
-            for frame in 0..self.frames.len() {
-                if let Some(window) = self.frame_window(frame) {
-                    window.request_redraw();
-                }
-            }
-        }
-
         if now >= self.next_disk_check {
             self.poll_files_changed_on_disk();
         }
@@ -23422,11 +23479,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.code_focus_moved();
         // A tutorial step that's waited long enough shows its hint.
         if self.tutorial_tick(now) {
-            for frame in 0..self.frames.len() {
-                if let Some(window) = self.frame_window(frame) {
-                    window.request_redraw();
-                }
-            }
+            needs_redraw = true;
         }
 
         // The disk check has to be one of the deadlines the loop waits
@@ -23441,20 +23494,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // An extension's layer whose next frame the loop just woke for.
         let motion_on = crate::motion::level(&self.config) != crate::motion::Level::Off;
         if self.wasm.layers.frame_due(now, motion_on) {
-            for frame in 0..self.frames.len() {
-                if let Some(window) = self.frame_window(frame) {
-                    window.request_redraw();
-                }
-            }
+            needs_redraw = true;
         }
         // A message about to fade, or the spinner's next blade.
         let wait_until = match self.motion_next_wake(now) {
             Some(wake) if wake <= now => {
-                for frame in 0..self.frames.len() {
-                    if let Some(window) = self.frame_window(frame) {
-                        window.request_redraw();
-                    }
-                }
+                needs_redraw = true;
                 now + ANIM_TICK
             }
             Some(wake) => wait_until.min(wake),
@@ -23511,6 +23556,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
+        // The extensions that start with Fenix, should no first frame
+        // have come to start them (#33).
+        let wait_until = match self.code_startup_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
         // The first frame, still not drawn: the window is stuck on the
         // splash (#65).
         let wait_until = match self.first_frame_tick(now) {
@@ -23522,7 +23573,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
+        WakePlan { redraw: needs_redraw, wait_until }
     }
 }
 
@@ -32304,7 +32355,7 @@ configure_board stm32
         app.debug_start_or_continue();
         let said = app.modeline_pieces().1;
         assert!(said.contains("no debug adapter for rust"), "{said}");
-        assert!(said.contains("SPC p h") && said.contains("SPC q r"), "says where to look: {said}");
+        assert!(said.contains("SPC p h") && said.contains("SPC h l"), "says where to look: {said}");
     }
 
     #[test]
