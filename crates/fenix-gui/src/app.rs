@@ -63,6 +63,8 @@ mod problems;
 mod test_keys;
 #[cfg(test)]
 mod standard_tests;
+#[cfg(test)]
+mod text_input_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
@@ -16596,9 +16598,26 @@ impl App {
                 return;
             }
         }
-        let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+        let keypresses = keymap::to_keypresses(&event.logical_key, event.physical_key, event.text.as_deref(), self.modifiers);
+        self.dispatch_keypresses(keypresses, Some(event_loop));
+    }
+
+    /// Text that came with no key of its own: an input method's committed
+    /// text, or what a `VK_PACKET` carried. Typed a character at a time
+    /// through the real key path, so it lands wherever typing would -- a
+    /// buffer in Insert, a prompt, a picker's query, a terminal (#37).
+    fn receive_text(&mut self, text: &str, event_loop: Option<&ActiveEventLoop>) {
+        self.dispatch_keypresses(keymap::text_keypresses(text), event_loop);
+    }
+
+    fn dispatch_keypresses(&mut self, keypresses: Vec<KeyPress>, event_loop: Option<&ActiveEventLoop>) {
+        if keypresses.is_empty() {
+            return;
+        }
         self.code_active();
-        self.dispatch_keypress(keypress, Some(event_loop));
+        for keypress in keypresses {
+            self.dispatch_keypress(keypress, event_loop);
+        }
     }
 
     /// Every real keypress passes through here exactly once -- the tap
@@ -23153,6 +23172,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(&event, event_loop);
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            // Fenix doesn't turn the input method on, but text one
+            // commits anyway is typed like any other.
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                self.receive_text(&text, Some(event_loop));
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }

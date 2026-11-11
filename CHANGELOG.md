@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Text sent as Unicode characters rather than key presses (Windows'
+  `SendInput` with `KEYEVENTF_UNICODE`: dictation, the on-screen
+  keyboard, password managers' auto-type, automation tools) is typed
+  into buffers, prompts, pickers and terminals, as is text an input
+  method commits (#37).
+
 ## [1.5.2] - 2026-11-11
 
 ### Added
