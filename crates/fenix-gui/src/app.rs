@@ -58,17 +58,23 @@ mod polish;
 mod which_key;
 mod keys_host;
 pub(crate) use keys_host::translate_leader;
+pub(crate) use a11y_host::{adapter_for as a11y_adapter_for, wanted as a11y_wanted};
 mod edit_commands;
 mod carets;
 mod updates;
 mod auto_save;
 mod problems;
+mod a11y_host;
 #[cfg(test)]
 mod test_keys;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
 mod standard_tests;
+#[cfg(test)]
+mod text_input_tests;
+#[cfg(test)]
+mod bidi_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
@@ -1922,6 +1928,9 @@ struct GitPrompt {
 /// do* -- `App::user_event` decides the "do."
 #[derive(Debug)]
 pub enum FenixUserEvent {
+    /// The main window's accessibility adapter: the tree asked for, an
+    /// action, the assistive technology gone (`a11y_host`).
+    Accessibility(accesskit_winit::Event),
     /// The machine was asleep this long (`watchdog`). Winit doesn't say.
     Woke(Duration),
     /// One decoded event from a language server's connection (a
@@ -2379,6 +2388,7 @@ impl FenixUserEvent {
     /// Which event this is, for the hang log (`watchdog`).
     fn label(&self) -> &'static str {
         match self {
+            Self::Accessibility(_) => "Accessibility",
             Self::Woke(_) => "Woke",
             Self::Lsp { .. } => "Lsp",
             Self::LspStarted(_) => "LspStarted",
@@ -4801,6 +4811,8 @@ struct FrameState {
 }
 
 pub struct App {
+    /// What a screen reader is told (`a11y_host`).
+    a11y: a11y_host::A11yHost,
     /// Every open frame, in a stable order -- `frames[0]` is the one
     /// the app started with. Each entry holds that frame's state *while
     /// it is parked*, and is `None` for exactly one index --
@@ -6567,6 +6579,7 @@ impl App {
             loop_wakes: 0,
             first_frame_due: None,
             status_message: None,
+            a11y: Default::default(),
             quit_confirm: false,
         }
     }
@@ -16670,6 +16683,7 @@ impl App {
 
     fn handle_drawn_user_event(&mut self, event: FenixUserEvent) {
         match event {
+            FenixUserEvent::Accessibility(event) => self.a11y_event(event),
             FenixUserEvent::Woke(slept) => self.machine_woke(slept, Instant::now()),
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
             FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
@@ -16763,9 +16777,26 @@ impl App {
                 return;
             }
         }
-        let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+        let keypresses = keymap::to_keypresses(&event.logical_key, event.physical_key, event.text.as_deref(), self.modifiers);
+        self.dispatch_keypresses(keypresses, Some(event_loop));
+    }
+
+    /// Text that came with no key of its own: an input method's committed
+    /// text, or what a `VK_PACKET` carried. Typed a character at a time
+    /// through the real key path, so it lands wherever typing would -- a
+    /// buffer in Insert, a prompt, a picker's query, a terminal (#37).
+    fn receive_text(&mut self, text: &str, event_loop: Option<&ActiveEventLoop>) {
+        self.dispatch_keypresses(keymap::text_keypresses(text), event_loop);
+    }
+
+    fn dispatch_keypresses(&mut self, keypresses: Vec<KeyPress>, event_loop: Option<&ActiveEventLoop>) {
+        if keypresses.is_empty() {
+            return;
+        }
         self.code_active();
-        self.dispatch_keypress(keypress, Some(event_loop));
+        for keypress in keypresses {
+            self.dispatch_keypress(keypress, event_loop);
+        }
     }
 
     /// Every real keypress passes through here exactly once -- the tap
@@ -23178,6 +23209,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => "the window's size",
             _ => "a window event",
         });
+        self.a11y_window_event(id, &event);
         let Some(frame) = self.frame_index_of(id) else { return };
         // Every event is handled with the frame it arrived from active,
         // so the handlers below -- all written against one implicit
@@ -23379,6 +23411,14 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     window.request_redraw();
                 }
             }
+            // Fenix doesn't turn the input method on, but text one
+            // commits anyway is typed like any other.
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                self.receive_text(&text, Some(event_loop));
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.redraw();
                 // The window is up: the extensions that start with Fenix,
@@ -23403,6 +23443,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _profile = crate::profile::Scope::new("about_to_wait");
         self.loop_wakes += 1;
+        // A screen reader hears what the events just handled changed.
+        self.a11y_update();
         // Frames requested by a `fenix --new-window` hand-off, which
         // arrived somewhere without an `&ActiveEventLoop` to open a
         // window with. See `App::pending_frames`.

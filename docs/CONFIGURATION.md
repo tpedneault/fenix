@@ -537,6 +537,7 @@ when it's out of date).
 | **Appearance** | | | |
 | `editor.theme` | text | Orbit Dark | The colour theme; h and l preview each one. |
 | `editor.font_family` | text | the system's monospace font | A monospace font installed on this machine; Enter lists them to pick from, h and l step through them. |
+| `accessibility.screen_reader` | true / false | on | Fenix tells a screen reader (Narrator, NVDA, JAWS, Orca, VoiceOver) the text you're in with its cursor and selection, the modeline, prompts, and each change of mode and message. Nothing is worked out until one asks. Takes effect the next time Fenix starts. |
 | `editor.font_size` | 6–48 | 16 | Text size, in points. |
 | `appearance.corner_radius` | 0–16 | the theme's | Pixels of rounding on popups and floating boxes. 0 keeps them square. |
 | `appearance.shadows` | true / false | on | Popups cast a soft shadow. |

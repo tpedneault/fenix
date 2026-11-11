@@ -276,6 +276,26 @@ pub(super) fn virtual_row_lead(ob: &super::OpenBuffer, line: usize, tab_stops: &
     tabstops::expand_line(&leading, tab_stops).0.chars().count().min(cols / 2)
 }
 
+/// Each row of `map` showing right-to-left text of `lines` (each line's
+/// text as drawn): the cell its text starts in, and where each character
+/// it shows is drawn -- worked out on just what the row shows, as the
+/// row's text is laid out on its own (`row_content_spans`).
+pub(super) fn bidi_rows(map: &RowMap, lines: &HashMap<usize, String>) -> HashMap<usize, (usize, crate::bidi::VisualOrder)> {
+    let mut out = HashMap::new();
+    for r in 0..map.len() {
+        let Some(row) = map.row(r).filter(|row| row.kind == RowKind::Text) else { continue };
+        let Some(text) = lines.get(&row.line) else { continue };
+        let scroll = map.scroll_col();
+        let start = row.cols.start.max(scroll);
+        let end = if scroll > 0 || map.width() == Some(UNBOUNDED) { row.cols.end.min(start.saturating_add(super::MAX_ROW_CHARS)) } else { row.cols.end };
+        let shown: String = text.chars().skip(start).take(end.saturating_sub(start)).collect();
+        if let Some(order) = crate::bidi::visual_order(&shown) {
+            out.insert(r, (map.x(row, start), order));
+        }
+    }
+    out
+}
+
 /// A pane's text as a frame lays it out: its rows, and the lines whose
 /// columns aren't one a char (a tab, a decoration).
 pub(super) struct PaneLayout {
@@ -288,6 +308,9 @@ pub(super) struct PaneLayout {
     pub decoration_rows: Vec<(usize, LineLayout)>,
     /// Indentation guides: (row, column).
     pub indent_guides: Vec<(usize, usize)>,
+    /// The rows with right-to-left text, by row: the cell their text
+    /// starts in, and where each of its characters is drawn (#17).
+    pub bidi: HashMap<usize, (usize, crate::bidi::VisualOrder)>,
 }
 
 impl PaneLayout {
@@ -296,15 +319,51 @@ impl PaneLayout {
         self.col_maps.get(&line).map(|m| tabstops::visual_col(m, col)).unwrap_or(col)
     }
 
-    /// Where char column `col` of `line` is drawn: (row, cell).
+    /// Where char column `col` of `line` is drawn: (row, cell) -- the
+    /// cell of the character there, right-to-left text reordered.
     pub(super) fn locate(&self, line: usize, col: usize) -> Option<(usize, usize)> {
-        self.map.locate(line, self.vcol(line, col))
+        self.locate_caret(line, col, true)
+    }
+
+    /// Where a caret before char column `col` of `line` is drawn: as
+    /// `locate` for a block (`block`); a bar in right-to-left text is at
+    /// the character's right edge.
+    pub(super) fn locate_caret(&self, line: usize, col: usize, block: bool) -> Option<(usize, usize)> {
+        let (row, cell) = self.map.locate(line, self.vcol(line, col))?;
+        Some((row, self.bidi_cell(row, cell, block)))
+    }
+
+    fn bidi_cell(&self, row: usize, cell: usize, block: bool) -> usize {
+        match self.bidi.get(&row) {
+            Some((first, order)) if cell >= *first => first + order.caret(cell - first, block),
+            _ => cell,
+        }
     }
 
     /// Segments in the text, as `(line, from, to)` char columns, on the
-    /// rows: `(row, from, to)` cells.
+    /// rows: `(row, from, to)` cells, a segment in right-to-left text in
+    /// as many pieces as its characters are drawn in.
     pub(super) fn to_rows(&self, segments: LineSegments) -> Segments {
-        segments.into_iter().flat_map(|(line, s, e)| self.map.segments(line, self.vcol(line, s)..self.vcol(line, e))).collect()
+        let rows = segments.into_iter().flat_map(|(line, s, e)| self.map.segments(line, self.vcol(line, s)..self.vcol(line, e)));
+        if self.bidi.is_empty() {
+            return rows.collect();
+        }
+        rows.flat_map(|(row, from, to)| match self.bidi.get(&row) {
+            Some((first, order)) if from < to && to > *first => {
+                let mut out = Vec::new();
+                if from < *first {
+                    out.push((row, from, *first));
+                }
+                out.extend(order.cells(from.max(*first) - first..to - first).into_iter().map(|c| (row, first + c.start, first + c.end)));
+                out
+            }
+            Some(_) if from == to => {
+                let at = self.bidi_cell(row, from, true);
+                vec![(row, at, at)]
+            }
+            _ => vec![(row, from, to)],
+        })
+        .collect()
     }
 }
 
@@ -579,7 +638,9 @@ impl App {
     /// and the indent guides (none on Home or a page, `dashboard`). Only
     /// the lines on the rows are read.
     pub(super) fn pane_layout(&self, buffer: BufferId, want: RowsWanted, cursor_line: usize, dashboard: bool) -> PaneLayout {
-        let mut layout = PaneLayout { map: RowMap::default(), col_maps: HashMap::new(), decorated: HashMap::new(), decoration_rows: Vec::new(), indent_guides: Vec::new() };
+        let mut layout = PaneLayout { map: RowMap::default(), col_maps: HashMap::new(), decorated: HashMap::new(), decoration_rows: Vec::new(), indent_guides: Vec::new(), bidi: HashMap::new() };
+        // The lines with right-to-left text, as drawn.
+        let mut rtl_lines: HashMap<usize, String> = HashMap::new();
         let Some(ob) = self.buffers.get(buffer) else { return layout };
         let tab_stops = self.tab_stops_for(buffer);
         // The file's own step (three spaces a level is three), not the
@@ -618,6 +679,15 @@ impl App {
             } else {
                 (None, line_text.chars().take_while(|&c| c == ' ').count())
             };
+            if crate::bidi::has_rtl(&line_text) {
+                let drawn = match (layout.decorated.get(&line), &display) {
+                    (Some(laid), _) => laid.display.clone(),
+                    (None, Some(display)) => display.clone(),
+                    (None, None) if line_text.contains('\t') => tabstops::expand_line(&line_text, &tab_stops).0,
+                    (None, None) => line_text.clone(),
+                };
+                rtl_lines.insert(line, drawn);
+            }
             let first_row = rows.len();
             match want.wrap {
                 Some(width) => {
@@ -666,6 +736,9 @@ impl App {
         layout.map.view_cols = want.view_cols;
         if let Some(width) = want.wrap {
             layout.map = layout.map.wrapped_at(width);
+        }
+        if !rtl_lines.is_empty() {
+            layout.bidi = bidi_rows(&layout.map, &rtl_lines);
         }
         layout
     }
@@ -793,7 +866,7 @@ impl App {
             brackets: layout.to_rows(self.bracket_match_segments(span.clone())),
             // The search per run of lines, the `:s` preview once.
             hlsearch: by_runs(&|run| self.search_match_segments(run)).into_iter().chain(layout.to_rows(self.substitute_segments(span.clone()))).collect(),
-            caret: self.focused_caret(line, col).and_then(|(line, col)| layout.locate(line, col)),
+            caret: self.focused_caret(line, col).and_then(|(line, col)| layout.locate_caret(line, col, self.caret_is_block())),
         }
     }
 

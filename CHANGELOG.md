@@ -111,6 +111,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With standard keys, `Alt+F5` and `Alt+Shift+F5` go to the next and
   previous changed hunk, as the keys table says, rather than starting
   or stopping the debugger.
+- Screen readers, a first step: Fenix tells Narrator, NVDA, JAWS, Orca
+  or VoiceOver the text you're in with its cursor and selection, an
+  open prompt, the modeline, and each change of mode and message,
+  through AccessKit. Nothing is worked out until a screen reader asks;
+  `accessibility.screen_reader` turns it off. Pickers, which-key, the
+  terminal and the other panes are the next steps
+  (docs/plans/screen-reader.md).
+
+### Fixed
+
+- Text sent as Unicode characters rather than key presses (Windows'
+  `SendInput` with `KEYEVENTF_UNICODE`: dictation, the on-screen
+  keyboard, password managers' auto-type, automation tools) is typed
+  into buffers, prompts, pickers and terminals, as is text an input
+  method commits (#37).
+- Right-to-left text (Hebrew, Arabic) is shown in place: a line that
+  starts with it is no longer pushed off the pane's right edge with its
+  line number, and the caret, the selection, search matches and clicks
+  land on its characters as they're drawn (#17).
 
 ## [1.5.2] - 2026-11-11
 
