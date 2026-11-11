@@ -1400,7 +1400,7 @@ mod app_tests {
         let layout = app.frame_layout(pane, buffer, &display, base, state.scroll_row, rows, state.scroll_col, line, false);
         let lines: Vec<usize> = layout.map.text_lines().collect();
         let (start, end) = (lines.first().copied().unwrap_or(0), lines.last().copied().unwrap_or(0));
-        let highlights = app.syntax_highlights_in_columns(buffer, start, end - start + 1, state.scroll_col, None);
+        let highlights = app.syntax_highlights_in_columns(buffer, start, end - start + 1, state.scroll_col, None, true);
         let folds = app.code_folds.get(&buffer).cloned().unwrap_or_default();
         let ob = app.open();
         let (gutter, tab_stops) = (app.gutter_chars(ob), app.tab_stops_for(buffer));
