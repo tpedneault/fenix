@@ -6,29 +6,37 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-11
+
 ### Added
 
-- Soft wrap: long lines go on under themselves at the pane's width, by
-  buffer (`SPC t w`, `Alt+Z` with standard keys), with `editor.wrap` and
-  per-language lists (Markdown, `.txt` and `.text` files wrap by default); an
-  agent's prompt wraps. `gj` / `gk`, and with standard keys and in Insert
-  the arrows, `Home` / `End` and `PageUp` / `PageDown`, go by screen rows
-  (#107).
-- Colours from language servers (semantic highlighting): where a file's
-  server offers semantic tokens, they're laid over the grammar's colours
+- Soft wrap, off by default except in Markdown, `.txt` and `.text` files:
+  long lines go on under themselves at the pane's width, by buffer
+  (`SPC t w`, `Alt+Z` with standard keys), with `editor.wrap` and
+  per-language lists; an agent's prompt wraps. `gj` / `gk`, and with
+  standard keys and in Insert the arrows, `Home` / `End` and `PageUp` /
+  `PageDown`, go by screen rows (#107).
+- Semantic highlighting, on by default: where a file's language server
+  offers semantic tokens, they're laid over the grammar's colours
   (parameters, macros, interfaces and constants told apart, mutable
   names underlined). They follow your typing until the next answer, and
   a large file is asked only for the lines in view.
   `lsp.semantic_highlighting` (on) and `lsp.semantic_highlighting_off`
   turn it off globally and per language. Themes gain optional
   `syntax.interface`, `syntax.parameter` and `syntax.macro` keys (#105).
-- Code lens, off by default for now (`lsp.code_lens`): what a language
+- Code lens, off by default (`lsp.code_lens`): what a language
   server offers for a function or test ("▶ Run", "3 references") on a
   dimmed row of its own above it, run with a click or `SPC c l`. Fenix
   adds its own "▶ Run test" over tests the server offers no run for
   (`lsp.code_lens_tests`). While a file has lenses, its pane goes by
   rows: it snaps rather than eases, and sticky scroll is off, which is
   why it starts off (#106).
+
+### Fixed
+
+- A file that changed on disk between being closed and opened again is
+  sent to its language server again, so the server no longer works from
+  the text it had before.
 
 ## [1.5.1] - 2026-11-11
 
@@ -1046,7 +1054,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/tpedneault/fenix/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tpedneault/fenix/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/tpedneault/fenix/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/tpedneault/fenix/compare/v1.3.0...v1.4.0
