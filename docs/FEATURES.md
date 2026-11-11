@@ -211,8 +211,11 @@ its extension. The rest is built into Fenix.
   - Fenix says plainly when it can't run one; debugging from a lens
     isn't there yet.
   - Fenix offers its own "▶ Run test" over a Rust `#[test]`, a pytest
-    test or a Go `TestXxx` where the server gives no run lens
-    (`lsp.code_lens_tests`), run as `SPC p r` runs it.
+    test or a Go `TestXxx` where the server gives no run lens, with or
+    without a language server (`lsp.code_lens_tests`), run as `SPC p r`
+    runs it, in a trusted project. So with code lens on, a file of tests
+    snaps a row at a time without sticky scroll, as any file with lenses
+    does.
   - Lenses move with your edits and are refreshed after you pause.
   - `lsp.code_lens_off` lists languages that show none.
   - While a file has lenses, its pane snaps a row at a time rather than

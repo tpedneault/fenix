@@ -82,12 +82,32 @@ impl LensDoc {
     }
 
     /// The lenses as they're shown: one not resolved yet with what the
-    /// last answer's in its place said, while it's carried.
+    /// last answer's in its place said, while it's carried; one whose
+    /// resolve came to nothing with no title, so nothing to click.
     fn shown(&self) -> impl Iterator<Item = (usize, std::borrow::Cow<'_, lsp_types::CodeLens>)> {
-        self.lenses.iter().enumerate().map(|(i, lens)| match (lens.command.is_none(), self.carried.get(&i)) {
-            (true, Some(command)) => (i, std::borrow::Cow::Owned(lsp_types::CodeLens { command: Some(command.clone()), ..lens.clone() })),
-            _ => (i, std::borrow::Cow::Borrowed(lens)),
+        self.lenses.iter().enumerate().map(|(i, lens)| {
+            let with = |command: lsp_types::Command| std::borrow::Cow::Owned(lsp_types::CodeLens { command: Some(command), ..lens.clone() });
+            match (lens.command.is_none(), self.tried.contains(&i), self.carried.get(&i)) {
+                (true, true, _) => (i, with(lsp_types::Command { title: String::new(), command: String::new(), arguments: None })),
+                (true, false, Some(command)) => (i, with(command.clone())),
+                _ => (i, std::borrow::Cow::Borrowed(lens)),
+            }
         })
+    }
+
+    /// The resolves out let go: cancelled at the server and forgotten.
+    fn cancel_resolves(&mut self, client: &fenix_lsp::LspClient, pending: &mut HashMap<i64, PendingLspRequest>) {
+        for (_, (id, _)) in self.resolving.drain() {
+            let _ = client.notify::<lsp_types::notification::Cancel>(lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id as i32) });
+            pending.remove(&id);
+        }
+    }
+}
+
+/// `session`'s lenses of `canonical` let go, with any resolves out.
+fn drop_doc(session: &mut LspSession, canonical: &Path) {
+    if let Some(mut doc) = session.lenses.remove(canonical) {
+        doc.cancel_resolves(&session.client, &mut session.pending);
     }
 }
 
@@ -109,7 +129,7 @@ pub(super) fn offers(session: &LspSession) -> bool {
 pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Option<&str>, new: &str, sync: LensSync) {
     let buffer = match sync {
         LensSync::Drop => {
-            session.lenses.remove(canonical);
+            drop_doc(session, canonical);
             return;
         }
         LensSync::Follow => None,
@@ -249,7 +269,10 @@ impl App {
             let buffers: Vec<BufferId> = self.lens_of.keys().copied().collect();
             self.lens_of.clear();
             for session in self.lsp_sessions.values_mut() {
-                session.lenses.clear();
+                let paths: Vec<PathBuf> = session.lenses.keys().cloned().collect();
+                for path in paths {
+                    drop_doc(session, &path);
+                }
             }
             for buffer in buffers {
                 self.lay_out_lenses(buffer);
@@ -257,6 +280,13 @@ impl App {
             return;
         }
         let now = Instant::now();
+        // `lsp.code_lens_tests` turned off: Fenix's own go now.
+        if !self.own_lenses.is_empty() && !self.config.bool_value("lsp.code_lens_tests").unwrap_or(true) {
+            let buffers: Vec<BufferId> = self.own_lenses.keys().copied().collect();
+            for buffer in buffers {
+                self.lay_out_lenses(buffer);
+            }
+        }
         // A buffer whose language `lsp.code_lens_off` now leaves out: its
         // lenses go now, not at its next sync.
         let left_out: Vec<BufferId> = self.lens_of.keys().copied().filter(|&b| self.buffers.get(b).is_some() && !self.code_lens_wanted(b)).collect();
@@ -264,7 +294,7 @@ impl App {
             if let Some((keys, path)) = self.lens_of.remove(&buffer) {
                 for key in keys {
                     if let Some(session) = self.lsp_sessions.get_mut(&key) {
-                        session.lenses.remove(&path);
+                        drop_doc(session, &path);
                     }
                 }
             }
@@ -290,7 +320,10 @@ impl App {
             if session.lenses.is_empty() {
                 continue;
             }
-            session.lenses.retain(|path, d| of.get(&d.buffer).is_some_and(|(keys, p)| p == path && keys.contains(key)));
+            let unwanted: Vec<PathBuf> = session.lenses.iter().filter(|(path, d)| !of.get(&d.buffer).is_some_and(|(keys, p)| p == *path && keys.contains(key))).map(|(path, _)| path.clone()).collect();
+            for path in unwanted {
+                drop_doc(session, &path);
+            }
             let paths: Vec<PathBuf> = session.lenses.keys().cloned().collect();
             for path in paths {
                 time_out(session, &path, now);
@@ -387,17 +420,21 @@ impl App {
         lenses.sort_by_key(|l| l.range.start.line);
         // What the last answer showed in the same place, kept on show for
         // a lens not resolved yet, so a title doesn't blink to `…`.
-        let mut carried = HashMap::new();
-        for (i, new) in lenses.iter().enumerate().filter(|(_, l)| l.command.is_none()) {
-            let old = doc.lenses.iter().enumerate().find(|(_, old)| old.range == new.range && old.data == new.data);
-            if let Some(command) = old.and_then(|(j, old)| old.command.clone().or_else(|| doc.carried.get(&j).cloned())) {
-                carried.insert(i, command);
+        let place = |l: &lsp_types::CodeLens| (l.range.start.line, l.range.start.character, l.range.end.line, l.range.end.character, l.data.as_ref().map(|d| d.to_string()));
+        let mut said: HashMap<_, lsp_types::Command> = HashMap::new();
+        if lenses.iter().any(|l| l.command.is_none()) {
+            for (j, old) in doc.lenses.iter().enumerate() {
+                if let Some(command) = old.command.clone().or_else(|| doc.carried.get(&j).cloned()) {
+                    said.entry(place(old)).or_insert(command);
+                }
             }
         }
+        let carried: HashMap<usize, lsp_types::Command> = lenses.iter().enumerate().filter(|(_, l)| l.command.is_none()).filter_map(|(i, l)| said.get(&place(l)).map(|c| (i, c.clone()))).collect();
         doc.lenses = lenses;
         doc.carried = carried;
         doc.generation += 1;
-        doc.resolving.clear();
+        // Resolves of the last answer's lenses: cancelled, not left out.
+        doc.cancel_resolves(&session.client, &mut session.pending);
         doc.tried.clear();
         doc.retry = LENS_PAUSE;
         doc.refusals = 0;
@@ -418,9 +455,8 @@ impl App {
         doc.tried.insert(index);
         let resolved = result.ok().and_then(|v| serde_json::from_value::<lsp_types::CodeLens>(v).ok()).and_then(|l| l.command);
         let Some(lens) = doc.lenses.get_mut(index) else { return };
-        // Its own title now, or (none came) what was carried stays.
-        let Some(command) = resolved else { return };
-        lens.command = Some(command);
+        // Its own title now, or (none came) none: nothing to run.
+        lens.command = resolved;
         doc.carried.remove(&index);
         let buffer = doc.buffer;
         self.lay_out_lenses(buffer);
@@ -501,17 +537,63 @@ impl App {
             self.set_virtual_rows(id, texts);
             self.request_redraw_all();
         }
+        self.refresh_lens_hover();
     }
 }
 
 /// A lens to run: its buffer, its server (`None`: one of Fenix's own),
-/// its document, which of its lenses.
+/// its document, which of its lenses, and what it was when it was
+/// picked -- the answer it came in (`generation`; for Fenix's own, the
+/// edit) and what it is (`identity`), so a lens answered again since
+/// isn't mistaken for another.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct LensPick {
     pub buffer: BufferId,
     pub key: Option<LspKey>,
     pub path: PathBuf,
     pub index: usize,
+    pub generation: u64,
+    pub identity: LensIdentity,
+}
+
+/// What a lens is, as it was shown: its place, its command and that
+/// command's arguments.
+pub(super) type LensIdentity = (lsp_types::Range, Option<String>, Option<String>);
+
+fn identity(lens: &lsp_types::CodeLens) -> LensIdentity {
+    let command = lens.command.as_ref();
+    (lens.range, command.map(|c| c.command.clone()), command.and_then(|c| c.arguments.as_ref()).map(|a| serde_json::Value::from(a.clone()).to_string()))
+}
+
+impl App {
+    /// Buffer `buffer`'s lens `index` from `key` (`None`: Fenix's own) of
+    /// `path`, as a pick: `None` if it isn't there.
+    fn lens_pick(&self, buffer: BufferId, key: &Option<LspKey>, path: &Path, index: usize) -> Option<LensPick> {
+        let (generation, shown) = match key {
+            Some(key) => {
+                let doc = self.lsp_sessions.get(key)?.lenses.get(path)?;
+                (doc.generation, doc.shown().nth(index)?.1.into_owned())
+            }
+            None => {
+                let (at, own) = self.own_lenses.get(&buffer)?;
+                (*at, own.get(index)?.clone())
+            }
+        };
+        Some(LensPick { buffer, key: key.clone(), path: path.to_path_buf(), index, generation, identity: identity(&shown) })
+    }
+
+    /// After lens rows are laid out again: the lens under a pointer that
+    /// hasn't moved worked out afresh, so no title stays lit that isn't
+    /// there now, nor the hand over none.
+    fn refresh_lens_hover(&mut self) {
+        if self.lens_hover.is_none() {
+            return;
+        }
+        match (self.cursor_pos, self.gpu.as_ref().map(|g| (g.size.width as f32, g.size.height as f32))) {
+            (Some(pos), Some((w, h))) => self.update_hover_cursor(pos, w, h),
+            _ => self.lens_hover = None,
+        }
+    }
 }
 
 impl App {
@@ -544,8 +626,8 @@ impl App {
         let col = ((x / char_width).floor() as usize).checked_sub(lead)?;
         let lens_row = rows.get(&r.line)?.fit(view_cols.saturating_sub(1).saturating_sub(lead));
         let (cols, (key, index)) = lens_row.spans.iter().find(|(c, _)| c.contains(&col))?;
-        let path = self.lens_of.get(&buffer)?.1.clone();
-        Some((LensPick { buffer, key: key.clone(), path, index: *index }, r.line, cols.clone()))
+        let path = &self.lens_of.get(&buffer)?.1;
+        Some((self.lens_pick(buffer, key, path, *index)?, r.line, cols.clone()))
     }
 
     /// The pointer moved to `pos` over `pane`: the lens under it (if any)
@@ -554,10 +636,7 @@ impl App {
         if self.lens_rows.is_empty() && self.lens_hover.is_none() {
             return false;
         }
-        let now = pane.and_then(|(p, rect)| {
-            let buffer = *self.windows().content(p)?;
-            self.lens_at(p, rect, pos).map(|(_, line, cols)| (buffer, line, cols))
-        });
+        let now = pane.and_then(|(p, rect)| self.lens_at(p, rect, pos).map(|(_, line, cols)| (p, line, cols)));
         if now == self.lens_hover {
             return false;
         }
@@ -579,9 +658,26 @@ impl App {
     /// does for a command it's expected to run itself; why not, when it
     /// can't.
     pub(super) fn run_lens(&mut self, pick: &LensPick) {
+        // Answered again (or edited, for Fenix's own) since it was
+        // picked: the same lens, if it's still there, else none.
+        let same = |generation: u64, lenses: Vec<lsp_types::CodeLens>| {
+            if generation == pick.generation && lenses.get(pick.index).is_some_and(|l| identity(l) == pick.identity) {
+                Some(pick.index)
+            } else {
+                lenses.iter().position(|l| identity(l) == pick.identity)
+            }
+        };
+        let found = match &pick.key {
+            Some(key) => self.lsp_sessions.get(key).and_then(|s| s.lenses.get(&pick.path)).and_then(|doc| same(doc.generation, doc.shown().map(|(_, l)| l.into_owned()).collect())),
+            None => self.own_lenses.get(&pick.buffer).and_then(|(at, own)| same(*at, own.clone())),
+        };
+        let Some(index) = found else {
+            self.set_error("not run: the lenses changed since; try again");
+            return;
+        };
         let Some(key) = &pick.key else {
             // One of Fenix's own: the test at its line.
-            let Some(own) = self.own_lenses.get(&pick.buffer).and_then(|(_, own)| own.get(pick.index)).cloned() else { return };
+            let Some(own) = self.own_lenses.get(&pick.buffer).and_then(|(_, own)| own.get(index)).cloned() else { return };
             if let lens::Action::RunTest { path, line } = lens::action(&own, |_| false) {
                 let path = PathBuf::from(path);
                 if self.lens_may_start(&super::tool_sessions::root_for_path(&path)) {
@@ -591,7 +687,7 @@ impl App {
             return;
         };
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
-        let Some(code_lens) = session.lenses.get(&pick.path).and_then(|d| d.lenses.get(pick.index)).cloned() else { return };
+        let Some(code_lens) = session.lenses.get(&pick.path).and_then(|d| d.lenses.get(index)).cloned() else { return };
         let caps = session.capabilities.clone().unwrap_or_default();
         match lens::action(&code_lens, |c| lens::executes(&caps, c)) {
             lens::Action::Server { command, arguments } => {
@@ -615,11 +711,16 @@ impl App {
                 // Run where the server says, only inside its project: cargo
                 // itself by its arguments, no shell between.
                 let project = super::refactor::identity(&key.root);
-                let root = runnable.cwd.as_ref().map_or_else(|| project.clone(), |cwd| super::refactor::identity(Path::new(cwd)));
-                if !root.starts_with(&project) {
-                    self.set_error(format!("not run: {} is outside the project", root.display()));
+                // Where it is, not where its name says: a path that can't be
+                // followed isn't run in.
+                let cwd = match &runnable.cwd {
+                    None => Some(project.clone()),
+                    Some(cwd) => std::fs::canonicalize(cwd).ok().map(fenix_lsp::normalize),
+                };
+                let Some(cwd) = cwd.filter(|cwd| cwd.starts_with(&project)) else {
+                    self.set_error(format!("not run: {} isn't a folder in the project", runnable.cwd.as_deref().unwrap_or_default()));
                     return;
-                }
+                };
                 if !self.lens_may_start(&project) {
                     return;
                 }
@@ -630,10 +731,13 @@ impl App {
                 }
                 let mut name = if runnable.label.is_empty() { format!("cargo {}", args.join(" ")) } else { runnable.label.clone() };
                 // Not a project task of the same name in its place.
-                if self.project_tools(&root).is_ok_and(|tools| tools.tasks.contains_key(&name)) {
+                if self.project_tools(&project).is_ok_and(|tools| tools.tasks.contains_key(&name)) {
                     name.push_str(" (code lens)");
                 }
-                self.run_task_as(fenix_tasks::TaskDef { name, command: "cargo".into(), args }, root, None);
+                // The project's task, run in the crate's folder.
+                let mut spec = fenix_project::tools::CommandSpec::new("cargo".to_string(), args.clone());
+                spec.cwd = Some(cwd.clone());
+                self.run_task_as(fenix_tasks::TaskDef { name, command: "cargo".into(), args }, project, Some(spec));
             }
             lens::Action::CargoDebug(runnable) => {
                 self.set_error(format!("Fenix can't debug from a lens yet ({}): SPC u u starts the debugger", runnable.label));
@@ -661,8 +765,13 @@ impl App {
         let picks: Vec<(String, LensPick)> = row
             .spans
             .iter()
-            .map(|(cols, (key, index))| (row.text.chars().skip(cols.start).take(cols.len()).collect(), LensPick { buffer, key: key.clone(), path: path.clone(), index: *index }))
+            .filter_map(|(cols, (key, index))| Some((row.text.chars().skip(cols.start).take(cols.len()).collect(), self.lens_pick(buffer, key, &path, *index)?)))
             .collect();
+        // Titles all empty: none to run.
+        if picks.is_empty() {
+            self.set_message("no code lenses on this line");
+            return;
+        }
         if let [(_, pick)] = picks.as_slice() {
             let pick = pick.clone();
             self.run_lens(&pick);

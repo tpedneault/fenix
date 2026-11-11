@@ -5349,7 +5349,7 @@ pub struct App {
     /// Fenix's own "Run test" lenses, by buffer, as of an edit count.
     own_lenses: HashMap<BufferId, (u64, Vec<lsp_types::CodeLens>)>,
     /// The lens under the pointer: its buffer, its row's line, its columns.
-    lens_hover: Option<(BufferId, usize, std::ops::Range<usize>)>,
+    lens_hover: Option<(fenix_window::WindowId, usize, std::ops::Range<usize>)>,
     /// A test's seam: every pane that could wrap goes by rows (at
     /// `rows::UNBOUNDED` when it doesn't wrap), with or without rows
     /// above its lines, so the row path can be checked against the
@@ -37445,6 +37445,96 @@ name = \"orbit\"
         assert_eq!(said_now(&app), "no code lenses on this line");
     }
 
+    fn titled(title: &str, command: &str) -> serde_json::Value {
+        serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": title, "command": command}})
+    }
+
+    fn answer_lenses_again(app: &mut App, key: &LspKey, lenses: serde_json::Value) {
+        app.refresh_lenses(key);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(app, key, id, lenses);
+    }
+
+    fn lens_commands_sent(app: &App, key: &LspKey) -> Vec<String> {
+        app.lsp_sessions[key].pending.values().filter_map(|p| match p {
+            PendingLspRequest::LensCommand { title } => Some(title.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn the_lens_picked_is_the_one_run_though_the_lenses_were_answered_again() {
+        let caps = |app: &mut App, key: &LspKey| app.lsp_sessions.get_mut(key).unwrap().capabilities = Some(capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {}, "executeCommandProvider": {"commands": ["x.run", "x.debug", "x.delete"]}})));
+        let (_dir, mut app, key) = lensed("lens_pick_moved", serde_json::json!([titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        caps(&mut app, &key);
+        app.run_cmd("code.lens");
+        assert!(matches!(app.active_picker, Some(ActivePicker::Lenses(_))));
+        answer_lenses_again(&mut app, &key, serde_json::json!([titled("Delete all", "x.delete"), titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        app.press("Enter");
+        assert_eq!(lens_commands_sent(&app, &key), vec!["▶ Run".to_string()], "the one shown, found again");
+        // Gone when it's chosen: none run, and it's said.
+        let (_dir, mut app, key) = lensed("lens_pick_gone", serde_json::json!([titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        caps(&mut app, &key);
+        app.run_cmd("code.lens");
+        answer_lenses_again(&mut app, &key, serde_json::json!([titled("Delete all", "x.delete"), titled("Debug", "x.debug")]));
+        app.press("Enter");
+        assert!(lens_commands_sent(&app, &key).is_empty());
+        assert!(said_now(&app).contains("the lenses changed"), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn a_line_whose_lenses_have_no_titles_has_none_to_run() {
+        let (_dir, mut app, _key) = lensed("lens_no_titles", serde_json::json!([titled("\u{200b}", "x.run"), titled("", "x.run")]));
+        app.run_cmd("code.lens");
+        assert!(app.active_picker.is_none(), "no empty picker");
+        assert_eq!(said_now(&app), "no code lenses on this line");
+    }
+
+    #[test]
+    fn a_run_s_folder_must_be_a_real_one_in_the_project_and_the_task_is_the_project_s() {
+        let (dir, mut app, _key) = lensed("lens_run_cwd", serde_json::json!([]));
+        let root = dir.path().to_path_buf();
+        let run = |cwd: &str| serde_json::json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "t", "kind": "cargo", "args": {"cargoArgs": ["--version"], "cwd": cwd}}]}}]);
+        let key = app.lsp_sessions.keys().next().unwrap().clone();
+        // A path that can't be followed, though its name is inside.
+        answer_lenses_again(&mut app, &key, run(&format!("{}/nope/../../..", root.display())));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("isn't a folder in the project"), "{}", said_now(&app));
+        assert!(app.task_session.is_none());
+        // A member crate's folder: run there, as the project's task.
+        std::fs::create_dir_all(root.join("member")).unwrap();
+        answer_lenses_again(&mut app, &key, run(&root.join("member").display().to_string()));
+        app.run_cmd("code.lens");
+        let session = app.task_session.as_ref().expect("started");
+        assert_eq!(session.root, fenix_lsp::normalize(refactor::identity(&root)), "the project's");
+        assert!(session.cwd.ends_with("member"), "{:?}", session.cwd);
+    }
+
+    #[test]
+    fn a_double_click_on_a_lens_runs_it_once_and_its_hover_follows_the_rows() {
+        let (_dir, mut app, key) = lensed("lens_double", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        let pane = app.focused_pane_id();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let (char_width, line_height) = app.cell_size();
+        let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+        let gutter = app.gutter_chars(app.open()) as f32 * char_width;
+        let at = |col: f32| (content.x + text::PAD_LEFT + gutter + (col + 0.5) * char_width, content.y + text::PAD_TOP + line_height * 0.5);
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        app.mouse_release();
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        app.mouse_release();
+        assert_eq!(lens_commands_sent(&app, &key).len(), 1, "once");
+        // Lit, then the lenses go under a pointer that doesn't move.
+        assert!(app.hover_lens(Some((pane, rect)), at(9.0)));
+        assert_eq!(app.lens_hover.as_ref().map(|(p, _, _)| *p), Some(pane), "by pane");
+        answer_lenses_again(&mut app, &key, serde_json::json!([]));
+        assert!(app.lens_hover.is_none(), "not lit over nothing");
+    }
+
     #[test]
     fn a_lens_starts_cargo_only_in_a_trusted_project() {
         let run = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["--version"]}}]}});
@@ -37478,7 +37568,7 @@ name = \"orbit\"
         let away = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["test"], "cwd": "/"}}]}});
         let (_dir, mut app, _key) = lensed("lens_run_away", serde_json::json!([away]));
         app.run_cmd("code.lens");
-        assert!(said_now(&app).contains("is outside the project"), "{}", said_now(&app));
+        assert!(said_now(&app).contains("isn't a folder in the project"), "{}", said_now(&app));
         assert!(app.task_session.is_none(), "nothing started");
         // Fenix's own command in a server's lens: not run.
         let own = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run test", "command": "fenix.runTest", "arguments": ["/elsewhere/t.rs", 1]}});
@@ -37544,11 +37634,9 @@ name = \"orbit\"
         app.run_cmd("code.lens");
         let session = app.task_session.as_ref().expect("Task Output opened");
         assert!(app.buffers.get(session.buffer).unwrap().buffer.text().starts_with("$ pytest test_ledger.py::test_totals"));
-        // Off on their own.
+        // Off on their own: gone in the next frame.
         app.config.set_value("lsp.code_lens_tests", Some(fenix_config::Value::Bool(false)));
-        app.sync_lsp_for_focused_buffer();
-        let buffer = app.focused_buffer_id();
-        app.lay_out_lenses(buffer);
+        app.ask_due_lenses();
         assert!(lens_rows_of(&app).is_empty());
     }
 
@@ -37618,6 +37706,27 @@ name = \"orbit\"
         let _ = app.focused_layout(60);
         let laid = started.elapsed();
         println!("open with own lenses {first:?}; 5000 server lenses laid out {answered:?}; an edit's sync {edited:?}; a frame's 60 rows {laid:?}; rows {}", app.virtual_rows[&app.focused_buffer_id()].len());
+        // The same lenses unresolved, answered twice: the second carries
+        // the first's titles over by place.
+        let unresolved: Vec<serde_json::Value> = (0..5_000).map(|i| lens_json(i * 4 + 1, None)).collect();
+        app.refresh_lenses(&key);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..60]);
+        for _ in 0..2 {
+            app.lsp_sessions.get_mut(&key).unwrap().lenses.values_mut().for_each(|d| d.due = Some(Instant::now()));
+            app.sync_lsp_for_focused_buffer();
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            let started = Instant::now();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+            println!("5000 unresolved lenses answered (titles carried) {:?}", started.elapsed());
+        }
+        // A Python class of 5 000 tests: Fenix's own found.
+        let text = format!("class TestBig:\n{}", (0..5_000).map(|i| format!("    def test_{i}(self):\n        x()\n\n\n")).collect::<String>());
+        let path = dir.write("test_big.py", &text);
+        let started = Instant::now();
+        let found = fenix_tasks::test_lines(&path, &text, dir.path());
+        println!("a Python class of 5000 tests, 20 000 lines: {} found in {:?}", found.len(), started.elapsed());
     }
 
     #[test]
@@ -37769,6 +37878,45 @@ name = \"orbit\"
             _ => None,
         }).collect();
         assert_eq!(asked.iter().copied().collect::<std::collections::BTreeSet<_>>(), [0, 3].into());
+    }
+
+    #[test]
+    fn resolves_of_an_answer_let_go_are_cancelled_so_no_more_than_sixteen_are_ever_out() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_superseded", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        let unresolved: Vec<serde_json::Value> = (0..40).map(|l| lens_json(l, None)).collect();
+        for _ in 0..4 {
+            app.note_lens_view(buffer, &[0..40]);
+            assert!(resolves_out(&app, &key).len() <= 16, "{}", resolves_out(&app, &key).len());
+            // Asked again (a refresh) and answered; the resolves never are.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..40]);
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+        }
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+    }
+
+    #[test]
+    fn a_carried_title_whose_resolve_comes_to_nothing_isn_t_shown_to_be_run() {
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_carry_fails", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "carried");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::Value::Null);
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())], "nothing to click, its row kept");
     }
 
     #[test]

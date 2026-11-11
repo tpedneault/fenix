@@ -246,9 +246,9 @@ impl App {
     /// aren't text): `row` (from the top of `content`, negative above it)
     /// and `x` (pixels from the text's left edge) through the pane's rows.
     /// Right of a row that goes on below is that row's last char. Above or
-    /// below the rows shown, it's as with a row a line: a line on from the
-    /// first shown or the last for each row past the edge, at the column
-    /// (through any sideways scroll) under the pointer. A row that isn't
+    /// below the rows shown: wrapped, the line before the first or after
+    /// the last; not wrapped, as a row a line has it, a line on for each
+    /// row past the edge, through the sideways scroll. A row that isn't
     /// text (a code lens's) is no place in the text.
     fn wrapped_text_hit(&self, pane: fenix_window::WindowId, buffer: BufferId, content: fenix_window::Rect, row: isize, x: f32) -> Option<TextHit> {
         let ob = self.buffers.get(buffer)?;
@@ -268,7 +268,8 @@ impl App {
             Some((display[at], index >= display.len() as isize))
         };
         // Unwrapped, the columns go through the sideways scroll.
-        let scroll_col = if self.row_cols(pane, buffer).is_some_and(|w| w != super::rows::UNBOUNDED) { 0 } else { state.scroll_col };
+        let wrapped = self.row_cols(pane, buffer).is_some_and(|w| w != super::rows::UNBOUNDED);
+        let scroll_col = if wrapped { 0 } else { state.scroll_col };
         let (line, vcol, past) = match usize::try_from(row).ok().filter(|&r| r <= last) {
             Some(r) => match map.row(r).map(|row| row.kind) {
                 Some(super::rows::RowKind::Virtual(_)) => return None,
@@ -279,9 +280,15 @@ impl App {
                     (line, vcol, false)
                 }
             },
-            None => {
+            // A pane that doesn't wrap: as a row a line has it.
+            None if !wrapped => {
                 let (line, past) = if row < 0 { off(0, row)? } else { off(last, row - last as isize)? };
                 (line, scroll_col + cell, past)
+            }
+            // Wrapped: the line before the first shown, or after the last.
+            None => {
+                let (line, past) = if row < 0 { off(0, -1)? } else { off(last, 1)? };
+                (line, cell, past)
             }
         };
         let cursor_line = ob.buffer.line_col(&state.cursor).0;
@@ -339,7 +346,10 @@ impl App {
     pub(super) fn text_press(&mut self, pane: fenix_window::WindowId, rect: fenix_window::Rect, pos: (f32, f32), now: Instant) -> bool {
         // On a code lens's title: that lens run.
         if let Some((pick, _, _)) = self.lens_at(pane, rect, pos) {
-            self.run_lens(&pick);
+            // Once a click: not again on its double or triple.
+            if self.mouse.clicks.press(now, pos) == 1 {
+                self.run_lens(&pick);
+            }
             return true;
         }
         let Some(hit) = self.text_hit(pane, rect, pos) else { return false };
