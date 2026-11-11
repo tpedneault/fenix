@@ -36,10 +36,10 @@ pub(super) fn modeline_project_spans(kind: ProjectKind, name: &str, theme: &Them
 /// "orbit-tools — Fenix 1.3.0", or "Fenix 1.3.0" outside a project -- so
 /// the taskbar tells two Fenix windows apart, and says which Fenix.
 pub(crate) fn window_title(project: Option<&str>) -> String {
-    let fenix = concat!("Fenix ", env!("CARGO_PKG_VERSION"));
+    let fenix = format!("Fenix {}", crate::installed::RELEASE);
     match project {
         Some(name) => format!("{name} \u{2014} {fenix}"),
-        None => fenix.to_string(),
+        None => fenix,
     }
 }
 
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn the_window_is_named_after_its_project() {
-        let fenix = format!("Fenix {}", env!("CARGO_PKG_VERSION"));
+        let fenix = format!("Fenix {}", crate::installed::RELEASE);
         assert_eq!(window_title(Some("orbit-tools")), format!("orbit-tools \u{2014} {fenix}"));
         assert_eq!(window_title(None), fenix);
     }

@@ -60,13 +60,14 @@ Extensions:
 
 A running Fenix gets what a later `fenix` asks for. docs/CONTROL.md has the rest.
 ",
-        version = env!("CARGO_PKG_VERSION")
+        version = crate::installed::describe()
     )
 }
 
-/// What `fenix --version` prints.
+/// What `fenix --version` prints: `fenix 1.5.2`, or for a nightly
+/// `fenix 1.6.0-nightly.20261112 (a1b2c3d4e5f6)`, its commit.
 pub fn version_text() -> String {
-    format!("fenix {}", env!("CARGO_PKG_VERSION"))
+    format!("fenix {}", crate::installed::describe())
 }
 
 /// `--help` or `--version`, when the command line asks for either before
@@ -267,7 +268,7 @@ mod tests {
         for flag in ["--mcp", "--install-extension", "--list-extensions", "--disable-extensions", "--goto", "--project", "--new-window", "--version"] {
             assert!(help.contains(flag), "{flag} missing from:\n{help}");
         }
-        assert_eq!(info_request(&args(&["-V"])).unwrap(), format!("fenix {}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(info_request(&args(&["-V"])).unwrap(), format!("fenix {}", crate::installed::describe()));
         assert_eq!(info_request(&args(&["a.rs", "--version"])), Some(version_text()));
         assert_eq!(info_request(&args(&["--", "--help"])), None, "after -- it's a file");
         assert_eq!(info_request(&args(&["a.rs"])), None);

@@ -14,12 +14,51 @@ use std::path::{Path, PathBuf};
 
 use fenix_extensions::{Installed, Policy, Store};
 
-/// The Fenix release this is, for an extension's `engine.fenix` range:
-/// the workspace's version, so the two can't drift apart.
-pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
+/// The Fenix release this is, for an extension's `engine.fenix` range
+/// and the update check: the workspace's version, so the two can't drift
+/// apart -- or, for a nightly, the version its build was stamped with
+/// (`FENIX_VERSION=1.6.0-nightly.20261112`, set by the nightly workflow;
+/// nothing is committed for it).
+pub const RELEASE: &str = match option_env!("FENIX_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// The commit a stamped build was made from (`FENIX_COMMIT`); none for a
+/// release or a build of your own.
+pub const COMMIT: Option<&str> = option_env!("FENIX_COMMIT");
 
 pub fn release() -> semver::Version {
     semver::Version::parse(RELEASE).expect("a version")
+}
+
+/// Whether this is a nightly build: a version the nightly workflow
+/// stamped (`-nightly.` in it).
+pub fn is_nightly() -> bool {
+    is_nightly_version(&release())
+}
+
+pub fn is_nightly_version(v: &semver::Version) -> bool {
+    v.pre.as_str().starts_with("nightly.")
+}
+
+/// The version as people are told it: `1.5.2`, or
+/// `1.6.0-nightly.20261112 (a1b2c3d4e5f6)` with the commit a stamped build
+/// was made from.
+pub fn describe() -> String {
+    describe_with(RELEASE, COMMIT)
+}
+
+pub fn describe_with(version: &str, commit: Option<&str>) -> String {
+    match commit.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(commit) => format!("{version} ({})", short_commit(commit)),
+        None => version.to_string(),
+    }
+}
+
+/// A commit's first 12 characters, as Git shows one.
+pub fn short_commit(commit: &str) -> &str {
+    commit.get(..12).unwrap_or(commit)
 }
 
 /// `fenix --disable-extensions`: safe mode, the core alone for this run.
@@ -475,7 +514,24 @@ mod tests {
 
     #[test]
     fn this_release_is_at_least_the_packages_version() {
-        assert!(release() >= semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap());
+        let package = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let this = release();
+        // A nightly is a pre-release of the next minor: past the package's
+        // version, but not its own release.
+        assert!(this >= package || (is_nightly() && this.minor > package.minor), "{this} against {package}");
+    }
+
+    #[test]
+    fn a_nightly_says_so_and_names_its_commit() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        assert!(is_nightly_version(&v("1.6.0-nightly.20261112")));
+        assert!(is_nightly_version(&v("1.6.0-nightly.20261112.2")));
+        assert!(!is_nightly_version(&v("1.6.0")));
+        assert!(!is_nightly_version(&v("1.6.0-rc.1")));
+        assert_eq!(describe_with("1.5.2", None), "1.5.2");
+        assert_eq!(describe_with("1.6.0-nightly.20261112", Some("0123456789abcdef0123456789abcdef01234567")), "1.6.0-nightly.20261112 (0123456789ab)");
+        assert_eq!(describe_with("1.6.0-nightly.20261112", Some(" ")), "1.6.0-nightly.20261112");
+        assert_eq!(describe(), describe_with(RELEASE, COMMIT));
     }
 
     #[test]

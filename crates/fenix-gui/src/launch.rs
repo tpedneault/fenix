@@ -95,7 +95,7 @@ impl Launcher {
         // and on which driver is the first thing to know about a window
         // that stopped drawing.
         let adapter = gpu_context.adapter_info();
-        crate::watchdog::note(&format!("Fenix {} on {} via {:?}, driver {} {}", env!("CARGO_PKG_VERSION"), adapter.name, adapter.backend, adapter.driver, adapter.driver_info));
+        crate::watchdog::note(&format!("Fenix {} on {} via {:?}, driver {} {}", crate::installed::describe(), adapter.name, adapter.backend, adapter.driver, adapter.driver_info));
         if std::env::var_os("FENIX_PROFILE").is_some() {
             eprintln!("fenix-profile launch/adapter: {} via {:?}", adapter.name, adapter.backend);
         }
