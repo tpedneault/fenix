@@ -455,34 +455,54 @@ impl App {
     }
 
     /// `buffer`'s rows above its lines that aren't text (a code lens's),
-    /// by line, `rows` in place of what it had. Every pane showing it
-    /// keeps its top text row where it was: the rows that come or go
-    /// above its top line are counted into, or out of, how far into that
-    /// line the top is, and a top that was on one of the rows that went
-    /// is on the line's text.
+    /// by line, `rows` in place of what it had. Every pane showing it, in
+    /// every workspace and frame, keeps its top text row where it was:
+    /// the rows that come or go above its top line are counted into, or
+    /// out of, how far into that line the top is, and a top that was on
+    /// one of the rows that went is on the line's text. A top at its
+    /// line's very first row stays there, so rows that come above the top
+    /// line show (at the top of the file, they'd be out of reach else).
     // Lenses fill these from the next stage of #106; until then only
     // the tests do.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn set_virtual_rows(&mut self, buffer: BufferId, rows: std::collections::BTreeMap<usize, Vec<String>>) {
-        let showing: Vec<fenix_window::WindowId> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
-        let tops: Vec<(fenix_window::WindowId, usize)> = showing
-            .iter()
-            .map(|&pane| {
-                let state = self.pane_state(pane);
-                let line = self.pane_display_lines(pane, buffer).get(state.scroll_line).copied().unwrap_or(NO_LINE);
-                (pane, line)
-            })
-            .collect();
-        let before: Vec<usize> = tops.iter().map(|&(_, line)| self.virtual_rows_above(buffer, line).len()).collect();
+        // Each pane showing it: its frame (`None`, the live one), its
+        // workspace, and the line at its top.
+        let folded = self.folded_display_lines(buffer);
+        let lists = std::iter::once((None, &self.workspaces)).chain(self.frames.iter().enumerate().filter_map(|(i, f)| f.as_ref().map(|f| (Some(i), &f.workspaces))));
+        let mut tops: Vec<(Option<usize>, usize, fenix_window::WindowId, usize)> = Vec::new();
+        for (frame, list) in lists {
+            for (index, workspace) in list.workspaces.iter().enumerate() {
+                let live = frame.is_none() && index == list.active;
+                for pane in workspace.windows.windows().into_iter().filter(|&p| workspace.windows.content(p) == Some(&buffer)) {
+                    let Some(state) = workspace.pane_states.get(&pane) else { continue };
+                    // A side-by-side's fillers are only in the live workspace.
+                    let line = if live { self.pane_display_lines(pane, buffer).get(state.scroll_line).copied() } else { folded.get(state.scroll_line).copied() };
+                    tops.push((frame, index, pane, line.unwrap_or(NO_LINE)));
+                }
+            }
+        }
+        let before: Vec<usize> = tops.iter().map(|&(_, _, _, line)| self.virtual_rows_above(buffer, line).len()).collect();
         if rows.is_empty() {
             self.virtual_rows.remove(&buffer);
         } else {
             self.virtual_rows.insert(buffer, rows);
         }
-        for ((pane, line), old_above) in tops.into_iter().zip(before) {
+        for ((frame, index, pane, line), old_above) in tops.into_iter().zip(before) {
             let new_above = self.virtual_rows_above(buffer, line).len();
-            let state = self.pane_state_mut(pane);
-            state.scroll_row = if state.scroll_row < old_above { new_above } else { state.scroll_row - old_above + new_above };
+            let list = match frame {
+                None => &mut self.workspaces,
+                Some(f) => match self.frames.get_mut(f).and_then(Option::as_mut) {
+                    Some(parked) => &mut parked.workspaces,
+                    None => continue,
+                },
+            };
+            let Some(state) = list.workspaces.get_mut(index).and_then(|w| w.pane_states.get_mut(&pane)) else { continue };
+            state.scroll_row = match state.scroll_row {
+                0 => 0,
+                row if row < old_above => new_above,
+                row => row - old_above + new_above,
+            };
         }
     }
 
@@ -1566,16 +1586,72 @@ mod app_tests {
         app.set_pane_text_cols(pane, 30);
         app.pane_state_mut(pane).scroll_line = 5;
         app.pane_state_mut(pane).rendered_scroll = 5.0;
-        // A lens appears on the top line: still its text at the top.
+        // A lens appears on the top line, the top at its first row: the
+        // lens shows above it.
         app.set_virtual_rows(buffer, [(5, vec!["lens".to_string()]), (9, vec!["lens".to_string()])].into());
-        assert_eq!(app.pane_state(pane).scroll_row, 1);
+        assert_eq!(app.pane_state(pane).scroll_row, 0);
+        assert_eq!(app.focused_layout(3).map.row(0).map(|r| (r.line, r.kind)), Some((5, crate::app::rows::RowKind::Virtual(0))));
+        // Scrolled onto the text, a second lens there: still its text at
+        // the top.
+        app.pane_state_mut(pane).scroll_row = 1;
+        app.set_virtual_rows(buffer, [(5, vec!["lens".to_string(), "more".to_string()]), (9, vec!["lens".to_string()])].into());
+        assert_eq!(app.pane_state(pane).scroll_row, 2);
         assert_eq!(app.focused_layout(3).map.row(0).map(|r| (r.line, r.kind)), Some((5, crate::app::rows::RowKind::Text)));
-        // Scrolled up onto the lens row, then the lenses go: the line's text.
-        app.pane_state_mut(pane).scroll_row = 0;
+        // Up onto a lens row, then the lenses go: the line's text.
+        app.pane_state_mut(pane).scroll_row = 1;
         app.set_virtual_rows(buffer, Default::default());
         assert_eq!(app.pane_state(pane).scroll_row, 0);
         assert_eq!(app.row_cols(pane, buffer), None, "a row a line again, as in 1.5");
         assert_eq!(app.pane_state(pane).scroll_line, 5);
+    }
+
+    #[test]
+    fn a_lens_on_the_first_line_shows_and_can_be_scrolled_back_to() {
+        let (mut app, _f) = app_on_file("a.rs", &"x\n".repeat(30));
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 30);
+        let lens = |app: &mut App| app.set_virtual_rows(buffer, [(0, vec!["lens".to_string()])].into());
+        let top = |app: &App| (app.pane_state(pane).scroll_line, app.pane_state(pane).scroll_row);
+        // Opened at the top, the lens comes: it shows.
+        lens(&mut app);
+        assert_eq!(top(&app), (0, 0));
+        assert_eq!(app.focused_layout(3).map.row(0).map(|r| r.kind), Some(crate::app::rows::RowKind::Virtual(0)));
+        // Hidden above the top, each way back to the top shows it.
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let ways: [&dyn Fn(&mut App); 4] = [
+            &|app| app.press_all("j k k"),
+            &|app| app.press_all("g g"),
+            &|app| {
+                for _ in 0..3 {
+                    app.handle_wheel_at((rect.x + 120.0, rect.y + 60.0), MouseScrollDelta::LineDelta(0.0, 1.0), 800.0, 600.0);
+                }
+            },
+            &|app| app.press_all("z t"),
+        ];
+        for (i, way) in ways.iter().enumerate() {
+            app.pane_state_mut(pane).scroll_row = 1;
+            way(&mut app);
+            app.ensure_cursor_visible(5);
+            assert_eq!(top(&app), (0, 0), "way {i}");
+        }
+    }
+
+    #[test]
+    fn a_page_in_a_pane_with_lens_rows_counts_them() {
+        let (mut app, _f) = app_on_file("a.rs", &"x\n".repeat(60));
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 30);
+        // Every line a lens: two rows a line.
+        app.set_virtual_rows(buffer, (0..60).map(|l| (l, vec!["lens".to_string()])).collect());
+        let rows = app.pane_text_rows(pane).unwrap_or(20).saturating_sub(1).max(1);
+        app.press("PageDown");
+        // From line 0's text (row 1), a pane less one on: half as many lines.
+        let down = rows.div_ceil(2);
+        assert_eq!(app.line_col().0, down);
+        // And back from its text's row.
+        app.press("PageUp");
+        assert_eq!(app.line_col().0, (2 * down + 1).saturating_sub(rows) / 2);
     }
 
     #[test]

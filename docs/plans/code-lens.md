@@ -293,3 +293,17 @@ lenses are off by default until stage 6.
     rows above them.
   - Rows appearing and going keep the top text row in place, and with
     none left the pane is on the line path again.
+- **After review.**
+  - Panes in every workspace and frame keep their top through
+    `set_virtual_rows`, not just the live workspace's.
+  - A top at its line's very first row stays there when rows come
+    above that line, so a lens arriving on the top line shows (on line
+    0 it couldn't be reached otherwise). `follow` shows a line's lens
+    when the cursor is on the top line's first text row with the lens
+    hidden, so `gg`, `k` and the wheel reach it.
+  - Off the rows (above, below, right of a line's end, a drag past an
+    edge), a hit is where the line path has it, through the sideways
+    scroll. A lens row is no place in the text: a click, drag or hover
+    there moves no cursor and scrolls nothing.
+  - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
+    lens rows counted (`page_by_rows`), as in a wrapped pane.

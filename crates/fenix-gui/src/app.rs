@@ -16859,10 +16859,16 @@ impl App {
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
-            // A wrapped pane: by its rows, a pane less one.
+            // A pane by rows: by its rows, a pane less one. One that
+            // doesn't wrap (lens rows above its lines) counts them, as
+            // Vim's rows don't.
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
             if self.row_cols(pane, id).is_some() {
                 let rows = self.pane_text_rows(pane).unwrap_or(page_size).saturating_sub(1).max(1) as isize;
+                if self.page_by_rows(pane, id, if down { rows } else { -rows }) {
+                    self.wake_caret();
+                    return;
+                }
                 if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                     if self.vim.move_rows(&mut ob.buffer, &mut state.cursor, if down { rows } else { -rows }) {
                         self.wake_caret();
