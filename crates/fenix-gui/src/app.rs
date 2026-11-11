@@ -37446,6 +37446,24 @@ name = \"orbit\"
     }
 
     #[test]
+    fn a_lens_starts_cargo_only_in_a_trusted_project() {
+        let run = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["--version"]}}]}});
+        let (dir, mut app, _key) = lensed("lens_run_trust", serde_json::json!([run]));
+        // The project names a program, and nobody has allowed it yet.
+        dir.write(".fenix/tools.json", r#"{"tasks": {"build": {"executable": "make"}}}"#);
+        let state = TempDir::new("lens_run_trust_state");
+        app.known_projects = fenix_project::KnownProjects::load_or_default(state.path().join("projects.txt"));
+        app.project_trust_begin(Some(state.path().join("trusted-projects.json")));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("only in a trusted project (SPC p y)"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        // Trusted: it runs.
+        app.trust_project_as_written(dir.path());
+        app.run_cmd("code.lens");
+        assert!(app.task_session.is_some(), "{}", said_now(&app));
+    }
+
+    #[test]
     fn lenses_fenix_runs_itself_or_says_why_not() {
         let location = serde_json::json!({"uri": "file:///tmp/a.rs", "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}});
         let refs = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "1 reference", "command": "rust-analyzer.showReferences", "arguments": ["file:///tmp/a.rs", {"line": 0, "character": 0}, [location]]}});
