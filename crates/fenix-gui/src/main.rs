@@ -64,6 +64,7 @@ mod folds;
 mod notify;
 mod notifications_page;
 mod welcome_page;
+mod import_page;
 mod merge_view;
 mod popup;
 mod profile;

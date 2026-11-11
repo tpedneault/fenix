@@ -339,6 +339,7 @@ impl App {
                 let chars = self.effective_iskeyword();
                 self.vim.set_iskeyword_extra(chars);
             }
+            "editor.line_numbers" => self.line_number_mode = super::LineNumberMode::from_setting(&self.config),
             "explorer.width" => self.sidebar_width = self.config.explorer_width.map_or(text::SIDEBAR_WIDTH, |w| w as f32),
             "explorer.hide" | "explorer.compact" | "explorer.show_hidden" => self.reconfigure_explorers(),
             "search.smart_case" => self.vim.set_smart_case(self.config.search_smart_case != Some(false)),

@@ -910,6 +910,37 @@ mod tests {
         assert_eq!(map.lookup(KeyPress::named(FenixNamedKey::Enter).with_ctrl(), &at), Some("file.save"));
     }
 
+    /// A keymap flavour -- a data-only extension's `keymaps/*.toml` -- goes
+    /// over Fenix's standard chords for its scheme, can take one away, and
+    /// leaves Vim keys as they were.
+    #[test]
+    fn a_flavour_s_chords_go_over_fenix_s_for_its_scheme_alone() {
+        let leak = |text: &str| -> &'static KeymapData { Box::leak(Box::new(toml::from_str(text).unwrap())) };
+        let registry = crate::commands::CommandRegistry::with_builtins();
+        let known = |id: &str| registry.get(id).is_some();
+        let mut map = ChordMap::new();
+        lay_chords(&mut map, default_keymap(), None, &known, ChordSource::Fenix, &mut Vec::new());
+        let flavour = leak(
+            "[[keys]]\nkeys = \"C-d\"\ncommand = \"edit.copy_lines_down\"\nscheme = \"standard\"\nwhen = \"text\"\n\n\
+             [[keys]]\nkeys = \"F9\"\ncommand = \"debug.start_or_continue\"\nscheme = \"standard\"\n\n\
+             [[keys]]\nkeys = \"C-F8\"\ncommand = \"debug.toggle_breakpoint\"\nscheme = \"standard\"\n\n\
+             [[keys]]\nkeys = \"C-S-l\"\nunbind = true\nscheme = \"standard\"\n",
+        );
+        let mut problems = Vec::new();
+        lay_chords(&mut map, flavour, Some("jetbrains"), &known, ChordSource::Extension, &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        let standard = ChordContext { scheme: Scheme::Standard, text: true, ..ChordContext::default() };
+        let vim = ChordContext { scheme: Scheme::Vim, text: true, ..ChordContext::default() };
+        assert_eq!(map.lookup(parse_key("C-d").unwrap(), &standard), Some("edit.copy_lines_down"), "over Fenix's add-next-occurrence");
+        assert_eq!(map.lookup(parse_key("F9").unwrap(), &standard), Some("debug.start_or_continue"));
+        assert_eq!(map.lookup(parse_key("C-S-l").unwrap(), &standard), None, "taken away");
+        assert_eq!(map.lookup(parse_key("C-c").unwrap(), &standard), Some("edit.copy"), "the rest stay Fenix's");
+        assert_eq!(map.lookup(parse_key("C-d").unwrap(), &vim), None, "Vim keys untouched");
+        assert_eq!(map.lookup(parse_key("F9").unwrap(), &vim), None);
+        let in_use = map.in_use(Scheme::Standard);
+        assert_eq!(in_use.iter().find(|c| c.key == parse_key("C-d").unwrap()).and_then(|c| c.from), Some("jetbrains"), "the keys page says whose");
+    }
+
     /// Fenix's own chords name commands Fenix has: a typo'd one would be
     /// dropped without a word (as a feature's key is when it's off).
     #[test]

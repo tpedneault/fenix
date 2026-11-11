@@ -17,6 +17,7 @@
 //! comments and hand edits survive it.
 
 mod project;
+pub mod import;
 pub mod schema;
 pub mod keychain;
 pub mod secrets;

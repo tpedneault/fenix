@@ -867,6 +867,71 @@ required = true
 
 They follow `agent_tools`' toolset and rules.
 
+## Keymap flavours
+
+A flavour -- another IDE's shortcuts, say -- is an extension of data
+alone: a manifest and a keymap, no code.
+
+```text
+jetbrains-keys/
+  extension.toml
+  keymaps/jetbrains.toml
+  README.md
+```
+
+```toml
+[extension]
+id = "acme.jetbrains-keys"
+name = "JetBrains keys"
+version = "1.0.0"
+description = "JetBrains' shortcuts for standard keys"
+categories = ["keymaps"]
+runtime = "none"
+
+[engine]
+fenix = ">=1.5, <2"            # [[keys]] in an extension's keymaps
+```
+
+Its keymap is `[[keys]]` entries, as above. Fenix lays the chords in
+order -- its own, then each extension's, then your `keybindings.toml` --
+and the last that fits wins, so a flavour's go over Fenix's and yours
+go over the flavour's:
+
+```toml
+[[keys]]
+keys = "S-F6"
+command = "code.lsp_rename"
+scheme = "standard"            # Vim keys are left as they are
+when = "text"                  # in a file's text; elsewhere, Fenix's
+
+[[keys]]
+keys = "C-w"                   # a key it has no command for: Fenix's
+unbind = true                  # taken away rather than left to surprise
+scheme = "standard"
+```
+
+- **`scheme = "standard"`** keeps it to standard keys. A flavour for Vim
+  keys can say `vim`, and one for both `any`.
+- **What it doesn't list stays Fenix's**: its standard keys are VS
+  Code's, so a flavour only names what differs.
+- **F-keys too.** The debugger's F5, F6, F9, F10 and F11 are Fenix's in
+  every mode, but one a flavour binds goes to the flavour (from the
+  Fenix after 1.5.2): JetBrains' `F9` resumes. Fenix's own keymap binds
+  none of them, so without a flavour nothing changes.
+- **What it can't take**: `Ctrl+K` (the leader), `Ctrl+Shift+P`,
+  `Ctrl+\` and `Alt+X`, and nothing reaches past a terminal. A command
+  Fenix doesn't have, or a key it can't read, is reported -- `SPC h K`
+  says what's wrong, as it does for your own file -- and not bound.
+- **Switching it off** (`SPC h x`) brings Fenix's keys back; `SPC h ?`
+  lists the chords in use with whose each is (`from jetbrains`, the
+  keymap file's name).
+
+fenix-extensions' `cargo xtask validate` holds a keymap to the same
+rules before it's packed. The store's
+[JetBrains keys](https://github.com/tpedneault/fenix-extensions/tree/main/extensions/jetbrains-keys)
+is the worked example: the IntelliJ platform's default shortcuts for
+every command Fenix has, and a README saying what's different.
+
 ## Its manifest
 
 ```toml

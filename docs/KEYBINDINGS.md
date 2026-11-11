@@ -155,7 +155,9 @@ is the F-keys. `SPC h ?` (`Ctrl+K h ?`) lists the keys in use on a page;
 The bracket keys are where a US keyboard has them; on another layout,
 bind the commands (`nav.matching_bracket`, `code.fold`, `code.unfold`,
 `edit.indent_lines`, `edit.outdent_lines`) in `keybindings.toml`. The
-F-keys are the debugger's in every mode with either keys.
+F-keys are the debugger's in every mode with either keys, unless your
+`keybindings.toml` or a keymap extension binds one (`F9` to
+`debug.start_or_continue`, say): then it's that binding's.
 
 Not in standard keys: the `:` command line, `.` and macros (they're Vim
 keys'; the palette has the commands).
@@ -287,6 +289,7 @@ keys'; the palette has the commands).
 | `SPC ] f` | Open the file named under the cursor, as `gf` |
 | `SPC C-i` | Hover, as `K` (standard keys' `Ctrl+K Ctrl+I`) |
 | `SPC h x` / `SPC h w` | The Extensions page / the welcome (keys, look, packs, where to learn) |
+| `SPC h i` | Bring your settings and keys over from VS Code, Vim or Neovim: what would be written is shown first ([Coming from another editor](COMING_FROM.md#bringing-your-settings-over)) |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |
 | `SPC h b` / `SPC h K` | The keys bound here / where keys disagree |
 | `SPC h e` / `SPC h l` | Your keybindings (`keybindings.toml`) / what the code extensions said |
@@ -1084,6 +1087,11 @@ scheme = "standard"     # vim, standard or any (the default)
 when = "text"           # anywhere (the default), text, typing, not_typing, page, terminal
 # context = "sql"       # only in a buffer of that SPC m menu
 ```
+
+`SPC h i` writes entries here from VS Code's `keybindings.json` or a
+Vim config's maps, after showing them; a keymap extension (JetBrains
+keys, in the store) lays a whole set of `[[keys]]` between Fenix's and
+yours. `SPC h ?` says whose each chord is.
 
 Keys are written as the key menu writes them: `C-` Ctrl, `M-` Alt, `s-`
 Super, `S-` Shift (`C-S-p`, `S-Down`, `M-Left`, `F12`, `<F2>`), `SPC` the

@@ -6,6 +6,33 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Bring your settings over from another editor (`SPC h i`, or `i` on the
+  welcome's first step): VS Code's `settings.json` and
+  `keybindings.json` (stable, Insiders, VSCodium, Code - OSS, Cursor and
+  Windsurf, on Windows and Linux), a Neovim `init.lua` or `init.vim`, or
+  a `.vimrc`, read into the settings and `[[keys]]` Fenix would write --
+  font, theme, indent, wrap, line numbers, format on save, the key scheme
+  and more -- shown first with what couldn't be brought over and why.
+  Nothing is written until `y`; your own settings and keys stay unless
+  `R` replaces them. Vim and Neovim configs are read, never run.
+- `editor.line_numbers`: absolute, relative or off when Fenix starts
+  (`SPC t n` still cycles them).
+- [Coming from another editor](docs/COMING_FROM.md): Fenix for Neovim,
+  Helix and VS Code users.
+- Keymap flavours as extensions of data: an F-key a `[[keys]]` entry
+  binds -- yours, or an extension's -- goes to it rather than the
+  debugger's F5, F9, F10 and F11, so a flavour can rebind them; the keys
+  page (`SPC h ?`) says whose each chord is. Writing extensions has a
+  section on them, and the store's JetBrains keys is the first.
+
+### Fixed
+
+- With standard keys, `Alt+F5` and `Alt+Shift+F5` go to the next and
+  previous changed hunk, as the keys table says, rather than starting
+  or stopping the debugger.
+
 ## [1.5.2] - 2026-11-11
 
 ### Added

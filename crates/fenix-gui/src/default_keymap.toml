@@ -349,6 +349,11 @@ label = "welcome"
 command = "help.welcome"
 
 [[leader]]
+keys = "SPC h i"
+label = "import from another editor"
+command = "settings.import"
+
+[[leader]]
 keys = "SPC h l"
 label = "extensions' output"
 command = "extensions.output"

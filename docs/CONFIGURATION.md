@@ -81,6 +81,10 @@ they're set, and are never written to it; GitHub also uses the GitHub
 CLI's sign-in (`gh auth login`) when there's no token. (Keeping them in
 the operating system's credential store instead is planned.)
 
+Coming from another editor? `SPC h i` reads VS Code's, Vim's or
+Neovim's settings and shows what it would write here before it writes
+anything -- see [Coming from another editor](COMING_FROM.md#bringing-your-settings-over).
+
 ## A project's own settings
 
 A project can set some settings for itself in `.fenix/settings.toml`,
@@ -466,6 +470,7 @@ when it's out of date).
 | `editor.wrap` | true / false | off | A line wider than its pane goes on under itself, at the pane's width; SPC t w (Alt+Z with standard keys) turns it on or off for one buffer until it's closed or Fenix restarts. Not tables, diffs, Git pages, terminals or a side by side. |
 | `editor.wrap_languages` | a list | markdown, text | Languages whose lines wrap whatever Wrap long lines says (markdown; text for .txt and .text files). |
 | `editor.nowrap_languages` | a list | none | Languages whose lines never wrap unless SPC t w says so: over Wrap long lines and the list of those that do. |
+| `editor.line_numbers` | absolute / relative / off | absolute | The gutter's numbers: each line's own, how far each is from the cursor's line, or none. SPC t n cycles them until Fenix restarts. |
 | `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |

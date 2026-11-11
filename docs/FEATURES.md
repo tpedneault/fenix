@@ -26,6 +26,23 @@ its extension. The rest is built into Fenix.
 - **Your own keys**: `keybindings.toml`'s `[[leader]]` and `[[keys]]`
   entries rebind or unbind any leader key or chord (Ctrl+S included), for
   either scheme or both; the palette's `Tab` binds the command picked.
+- **Keymap flavours**: an extension of data alone can lay a set of
+  chords over standard keys -- the store's JetBrains keys does -- between
+  Fenix's and yours; an F-key it (or you) binds goes to that binding
+  rather than the debugger. `SPC h ?` says whose each chord is.
+- **Bringing your settings over** (`SPC h i`, or the welcome's first
+  step): VS Code's `settings.json` and `keybindings.json` (and
+  VSCodium's, Cursor's, Windsurf's...), a Neovim `init.lua` or
+  `init.vim`, or a `.vimrc`, read into what Fenix would write -- font,
+  theme, indent, wrap, line numbers, format on save, the key scheme and
+  more, and key bindings whose commands Fenix has -- shown first, with
+  what it has nothing for and why. Nothing is written until you say so,
+  and your own settings stay unless you ask for them to be replaced.
+  Vim and Neovim configs are read, never run: plain options, the colour
+  scheme and maps of one chord to one command. See
+  [Coming from another editor](COMING_FROM.md).
+- **Line numbers** as you like them: `editor.line_numbers` (absolute,
+  relative or off) when Fenix starts; `SPC t n` cycles them.
 
 - **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace/Command
   modes, the standard motion set (`h j k l w b e 0 ^ $ gg G f F t T ; , % { }`),

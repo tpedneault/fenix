@@ -79,6 +79,7 @@ mod remote;
 mod trust;
 mod extensions_host;
 mod welcome_host;
+mod import_host;
 mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
@@ -2443,15 +2444,24 @@ type LineSegments = Vec<(usize, usize, usize)>;
 /// A content or sidebar row's rich-text spans: (text, color, use_icon_font).
 type RowSpans = Vec<(String, glyphon::Color, bool)>;
 
-/// Line-number gutter display. Not wired to a config file yet -- there
-/// isn't one yet (`App::with_file` just picks a hardcoded default) -- but
-/// the enum exists now so hooking that up later is a matter of reading
-/// this field from somewhere else, not redesigning the rendering.
+/// Line-number gutter display: `editor.line_numbers` when Fenix starts
+/// (and when the setting changes), cycled by `SPC t n` until then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineNumberMode {
     Off,
     Absolute,
     Relative,
+}
+
+impl LineNumberMode {
+    /// `editor.line_numbers`' value; absolute when it isn't set.
+    fn from_setting(config: &fenix_config::Config) -> LineNumberMode {
+        match config.text_value("editor.line_numbers") {
+            Some("relative") => LineNumberMode::Relative,
+            Some("off") => LineNumberMode::Off,
+            _ => LineNumberMode::Absolute,
+        }
+    }
 }
 
 /// What occupies the main content area: the editor buffer, a full-buffer
@@ -6251,7 +6261,7 @@ impl App {
             surfaces: None,
             buffers,
             workspaces,
-            line_number_mode: LineNumberMode::Absolute,
+            line_number_mode: LineNumberMode::from_setting(&config),
             main_view: MainView::Editor,
             explorer: None,
             sidebar: None,
@@ -16215,10 +16225,8 @@ impl App {
         self.wake_caret();
     }
 
-    /// Off -> Absolute -> Relative -> Off. Stands in for a config-file
-    /// setting that doesn't exist yet (see `LineNumberMode`) -- a keybound
-    /// cycle is how you'd want to flip this at runtime anyway, so it's not
-    /// wasted work once config loading lands.
+    /// Off -> Absolute -> Relative -> Off, until Fenix restarts or
+    /// `editor.line_numbers` changes (see `LineNumberMode`).
     pub(crate) fn cycle_line_number_mode(&mut self) {
         self.line_number_mode = match self.line_number_mode {
             LineNumberMode::Off => LineNumberMode::Absolute,
@@ -16592,7 +16600,10 @@ impl App {
                 self.wake_caret();
                 return;
             }
-            if self.debug_function_key(named) {
+            // An F-key a `[[keys]]` entry binds (yours, or a keymap
+            // flavour's) goes to it; the rest are the debugger's.
+            let bound = keymap::to_keypress(event, self.modifiers).is_some_and(|k| self.chord_takes_function_key(k));
+            if !bound && self.debug_function_key(named) {
                 return;
             }
         }
@@ -25342,6 +25353,18 @@ index 0000000..1111111 100644
         // Ask for a row well past the dashboard's own content.
         let spans = app.content_spans(ob, visual_lines + 10, 1, 0, Some(&pad), &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         assert!(!spans.iter().any(|(s, _)| s == "~"));
+    }
+
+    #[test]
+    fn editor_line_numbers_sets_the_gutter_and_the_cycle_goes_on_from_it() {
+        let mut app = App::with_file(None);
+        assert_eq!(app.line_number_mode, LineNumberMode::Absolute, "the default");
+        app.set_setting("editor.line_numbers", Some(fenix_config::Value::Text("relative".into()))).ok();
+        assert_eq!(app.line_number_mode, LineNumberMode::Relative);
+        app.cycle_line_number_mode();
+        assert_eq!(app.line_number_mode, LineNumberMode::Off);
+        app.config.set_value("editor.line_numbers", Some(fenix_config::Value::Text("off".into())));
+        assert_eq!(LineNumberMode::from_setting(&app.config), LineNumberMode::Off);
     }
 
     #[test]
