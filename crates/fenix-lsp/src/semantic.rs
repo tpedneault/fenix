@@ -260,8 +260,8 @@ pub fn decode(data: &[u32], text: &str, styles: &Styles) -> Vec<Token> {
     let rope = ropey::Rope::from_str(text);
     let mut lines = Lines::new(&rope);
     let (mut line, mut start) = (0u32, 0u32);
-    for t in data.chunks_exact(5) {
-        let [delta_line, delta_start, length, ty, modifiers] = [t[0], t[1], t[2], t[3], t[4]];
+    for t in data.as_chunks::<5>().0 {
+        let [delta_line, delta_start, length, ty, modifiers] = *t;
         if delta_line > 0 {
             line = line.saturating_add(delta_line);
             start = delta_start;
