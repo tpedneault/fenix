@@ -120,6 +120,8 @@ tutorial (`SPC h T`) is the quickest way in. A few places to start:
 
 - [Features](docs/FEATURES.md): everything Fenix does, by area
 - [Keybindings](docs/KEYBINDINGS.md): the leader menu and every page's keys
+- [Differences from Vim](docs/VIM_DIFFERENCES.md): what Fenix's Vim keys
+  do otherwise, or don't do
 - [Configuration](docs/CONFIGURATION.md): `settings.toml`, where files
   live, and every setting
 - [Coding agents](docs/AGENTS.md): setting up Claude Code, Codex, Devin

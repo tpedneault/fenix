@@ -27,11 +27,25 @@ its extension. The rest is built into Fenix.
   entries rebind or unbind any leader key or chord (Ctrl+S included), for
   either scheme or both; the palette's `Tab` binds the command picked.
 
-- **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace/Command
-  modes, the standard motion set (`h j k l w b e 0 ^ $ gg G f F t T ; , % { }`),
-  operators (`d c y` composing with motions and text objects, plus the
-  doubled `dd`/`cc`/`yy` forms), `iw`/`aw` text objects, numeric counts
-  (`3dw`, `2dd`, ...), yank/paste mirrored onto the OS clipboard (the
+- **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace (`R`)/Command
+  modes, the standard motion set (`h j k l w b e ge gE 0 ^ $ g_ | + - _
+  Enter gg G H M L f F t T ; , % { } ( )`), with `j`/`k`, `+`/`-`, `G`
+  and `H`/`M`/`L` taking whole lines to an operator as in Vim (`dj`
+  deletes two lines), operators (`d c y`, `gU gu g~ g?` for case and
+  rot13, `gq`/`gw` to wrap lines at the text width -- `:set tw=N`, 79
+  without -- keeping a comment's leader and a list item's indent, `> <`
+  to indent, `!` to filter lines through a command, all composing with
+  motions, text objects, searches (`d/foo<CR>`, `dn`, `d*`) and marks
+  (`d'a`, `` y`a ``), plus the doubled `dd`/`cc`/`yy`/`gUU`/`g??`/`gqq`/`>>`/`!!`
+  forms), `J`/`gJ`, `U` (every change on the last changed line, back),
+  `gi`/`gI`, `iw`/`aw` text objects, numeric counts (`3dw`, `2dd`,
+  `3ifoo<Esc>`, `2.` -- a count on `.` takes the place of the change's
+  own), Insert's `Ctrl-W`, `Ctrl-U`, `Ctrl-H`, `Ctrl-R {register}`
+  (`"`, `a`-`z`, `0`, `.`, `/`, `:`, and `+`/`*` the clipboard),
+  `Ctrl-T`/`Ctrl-D` and `Ctrl-O`; Visual `Ctrl-A`/`Ctrl-X` and `g Ctrl-A`
+  for a sequence. A suite of cases checked against real Vim holds them
+  to its behaviour; [Differences from Vim](VIM_DIFFERENCES.md) lists
+  where Fenix does otherwise. Yank/paste mirrored onto the OS clipboard (the
   unnamed register only -- `y`/`d`/`c` push to it, `p`/`P` pull from it
   first, so copying in Fenix and pasting elsewhere -- or vice versa --
   just works; in Visual mode `p` replaces the selection with it, leaving
@@ -80,8 +94,9 @@ its extension. The rest is built into Fenix.
   split): named position bookmarks that work across files, unlike real
   Vim's lowercase-is-buffer-local/uppercase-is-global distinction, which
   Fenix doesn't replicate -- every mark can jump to wherever it was set,
-  any file. Not composable with operators (no `` d`a `` / `d'a`) --
-  jump-only.
+  any file. An operator takes the focused buffer's marks as its target
+  (`d'a` by lines, `` y`a `` exactly), and ``` `` ``` / `''` go back to
+  where the last jump left.
 - **`SPC`-leader menu** with a live which-key popup showing available
   continuations as you type a sequence -- reachable from Visual mode as
   well as Normal, so e.g. `SPC c f` (indent the selection) can act on an

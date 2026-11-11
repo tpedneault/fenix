@@ -18,6 +18,48 @@ A `:` command that doesn't exist says so. `:s` and `:g` take Vim's patterns:
 `\(`, `\|` and `\+` are operators and bare `(`, `|` and `+` are literal, or
 the other way round after `\v`.
 
+## Vim's editing keys
+
+Vim's motions, operators, text objects, registers, counts, `.` and macros
+work as in Vim; [Differences from Vim](VIM_DIFFERENCES.md) lists what
+Fenix does otherwise. Among them:
+
+| Keys | |
+|---|---|
+| `ge` `gE` | Back to the end of the previous word, WORD |
+| `g_` | The line's last non-blank (a count: lines down) |
+| `\|` | To the column the count names |
+| `+` `Enter` / `-` / `_` | The first non-blank of the next line / the one before / `count - 1` lines down |
+| `(` `)` | The start of this sentence, the next |
+| `H` `M` `L` | The pane's top, middle and bottom line (a count: lines in from the edge) |
+| `gU` `gu` `g~` `g?` {motion} | Upper case, lower case, case toggled, rot13 -- doubled (`gUU`, `g??`) for the line |
+| `gq` / `gw` {motion} | Wrap the lines at the text width (`:set tw=N`, 79 without); `gw` keeps the cursor on its text |
+| `>` `<` {motion} | Indent, dedent the lines (`>ip`, `>>`) |
+| `!` {motion} | Filter the lines through a command: the command line opens on them (`:.,.+2!`) |
+| `J` / `gJ` | Join lines with a space / as they are |
+| `R` | Replace mode: typing overwrites, Backspace puts back what was there |
+| `U` | Every change on the last changed line, back |
+| `gi` / `gI` | Insert where Insert was last left / at column 1 |
+| `d/foo<CR>` `dn` `d*` `d'a` `` d`a `` | An operator up to a search's match, or a mark |
+| ``` `` ``` `''` | Back to where the last jump left |
+| `3.` | Repeat the last change with a count of 3 in place of its own |
+| Visual `Ctrl-A` / `g Ctrl-A` | Add the count to each line's number / 1, 2, 3... times it |
+
+In Insert:
+
+| Keys | |
+|---|---|
+| `Ctrl-W` | Delete the word before the cursor |
+| `Ctrl-U` | Delete back to the indent, then to the line's start |
+| `Ctrl-H` | Backspace |
+| `Ctrl-R {register}` | Put a register in: `"`, `a`-`z`, `0`, `.` (the last text typed), `/` (the last search), `:` (the last command), `+` and `*` (the clipboard) |
+| `Ctrl-T` `Ctrl-D` | Indent, dedent the line |
+| `Ctrl-O` | One Normal command, then back |
+
+Wrapping, case and joining are commands too, for either key scheme:
+`edit.wrap_lines`, `edit.upper_case`, `edit.lower_case`, `edit.join_lines`
+(in the palette).
+
 ## Standard keys
 
 With `editor.keys = "standard"`. A file's text is typed into at once and
@@ -678,6 +720,7 @@ Docker panel's own `s`/`S`/`R` already established.
 | `←` `→` / `Ctrl-←` `Ctrl-→` | Move the caret a character / a word |
 | `Home` `End` | To the start, the end |
 | `Backspace` `Delete` / `Ctrl-Backspace` `Ctrl-W` | Delete a character / the word before the caret |
+| `Ctrl-U` | Delete everything before the caret |
 | `Ctrl-O` | Browse for the path being typed (a path setting, a list of paths, the project's program and cwd) |
 | `Ctrl-V` | Paste at the caret |
 
