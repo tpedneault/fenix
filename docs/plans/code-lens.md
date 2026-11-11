@@ -248,4 +248,48 @@ there for anyone who wants them.
 
 ## 5. As built
 
-To be filled in as the stages land.
+### Stage 1
+
+`fenix_lsp::code_lens` as planned. The plan was revised after review:
+lenses are off by default until stage 6.
+
+### Stage 2
+
+- **`App::row_cols(pane, buffer)`** decides the row path: `wrap_cols`, else `rows::UNBOUNDED` when the
+  buffer has virtual rows (or `App::force_row_path`, a test seam) and
+  the pane could wrap. Its users:
+  - `frame_layout`;
+  - `row_walk` (follow, `zt`/`zz`/`zb`, and the wheel on an unfocused
+    pane);
+  - the mouse's hit test;
+  - PageUp/PageDown;
+  - and in `redraw`: the drawer choice, the snapping and sticky
+    headers.
+- **What still asks `wrap_cols`**, meaning "the lines really break":
+  - the reset of sideways scroll;
+  - `ensure_cursor_visible_horizontally`;
+  - the eased sideways scroll;
+  - the per-line highlight windows;
+  - Vim's motions by row: at `UNBOUNDED`, `sync_screen_rows` gives
+    `LineRows`, so `gj`/`gk` are `j`/`k` with the sticky column;
+  - the focused wheel, which at `UNBOUNDED` moves the cursor by lines
+    as 1.5 did while the view follows.
+- **Sideways scroll.** `frame_layout` keeps `scroll_col` when the rows
+  are `UNBOUNDED`, and `RowMap` already offsets by it.
+  `row_content_spans` starts a row at the scroll and draws at most
+  `MAX_ROW_CHARS` of it, as the line path does. Lens rows don't scroll.
+- **`App::set_virtual_rows(buffer, rows)`** replaces a buffer's rows
+  and keeps each pane's top text row in place.
+- **Tested.**
+  - `force_row_path` against the line path: frame by frame, the drawn
+    chars and their colours, the overlays, every cell's hit, the
+    scroll and the cursor match. Covered: moves, `gj`/`gk`, `$`/`0`/`w`/`%`,
+    a long line with tabs, `é` and `漢` scrolled sideways, Visual,
+    search, folds, the wheel, a click.
+  - The line path's frames are compared once settled, since it eases
+    and the row path snaps.
+  - With lens rows on lines 1 and 3: the same moves, and the caret,
+    the selection and the search's matches shifted by exactly the lens
+    rows above them.
+  - Rows appearing and going keep the top text row in place, and with
+    none left the pane is on the line path again.

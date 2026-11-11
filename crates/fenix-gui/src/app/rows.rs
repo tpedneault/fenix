@@ -460,6 +460,9 @@ impl App {
     /// above its top line are counted into, or out of, how far into that
     /// line the top is, and a top that was on one of the rows that went
     /// is on the line's text.
+    // Lenses fill these from the next stage of #106; until then only
+    // the tests do.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn set_virtual_rows(&mut self, buffer: BufferId, rows: std::collections::BTreeMap<usize, Vec<String>>) {
         let showing: Vec<fenix_window::WindowId> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
         let tops: Vec<(fenix_window::WindowId, usize)> = showing
@@ -1489,26 +1492,71 @@ mod app_tests {
     }
 
     #[test]
+    fn by_rows_without_rows_above_the_wheel_and_a_click_do_as_a_row_a_line_does() {
+        let text = format!("{}{}\n", "line\n".repeat(40), "x".repeat(200));
+        let mut runs = Vec::new();
+        for forced in [false, true] {
+            let (mut app, _f) = app_on_file("a.rs", &text);
+            app.force_row_path = forced;
+            let pane = app.focused_pane_id();
+            let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+            let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+            let pos = (rect.x + 120.0, rect.y + 60.0);
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                app.handle_wheel_at(pos, MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0);
+                seen.push(app.line_col());
+            }
+            app.handle_click_at(pos, 800.0, 600.0);
+            seen.push(app.line_col());
+            // Sideways, past a long line's start: the click lands on the
+            // same column.
+            app.press_all("G $");
+            app.ensure_cursor_visible_horizontally(30);
+            let scroll_col = app.pane_state(pane).scroll_col;
+            seen.push((scroll_col, 0));
+            runs.push(seen);
+        }
+        assert_eq!(runs[0], runs[1]);
+    }
+
+    #[test]
     fn a_lens_row_offsets_what_s_below_it_and_changes_nothing_else() {
-        let text = "fn a() {}\nfn b() {}\n\nfn c() { x }\nend\n";
+        let text = "fn a() {}\nfn b() { b }\n\nfn c() { b }\nend b\n";
+        let lensed_lines = [1usize, 3];
         let mut frames = Vec::new();
         for lensed in [false, true] {
             let (mut app, _f) = app_on_file("a.rs", text);
             let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
             app.set_pane_text_cols(pane, 30);
             if lensed {
-                app.set_virtual_rows(buffer, [(1, vec!["▶ Run".to_string()]), (3, vec!["2 references".to_string()])].into());
+                app.set_virtual_rows(buffer, lensed_lines.iter().map(|&l| (l, vec!["▶ Run".to_string()])).collect());
                 assert_eq!(app.row_cols(pane, buffer), Some(crate::app::rows::UNBOUNDED), "by rows, not wrapped");
             }
-            app.press_all("j j j w");
-            app.ensure_cursor_visible(8);
-            frames.push((app.line_col(), app.focused_overlays_now(8), (0..8).map(|r| app.focused_layout(8).map.row(r).map(|r| (r.line, r.kind))).collect::<Vec<_>>()));
+            let mut seen = Vec::new();
+            for keys in ["j j j w", "/ b Enter", "g g v j j l"] {
+                app.press_all(keys);
+                app.ensure_cursor_visible(8);
+                let o = app.focused_overlays_now(8);
+                seen.push((app.line_col(), o.caret, o.selection, o.hlsearch));
+            }
+            app.press("Escape");
+            let rows: Vec<_> = (0..8).map(|r| app.focused_layout(8).map.row(r).map(|r| (r.line, r.kind))).collect();
+            frames.push((seen, rows));
         }
-        let (plain, lensed) = (&frames[0], &frames[1]);
-        assert_eq!(plain.0, lensed.0, "the same moves: j by line, lens rows stepped over");
-        assert_eq!(lensed.1.caret, plain.1.caret.map(|(r, c)| (r + 2, c)), "line 3's caret two rows down: below two lens rows");
-        assert_eq!(lensed.2[1], Some((1, crate::app::rows::RowKind::Virtual(0))));
-        assert_eq!(lensed.2[4], Some((3, crate::app::rows::RowKind::Virtual(1))));
+        // A plain pane's row r is line r; with lenses, it's r plus the
+        // lens rows at or above it.
+        let shift = |row: usize| row + lensed_lines.iter().filter(|&&l| l <= row).count();
+        let shifted = |segs: &Segments| segs.iter().map(|&(r, a, b)| (shift(r), a, b)).collect::<Segments>();
+        for ((plain, lensed), step) in frames[0].0.iter().zip(&frames[1].0).zip(0..) {
+            assert_eq!(plain.0, lensed.0, "step {step}: the same moves, lens rows stepped over");
+            assert_eq!(lensed.1, plain.1.map(|(r, c)| (shift(r), c)), "step {step}: the caret");
+            assert_eq!(lensed.2, shifted(&plain.2), "step {step}: the selection");
+            assert_eq!(lensed.3, shifted(&plain.3), "step {step}: the search's matches");
+        }
+        let rows = &frames[1].1;
+        assert_eq!(rows[1], Some((1, crate::app::rows::RowKind::Virtual(0))));
+        assert_eq!(rows[4], Some((3, crate::app::rows::RowKind::Virtual(1))));
     }
 
     #[test]

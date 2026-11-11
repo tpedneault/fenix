@@ -20204,8 +20204,11 @@ impl App {
                     }
                 } else if pane == self.focused_pane_id() {
                     // A wrapped pane's view goes by rows, the cursor only
-                    // as far as keeps it in view.
+                    // as far as keeps it in view. One by rows only for the
+                    // rows above its lines (a code lens's) moves its cursor
+                    // by lines, as 1.5 did, and the view follows.
                     let wrapped = self.main_view == MainView::Editor
+                        && self.wrap_cols(pane, self.focused_buffer_id()).is_some()
                         && geometry.panes.iter().find(|(id, _)| *id == pane).is_some_and(|(_, rect)| {
                             let visible = text::lines_that_fit(pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height);
                             let buffer = self.focused_buffer_id();
