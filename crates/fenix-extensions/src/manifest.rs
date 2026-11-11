@@ -13,6 +13,14 @@ use serde::Deserialize;
 /// 1.x runs on any later 1.x: a minor version only adds.
 pub const API: &str = "1.5.0";
 
+/// Whether `fenix` is in an extension's `engine.fenix` range. A nightly
+/// (`1.6.0-nightly.20261112`) counts as the release it leads to: a range
+/// never matches a pre-release of another version, and every extension
+/// would be refused by a nightly otherwise.
+pub fn fenix_fits(range: &semver::VersionReq, fenix: &semver::Version) -> bool {
+    range.matches(&semver::Version::new(fenix.major, fenix.minor, fenix.patch))
+}
+
 /// Whether an extension built against `api` runs on this Fenix's `API`.
 pub fn api_fits(api: &str) -> bool {
     let (Ok(want), Ok(have)) = (semver::Version::parse(&full_version(api)), semver::Version::parse(API)) else { return false };
@@ -1220,13 +1228,9 @@ impl Manifest {
 
     /// Whether this Fenix (`fenix`, its own version) can install it: one
     /// it runs in, and code it can run. `Err` says why not.
-    ///
-    /// A nightly (`1.6.0-nightly.20261112`) counts as the release it leads
-    /// to: a range never matches a pre-release of another version, and
-    /// every extension would be refused otherwise.
     pub fn runs_in(&self, fenix: &semver::Version) -> Result<(), String> {
         let req = semver::VersionReq::parse(&self.engine.fenix).map_err(|e| e.to_string())?;
-        if !req.matches(&semver::Version::new(fenix.major, fenix.minor, fenix.patch)) {
+        if !fenix_fits(&req, fenix) {
             return Err(format!("{} {} is for Fenix {}, and this is {fenix}", self.extension.name, self.extension.version, self.engine.fenix));
         }
         match self.extension.runtime {
