@@ -242,11 +242,14 @@ impl App {
         }
     }
 
-    /// `text_hit` in a pane whose lines wrap: `row` (from the top of
-    /// `content`, negative above it) and `x` (pixels from the text's left
-    /// edge) through the pane's rows. Right of a row that goes on below
-    /// is that row's last char; above or below the rows shown is the line
-    /// before the first or after the last, by its first row.
+    /// `text_hit` in a pane shown by rows (wrapped, or with rows that
+    /// aren't text): `row` (from the top of `content`, negative above it)
+    /// and `x` (pixels from the text's left edge) through the pane's rows.
+    /// Right of a row that goes on below is that row's last char. Above or
+    /// below the rows shown, it's as with a row a line: a line on from the
+    /// first shown or the last for each row past the edge, at the column
+    /// (through any sideways scroll) under the pointer. A row that isn't
+    /// text (a code lens's) is no place in the text.
     fn wrapped_text_hit(&self, pane: fenix_window::WindowId, buffer: BufferId, content: fenix_window::Rect, row: isize, x: f32) -> Option<TextHit> {
         let ob = self.buffers.get(buffer)?;
         let (char_width, line_height) = self.cell_size();
@@ -256,24 +259,30 @@ impl App {
         let map = self.pane_rows(pane, buffer, top, state.scroll_row, fit + 1);
         let last = map.len().checked_sub(1)?;
         let cell = (x / char_width).floor().max(0.0) as usize;
-        let lines = ob.buffer.visual_line_count().max(1);
-        let edge = map.row(if row < 0 { 0 } else { last })?.line;
+        let display = self.pane_display_lines(pane, buffer);
+        // Off the rows: the display line `rows` on from `edge`'s line.
+        let off = |edge: usize, rows: isize| -> Option<(usize, bool)> {
+            let line = map.row(edge)?.line;
+            let index = display.partition_point(|&l| l < line) as isize + rows;
+            let at = index.clamp(0, display.len() as isize - 1) as usize;
+            Some((display[at], index >= display.len() as isize))
+        };
+        // Unwrapped, the columns go through the sideways scroll.
+        let scroll_col = if self.row_cols(pane, buffer).is_some_and(|w| w != super::rows::UNBOUNDED) { 0 } else { state.scroll_col };
         let (line, vcol, past) = match usize::try_from(row).ok().filter(|&r| r <= last) {
-            Some(r) => {
+            Some(r) => match map.row(r).map(|row| row.kind) {
+                Some(super::rows::RowKind::Virtual(_)) => return None,
                 // Past a row's end, on a line that goes on below: its
-                // last char (`RowMap::at` holds it there). A row above a
-                // line that isn't text (a code lens) is stepped over: the
-                // line's start.
-                match map.row(r).map(|row| row.kind) {
-                    Some(super::rows::RowKind::Virtual(_)) => (map.row(r)?.line, 0, false),
-                    _ => {
-                        let (line, vcol) = map.at(r, cell)?;
-                        (line, vcol, false)
-                    }
+                // last char (`RowMap::at` holds it there).
+                _ => {
+                    let (line, vcol) = map.at(r, cell)?;
+                    (line, vcol, false)
                 }
+            },
+            None => {
+                let (line, past) = if row < 0 { off(0, row)? } else { off(last, row - last as isize)? };
+                (line, scroll_col + cell, past)
             }
-            None if row < 0 => (edge.saturating_sub(1), cell, false),
-            None => (edge.saturating_add(1).min(lines - 1), cell, edge + 1 >= lines),
         };
         let cursor_line = ob.buffer.line_col(&state.cursor).0;
         let col_map = self.line_col_map(buffer, line, cursor_line);
@@ -1527,6 +1536,63 @@ mod tests {
         assert_eq!(app.text(), "bye world");
     }
 
+    /// Where a cell is, rows from the text's top (negative above it).
+    fn at_row(app: &App, row: f32, col: usize) -> (f32, f32) {
+        let (x, y) = at(app, 0, col);
+        (x, y + row * text::LINE_HEIGHT)
+    }
+
+    #[test]
+    fn off_the_rows_by_rows_is_where_a_row_a_line_has_it_scrolled_sideways_too() {
+        let text = format!("{0}\n{0}\n{0}\n", "x".repeat(200));
+        let mut runs = Vec::new();
+        for forced in [false, true] {
+            let mut app = app_with(&text);
+            app.force_row_path = forced;
+            let pane = app.focused_pane_id();
+            app.pane_state_mut(pane).scroll_col = 50;
+            let rect = app.geometry_at(W, H).panes.into_iter().find(|(p, _)| *p == pane).unwrap().1;
+            let mut seen = Vec::new();
+            // Above the text, below it, and right of a line's end.
+            for (row, col) in [(-1.0, 16), (-3.0, 16), (20.0, 16), (3.0, 16), (3.0, 40)] {
+                let hit = app.text_hit(pane, rect, at_row(&app, row, col));
+                seen.push(hit.map(|h| (h.line, h.col, h.past_end)));
+            }
+            // A drag past each edge, from inside.
+            for row in [-2.0, 30.0] {
+                let from = at_row(&app, 1.0, 5);
+                app.handle_click_at(from, W, H);
+                app.mouse_drag_to(at_row(&app, row, 16), W, H);
+                app.mouse_release();
+                seen.push(Some((cursor_at(&app).0, cursor_at(&app).1, app.pane_state(pane).scroll_col == 50)));
+                app.press("Escape");
+                app.pane_state_mut(pane).scroll_col = 50;
+            }
+            runs.push(seen);
+        }
+        assert_eq!(runs[0], runs[1]);
+        assert_eq!(runs[0][0], Some((0, 66, false)), "through the sideways scroll");
+    }
+
+    #[test]
+    fn a_lens_row_is_no_place_in_the_text() {
+        let mut app = app_with("fn a() {}\nfn b() {}\nfn c() {}\n");
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_virtual_rows(buffer, [(1, vec!["▶ Run".to_string()])].into());
+        app.test_set_cursor(Cursor { char_idx: 3, sticky_col: 3 });
+        app.pane_state_mut(pane).scroll_col = 2;
+        let rect = app.geometry_at(W, H).panes.into_iter().find(|(p, _)| *p == pane).unwrap().1;
+        // Row 1 is line 1's lens, past its title.
+        let pos = at(&app, 1, 20);
+        assert!(app.text_hit(pane, rect, pos).is_none(), "nothing to hover or put a cursor on");
+        click(&mut app, pos);
+        click(&mut app, pos);
+        app.mouse_drag_to(pos, W, H);
+        app.mouse_release();
+        assert_eq!((cursor_at(&app), app.pane_state(pane).scroll_col), ((0, 3), 2), "the cursor and the scroll as they were");
+        assert_eq!(app.vim.mode(), Mode::Normal, "nothing selected");
+    }
+
     /// `text`, its lines wrapped at `cols` columns.
     fn wrapped_app(text: &str, cols: usize) -> App {
         let mut app = app_with(text);
@@ -1580,13 +1646,13 @@ mod tests {
     }
 
     #[test]
-    fn a_click_on_a_row_above_a_line_that_isn_t_text_is_the_line_s_start() {
+    fn a_click_on_a_row_above_a_line_that_isn_t_text_moves_nothing() {
         let mut app = wrapped_app("one\ntwo words\n", 20);
         let buffer = app.focused_buffer_id();
         app.virtual_rows.entry(buffer).or_default().insert(1, vec!["a lens".into()]);
         let pos = at(&app, 1, 4);
         click(&mut app, pos);
-        assert_eq!(cursor_at(&app), (1, 0));
+        assert_eq!(cursor_at(&app), (0, 0));
         let pos = at(&app, 2, 4);
         click(&mut app, pos);
         assert_eq!(cursor_at(&app), (1, 4), "the text's row below it");

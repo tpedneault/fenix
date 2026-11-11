@@ -293,6 +293,20 @@ lenses are off by default until stage 6.
     rows above them.
   - Rows appearing and going keep the top text row in place, and with
     none left the pane is on the line path again.
+- **After review.**
+  - Panes in every workspace and frame keep their top through
+    `set_virtual_rows`, not just the live workspace's.
+  - A top at its line's very first row stays there when rows come
+    above that line, so a lens arriving on the top line shows (on line
+    0 it couldn't be reached otherwise). `follow` shows a line's lens
+    when the cursor is on the top line's first text row with the lens
+    hidden, so `gg`, `k` and the wheel reach it.
+  - Off the rows (above, below, right of a line's end, a drag past an
+    edge), a hit is where the line path has it, through the sideways
+    scroll. A lens row is no place in the text: a click, drag or hover
+    there moves no cursor and scrolls nothing.
+  - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
+    lens rows counted (`page_by_rows`), as in a wrapped pane.
 
 ### Stage 3
 
@@ -326,6 +340,27 @@ lenses are off by default until stage 6.
     the line path again.
 - **Moved to stage 4:** the hover colour, which belongs with the click
   it shows.
+- **After review.**
+  - A resolve is tried once a lens per answer, whatever comes back (an
+    error, null, still no command); resolves out 10 s are cancelled and
+    count as tried. The 16 out at once are per server, over all its
+    documents, as planned.
+  - A full answer keeps on show what the last answer's lens in the same
+    place (range and data) said, until the new one's resolve lands, so
+    titles don't blink to `…`. A line with a lens keeps its row whatever
+    its title (an empty one shows nothing).
+  - A good answer clears the timeout, so a later timeout is asked once
+    more again. Refusals (cancelled, modified) are asked again 5 times,
+    then not until an edit, an answer or a refresh; semantic tokens the
+    same.
+  - Lenses moved by an agent's edit are laid out again in the next
+    frame; a closed buffer's rows go; `lsp.code_lens_off` applies at
+    once; edits with no lenses held skip the line count.
+  - Resolves look only at the runs a pane shows (none in a closed fold),
+    the lenses kept in line order and found by search.
+  - A lens row is cut to the pane's real width by whole titles
+    (`LensRow::fit`), wrapped or not, and its indent is at most half the
+    pane, so it stays in view.
 
 ### Stage 4
 
@@ -337,8 +372,12 @@ lenses are off by default until stage 6.
     they always have been.
   - `showReferences` fills the references list, as `gr` does.
   - rust-analyzer's `runSingle` runs `cargo <cargoArgs> -- <executableArgs>`
-    in Task Output, in its workspace root.
-  - Fenix's own `fenix.runTest` runs as `SPC p r` does.
+    in Task Output, by its arguments with no shell, in the `cwd` it
+    gives when that's inside the project (else it says so and runs
+    nothing), and only from the Rust server. Its task's name never
+    picks a project task of the same name in its place.
+  - Fenix's own `fenix.runTest` runs as `SPC p r` does; in a server's
+    lens it's one Fenix can't run.
   - Anything else is said: "Fenix can't run *title* (*command*)".
 - **Changed from the plan: `debugSingle`.** Fenix has no way yet to
   debug a single test: `SPC p r` runs one, and `SPC u u` starts the
@@ -351,7 +390,9 @@ lenses are off by default until stage 6.
   (`RowKind::Virtual`), the cell less the row's lead
   (`rows::virtual_row_lead`, shared with drawing) is the column in the
   row's text, and the `LensRow` span there is the lens. Separators and
-  the space after the titles run nothing. The cursor doesn't move.
+  the space after the titles run nothing. The cursor doesn't move. The
+  spans are those of the row as drawn, cut to the pane by whole titles,
+  so a title cut off isn't clicked.
 - **Hover.** `update_hover_cursor` keeps `lens_hover`, the lens under
   the pointer. `row_content_spans` draws that title in the text colour,
   the rest in the gutter's, and the pointer becomes a hand over it.
