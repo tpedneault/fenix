@@ -806,7 +806,7 @@ impl TextPipeline {
         }
         let buf = self.content_buffers.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(h));
-        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -901,7 +901,7 @@ impl TextPipeline {
         }
         let buf = self.titles.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(self.line_height));
-        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -920,7 +920,7 @@ impl TextPipeline {
         }
         let buf = self.breadcrumbs.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(self.line_height));
-        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -939,7 +939,10 @@ impl TextPipeline {
     /// `start`, which is a byte offset into that same string.
     pub fn title_span_bounds(&self, pane: PaneId, ranges: &[(usize, usize)]) -> Vec<Option<(f32, f32)>> {
         let Some(buffer) = self.titles.get(&pane) else { return vec![None; ranges.len()] };
-        let glyphs = buffer.layout_runs().flat_map(|run| run.glyphs.iter()).map(|g| (g.start, g.x, g.w));
+        // A title with right-to-left text starts with a mark of its own
+        // (`bidi::ltr_lines`), which the ranges don't count.
+        let mark = if buffer.lines.first().is_some_and(|l| l.text().starts_with(crate::bidi::LRM)) { crate::bidi::LRM.len() } else { 0 };
+        let glyphs = buffer.layout_runs().flat_map(|run| run.glyphs.iter()).filter(|g| g.start >= mark).map(|g| (g.start - mark, g.x, g.w));
         span_bounds(glyphs, ranges)
     }
 
@@ -963,7 +966,7 @@ impl TextPipeline {
         }
         let buf = self.sticky.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), None);
-        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -982,7 +985,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(body_family);
         let spans: Vec<(&str, Attrs)> =
             segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
-        self.modeline.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.modeline.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -1037,7 +1040,7 @@ impl TextPipeline {
         let buf = self.popups.get_mut(&id).expect("just inserted if missing");
         buf.set_metrics(Metrics::new(self.font_size, line_height));
         buf.set_size(Some(width), None);
-        buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        buf.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -1065,7 +1068,7 @@ impl TextPipeline {
     pub fn set_sidebar_rich(&mut self, segments: &[(&str, Color, bool)]) {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.cell_spans(segments);
-        self.sidebar.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.sidebar.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -1075,7 +1078,7 @@ impl TextPipeline {
     pub fn set_debug_dock_rich(&mut self, segments: &[(&str, Color, bool)]) {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.rich_spans(segments);
-        self.debug_dock.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.debug_dock.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         self.debug_dock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -1083,7 +1086,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
         let mut spans = self.rich_spans(segments);
         apply_styles(&mut spans, styles);
-        self.terminal.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.terminal.set_rich_text(crate::bidi::ltr_lines(spans, &default_attrs), &default_attrs, Shaping::Advanced, None);
         self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
@@ -1821,6 +1824,36 @@ mod tests {
         buffer.shape_until_scroll(&mut fonts, false);
         let glyphs: Vec<f32> = buffer.layout_runs().next().unwrap().glyphs.iter().map(|g| g.x).collect();
         assert!((glyphs[2] - 2.0 * cell).abs() < 0.5, "the name starts two cells in: {glyphs:?}, cell {cell}");
+    }
+
+    #[test]
+    fn a_line_of_right_to_left_text_stays_on_screen_with_its_line_number() {
+        // #17: a row whose text starts in Hebrew was a right-to-left
+        // paragraph, laid out against the right edge and past it, its
+        // gutter's number with it.
+        let mut fonts = FontSystem::new();
+        let body: &'static str = Box::leak(default_monospace_family(&fonts).into_boxed_str());
+        let attrs = Attrs::new().family(Family::Name(body));
+        let cell = TextPipeline::measure_char_width(&mut fonts, Family::Name(body), FONT_SIZE, LINE_HEIGHT);
+        let text = "  1 עברית RTL\n  2 plain";
+        let mut buffer = GlyphBuffer::new(&mut fonts, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        buffer.set_wrap(Wrap::None);
+        let width = 600.0;
+        buffer.set_size(Some(width), Some(4.0 * LINE_HEIGHT));
+        buffer.set_rich_text(crate::bidi::ltr_lines(vec![(text, attrs.clone())], &attrs), &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let first = buffer.layout_runs().next().expect("shaped");
+        assert!(!first.rtl, "laid out left to right");
+        let mark = crate::bidi::LRM.len();
+        let x_of = |byte: usize| first.glyphs.iter().find(|g| g.start == byte + mark).map(|g| g.x).unwrap_or(f32::NAN);
+        // The line number where the gutter has it, the text after it.
+        assert!((x_of(2) - 2.0 * cell).abs() < 0.5, "the `1` at cell 2: {}", x_of(2));
+        assert!(first.glyphs.iter().all(|g| g.x >= 0.0 && g.x + g.w <= width), "every glyph inside the pane");
+        // The Hebrew word is drawn reversed, where it starts: its first
+        // letter (ע) rightmost of the word, before " RTL".
+        let ayin = x_of(4);
+        let r = x_of("  1 עברית ".len());
+        assert!(ayin > x_of(2) && ayin < r, "ע at {ayin}, R at {r}");
     }
 
     #[test]

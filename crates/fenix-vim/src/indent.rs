@@ -5,11 +5,8 @@ use crate::motion;
 /// The default spaces-per-indent-level, before any `:set shiftwidth=N`
 /// (`VimState::indent_width`, runtime-configurable -- see `state.rs` and
 /// `substitute.rs`'s `:set` handling). Tabs are always inserted as
-/// spaces, not a literal `'\t'`: the render pipeline has no tab-stop
-/// logic (every character occupies exactly one fixed-width column), so
-/// a real tab character would render as a single narrow column instead
-/// of expanding to the configured width -- a disclosed scope cut, not
-/// an oversight.
+/// spaces, unless the host says the file indents with tabs
+/// (`VimState::set_indent_tabs`), when a level is one `'\t'`.
 pub const DEFAULT_INDENT_WIDTH: usize = 4;
 
 /// How many spaces a Tab press at column `col` should insert to reach
@@ -206,19 +203,31 @@ pub fn toggle_checkbox(buffer: &mut Buffer, cursor: &mut Cursor, line: usize) ->
 /// are stand-alone Normal-mode actions, not part of an active
 /// Insert-mode coalescing run.
 pub fn indent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize, width: usize) {
-    let at = buffer.line_start_char(line);
-    cursor.char_idx = at;
-    buffer.insert_str(cursor, &" ".repeat(width));
+    indent_line_with(buffer, cursor, line, &" ".repeat(width));
 }
 
-/// `<<`: removes up to `width` leading whitespace chars (spaces or
-/// tabs) from the start of `line` -- fewer if the line has less,
-/// stopping at the first non-space/tab char either way.
+/// `>>` with one level as `unit`: `width` spaces, or a tab where the
+/// file indents with tabs (`VimState::set_indent_tabs`, from
+/// `.editorconfig`'s `indent_style = tab`).
+pub fn indent_line_with(buffer: &mut Buffer, cursor: &mut Cursor, line: usize, unit: &str) {
+    let at = buffer.line_start_char(line);
+    cursor.char_idx = at;
+    buffer.insert_str(cursor, unit);
+}
+
+/// `<<`: removes one level, `width` columns, of leading whitespace from
+/// the start of `line` -- less if the line has less, stopping at the
+/// first non-space/tab char either way. A tab is a whole level.
 pub fn dedent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize, width: usize) {
     let start = buffer.line_start_char(line);
     let end_of_line = start + buffer.line_len(line);
-    let mut end = start;
-    while end < end_of_line && end - start < width && matches!(buffer.char_at(end), Some(' ') | Some('\t')) {
+    let (mut end, mut columns) = (start, 0);
+    while end < end_of_line && columns < width {
+        match buffer.char_at(end) {
+            Some(' ') => columns += 1,
+            Some('\t') => columns = width,
+            _ => break,
+        }
         end += 1;
     }
     buffer.delete_range(cursor, start, end);

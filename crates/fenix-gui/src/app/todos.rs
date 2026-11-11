@@ -185,7 +185,8 @@ pub(super) fn collect_todos(root: &Path, unsaved: &HashMap<PathBuf, String>) -> 
     for path in files {
         let text = match unsaved.get(&path) {
             Some(text) => text.clone(),
-            None => match std::fs::read_to_string(&path) {
+            // A remote project's files are read on its machine.
+            None => match if fenix_vfs::is_remote(&path) { fenix_vfs::read(&path).and_then(|bytes| String::from_utf8(bytes).map_err(std::io::Error::other)) } else { std::fs::read_to_string(&path) } {
                 Ok(text) => text,
                 // Not UTF-8 (a binary rg decided to search anyway) or
                 // gone since the search: nothing to list.

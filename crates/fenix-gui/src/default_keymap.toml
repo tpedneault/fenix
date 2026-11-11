@@ -90,6 +90,11 @@ label = "rename file"
 command = "file.rename"
 
 [[leader]]
+keys = "SPC f c"
+label = "what .editorconfig says"
+command = "file.editorconfig"
+
+[[leader]]
 keys = "SPC f D"
 label = "delete file"
 command = "file.delete"
@@ -173,6 +178,11 @@ command = "view.toggle_fullscreen"
 keys = "SPC t a"
 label = "motion"
 command = "view.toggle_animations"
+
+[[leader]]
+keys = "SPC t i"
+label = "inlay hints"
+command = "view.toggle_inlay_hints"
 
 [[leader]]
 keys = "SPC t d"
@@ -347,6 +357,11 @@ command = "extensions.open"
 keys = "SPC h w"
 label = "welcome"
 command = "help.welcome"
+
+[[leader]]
+keys = "SPC h i"
+label = "import from another editor"
+command = "settings.import"
 
 [[leader]]
 keys = "SPC h l"
@@ -651,10 +666,8 @@ command = "debug.pick_launch"
 
 # Tool status listing (Milestone E of the LSP/DAP plan) -- `l`
 # for "lsp", the group the original plan reserved this letter
-# for. Only `m` ("manager") exists for now; the plan's own
-# `SPC l i`/`SPC l r` (per-buffer LSP status/restart) were never
-# wired up, so this group has exactly one entry rather than the
-# three gaps that would come from stubbing them out unbuilt.
+# for: `m` ("manager") the status listing, `i` installing the
+# focused file's missing language server.
 [[leader]]
 keys = "SPC l"
 group = "lsp"
@@ -663,6 +676,11 @@ group = "lsp"
 keys = "SPC l m"
 label = "tool status"
 command = "tools.status"
+
+[[leader]]
+keys = "SPC l i"
+label = "install language server"
+command = "lsp.install"
 
 # Git. The status page (`g`) is the hub and has its own keys for
 # most of what's done to a repository; these are the ways in,

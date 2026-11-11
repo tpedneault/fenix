@@ -154,6 +154,7 @@ pub trait Probe {
         if let Some(home) = dirs::home_dir() {
             dirs.push(home.join(".local").join("bin"));
         }
+        dirs.extend(installer_dirs());
         dirs
     }
 }
@@ -173,6 +174,35 @@ pub fn in_tool_dirs(program: &str) -> Option<PathBuf> {
         }
     }
     find_in(&Defaults.tool_dirs(), program)
+}
+
+/// Where the installers `server_install` runs put what they install, when
+/// that may not be on the PATH Fenix started with (a folder an installer
+/// has just added to PATH isn't on it until Fenix starts again): rustup's,
+/// `go install`'s, and on Windows npm's, winget's and LLVM's.
+fn installer_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let home = dirs::home_dir();
+    if let Some(cargo) = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".cargo"))) {
+        dirs.push(cargo.join("bin"));
+    }
+    if let Some(gobin) = std::env::var_os("GOBIN").filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(gobin));
+    } else if let Some(gopath) = std::env::var_os("GOPATH").and_then(|v| std::env::split_paths(&v).next()).or_else(|| home.as_ref().map(|h| h.join("go"))) {
+        dirs.push(gopath.join("bin"));
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            dirs.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            dirs.push(PathBuf::from(local).join("Microsoft").join("WinGet").join("Links"));
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            dirs.push(PathBuf::from(program_files).join("LLVM").join("bin"));
+        }
+    }
+    dirs
 }
 
 /// `program` in one of `dirs`, with Windows' executable extensions.
@@ -285,6 +315,41 @@ impl<'a> Doctor<'a> {
     pub fn push(&mut self, check: Check) {
         self.checks.push(check);
     }
+
+    /// A language server Fenix starts by default (`program`): found on
+    /// PATH or where its installer puts it, else `Warn` with the install
+    /// `server_install` gives, the same one Tool Status and `SPC l i`
+    /// offer.
+    pub fn language_server(&mut self, program: &str) {
+        if self.probe.locate(program).is_some() {
+            self.program(Section::Toolchain, program, Health::Warn, "");
+        } else if let Some(found) = find_in(&self.probe.tool_dirs(), program) {
+            let dir = found.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            self.push(Check::new(Section::Toolchain, program, Health::Ok, format!("{dir} · not on PATH, Fenix starts it from there")));
+        } else {
+            let check = Check::new(Section::Toolchain, program, Health::Warn, "not found -- no completion or errors as you type");
+            let check = with_install(check, self.probe, program);
+            self.push(check);
+        }
+    }
+}
+
+/// `check` (a missing server's) with how to install it: the command as
+/// its fix, never a safe one; or, with no command to run here, what to
+/// do and where to read, in its detail.
+fn with_install(check: Check, probe: &dyn Probe, program: &str) -> Check {
+    use crate::server_install::{server_install_on, Os, ServerInstall};
+    match server_install_on(program, Os::current(), |p| probe.locate(p)) {
+        Some(ServerInstall::Run(step)) => {
+            let label = step.display();
+            check.fix(&label, FixAction::Run(step), false)
+        }
+        Some(manual @ ServerInstall::Manual { .. }) => {
+            let detail = format!("{} -- {}", check.detail, manual.hint());
+            Check { detail, ..check }
+        }
+        None => check,
+    }
 }
 
 /// Checks a feature adds for the kinds of project it knows (Fenix's
@@ -305,24 +370,20 @@ pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bo
         ProjectKind::Python => python(&mut d, tools.as_ref().ok()),
         ProjectKind::Rust => {
             d.program(Section::Toolchain, "cargo", Health::Bad, "install Rust from https://rustup.rs");
-            if d.probe.locate("rust-analyzer").is_none() {
-                d.push(Check::new(Section::Toolchain, "rust-analyzer", Health::Warn, "not found -- no completion or errors as you type").run("rustup component add rust-analyzer", "rustup", &["component", "add", "rust-analyzer"], false));
-            } else {
-                d.program(Section::Toolchain, "rust-analyzer", Health::Warn, "");
-            }
+            d.language_server("rust-analyzer");
             rust_src(&mut d);
         }
         ProjectKind::Cpp => {
             d.program(Section::Toolchain, "cmake", Health::Warn, "install CMake to configure and build");
-            d.program(Section::Toolchain, "clangd", Health::Warn, "no completion or errors as you type");
+            d.language_server("clangd");
         }
         ProjectKind::Go => {
             d.program(Section::Toolchain, "go", Health::Bad, "install Go from https://go.dev");
-            d.program(Section::Toolchain, "gopls", Health::Warn, "go install golang.org/x/tools/gopls@latest");
+            d.language_server("gopls");
         }
         ProjectKind::Node => {
             d.program(Section::Toolchain, "node", Health::Bad, "install Node.js");
-            d.program(Section::Toolchain, "typescript-language-server", Health::Warn, "npm install -g typescript-language-server typescript");
+            d.language_server("typescript-language-server");
         }
         // Their features' (`features`).
         ProjectKind::Arduino | ProjectKind::Mib | ProjectKind::Tcl | ProjectKind::Monorepo | ProjectKind::Other => {}
@@ -418,7 +479,7 @@ fn python(d: &mut Doctor, tools: Option<&ProjectTools>) {
         );
     } else {
         let check = Check::new(Section::Toolchain, &server, Health::Bad, "not found -- no completion or errors as you type");
-        d.push(if server == "pyright-langserver" { check.run("uv tool install pyright", "uv", &["tool", "install", "pyright"], false) } else { check });
+        d.push(if server == "pyright-langserver" { with_install(check, d.probe, &server) } else { check });
     }
     if venv.is_dir() {
         let has_debugpy = [venv.join("Lib").join("site-packages").join("debugpy")]
@@ -595,6 +656,31 @@ mod tests {
         assert!(lsp.fix.as_ref().is_some_and(|f| !f.safe), "installing is never safe");
         assert_eq!(find(&checks, "git").health, Health::Info);
         assert_eq!(worst(&checks), Health::Bad);
+    }
+
+    /// The doctor offers the same install `SPC l i` and Tool Status do
+    /// (`server_install`), and finds a server where its installer put it.
+    #[test]
+    fn a_missing_language_server_gets_the_shared_install() {
+        let dir = TempDir::new("doctor_go");
+        dir.write("go.mod", "module x\n");
+        let probe = FakeProbe { programs: vec!["go"], ..Default::default() };
+        let checks = diagnose(dir.path(), ProjectKind::Go, &probe, false);
+        let gopls = find(&checks, "gopls");
+        assert_eq!(gopls.health, Health::Warn);
+        let fix = gopls.fix.as_ref().expect("go is there, so go install is offered");
+        assert_eq!(fix.label, "go install golang.org/x/tools/gopls@latest");
+        assert!(!fix.safe, "installing is never safe");
+        // No installer: what to do, with a link.
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &FakeProbe::default(), false);
+        let ra = find(&checks, "rust-analyzer");
+        assert!(ra.fix.is_none() && ra.detail.contains("https://"), "{}", ra.detail);
+        // Installed where rustup puts it, though not on PATH.
+        let exe = if cfg!(windows) { "bin/rust-analyzer.exe" } else { "bin/rust-analyzer" };
+        dir.write(exe, "");
+        let probe = FakeProbe { tool_dirs: vec![dir.path().join("bin")], ..Default::default() };
+        let ra = diagnose(dir.path(), ProjectKind::Rust, &probe, false).into_iter().find(|c| c.label == "rust-analyzer").unwrap();
+        assert_eq!(ra.health, Health::Ok, "{}", ra.detail);
     }
 
     #[test]

@@ -212,6 +212,20 @@ While the agenda's clock runs, there's also:
 `taskId` is the task's `id` in `fenix/agenda.tasks`; `since`, when the
 clock started, is RFC 3339 with the local offset.
 
+And counts since Fenix started, for checking that an idle Fenix stays
+idle:
+
+```json
+{ "stats": { "frames": 1204, "wakes": 2210, "extensionClockWakes": 35 } }
+```
+
+`frames` is the frames drawn to the screen, every window's; `wakes` the
+times its event loop woke up; `extensionClockWakes` the times the clock
+that times extensions' calls woke, which it does only while their code
+runs. Read twice, a few seconds apart, with nothing happening: `frames`
+moves by one at most (answering the first read draws one) and the rest
+by a few.
+
 ### `fenix/commands`
 
 Params: `{}`. Result:

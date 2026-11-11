@@ -29,6 +29,10 @@ mod rows;
 mod row_scroll;
 mod semantic;
 mod code_lens;
+mod server_install;
+mod editorconfig_host;
+mod inlay_hints;
+use server_install::spawn_lsp_server;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -54,15 +58,23 @@ mod polish;
 mod which_key;
 mod keys_host;
 pub(crate) use keys_host::translate_leader;
+pub(crate) use a11y_host::{adapter_for as a11y_adapter_for, wanted as a11y_wanted};
 mod edit_commands;
 mod carets;
 mod updates;
 mod auto_save;
 mod problems;
+mod a11y_host;
 #[cfg(test)]
 mod test_keys;
 #[cfg(test)]
+mod idle_tests;
+#[cfg(test)]
 mod standard_tests;
+#[cfg(test)]
+mod text_input_tests;
+#[cfg(test)]
+mod bidi_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
@@ -79,6 +91,7 @@ mod remote;
 mod trust;
 mod extensions_host;
 mod welcome_host;
+mod import_host;
 mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
@@ -148,6 +161,10 @@ const LAYER_TICK: Duration = Duration::from_millis(33);
 /// The longest the loop sleeps with nothing due: other deadlines (the
 /// disk check) come sooner anyway.
 const IDLE_WAIT: Duration = Duration::from_secs(60);
+/// The extensions that start with Fenix start once the window has drawn
+/// its first frame (#33), or this long after Fenix started without one: a
+/// window stuck on the splash (#65), or one never shown, still has them.
+const STARTUP_EXTENSIONS_WITHIN: Duration = Duration::from_secs(3);
 /// How long after the splash hands over the editor's first frame may
 /// take before the window is taken to be stuck on the splash (#65).
 const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(10);
@@ -204,6 +221,9 @@ const MACRO_REPLAY_BUDGET: u32 = 10_000;
 /// just spending time. Real Vim has the exact same guard for the exact
 /// same reason (`E169: command too recursive`, `'maxmapdepth'`).
 const MAX_MACRO_REPLAY_DEPTH: u32 = 100;
+
+/// How long `:{range}!command` waits for its command.
+const FILTER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Jumps larger than this many screens snap instantly instead of
 /// animating. Panning smoothly through a huge jump (`G` on a large file)
 /// would either blur past unreadably fast or need fetching far more
@@ -1245,7 +1265,7 @@ fn no_debug_adapter(language: fenix_syntax::LanguageId) -> String {
     let name = crate::lsp::language_config_name(language);
     format!(
         "no debug adapter for {name}: the project's .fenix/tools.json names none, no extension running gives one, and Fenix has none built in \
-         -- an extension's adapter needs its tool on PATH (SPC p h checks), and one installed or set up since Fenix started needs SPC q r"
+         -- an extension's adapter needs its tool on PATH (SPC p h, the project doctor, names what's missing), and SPC h l shows what the extension said as it started"
     )
 }
 
@@ -1428,6 +1448,9 @@ enum PendingLspRequest {
     /// `textDocument/codeLens` for `path` (canonical) as it was at
     /// `edit_count`, by request `request`.
     CodeLens { path: PathBuf, edit_count: u64, request: i64 },
+    /// `textDocument/inlayHint` for buffer `buffer`'s lines in view, by
+    /// request `request`.
+    InlayHint { buffer: BufferId, request: i64 },
     /// `codeLens/resolve` for lens `index` of `path`'s answer `generation`.
     CodeLensResolve { path: PathBuf, generation: u64, index: usize },
     /// `workspace/executeCommand` for the lens titled `title`.
@@ -1905,6 +1928,9 @@ struct GitPrompt {
 /// do* -- `App::user_event` decides the "do."
 #[derive(Debug)]
 pub enum FenixUserEvent {
+    /// The main window's accessibility adapter: the tree asked for, an
+    /// action, the assistive technology gone (`a11y_host`).
+    Accessibility(accesskit_winit::Event),
     /// The machine was asleep this long (`watchdog`). Winit doesn't say.
     Woke(Duration),
     /// One decoded event from a language server's connection (a
@@ -2362,6 +2388,7 @@ impl FenixUserEvent {
     /// Which event this is, for the hang log (`watchdog`).
     fn label(&self) -> &'static str {
         match self {
+            Self::Accessibility(_) => "Accessibility",
             Self::Woke(_) => "Woke",
             Self::Lsp { .. } => "Lsp",
             Self::LspStarted(_) => "LspStarted",
@@ -2399,6 +2426,22 @@ impl FenixUserEvent {
             Self::Control { .. } => "Control",
             Self::Page { .. } => "Page",
         }
+    }
+}
+
+/// Starts a terminal's program in `cwd`. In a folder on a remote
+/// project's machine, the terminal is there, and its shell the user's own
+/// there (`terminal.shell` names one on this machine). `one_tool`: the
+/// program is a tool of this machine's, which runs here as before.
+fn spawn_shell(rows: u16, cols: u16, cwd: Option<&Path>, program: Option<&(String, Vec<String>)>, one_tool: bool) -> std::io::Result<(fenix_terminal::Terminal, Box<dyn std::io::Read + Send>)> {
+    if let Some(cwd) = cwd.filter(|cwd| !one_tool && fenix_vfs::is_remote(cwd)) {
+        if let Some(remote) = fenix_terminal::Terminal::spawn_remote(rows, cols, cwd, None) {
+            return remote;
+        }
+    }
+    match program {
+        Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd, program, args),
+        None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd),
     }
 }
 
@@ -2443,15 +2486,24 @@ type LineSegments = Vec<(usize, usize, usize)>;
 /// A content or sidebar row's rich-text spans: (text, color, use_icon_font).
 type RowSpans = Vec<(String, glyphon::Color, bool)>;
 
-/// Line-number gutter display. Not wired to a config file yet -- there
-/// isn't one yet (`App::with_file` just picks a hardcoded default) -- but
-/// the enum exists now so hooking that up later is a matter of reading
-/// this field from somewhere else, not redesigning the rendering.
+/// Line-number gutter display: `editor.line_numbers` when Fenix starts
+/// (and when the setting changes), cycled by `SPC t n` until then.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineNumberMode {
     Off,
     Absolute,
     Relative,
+}
+
+impl LineNumberMode {
+    /// `editor.line_numbers`' value; absolute when it isn't set.
+    fn from_setting(config: &fenix_config::Config) -> LineNumberMode {
+        match config.text_value("editor.line_numbers") {
+            Some("relative") => LineNumberMode::Relative,
+            Some("off") => LineNumberMode::Off,
+            _ => LineNumberMode::Absolute,
+        }
+    }
 }
 
 /// What occupies the main content area: the editor buffer, a full-buffer
@@ -4759,6 +4811,8 @@ struct FrameState {
 }
 
 pub struct App {
+    /// What a screen reader is told (`a11y_host`).
+    a11y: a11y_host::A11yHost,
     /// Every open frame, in a stable order -- `frames[0]` is the one
     /// the app started with. Each entry holds that frame's state *while
     /// it is parked*, and is `None` for exactly one index --
@@ -5571,6 +5625,12 @@ pub struct App {
     /// Why each of `lsp_unavailable` stopped, with the last it wrote to
     /// stderr: what Tool Status shows.
     lsp_failures: HashMap<LspKey, String>,
+    /// A missing language server offered, asked about, or installing.
+    server_install: server_install::InstallState,
+    /// What `.editorconfig` says of each file looked at, by path.
+    editorconfig_cache: HashMap<PathBuf, fenix_config::editorconfig::Properties>,
+    /// Each buffer's inlay hints: which server, what's asked and drawn.
+    inlay: HashMap<BufferId, inlay_hints::InlayDoc>,
     /// Each project root's additional servers (`tools.json`'s
     /// `lsp.additional`), read once and again on `:lsp-restart`.
     lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
@@ -5741,6 +5801,10 @@ pub struct App {
     /// When `settings.toml` last changed, as the disk poll last saw it:
     /// a change it didn't make is read again.
     settings_stamp: Option<std::time::SystemTime>,
+    /// `extensions.toml`, yours and the machine's, as last seen: one
+    /// changed from outside (`fenix --install-extension`) is put in use
+    /// (`extensions_installed_if_changed`).
+    extensions_stamp: Option<Vec<Option<std::time::SystemTime>>>,
     /// The focused project's own settings (`.fenix/settings.toml`),
     /// with the root they're for.
     project_settings: Option<(PathBuf, fenix_config::ProjectSettings)>,
@@ -5784,9 +5848,11 @@ pub struct App {
     splash_fade: Option<crate::splash::SplashFade>,
     /// Getting the windows drawing again when they stop: see `gpu_host`.
     gpu_watch: crate::gpu::GpuWatch,
-    /// Frames that have reached the screen: what the live tests watch.
-    #[cfg(test)]
+    /// Frames that have reached the screen, and how many times the event
+    /// loop has woken: what the live tests watch, and `fenix/state`'s
+    /// `stats` reports, so an idle window can be seen to draw nothing (#74).
     frames_presented: u64,
+    loop_wakes: u64,
     /// When the editor's first frame is overdue, from the splash's hand-off:
     /// past it with nothing presented, the window is still showing the
     /// splash, so its surface is made again and why it's stuck is said
@@ -6095,9 +6161,10 @@ impl App {
         // The file opened at start was given its project before the
         // packs' markers were known: again, now they are. Then those that
         // start with Fenix start, in it (or a moment later, after it, each
-        // would start again there).
+        // would start again there) -- once the window has drawn its first
+        // frame, so forty of them loading don't hold the window up (#33).
         app.refresh_project_root();
-        app.code_extensions_at_startup();
+        app.wasm.startup_due = Some(Instant::now() + STARTUP_EXTENSIONS_WITHIN);
         // What the keychain said as settings were read (a token too long
         // for it, kept in settings.toml).
         let said = startup::said_later();
@@ -6251,7 +6318,7 @@ impl App {
             surfaces: None,
             buffers,
             workspaces,
-            line_number_mode: LineNumberMode::Absolute,
+            line_number_mode: LineNumberMode::from_setting(&config),
             main_view: MainView::Editor,
             explorer: None,
             sidebar: None,
@@ -6431,6 +6498,9 @@ impl App {
             restart_requested: false,
             lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
+            server_install: Default::default(),
+            editorconfig_cache: HashMap::new(),
+            inlay: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
             next_lsp_fanout: 1,
@@ -6487,6 +6557,7 @@ impl App {
             theme,
             config,
             settings_stamp: None,
+            extensions_stamp: None,
             project_settings: None,
             snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
             snippets_origin: None,
@@ -6504,10 +6575,11 @@ impl App {
             motion: motion_host::MotionState::default(),
             splash_fade: None,
             gpu_watch: Default::default(),
-            #[cfg(test)]
             frames_presented: 0,
+            loop_wakes: 0,
             first_frame_due: None,
             status_message: None,
+            a11y: Default::default(),
             quit_confirm: false,
         }
     }
@@ -7088,8 +7160,10 @@ impl App {
         // from this diff names paths from the top of the repository,
         // which is where `git apply` has to run.
         let repo_root = git_editor::repository_of(&path)?;
-        let absolute = std::fs::canonicalize(&path).unwrap_or(path);
-        let diff_text = fenix_git::file_diff(&repo_root, &absolute.to_string_lossy(), false).ok()?;
+        // A remote file is named to its machine's git from the top of its
+        // repository: this side's path for it means nothing there.
+        let named = if fenix_vfs::is_remote(&path) { git_editor::relative_to(&path, &repo_root) } else { std::fs::canonicalize(&path).unwrap_or(path).to_string_lossy().into_owned() };
+        let diff_text = fenix_git::file_diff(&repo_root, &named, false).ok()?;
         let file = fenix_diff::parse(&diff_text).into_iter().next()?;
         Some((repo_root, file))
     }
@@ -7250,6 +7324,7 @@ impl App {
             }
         }
         self.refresh_project_settings(false);
+        self.apply_editorconfig();
         self.tell_extensions(Happened::FocusChanged);
         // Said before its servers would have started: they won't, yet.
         self.project_trust_notice();
@@ -7347,6 +7422,7 @@ impl App {
         }
         // A buffer's lenses from every one of them that offers them.
         let lensed = self.lens_targets(buffer, &path, &canonical);
+        self.inlay_targets(buffer, &path, &canonical);
         for (key, language_id, by_pattern) in self.lsp_targets(&path) {
             let semantic = match (&asked, buffer) {
                 (Some((b, asked)), _) if *asked == key => semantic::SemanticSync::Ask(*b),
@@ -7526,7 +7602,7 @@ impl App {
     /// window (#33). With no event loop to hear of it, it starts here.
     fn start_lsp_session(&mut self, key: LspKey, name: String, languages: Vec<String>, spec: &fenix_project::tools::CommandSpec, cwd: &Path) {
         let Some(send) = self.lsp_start_sender() else {
-            let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+            let spawned = spawn_lsp_server(spec, &key.root);
             return self.lsp_started(key, name, languages, &spec.executable, cwd, spawned);
         };
         let generation = tool_sessions::generation();
@@ -7535,7 +7611,7 @@ impl App {
         std::thread::Builder::new()
             .name("fenix-lsp-start".into())
             .spawn(move || {
-                let result = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+                let result = spawn_lsp_server(&spec, &key.root);
                 send(FenixUserEvent::LspStarted(Box::new(LspStart { key, generation, name, languages, executable: spec.executable, cwd, result })));
             })
             .expect("a thread to start a language server");
@@ -7596,8 +7672,12 @@ impl App {
             }
             Err(err) => {
                 self.lsp_failures.insert(key.clone(), format!("couldn't start {executable}: {err}"));
+                // A built-in server that isn't installed is offered, in a
+                // notice, rather than reported as an error.
+                if !self.offer_server_install(&key, executable, &err) {
+                    self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
+                }
                 self.lsp_unavailable.insert(key);
-                self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
             }
         }
     }
@@ -7607,14 +7687,14 @@ impl App {
     /// later reconnect (once one exists) can re-send just this without
     /// re-spawning the process.
     fn send_lsp_initialize(&mut self, key: LspKey, cwd: &Path) {
-        let (semantic, lens) = (self.semantic_highlighting_on(), self.code_lens_on());
+        let (semantic, lens, inlay) = (self.semantic_highlighting_on(), self.code_lens_on(), self.inlay_hints_on());
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
             #[allow(deprecated)] // still set alongside workspace_folders for servers that only look at this
             root_uri: root_uri.clone(),
-            capabilities: crate::lsp::client_capabilities(semantic, lens),
+            capabilities: crate::lsp::client_capabilities(semantic, lens, inlay),
             workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
             ..Default::default()
         };
@@ -7657,6 +7737,9 @@ impl App {
                 }
                 if method == "workspace/codeLens/refresh" {
                     self.refresh_lenses(&key);
+                }
+                if method == "workspace/inlayHint/refresh" {
+                    self.refresh_inlay_hints(&key);
                 }
                 if let Some(session) = self.lsp_sessions.get_mut(&key) {
                     let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
@@ -7812,6 +7895,7 @@ impl App {
             }
             PendingLspRequest::SemanticTokens { path, edit_count, how, request } => self.semantic_tokens_answered(&key, path, edit_count, how, request, result),
             PendingLspRequest::CodeLens { path, edit_count, request } => self.lenses_answered(&key, path, edit_count, request, result),
+            PendingLspRequest::InlayHint { buffer, request } => self.inlay_hints_answered(&key, buffer, request, result),
             PendingLspRequest::CodeLensResolve { path, generation, index } => self.lens_resolved(&key, path, generation, index, result),
             PendingLspRequest::LensCommand { title } => {
                 if let Err(e) = result {
@@ -8466,7 +8550,7 @@ impl App {
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return false };
         let params = lsp_types::DocumentFormattingParams {
             text_document,
-            options: lsp_types::FormattingOptions { tab_size: 4, insert_spaces: true, ..Default::default() },
+            options: lsp_types::FormattingOptions { tab_size: self.vim.indent_width() as u32, insert_spaces: !self.vim.indent_tabs(), ..Default::default() },
             work_done_progress_params: Default::default(),
         };
         match session.client.request::<lsp_types::request::Formatting>(params) {
@@ -9097,6 +9181,42 @@ impl App {
         }
     }
 
+    /// `:{range}!command`, `!{motion}`: lines `first..=last` through
+    /// `command` (`cmd /C` on Windows, `sh -c` elsewhere, in the project's
+    /// folder), what it writes in their place as one change, the cursor on
+    /// the first of them. It runs while you wait, for a few seconds at
+    /// most; one that fails says why and leaves the lines.
+    pub(crate) fn filter_lines(&mut self, first: usize, last: usize, command: &str) {
+        let root = self.project_root.clone().or_else(|| self.open().buffer.path().and_then(Path::parent).map(Path::to_path_buf)).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let (program, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
+        let spec = fenix_project::tools::CommandSpec::new(program.into(), vec![flag.into(), command.into()]);
+        let (input, start, end) = {
+            let buffer = &self.open().buffer;
+            let last = last.min(buffer.line_count().saturating_sub(1));
+            let start = buffer.line_start_char(first.min(last));
+            let end = buffer.line_start_char(last) + buffer.line_len(last);
+            (format!("{}\n", buffer.text_range(start, end)), start, end)
+        };
+        let file = root.join("filter");
+        match crate::formatter::run(&spec, &input, &file, &root, FILTER_TIMEOUT, true) {
+            Ok(output) => {
+                let output = output.replace("\r\n", "\n");
+                let output = output.strip_suffix('\n').unwrap_or(&output).to_string();
+                let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+                buffer.begin_undo_group();
+                buffer.replace_range(cursor, start, end, &output);
+                buffer.break_undo_run();
+                buffer.end_undo_group();
+                cursor.char_idx = start.min(buffer.len_chars());
+                cursor.sticky_col = 0;
+                if !self.replaying_change {
+                    self.change_capture_dirty = true;
+                }
+            }
+            Err(why) => self.set_error(why),
+        }
+    }
+
     /// The formatter an extension gave for the focused buffer's language
     /// in its project (`formatter-set`), run on it: its text replaced as
     /// one change you can undo, the cursor kept on its line and column.
@@ -9351,6 +9471,7 @@ impl App {
                 return;
             }
         }
+        self.editorconfig_before_save(id, None);
         let ob = self.open_mut();
         match ob.buffer.save() {
             Ok(()) => {
@@ -9392,6 +9513,10 @@ impl App {
         if let Some(project) = lsp_settings_file(path) {
             let server = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             self.lsp_settings_changed(&project, Some(&server));
+        }
+        // A `.editorconfig` of yours, saved: read again.
+        if path.file_name().is_some_and(|n| n == ".editorconfig") {
+            self.editorconfig_changed();
         }
     }
 
@@ -9510,6 +9635,7 @@ impl App {
         }
         for id in dirty {
             let name = self.buffer_display_name(id);
+            self.editorconfig_before_save(id, None);
             let Some(ob) = self.buffers.get_mut(id) else { continue };
             if let Err(err) = ob.buffer.save() {
                 self.set_error(format!("save failed for {name}: {err}"));
@@ -9623,10 +9749,7 @@ impl App {
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
             let shell = self.terminal_shell_to_spawn();
-            let spawn = move || match &shell {
-                Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
-                None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
-            };
+            let spawn = move || spawn_shell(rows, cols, cwd.as_deref(), shell.as_ref(), false);
             match self.event_proxy.clone() {
                 Some(proxy) => {
                     std::thread::spawn(move || {
@@ -9759,10 +9882,6 @@ impl App {
     pub(crate) fn open_terminal_buffer(&mut self) {
         let cwd = self.terminal_start_dir();
         self.open_terminal_buffer_in(cwd);
-        // Said, because the shell that just opened looks like any other.
-        if self.project_root.as_deref().is_some_and(fenix_vfs::is_remote) {
-            self.set_message("this shell is on this machine: terminals on a remote project's machine aren't there yet");
-        }
     }
 
     /// Where a shell starts unless asked to start somewhere: the project
@@ -9770,13 +9889,16 @@ impl App {
     /// working folder (your home, started from the Start menu).
     fn terminal_start_dir(&self) -> Option<PathBuf> {
         let folder_of = |id: BufferId| self.buffers.get(id).and_then(|ob| ob.buffer.path()).and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
+        // A remote project's folder is one on its machine, where its
+        // terminal then is.
+        let is_dir = |p: &PathBuf| if fenix_vfs::is_remote(p) { fenix_vfs::metadata(p).is_ok_and(|meta| meta.is_dir()) } else { p.is_dir() };
         self.project_root
             .clone()
-            .filter(|p| p.is_dir())
-            .or_else(|| folder_of(self.focused_buffer_id()).filter(|p| p.is_dir()))
+            .filter(is_dir)
+            .or_else(|| folder_of(self.focused_buffer_id()).filter(is_dir))
             // From Home or a page, with no project: where the file used
             // last is, rather than wherever Fenix itself was started.
-            .or_else(|| self.buffers.mru().iter().filter_map(|&id| folder_of(id)).find(|p| p.is_dir()))
+            .or_else(|| self.buffers.mru().iter().filter_map(|&id| folder_of(id)).find(is_dir))
     }
 
     /// `open_terminal_buffer`, starting the shell somewhere in
@@ -9845,11 +9967,10 @@ impl App {
         // Remembered rather than passed once, so a shell respawned after
         // `exit` comes back where it was rather than somewhere else.
         let cwd = self.terminal_buffer_cwds.get(&id).cloned();
-        let program = self.terminal_buffer_programs.get(&id).cloned().or_else(|| self.terminal_shell_to_spawn());
-        let spawn = move || match &program {
-            Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
-            None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
-        };
+        let named = self.terminal_buffer_programs.get(&id).cloned();
+        let one_tool = named.is_some();
+        let program = named.or_else(|| self.terminal_shell_to_spawn());
+        let spawn = move || spawn_shell(rows, cols, cwd.as_deref(), program.as_ref(), one_tool);
         self.terminal_buffers_spawning.insert(id);
         match self.event_proxy.clone() {
             Some(proxy) => {
@@ -10862,10 +10983,14 @@ impl App {
             fenix_tasks::TaskEvent::Finished(outcome) => {
                 match outcome {
                     fenix_tasks::TaskOutcome::Exited { success, .. } => self.finish_task_run(buffer, Some(success)),
-                    fenix_tasks::TaskOutcome::Cancelled => self.append_task_output_text(buffer, "-- task cancelled --"),
+                    fenix_tasks::TaskOutcome::Cancelled => {
+                        self.append_task_output_text(buffer, "-- task cancelled --");
+                        self.server_install_finished(false);
+                    }
                     fenix_tasks::TaskOutcome::Failed(error) => {
                         self.append_task_output_text(buffer, &format!("-- task error: {error} --"));
                         self.set_error(format!("Task failed: {error}"));
+                        self.server_install_finished(false);
                     }
                 }
                 if let Some(session) = self.task_session.as_mut() {
@@ -10993,6 +11118,7 @@ impl App {
             ok: success == Some(true),
             tests: fenix_tasks::test_counts(&output),
         });
+        self.server_install_finished(success == Some(true));
         let took = self.task_session.as_mut().and_then(|s| s.started.take()).map(|t| t.elapsed());
         self.task_notify(success == Some(true), took);
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
@@ -12551,8 +12677,13 @@ impl App {
     /// and re-renders the Status pane -- mirrors `DockerHost::apply_stats`,
     /// including its "reset to top is harmless, Status is a small read-
     /// only info pane" reasoning.
-    fn apply_git_status(&mut self, status: Option<fenix_git::RepoStatus>) {
-        let Some(session) = self.git_session.as_mut() else { return };
+    /// Whether it changed: the poller asks every couple of seconds, and
+    /// the same status isn't written out and drawn again (#74).
+    fn apply_git_status(&mut self, status: Option<fenix_git::RepoStatus>) -> bool {
+        let Some(session) = self.git_session.as_mut() else { return false };
+        if session.status == status {
+            return false;
+        }
         session.status = status.clone();
         let (staged, unstaged, untracked) = file_counts(&session.files);
         let (status_buffer, conflicts) = (session.status_buffer, conflict_count(&session.files));
@@ -12562,6 +12693,7 @@ impl App {
             status_buffer,
             git_panel::render_status(status.as_ref(), staged, unstaged, untracked, in_progress.as_ref(), conflicts, sides.as_ref()),
         );
+        true
     }
 
     /// `u` (on any pane), and after every mutating action (stage/unstage/
@@ -13278,6 +13410,7 @@ impl App {
         self.refresh_python_environments();
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
+        self.extensions_installed_if_changed();
         // The files themselves -- open buffers, PDFs, the MIBs, the
         // project's settings -- are looked at off the UI thread.
         self.start_disk_probe();
@@ -15474,6 +15607,8 @@ impl App {
     /// for why a new jump invalidates old forward history rather than
     /// preserving it the way real Vim's jumplist does.
     fn record_jump(&mut self, from: JumpEntry) {
+        // Vim's `'` (and `` ` ``) mark: where the last jump left.
+        self.marks.insert('\'', from);
         self.jump_back_stack.push(from);
         self.jump_forward_stack.clear();
         self.mark_jump();
@@ -15533,6 +15668,8 @@ impl App {
     /// navigation_allowed`'s own doc comment -- `goto_jump_entry` is
     /// exactly as unsafe to call from there for a mark as for a jump).
     fn jump_to_mark(&mut self, name: char, linewise: bool) {
+        // `` ` `` and `'` are one mark: the place before the last jump.
+        let name = if name == '`' { '\'' } else { name };
         let Some(&entry) = self.marks.get(&name) else { return };
         if self.buffers.get(entry.buffer).is_none() {
             self.marks.remove(&name);
@@ -15577,11 +15714,16 @@ impl App {
             self.refresh_project_root();
         }
         self.mark_jump();
+        let normal = self.vim.mode() == Mode::Normal;
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
+        let (line, col) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
         cursor.char_idx = if linewise {
-            let (line, _) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
             line_first_non_blank_char(buffer, line)
+        } else if normal && col > 0 && col >= buffer.line_len(line) {
+            // Not past the line's last char in Normal mode (`` `^ `` after
+            // typing at a line's end).
+            target - 1
         } else {
             target
         };
@@ -15669,6 +15811,26 @@ impl App {
             KeyCode::Named(FenixNamedKey::Escape) => self.picker_cancel(),
             KeyCode::Named(FenixNamedKey::Enter) => self.picker_confirm(),
             KeyCode::Named(FenixNamedKey::Backspace) => picker_backspace(picker),
+            // As in a shell: `Ctrl-W` the word before, `Ctrl-U` all of it.
+            KeyCode::Char(c @ ('w' | 'u')) if key.mods.ctrl => {
+                let query: Vec<char> = picker_query(picker).chars().collect();
+                let mut keep = query.len();
+                if c == 'u' {
+                    keep = 0;
+                } else {
+                    while keep > 0 && query[keep - 1].is_whitespace() {
+                        keep -= 1;
+                    }
+                    let word = |c: char| c.is_alphanumeric() || c == '_';
+                    let in_word = keep > 0 && word(query[keep - 1]);
+                    while keep > 0 && !query[keep - 1].is_whitespace() && word(query[keep - 1]) == in_word {
+                        keep -= 1;
+                    }
+                }
+                for _ in keep..query.len() {
+                    picker_backspace(picker);
+                }
+            }
             KeyCode::Named(FenixNamedKey::Down) => picker_move_selection(picker, 1),
             KeyCode::Named(FenixNamedKey::Up) => picker_move_selection(picker, -1),
             KeyCode::Char('n') if key.mods.ctrl => picker_move_selection(picker, 1),
@@ -16215,10 +16377,8 @@ impl App {
         self.wake_caret();
     }
 
-    /// Off -> Absolute -> Relative -> Off. Stands in for a config-file
-    /// setting that doesn't exist yet (see `LineNumberMode`) -- a keybound
-    /// cycle is how you'd want to flip this at runtime anyway, so it's not
-    /// wasted work once config loading lands.
+    /// Off -> Absolute -> Relative -> Off, until Fenix restarts or
+    /// `editor.line_numbers` changes (see `LineNumberMode`).
     pub(crate) fn cycle_line_number_mode(&mut self) {
         self.line_number_mode = match self.line_number_mode {
             LineNumberMode::Off => LineNumberMode::Absolute,
@@ -16502,7 +16662,28 @@ impl App {
     /// -- same reasoning `handle_key`/`test_vim_key` already established
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
+        // What comes back on its own every couple of seconds, and most
+        // often finds nothing new, says whether it did: an idle window
+        // isn't drawn again for nothing (#74). Everything else is drawn.
+        let redraw = match event {
+            FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
+            FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
+            FenixUserEvent::Page(pages::PageEvent::ChromeGit(state)) => self.apply_chrome_git(state.map(|s| *s)),
+            event => {
+                self.handle_drawn_user_event(event);
+                true
+            }
+        };
+        if redraw {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    fn handle_drawn_user_event(&mut self, event: FenixUserEvent) {
         match event {
+            FenixUserEvent::Accessibility(event) => self.a11y_event(event),
             FenixUserEvent::Woke(slept) => self.machine_woke(slept, Instant::now()),
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
             FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
@@ -16511,7 +16692,8 @@ impl App {
             FenixUserEvent::Dap { generation, event } => {
                 if self.debug_session.as_ref().is_some_and(|s| s.generation == generation || s.children.iter().any(|c| c.generation == generation)) { self.apply_dap_event_on(generation, event); }
             },
-            FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
+            // Said whether they changed anything, in `handle_user_event`.
+            FenixUserEvent::GitStatusReady(_) | FenixUserEvent::DiskProbed(_) => {}
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
@@ -16522,7 +16704,6 @@ impl App {
             FenixUserEvent::TerminalOutput(target, bytes) => self.apply_terminal_output(target, bytes),
             FenixUserEvent::ExplorerListed { target, request, result } => self.apply_explorer_listed(target, request, result),
             FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
-            FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
             FenixUserEvent::RemoteQuestion(question) => self.remote_question(question),
             FenixUserEvent::RemoteConnected(connected) => self.remote_connected(*connected),
             FenixUserEvent::RemoteStatus(host, status) => self.remote_status(host, status),
@@ -16565,9 +16746,6 @@ impl App {
                 }
             }
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
     }
 
     fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
@@ -16592,13 +16770,33 @@ impl App {
                 self.wake_caret();
                 return;
             }
-            if self.debug_function_key(named) {
+            // An F-key a `[[keys]]` entry binds (yours, or a keymap
+            // flavour's) goes to it; the rest are the debugger's.
+            let bound = keymap::to_keypress(event, self.modifiers).is_some_and(|k| self.chord_takes_function_key(k));
+            if !bound && self.debug_function_key(named) {
                 return;
             }
         }
-        let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
+        let keypresses = keymap::to_keypresses(&event.logical_key, event.physical_key, event.text.as_deref(), self.modifiers);
+        self.dispatch_keypresses(keypresses, Some(event_loop));
+    }
+
+    /// Text that came with no key of its own: an input method's committed
+    /// text, or what a `VK_PACKET` carried. Typed a character at a time
+    /// through the real key path, so it lands wherever typing would -- a
+    /// buffer in Insert, a prompt, a picker's query, a terminal (#37).
+    fn receive_text(&mut self, text: &str, event_loop: Option<&ActiveEventLoop>) {
+        self.dispatch_keypresses(keymap::text_keypresses(text), event_loop);
+    }
+
+    fn dispatch_keypresses(&mut self, keypresses: Vec<KeyPress>, event_loop: Option<&ActiveEventLoop>) {
+        if keypresses.is_empty() {
+            return;
+        }
         self.code_active();
-        self.dispatch_keypress(keypress, Some(event_loop));
+        for keypress in keypresses {
+            self.dispatch_keypress(keypress, event_loop);
+        }
     }
 
     /// Every real keypress passes through here exactly once -- the tap
@@ -16665,6 +16863,36 @@ impl App {
         }
     }
 
+    /// What Vim's keys need of the focused pane that only the host
+    /// knows: its buffer's marks (`d'a`, `gi`, Visual's `'a`) and the
+    /// lines it shows (`H`, `M`, `L`).
+    ///
+    /// The lines are worked out only for the keys that read them, so the
+    /// other keys (and a long macro's) don't lay the frame out each time.
+    fn sync_vim_view(&mut self, key: KeyPress) {
+        let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+        self.vim.set_marks(self.marks.iter().filter(|(_, entry)| entry.buffer == id).map(|(&name, entry)| (name, entry.char_idx)));
+        if !matches!(key.code, KeyCode::Char('H' | 'M' | 'L')) || key.mods.ctrl || key.mods.alt {
+            return;
+        }
+        let viewport = self.pane_text_rows(pane).and_then(|rows| {
+            let ob = self.buffers.get(id)?;
+            let top = self.pane_state(pane).scroll_line;
+            let last = ob.buffer.line_count().saturating_sub(1);
+            // Folds and a side by side's filler rows put other lines on
+            // the rows than their numbers say; only then are the rows read
+            // line by line.
+            let plain = self.code_folds.get(&id).is_none_or(|folds| folds.is_empty()) && !self.is_side_by_side_pane(pane);
+            if plain {
+                return Some((top.min(last), (top + rows.saturating_sub(1)).min(last)));
+            }
+            let lines = self.pane_display_lines(pane, id);
+            let shown = lines.get(top..(top + rows).min(lines.len()))?;
+            Some((*shown.first()?, *shown.last()?))
+        });
+        self.vim.set_viewport(viewport);
+    }
+
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         let _profile = crate::profile::Scope::new("route_keypress");
         // What a move by row goes by: the focused pane's rows now, for a
@@ -16672,6 +16900,7 @@ impl App {
         // gone to another pane); and the cells the last key's moves by
         // row kept.
         self.sync_screen_rows();
+        self.sync_vim_view(keypress);
         self.vim.begin_key();
         // Everything but the chords reads keys as it always has, without
         // Shift (see `KeyPress::legacy`).
@@ -16812,6 +17041,10 @@ impl App {
         }
         if self.delete_file_confirm {
             self.delete_file_confirm_key(keypress);
+            return;
+        }
+        if self.server_install.confirm.is_some() {
+            self.server_install_confirm_key(keypress);
             return;
         }
 
@@ -17509,8 +17742,9 @@ impl App {
             // Automatic `` `^ `` mark (real Vim's own "position when
             // Insert mode was last exited") -- same reasoning, on the
             // Insert -> non-Insert transition instead of an edit.
-            if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
-                self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+            if matches!(mode_before, Mode::Insert | Mode::Replace) && !self.vim.is_inserting() {
+                let char_idx = self.vim.last_insert_exit().unwrap_or(pane_state.cursor.char_idx);
+                self.marks.insert('^', JumpEntry { buffer: id, char_idx });
             }
             event
         };
@@ -17578,8 +17812,9 @@ impl App {
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
             VimEvent::Fold(command) => self.fold_command(command),
-            VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
+            VimEvent::RepeatLastChange { count } => self.repeat_last_change(count, event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
+            VimEvent::FilterLines { first, last, command } => self.filter_lines(first, last, &command),
             VimEvent::Pulse(range) => {
                 if self.motion().yank_pulse {
                     self.pulse = Some(Pulse { range, started: Instant::now() });
@@ -17705,6 +17940,19 @@ impl App {
         self.replay_depth -= 1;
     }
 
+    /// What `.` replays: the last change's keys, with `count` (`3.`) in
+    /// place of the count they were typed with -- which `.` then keeps,
+    /// as Vim's does, so a later bare `.` repeats with it too.
+    fn last_change_keys_with(&mut self, count: Option<u32>) -> Option<Vec<KeyPress>> {
+        let keys = self.last_change_keys.as_ref()?;
+        if let Some(count) = count {
+            let counted = fenix_vim::with_count(keys, count);
+            self.last_change_keys = Some(counted.clone());
+            return Some(counted);
+        }
+        Some(keys.clone())
+    }
+
     /// `.` -- replays `last_change_keys` (the most recently completed
     /// change-producing key span, captured by `dispatch_keypress`) the
     /// same way `play_macro` replays a register's decoded content:
@@ -17716,8 +17964,8 @@ impl App {
     /// keypress's own span look dirty too, and `last_change_keys` would
     /// get overwritten with just `['.']` on every repeat. A silent no-op
     /// if nothing's been recorded yet.
-    fn repeat_last_change(&mut self, event_loop: Option<&ActiveEventLoop>) {
-        let Some(keys) = self.last_change_keys.clone() else { return };
+    fn repeat_last_change(&mut self, count: Option<u32>, event_loop: Option<&ActiveEventLoop>) {
+        let Some(keys) = self.last_change_keys_with(count) else { return };
         self.replaying_change = true;
         for key in &keys {
             self.route_keypress(*key, event_loop);
@@ -17735,11 +17983,13 @@ impl App {
     /// matcher) while a `g`-prefixed or operator-pending sequence never
     /// misreads its own continuation key as a paste.
     fn pull_clipboard_before_paste(&mut self, keypress: KeyPress) {
+        // Insert's `Ctrl-R "` (or `+`, `*`) puts the clipboard in too.
+        let ctrl_r = self.vim.is_awaiting_insert_register() && keypress.mods == Mods::default() && matches!(keypress.code, KeyCode::Char('"' | '+' | '*'));
         // Visual too: `p`/`P` there replace the selection with it.
-        if !matches!(self.vim.mode(), Mode::Normal | Mode::Visual) || self.vim.is_pending() || keypress.mods != Mods::default() {
+        if !ctrl_r && (!matches!(self.vim.mode(), Mode::Normal | Mode::Visual) || self.vim.is_pending() || keypress.mods != Mods::default()) {
             return;
         }
-        if !matches!(keypress.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+        if !ctrl_r && !matches!(keypress.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             return;
         }
         let Some(clipboard) = self.clipboard.as_mut() else { return };
@@ -18290,6 +18540,7 @@ impl App {
             .or_else(|| self.workspace_rename_prompt_text())
             .or_else(|| self.goto_line_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
+            .or_else(|| self.server_install_confirm_text())
     }
 
     /// Test-only: the modeline as one plain string, for assertions --
@@ -20412,6 +20663,7 @@ impl App {
         self.sync_lsp_if_changed();
         self.ask_due_semantic_tokens();
         self.ask_due_lenses();
+        self.ask_due_inlay_hints();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -20965,9 +21217,12 @@ impl App {
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
             // Its lines shown, for semantic tokens asked by range and the
             // lenses resolved: worked out only when either wants them.
-            let (semantic, lensed) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id));
-            if semantic || lensed {
+            let (semantic, lensed, hinted) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id), self.inlay.contains_key(&buffer_id));
+            if semantic || lensed || hinted {
                 let runs = row_map.runs();
+                if hinted {
+                    self.note_inlay_view(buffer_id, pane, &runs);
+                }
                 if semantic {
                     self.note_semantic_view(buffer_id, pane, &runs);
                 }
@@ -22796,10 +23051,7 @@ impl App {
             crate::watchdog::note("the window's surface is drawing again");
         }
         self.gpu_watch.presented();
-        #[cfg(test)]
-        {
-            self.frames_presented += 1;
-        }
+        self.frames_presented += 1;
         if self.first_frame_due.take().is_some_and(|due| Instant::now() > due) {
             eprintln!("fenix: the first frame came late, {:?} after the splash handed over", FIRST_FRAME_WITHIN);
         }
@@ -22913,7 +23165,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
     /// part so it's directly testable" reasoning `handle_key`/
     /// `test_vim_key` already established for keyboard input).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
-        let _busy = crate::watchdog::enter(event.label());
+        // Timed with FENIX_PROFILE, and named in the hang log while it runs.
+        let _busy = crate::profile::Scope::new(event.label());
         self.handle_user_event(event);
     }
 
@@ -22956,6 +23209,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => "the window's size",
             _ => "a window event",
         });
+        self.a11y_window_event(id, &event);
         let Some(frame) = self.frame_index_of(id) else { return };
         // Every event is handled with the frame it arrived from active,
         // so the handlers below -- all written against one implicit
@@ -23157,8 +23411,21 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     window.request_redraw();
                 }
             }
+            // Fenix doesn't turn the input method on, but text one
+            // commits anyway is typed like any other.
+            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                self.receive_text(&text, Some(event_loop));
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::RedrawRequested => {
                 self.redraw();
+                // The window is up: the extensions that start with Fenix,
+                // now (#33).
+                if self.frames_presented > 0 {
+                    self.code_startup_now();
+                }
                 // Code extensions' pages that came into view or left it;
                 // their layers' glides that ended, and the layout.
                 let sized = std::mem::take(&mut self.wasm.sized);
@@ -23175,18 +23442,44 @@ impl ApplicationHandler<FenixUserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let _profile = crate::profile::Scope::new("about_to_wait");
-        let now = Instant::now();
-        let mut needs_redraw = false;
-
+        self.loop_wakes += 1;
+        // A screen reader hears what the events just handled changed.
+        self.a11y_update();
         // Frames requested by a `fenix --new-window` hand-off, which
         // arrived somewhere without an `&ActiveEventLoop` to open a
         // window with. See `App::pending_frames`.
+        let mut opened = false;
         for (files, focus) in std::mem::take(&mut self.pending_frames) {
             self.new_frame(event_loop);
             self.open_positions(&files, focus);
-            needs_redraw = true;
+            opened = true;
         }
+        let plan = self.plan_wake(Instant::now());
+        if plan.redraw || opened {
+            for frame in 0..self.frames.len() {
+                if let Some(window) = self.frame_window(frame) {
+                    window.request_redraw();
+                }
+            }
+        }
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(plan.wait_until));
+    }
+}
 
+/// What the event loop does before it sleeps: draw a frame or not, and
+/// when to wake with nothing else to wake it (`App::plan_wake`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WakePlan {
+    redraw: bool,
+    wait_until: Instant,
+}
+
+impl App {
+    /// `about_to_wait`'s work, without the event loop: what's due now
+    /// done, whether the windows need a frame, and when the next thing is
+    /// due. An idle editor plans no frame and a long sleep (#74).
+    fn plan_wake(&mut self, now: Instant) -> WakePlan {
+        let mut needs_redraw = false;
         if self.blink_tick(now) {
             needs_redraw = true;
         }
@@ -23195,6 +23488,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // timed out): asked now, not on whatever frame comes next.
         self.ask_due_semantic_tokens();
         self.ask_due_lenses();
+        self.ask_due_inlay_hints();
 
         // Keep redrawing at animation cadence only while something is
         // actually transitioning (blink fade or an active pulse); once
@@ -23230,14 +23524,6 @@ impl ApplicationHandler<FenixUserEvent> for App {
             needs_redraw = true;
         }
 
-        if needs_redraw {
-            for frame in 0..self.frames.len() {
-                if let Some(window) = self.frame_window(frame) {
-                    window.request_redraw();
-                }
-            }
-        }
-
         if now >= self.next_disk_check {
             self.poll_files_changed_on_disk();
         }
@@ -23259,11 +23545,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.code_focus_moved();
         // A tutorial step that's waited long enough shows its hint.
         if self.tutorial_tick(now) {
-            for frame in 0..self.frames.len() {
-                if let Some(window) = self.frame_window(frame) {
-                    window.request_redraw();
-                }
-            }
+            needs_redraw = true;
         }
 
         // The disk check has to be one of the deadlines the loop waits
@@ -23278,20 +23560,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // An extension's layer whose next frame the loop just woke for.
         let motion_on = crate::motion::level(&self.config) != crate::motion::Level::Off;
         if self.wasm.layers.frame_due(now, motion_on) {
-            for frame in 0..self.frames.len() {
-                if let Some(window) = self.frame_window(frame) {
-                    window.request_redraw();
-                }
-            }
+            needs_redraw = true;
         }
         // A message about to fade, or the spinner's next blade.
         let wait_until = match self.motion_next_wake(now) {
             Some(wake) if wake <= now => {
-                for frame in 0..self.frames.len() {
-                    if let Some(window) = self.frame_window(frame) {
-                        window.request_redraw();
-                    }
-                }
+                needs_redraw = true;
                 now + ANIM_TICK
             }
             Some(wake) => wait_until.min(wake),
@@ -23348,6 +23622,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
+        // The extensions that start with Fenix, should no first frame
+        // have come to start them (#33).
+        let wait_until = match self.code_startup_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
         // The first frame, still not drawn: the window is stuck on the
         // splash (#65).
         let wait_until = match self.first_frame_tick(now) {
@@ -23359,7 +23639,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
+        WakePlan { redraw: needs_redraw, wait_until }
     }
 }
 
@@ -23446,6 +23726,7 @@ impl App {
     /// as ordinary top-level input, but `b`'s *expanded* replay must not
     /// also be appended on top of that.
     fn test_route_key(&mut self, kp: KeyPress) {
+        self.sync_vim_view(kp);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
@@ -23468,8 +23749,9 @@ impl App {
                     ob.buffer.undo(&mut pane_state.cursor);
                 }
             }
-            if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
-                self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+            if matches!(mode_before, Mode::Insert | Mode::Replace) && !self.vim.is_inserting() {
+                let char_idx = self.vim.last_insert_exit().unwrap_or(pane_state.cursor.char_idx);
+                self.marks.insert('^', JumpEntry { buffer: id, char_idx });
             }
             event
         };
@@ -23484,10 +23766,14 @@ impl App {
                 self.vim.finish_recording(register, &keys, self.macro_recording_append);
             }
             VimEvent::MacroPlay { register, count } => self.test_play_macro(register, count),
-            VimEvent::RepeatLastChange => self.test_repeat_last_change(),
+            VimEvent::RepeatLastChange { count } => self.test_repeat_last_change(count),
+            VimEvent::MarkSet(name, char_idx) => {
+                self.marks.insert(name, JumpEntry { buffer: id, char_idx });
+            }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
+            VimEvent::FilterLines { first, last, command } => self.filter_lines(first, last, &command),
             // Along the Ember Trail while there's one here; the TODOs
             // otherwise.
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } if self.debug_trail_here() => self.debug_trail_scrub(forward, count as usize),
@@ -23527,8 +23813,8 @@ impl App {
     /// Test-only mirror of `repeat_last_change` -- identical logic,
     /// replaying through `test_route_key` instead of the real `route_
     /// keypress`.
-    fn test_repeat_last_change(&mut self) {
-        let Some(keys) = self.last_change_keys.clone() else { return };
+    fn test_repeat_last_change(&mut self, count: Option<u32>) {
+        let Some(keys) = self.last_change_keys_with(count) else { return };
         self.replaying_change = true;
         for key in &keys {
             self.test_route_key(*key);
@@ -25345,6 +25631,18 @@ index 0000000..1111111 100644
     }
 
     #[test]
+    fn editor_line_numbers_sets_the_gutter_and_the_cycle_goes_on_from_it() {
+        let mut app = App::with_file(None);
+        assert_eq!(app.line_number_mode, LineNumberMode::Absolute, "the default");
+        app.set_setting("editor.line_numbers", Some(fenix_config::Value::Text("relative".into()))).ok();
+        assert_eq!(app.line_number_mode, LineNumberMode::Relative);
+        app.cycle_line_number_mode();
+        assert_eq!(app.line_number_mode, LineNumberMode::Off);
+        app.config.set_value("editor.line_numbers", Some(fenix_config::Value::Text("off".into())));
+        assert_eq!(LineNumberMode::from_setting(&app.config), LineNumberMode::Off);
+    }
+
+    #[test]
     fn cycle_line_number_mode_goes_off_absolute_relative_off() {
         let mut app = App::with_file(None);
         app.line_number_mode = LineNumberMode::Off;
@@ -26669,6 +26967,34 @@ configure_board stm32
 
         app.jump_forward();
         assert_eq!(app.cursor().char_idx, 4);
+    }
+
+    #[test]
+    fn backtick_backtick_goes_back_to_where_the_last_jump_left() {
+        let dir = TempDir::new("quote_quote");
+        let file = dir.write("abc.txt", "a\nb\nc");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let event = app.test_vim_key(KeyPress::char('G'));
+        let VimEvent::JumpRecorded(from) = event else { panic!("expected a JumpRecorded event from G, got {event:?}") };
+        let buffer = app.focused_buffer_id();
+        app.record_jump(JumpEntry { buffer, char_idx: from });
+        app.test_vim_key(KeyPress::char('`'));
+        let event = app.test_vim_key(KeyPress::char('`'));
+        let VimEvent::JumpToMark { name, linewise } = event else { panic!("expected a JumpToMark event, got {event:?}") };
+        app.jump_to_mark(name, linewise);
+        assert_eq!(app.cursor().char_idx, 0, "back where G left");
+        app.test_vim_key(KeyPress::char('\''));
+        let event = app.test_vim_key(KeyPress::char('\''));
+        let VimEvent::JumpToMark { name, linewise } = event else { panic!("expected a JumpToMark event, got {event:?}") };
+        app.jump_to_mark(name, linewise);
+        assert_eq!(app.cursor().char_idx, 4, "and '' goes back again");
+    }
+
+    #[test]
+    fn an_operator_reaches_a_mark_the_host_keeps() {
+        let mut app = macro_app("a\nb\nc\nd");
+        dispatch_all(&mut app, "majjd'a");
+        assert_eq!(app.open().buffer.text(), "d");
     }
 
     #[test]
@@ -32107,7 +32433,7 @@ configure_board stm32
         app.debug_start_or_continue();
         let said = app.modeline_pieces().1;
         assert!(said.contains("no debug adapter for rust"), "{said}");
-        assert!(said.contains("SPC p h") && said.contains("SPC q r"), "says where to look: {said}");
+        assert!(said.contains("SPC p h") && said.contains("SPC h l"), "says where to look: {said}");
     }
 
     #[test]
@@ -35230,6 +35556,23 @@ configure_board stm32
     }
 
     #[test]
+    fn ctrl_w_and_ctrl_u_edit_a_pickers_query_as_a_shell_does() {
+        let candidates = vec![fenix_picker::Candidate::new("apple", PathBuf::from("apple"))];
+        let mut app = App::with_file(None);
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        for c in "src/main rs".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let query = |app: &App| app.active_picker.as_ref().map(|p| picker_query(p).to_string());
+        app.picker_key(KeyPress::char('w').with_ctrl());
+        assert_eq!(query(&app).as_deref(), Some("src/main "));
+        app.picker_key(KeyPress::char('w').with_ctrl());
+        assert_eq!(query(&app).as_deref(), Some("src/"));
+        app.picker_key(KeyPress::char('u').with_ctrl());
+        assert_eq!(query(&app).as_deref(), Some(""));
+    }
+
+    #[test]
     fn picker_key_routes_typing_navigation_and_escape() {
         let candidates = vec![
             fenix_picker::Candidate::new("apple", PathBuf::from("apple")),
@@ -35798,6 +36141,58 @@ configure_board stm32
         assert_eq!(app.open().buffer.text(), "aa");
         app.test_dispatch_key(KeyPress::char('.'));
         assert_eq!(app.open().buffer.text(), "a");
+    }
+
+    fn dispatch_all(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            app.test_dispatch_key(KeyPress::char(c));
+        }
+    }
+
+    #[test]
+    fn a_count_on_dot_takes_the_place_of_the_changes_own() {
+        let mut app = macro_app("a\nb\nc\nd\ne\nf\ng");
+        dispatch_all(&mut app, "dd");
+        assert_eq!(app.open().buffer.text(), "b\nc\nd\ne\nf\ng");
+        dispatch_all(&mut app, "2.");
+        assert_eq!(app.open().buffer.text(), "d\ne\nf\ng", "2. deletes two lines");
+        dispatch_all(&mut app, ".");
+        assert_eq!(app.open().buffer.text(), "f\ng", "and a bare . keeps the 2, as in Vim");
+        let mut app = macro_app("a b c d e f");
+        dispatch_all(&mut app, "3dw1.");
+        assert_eq!(app.open().buffer.text(), "e f");
+    }
+
+    #[test]
+    fn bang_filters_lines_through_a_command() {
+        let mut app = macro_app("pear\napple\nfig\nkeep");
+        dispatch_all(&mut app, "!2j");
+        assert_eq!(app.vim.command_line(), ".,.+2!", "the command line opens on the lines, as Vim's does");
+        dispatch_all(&mut app, "sort");
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(app.open().buffer.text().replace("\r\n", "\n"), "apple\nfig\npear\nkeep");
+        dispatch_all(&mut app, "u");
+        assert_eq!(app.open().buffer.text(), "pear\napple\nfig\nkeep", "one change to undo");
+    }
+
+    #[test]
+    fn dot_repeats_the_new_operators() {
+        let mut app = macro_app("ab\ncd\nef");
+        dispatch_all(&mut app, "gUUj.");
+        assert_eq!(app.open().buffer.text(), "AB\nCD\nef");
+        let mut app = macro_app("abcdef");
+        dispatch_all(&mut app, "RXY");
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+        dispatch_all(&mut app, "l.");
+        assert_eq!(app.open().buffer.text(), "XYXYef");
+    }
+
+    #[test]
+    fn a_macro_replays_the_new_keys() {
+        let mut app = macro_app("one two\nthree four");
+        dispatch_all(&mut app, "qagUiwjq");
+        dispatch_all(&mut app, "k0w@a");
+        assert_eq!(app.open().buffer.text(), "ONE TWO\nthree four");
     }
 
     #[test]
@@ -37404,6 +37799,69 @@ name = \"orbit\"
         (dir, app, path, key)
     }
 
+    /// Inlay hints: asked for the lines in view once the server has the
+    /// text, drawn as dimmed decorations where they go, asked again when
+    /// the server says so, and gone when they're turned off, globally or
+    /// for the language.
+    #[test]
+    fn inlay_hints_are_asked_for_the_view_drawn_refreshed_and_turned_off() {
+        let dir = TempDir::new("inlay_hints");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() {}\nfn other() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], capabilities(serde_json::json!({"textDocumentSync": 2, "inlayHintProvider": true})));
+        app.sync_lsp_for_focused_buffer();
+        let id = app.focused_buffer_id();
+        assert!(app.inlay.contains_key(&id), "the server offers them");
+        app.ask_due_inlay_hints();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "nothing in view yet");
+        let pane = app.focused_pane_id();
+        app.note_inlay_view(id, pane, &[0..2]);
+        app.ask_due_inlay_hints();
+        let (request, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::InlayHint { buffer, .. } if buffer == id));
+        let hint = |line: u32, character: u32, label: &str| serde_json::json!({"position": {"line": line, "character": character}, "label": label, "kind": 1, "paddingLeft": true});
+        answer(&mut app, &key, request, serde_json::json!([hint(1, 8, "-> ()"), hint(0, 7, "-> ()")]));
+        assert_eq!(app.inlay_hints_drawn(id), vec![(7, " -> ()".to_string()), (13 + 8, " -> ()".to_string())]);
+        app.ask_due_inlay_hints();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "answered for what's in view");
+
+        // The server's refresh: asked again.
+        app.apply_lsp_event(key.clone(), app.lsp_sessions[&key].generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(9), method: "workspace/inlayHint/refresh".into(), params: serde_json::Value::Null });
+        app.ask_due_inlay_hints();
+        let (request, _) = only_pending(&app, &key);
+        answer(&mut app, &key, request, serde_json::json!([hint(0, 7, ": x")]));
+        assert_eq!(app.inlay_hints_drawn(id), vec![(7, " : x".to_string())]);
+        // They move with typing before them, until the next answer.
+        app.focused_buffer_and_cursor_mut().1.char_idx = 0;
+        app.test_insert_str("  ");
+        app.shift_code_decorations();
+        assert_eq!(app.inlay_hints_drawn(id), vec![(9, " : x".to_string())]);
+        app.sync_lsp_for_focused_buffer();
+
+        // An answer for text edited since is let go.
+        app.lsp_sessions.get_mut(&key).unwrap().pending.clear();
+        app.refresh_inlay_hints(&key);
+        app.ask_due_inlay_hints();
+        let (request, _) = only_pending(&app, &key);
+        app.test_insert_str("// ");
+        answer(&mut app, &key, request, serde_json::json!([hint(0, 0, "stale")]));
+        assert!(!app.inlay_hints_drawn(id).iter().any(|(_, t)| t.contains("stale")));
+
+        // Off for Rust: gone at the next frame.
+        app.config.set_value("lsp.inlay_hints_off", Some(fenix_config::Value::List(vec!["rust".into()])));
+        app.ask_due_inlay_hints();
+        assert!(!app.inlay.contains_key(&id) && app.inlay_hints_drawn(id).is_empty());
+        app.sync_lsp_for_focused_buffer();
+        assert!(!app.inlay.contains_key(&id), "not taken up again");
+        app.config.set_value("lsp.inlay_hints_off", None);
+        app.config.set_value("lsp.inlay_hints", Some(fenix_config::Value::Bool(false)));
+        app.sync_lsp_for_focused_buffer();
+        assert!(!app.inlay.contains_key(&id));
+        assert!(crate::lsp::client_capabilities(false, false, false).text_document.unwrap().inlay_hint.is_none(), "not advertised when off");
+        assert!(crate::lsp::client_capabilities(false, false, true).text_document.unwrap().inlay_hint.is_some());
+    }
+
     fn lens_json(line: u32, title: Option<&str>) -> serde_json::Value {
         let range = serde_json::json!({"start": {"line": line, "character": 0}, "end": {"line": line, "character": 2}});
         match title {
@@ -37736,8 +38194,8 @@ name = \"orbit\"
         app.sync_lsp_for_focused_buffer();
         app.ask_due_lenses();
         assert!(!app.lsp_sessions[&key].pending.values().any(|p| matches!(p, PendingLspRequest::CodeLens { .. })));
-        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().code_lens.is_none(), "not advertised");
-        assert!(crate::lsp::client_capabilities(false, true).text_document.unwrap().code_lens.is_some());
+        assert!(crate::lsp::client_capabilities(false, false, false).text_document.unwrap().code_lens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(false, true, false).text_document.unwrap().code_lens.is_some());
     }
 
     #[test]
@@ -38047,8 +38505,8 @@ name = \"orbit\"
 
     #[test]
     fn semantic_tokens_are_neither_asked_nor_drawn_with_the_setting_off_or_the_language_left_out() {
-        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
-        assert!(crate::lsp::client_capabilities(true, false).text_document.unwrap().semantic_tokens.is_some());
+        assert!(crate::lsp::client_capabilities(false, false, false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(true, false, false).text_document.unwrap().semantic_tokens.is_some());
         for (key, value) in [("lsp.semantic_highlighting", fenix_config::Value::Bool(false)), ("lsp.semantic_highlighting_off", fenix_config::Value::List(vec!["Rust".into()]))] {
             let (_dir, mut app, _path, server) = semantic_fixture("semantic_off");
             let grammar = colour_at(&mut app, 16);

@@ -9,5 +9,11 @@ publish.workspace = true
 
 [dependencies]
 fenix-rpc = { path = "../fenix-rpc" }
+# A terminal on a remote project's machine: its pty is the helper's there.
+fenix-vfs = { path = "../fenix-vfs" }
 portable-pty = "0.9"
 vt100 = "0.16"
+
+[dev-dependencies]
+# A remote machine in the tests: the real helper, in this process.
+fenix-ssh = { path = "../fenix-ssh" }

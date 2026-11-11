@@ -305,6 +305,49 @@ impl App {
         }
     }
 
+    /// `edit.wrap_lines`: the cursor's paragraph, or the selection's
+    /// lines, wrapped at the text width -- `gwip` and `gw`, the cursor
+    /// kept on its text.
+    pub(crate) fn cmd_wrap_lines(&mut self) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.wrap_lines(buffer, cursor));
+        } else {
+            self.vim_line_keys("gwip", "gw");
+        }
+    }
+
+    /// `edit.upper_case` / `edit.lower_case`: the word at the cursor, or
+    /// the selection, in upper or lower case -- `gUiw` and `U`, `guiw`
+    /// and `u`.
+    pub(crate) fn cmd_change_case(&mut self, upper: bool) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.change_case(buffer, cursor, upper));
+        } else if upper {
+            self.vim_line_keys("gUiw", "U");
+        } else {
+            self.vim_line_keys("guiw", "u");
+        }
+    }
+
+    /// `edit.join_lines`: the cursor's line and the next, or the
+    /// selection's lines, joined with a space -- `J`.
+    pub(crate) fn cmd_join_lines(&mut self) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.join_selected_lines(buffer, cursor));
+        } else {
+            self.vim_line_keys("J", "J");
+        }
+    }
+
     /// `edit.new_line_below` / `_above` (Ctrl+Enter / Ctrl+Shift+Enter): a
     /// line opened below (or above) the cursor's, indented, typing there
     /// -- `o` and `O`.
@@ -531,10 +574,13 @@ impl App {
             if scheme == crate::keymap::Scheme::Standard { "Standard" } else { "Vim" },
             self.keys_text("`SPC h b` lists every key, `SPC t k` switches between Vim and standard keys.")
         );
-        let mut chords: Vec<_> = crate::keymap::chord_map().in_use(scheme).into_iter().filter_map(|c| Some((c.command?, crate::keymap::describe_keypress(&c.key)))).collect();
+        let mut chords: Vec<_> = crate::keymap::chord_map().in_use(scheme).into_iter().filter_map(|c| Some((c.command?, crate::keymap::describe_keypress(&c.key), c.from))).collect();
         chords.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
-        for (id, keys) in chords {
-            out.push_str(&format!("| `{keys}` | `{id}` | {} |\n", describe(id).replace('|', "\\|")));
+        for (id, keys, from) in chords {
+            // Whose it is, when it isn't Fenix's: yours, or a keymap's
+            // (a flavour's).
+            let from = from.map(|f| format!(" (from {f})")).unwrap_or_default();
+            out.push_str(&format!("| `{keys}` | `{id}` | {}{from} |\n", describe(id).replace('|', "\\|")));
         }
         out.push_str("\n## The leader's groups\n\n| Keys | Group |\n|---|---|\n");
         let mut m = crate::keymap::leader_trie().matcher();

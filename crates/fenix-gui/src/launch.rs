@@ -37,6 +37,7 @@ struct Showing {
     gpu_context: GpuContext,
     gpu: crate::gpu::GpuState,
     splash: Option<SplashHandle>,
+    a11y: Option<accesskit_winit::Adapter>,
 }
 
 enum State {
@@ -89,6 +90,9 @@ impl Launcher {
         }
         let window = Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
         crate::profile::launch_mark("window");
+        // A screen reader's adapter has to be there before the window is
+        // first shown.
+        let a11y = if crate::app::a11y_wanted(&config) { crate::app::a11y_adapter_for(event_loop, &window, proxy.clone()) } else { None };
         let (gpu_context, mut gpu) = pollster::block_on(GpuContext::new(Arc::clone(&window)));
         crate::profile::launch_mark("gpu");
         // In the log whether or not anyone asked: which GPU, through what
@@ -115,7 +119,7 @@ impl Launcher {
             window.set_visible(true);
             splash.set_progress(0.1);
         }
-        self.state = State::Showing(Box::new(Showing { proxy, startup, queued, window, gpu_context, gpu, splash }));
+        self.state = State::Showing(Box::new(Showing { proxy, startup, queued, window, gpu_context, gpu, splash, a11y }));
         // Round the loop once more before the slow part: see `Showing`.
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     }
@@ -124,7 +128,7 @@ impl Launcher {
     fn load(&mut self, event_loop: &ActiveEventLoop) {
         let State::Showing(showing) = std::mem::replace(&mut self.state, State::Moving) else { return };
         let _busy = crate::watchdog::enter("starting up");
-        let Showing { proxy, startup, queued, window, gpu_context, gpu, splash } = *showing;
+        let Showing { proxy, startup, queued, window, gpu_context, gpu, splash, a11y } = *showing;
         let progress = |p: f32| {
             if let Some(splash) = &splash {
                 splash.set_progress(p);
@@ -138,6 +142,9 @@ impl Launcher {
         progress(0.6);
         let window_id = window.id();
         app.start_in(event_loop, Arc::clone(&window), gpu_context, gpu, &progress);
+        if let Some(adapter) = a11y {
+            app.attach_accessibility(adapter, Arc::clone(&window));
+        }
         for event in queued {
             app.user_event(event_loop, event);
         }

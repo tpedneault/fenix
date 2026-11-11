@@ -10,7 +10,69 @@ use std::path::{Path, PathBuf};
 /// with a `.git` -- so a subproject of a monorepo belongs to the
 /// monorepo's repository, not to none.
 pub fn repository_root(path: &Path) -> Option<PathBuf> {
+    if fenix_vfs::is_remote(path) {
+        return remote_repository_root(path);
+    }
     path.ancestors().find(|dir| dir.join(".git").exists()).map(Path::to_path_buf)
+}
+
+/// How long what's found of a remote folder's repository is believed:
+/// each folder looked at is a question over the network, and this is
+/// asked as files are opened and switched to.
+const REMOTE_ANSWER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `repository_root` on a remote machine: looked for there, never above
+/// the machine's root, and remembered a while.
+fn remote_repository_root(path: &Path) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    /// A folder, when it was looked at, and its repository's root.
+    type Found = HashMap<PathBuf, (Instant, Option<PathBuf>)>;
+    static FOUND: Mutex<Option<Found>> = Mutex::new(None);
+    if let Some((when, root)) = FOUND.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(path) {
+        if when.elapsed() < REMOTE_ANSWER {
+            return root.clone();
+        }
+    }
+    let mut unsure = false;
+    let root = path
+        .ancestors()
+        .take_while(|dir| fenix_vfs::is_remote(dir))
+        .find(|dir| match fenix_vfs::metadata(&dir.join(".git")) {
+            Ok(_) => true,
+            Err(error) => {
+                // A machine that can't be asked says nothing either way.
+                unsure |= error.kind() != std::io::ErrorKind::NotFound;
+                false
+            }
+        })
+        .map(Path::to_path_buf);
+    if !unsure {
+        let mut found = FOUND.lock().unwrap_or_else(|e| e.into_inner());
+        let found = found.get_or_insert_with(HashMap::new);
+        if found.len() > 4096 {
+            found.clear();
+        }
+        found.insert(path.to_path_buf(), (Instant::now(), root.clone()));
+    }
+    root
+}
+
+/// A file's text, wherever it is.
+fn read_text(path: &Path) -> Option<String> {
+    if fenix_vfs::is_remote(path) {
+        return String::from_utf8(fenix_vfs::read(path).ok()?).ok();
+    }
+    std::fs::read_to_string(path).ok()
+}
+
+/// Whether `path` is a file, wherever it is.
+fn is_file(path: &Path) -> bool {
+    if fenix_vfs::is_remote(path) {
+        return fenix_vfs::metadata(path).is_ok_and(|meta| meta.is_file());
+    }
+    path.is_file()
 }
 
 /// The branch checked out in the repository `root` is in, read straight
@@ -19,15 +81,22 @@ pub fn repository_root(path: &Path) -> Option<PathBuf> {
 pub fn git_branch(root: &Path) -> Option<String> {
     let root = repository_root(root)?;
     let dot_git = root.join(".git");
-    let git_dir = if dot_git.is_file() {
-        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let git_dir = if is_file(&dot_git) {
+        let pointer = read_text(&dot_git)?;
         let dir = pointer.trim().strip_prefix("gitdir:")?.trim();
-        let dir = PathBuf::from(dir);
-        if dir.is_absolute() { dir } else { root.join(dir) }
+        match fenix_vfs::host_of(&root) {
+            // A path on that machine, absolute or from the worktree.
+            Some(host) if dir.starts_with('/') => fenix_vfs::remote(&host, dir),
+            Some(_) => fenix_vfs::join(&root, dir),
+            None => {
+                let dir = PathBuf::from(dir);
+                if dir.is_absolute() { dir } else { root.join(dir) }
+            }
+        }
     } else {
         dot_git
     };
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = read_text(&git_dir.join("HEAD"))?;
     let head = head.trim();
     match head.strip_prefix("ref: refs/heads/") {
         Some(branch) => Some(branch.to_string()),
@@ -71,6 +140,10 @@ fn parse_status(text: &str, summary: &mut GitSummary) {
 }
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
+    if let Some(ran) = fenix_vfs::run_there(root, fenix_vfs::Run { program: "git", args, ..fenix_vfs::Run::default() }) {
+        let ran = ran.ok()?;
+        return ran.success().then(|| String::from_utf8_lossy(&ran.stdout).into_owned());
+    }
     let output = crate::process::quiet("git").args(args).current_dir(root).output().ok()?;
     output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -153,5 +226,18 @@ mod tests {
         assert_eq!(sub.last_commit.map(|(s, _)| s).as_deref(), Some("Add sub"));
         assert_eq!(repository_root(&dir.path().join("sub")).as_deref(), Some(dir.path()));
         assert_eq!(git_branch(&dir.path().join("sub")).as_deref(), Some("trunk"));
+    }
+
+    #[test]
+    fn a_remote_repository_is_found_and_read_on_its_machine() {
+        let dir = TempDir::new("vcs_remote");
+        let _machine = fenix_vfs::testing::Folder::mount("vcs-box", dir.path());
+        dir.write("proj/.git/HEAD", "ref: refs/heads/work\n");
+        dir.write("proj/src/main.rs", "");
+        let root = fenix_vfs::remote("vcs-box", "/proj");
+        assert_eq!(repository_root(&fenix_vfs::remote("vcs-box", "/proj/src")), Some(root.clone()));
+        assert_eq!(git_branch(&root).as_deref(), Some("work"));
+        assert_eq!(repository_root(&fenix_vfs::remote("vcs-box", "/elsewhere")), None, "never this machine's / above it");
+        fenix_vfs::unmount("vcs-box");
     }
 }

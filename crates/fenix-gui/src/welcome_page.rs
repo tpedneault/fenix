@@ -75,6 +75,8 @@ pub enum Action {
     Tutorial,
     KeysPage,
     OpenProject,
+    /// Another editor's settings, brought over (`settings.import`).
+    Import,
 }
 
 impl WelcomePage {
@@ -100,6 +102,7 @@ impl WelcomePage {
 
     fn step_key(&mut self, key: Key) -> Action {
         match (self.step, key) {
+            (Step::Hello, Key::Char('i')) => Action::Import,
             (Step::Keys, Key::Char('v')) => Action::Keys("vim"),
             (Step::Keys, Key::Char('s')) => Action::Keys("standard"),
             (Step::Keys, Key::Up | Key::Down) => Action::Keys(if self.keys == "vim" { "standard" } else { "vim" }),
@@ -202,6 +205,7 @@ pub fn layout(page: &WelcomePage, cols: usize) -> Page {
                 line += 1;
             }
             line += 1;
+            line = choice(&mut g, line, left, width, "i", "Coming from VS Code, Vim or Neovim?", None, "Bring your settings and keys over: what would be written is shown first, and nothing is until you say so. SPC h i any time.", false) + 1;
             para(&mut g, &mut line, "Each choice is a setting, in use as you make it, and changed any time: SPC , opens the settings, and SPC h w brings this back.", Role::Muted);
         }
         Step::Keys => {
@@ -299,7 +303,9 @@ mod tests {
     #[test]
     fn each_step_s_keys_ask_for_its_choices() {
         let mut p = page();
+        assert_eq!(p.key(Key::Char('i')), Action::Import, "the first step offers to import");
         p.step = Step::Keys;
+        assert_eq!(p.key(Key::Char('i')), Action::None, "only there");
         assert_eq!(p.key(Key::Char('s')), Action::Keys("standard"));
         assert_eq!(p.key(Key::Down), Action::Keys("standard"), "the other one");
         assert_eq!(p.key(Key::Char('t')), Action::None, "not this step's");

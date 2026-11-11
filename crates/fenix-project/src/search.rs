@@ -228,6 +228,9 @@ pub fn search(
     cancel: &AtomicBool,
     mut found: impl FnMut(FileResult) -> ControlFlow<()>,
 ) -> Result<Summary, String> {
+    if let Some(remote) = search_remote(scope, pattern, options, unsaved, max_matches, cancel, &mut found) {
+        return remote;
+    }
     let matcher = RegexMatcherBuilder::new().line_terminator(Some(b'\n')).build(&pattern.source).map_err(|e| e.to_string())?;
     let mut searcher = SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(0))
@@ -313,6 +316,98 @@ pub fn search(
         }
     }
     Ok(summary)
+}
+
+/// `search` of a scope on a remote project's machine: the files there
+/// walked and searched by Fenix's helper there, with the same pattern,
+/// and the lines it finds made results here as a local search makes
+/// them -- so what's shown, and what a replace changes, is the same.
+/// Open buffers' text in the scope is searched here instead of their
+/// files. `None` for a scope on this machine.
+fn search_remote(
+    scope: &Scope,
+    pattern: &Pattern,
+    options: &Options,
+    unsaved: &HashMap<PathBuf, String>,
+    max_matches: usize,
+    cancel: &AtomicBool,
+    found: &mut impl FnMut(FileResult) -> ControlFlow<()>,
+) -> Option<Result<Summary, String>> {
+    let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) = match scope {
+        Scope::Folders(folders) => (folders.clone(), Vec::new()),
+        Scope::Files(files) => (Vec::new(), files.clone()),
+    };
+    if !folders.iter().chain(&files).next().is_some_and(|path| fenix_vfs::is_remote(path)) {
+        return None;
+    }
+    let mut summary = Summary::default();
+    let mut total = 0usize;
+    // Whether to go on, having handed `found` a file's results.
+    let mut hand = |result: FileResult, summary: &mut Summary, total: &mut usize| -> bool {
+        let count = result.match_count();
+        if count == 0 {
+            return true;
+        }
+        *total += count;
+        if found(result).is_break() {
+            return false;
+        }
+        if *total >= max_matches {
+            summary.truncated = true;
+            return false;
+        }
+        true
+    };
+
+    let in_scope = |path: &Path| files.iter().any(|file| file == path) || folders.iter().chain(&files).any(|folder| path.starts_with(folder));
+    let mut open: Vec<(&PathBuf, &String)> = unsaved.iter().filter(|(path, _)| fenix_vfs::is_remote(path) && in_scope(path)).collect();
+    open.sort();
+    for (path, text) in &open {
+        summary.files_searched += 1;
+        if !hand(search_text(path, text, pattern, options.context), &mut summary, &mut total) {
+            return Some(Ok(summary));
+        }
+    }
+
+    let paths = fenix_vfs::SearchPaths { folders, files, skip: open.iter().map(|(path, _)| (*path).clone()).collect() };
+    let query = fenix_vfs::Search { pattern: &pattern.source, hidden: options.hidden, globs: &options.globs, context: options.context, ..fenix_vfs::Search::default() };
+    // A file's lines may come in several pieces, one after another: each
+    // is gathered until the next file starts.
+    let mut gathering: Option<(PathBuf, Collect)> = None;
+    let mut stopped = false;
+    let searched = fenix_vfs::search(&paths, query, &mut |piece| {
+        if cancel.load(Ordering::Relaxed) {
+            summary.cancelled = true;
+            stopped = true;
+            return false;
+        }
+        let Some((path, lines)) = piece else { return true };
+        if gathering.as_ref().is_some_and(|(now, _)| *now != path) {
+            let (done, collect) = gathering.take().expect("just looked");
+            if !hand(FileResult { path: done, lines: trim_context(collect.lines) }, &mut summary, &mut total) {
+                stopped = true;
+                return false;
+            }
+        }
+        let (_, collect) = gathering.get_or_insert_with(|| (path, Collect { pattern, lines: Vec::new(), binary: false }));
+        for line in lines {
+            collect.push(Some(line.number), line.text.as_bytes(), line.matched);
+        }
+        true
+    })?;
+    match searched {
+        Ok(searched) => {
+            summary.files_searched += searched.files_searched;
+            summary.binary_skipped += searched.binary_skipped;
+            if let Some((path, collect)) = gathering {
+                hand(FileResult { path, lines: trim_context(collect.lines) }, &mut summary, &mut total);
+            }
+            Some(Ok(summary))
+        }
+        // Stopped here, by a cancel or a full list: how far it got.
+        Err(_) if stopped => Some(Ok(summary)),
+        Err(error) => Some(Err(error.to_string())),
+    }
 }
 
 /// Text in memory searched as a file would be -- an open buffer's.
@@ -604,5 +699,47 @@ mod tests {
         let literal = Pattern::new("helper", &opts()).unwrap();
         assert_eq!(replace("helper Helper HELPER", &literal, "assist", true, &|_| false).0, "assist Assist ASSIST");
         assert_eq!(replace("a $1", &Pattern::new("a", &opts()).unwrap(), "$1", false, &|_| false).0, "$1 $1", "literal text is literal");
+    }
+
+    /// A remote project's search runs on its machine (the real helper,
+    /// in this process here) and gives what a local one gives.
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_folder_is_searched_on_its_machine_as_a_local_one_is() {
+        let _machine = fenix_ssh::testing::Loopback::mount("search-box").unwrap();
+        let dir = TempDir::new("search_remote");
+        dir.write(".gitignore", "target/\n");
+        dir.write("a.rs", "fn helper() {}\nlet x = 1;\nhelper();\n");
+        dir.write("b.rs", "nothing here\n");
+        dir.write("open.rs", "on disk\n");
+        dir.write("target/built.rs", "helper\n");
+        let remote = |path: &Path| fenix_vfs::remote("search-box", &path.to_string_lossy());
+        let root = remote(dir.path());
+        let options = Options { context: 1, ..opts() };
+        let (local, local_summary) = run(&Scope::Folders(vec![dir.path().to_path_buf()]), "helper", &options);
+        let (there, summary) = run(&Scope::Folders(vec![root.clone()]), "helper", &options);
+        assert_eq!(there.len(), 1);
+        assert_eq!(there[0].path, remote(&dir.path().join("a.rs")));
+        assert_eq!(there[0].lines, local[0].lines, "the same lines, matches and context");
+        assert_eq!(summary.files_searched, local_summary.files_searched);
+
+        // An open buffer's text, not its file's.
+        let pattern = Pattern::new("helper", &opts()).unwrap();
+        let unsaved = HashMap::from([(remote(&dir.path().join("open.rs")), "a helper typed\n".to_string())]);
+        let mut found = Vec::new();
+        search(&Scope::Folders(vec![root.clone()]), &pattern, &opts(), &unsaved, 1000, &AtomicBool::new(false), |file| {
+            found.push(file.path);
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        found.sort();
+        assert_eq!(found, [remote(&dir.path().join("a.rs")), remote(&dir.path().join("open.rs"))]);
+
+        // A cap stops it, and says so.
+        let summary = search(&Scope::Folders(vec![root]), &pattern, &opts(), &HashMap::new(), 1, &AtomicBool::new(false), |_| ControlFlow::Continue(())).unwrap();
+        assert!(summary.truncated);
+        // Files named alone.
+        let (named, _) = run(&Scope::Files(vec![remote(&dir.path().join("b.rs"))]), "nothing", &opts());
+        assert_eq!(named.len(), 1);
     }
 }

@@ -26,12 +26,43 @@ its extension. The rest is built into Fenix.
 - **Your own keys**: `keybindings.toml`'s `[[leader]]` and `[[keys]]`
   entries rebind or unbind any leader key or chord (Ctrl+S included), for
   either scheme or both; the palette's `Tab` binds the command picked.
+- **Keymap flavours**: an extension of data alone can lay a set of
+  chords over standard keys -- the store's JetBrains keys does -- between
+  Fenix's and yours; an F-key it (or you) binds goes to that binding
+  rather than the debugger. `SPC h ?` says whose each chord is.
+- **Bringing your settings over** (`SPC h i`, or the welcome's first
+  step): VS Code's `settings.json` and `keybindings.json` (and
+  VSCodium's, Cursor's, Windsurf's...), a Neovim `init.lua` or
+  `init.vim`, or a `.vimrc`, read into what Fenix would write -- font,
+  theme, indent, wrap, line numbers, format on save, the key scheme and
+  more, and key bindings whose commands Fenix has -- shown first, with
+  what it has nothing for and why. Nothing is written until you say so,
+  and your own settings stay unless you ask for them to be replaced.
+  Vim and Neovim configs are read, never run: plain options, the colour
+  scheme and maps of one chord to one command. See
+  [Coming from another editor](COMING_FROM.md).
+- **Line numbers** as you like them: `editor.line_numbers` (absolute,
+  relative or off) when Fenix starts; `SPC t n` cycles them.
 
-- **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace/Command
-  modes, the standard motion set (`h j k l w b e 0 ^ $ gg G f F t T ; , % { }`),
-  operators (`d c y` composing with motions and text objects, plus the
-  doubled `dd`/`cc`/`yy` forms), `iw`/`aw` text objects, numeric counts
-  (`3dw`, `2dd`, ...), yank/paste mirrored onto the OS clipboard (the
+- **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace (`R`)/Command
+  modes, the standard motion set (`h j k l w b e ge gE 0 ^ $ g_ | + - _
+  Enter gg G H M L f F t T ; , % { } ( )`), with `j`/`k`, `+`/`-`, `G`
+  and `H`/`M`/`L` taking whole lines to an operator as in Vim (`dj`
+  deletes two lines), operators (`d c y`, `gU gu g~ g?` for case and
+  rot13, `gq`/`gw` to wrap lines at the text width -- `:set tw=N`, 79
+  without -- keeping a comment's leader and a list item's indent, `> <`
+  to indent, `!` to filter lines through a command, all composing with
+  motions, text objects, searches (`d/foo<CR>`, `dn`, `d*`) and marks
+  (`d'a`, `` y`a ``), plus the doubled `dd`/`cc`/`yy`/`gUU`/`g??`/`gqq`/`>>`/`!!`
+  forms), `J`/`gJ`, `U` (every change on the last changed line, back),
+  `gi`/`gI`, `iw`/`aw` text objects, numeric counts (`3dw`, `2dd`,
+  `3ifoo<Esc>`, `2.` -- a count on `.` takes the place of the change's
+  own), Insert's `Ctrl-W`, `Ctrl-U`, `Ctrl-H`, `Ctrl-R {register}`
+  (`"`, `a`-`z`, `0`, `.`, `/`, `:`, and `+`/`*` the clipboard),
+  `Ctrl-T`/`Ctrl-D` and `Ctrl-O`; Visual `Ctrl-A`/`Ctrl-X` and `g Ctrl-A`
+  for a sequence. A suite of cases checked against real Vim holds them
+  to its behaviour; [Differences from Vim](VIM_DIFFERENCES.md) lists
+  where Fenix does otherwise. Yank/paste mirrored onto the OS clipboard (the
   unnamed register only -- `y`/`d`/`c` push to it, `p`/`P` pull from it
   first, so copying in Fenix and pasting elsewhere -- or vice versa --
   just works; in Visual mode `p` replaces the selection with it, leaving
@@ -57,6 +88,14 @@ its extension. The rest is built into Fenix.
   stops at the end of `testing` -- `:set iskeyword+=X`/`iskeyword=X,Y`
   add to or replace the set outright. Persisted across restarts the
   same way `shiftwidth` already is.
+- **`.editorconfig`**: a repository's `.editorconfig` sets the focused
+  file's indent (spaces or tabs, how wide) and tab width as you move
+  between files, and on save its line endings, charset, trailing
+  whitespace and final newline -- one undo step. Sections, `root = true`
+  and the specification's globs are honoured; a project's
+  `.fenix/settings.toml` comes before it and your own settings after.
+  `SPC f c` shows what applies and from where. See
+  [CONFIGURATION.md](CONFIGURATION.md#editorconfig).
 - **Macros** (`q{a-zA-Z}` to record, a second bare `q` to stop, `@
   {register}` to replay, `@@` to repeat whichever was last played,
   `3@a`-style count prefix): real Vim's own model, not a separate
@@ -80,8 +119,9 @@ its extension. The rest is built into Fenix.
   split): named position bookmarks that work across files, unlike real
   Vim's lowercase-is-buffer-local/uppercase-is-global distinction, which
   Fenix doesn't replicate -- every mark can jump to wherever it was set,
-  any file. Not composable with operators (no `` d`a `` / `d'a`) --
-  jump-only.
+  any file. An operator takes the focused buffer's marks as its target
+  (`d'a` by lines, `` y`a `` exactly), and ``` `` ``` / `''` go back to
+  where the last jump left.
 - **`SPC`-leader menu** with a live which-key popup showing available
   continuations as you type a sequence -- reachable from Visual mode as
   well as Normal, so e.g. `SPC c f` (indent the selection) can act on an
@@ -202,6 +242,23 @@ its extension. The rest is built into Fenix.
     `syntax.macro`; every built-in theme does.
   - `lsp.semantic_highlighting_off` lists languages that keep the
     grammar's colours alone.
+- **Inlay hints** (`SPC t i`, `lsp.inlay_hints`, on): where a file's
+  language server offers them, what it would write into the code without
+  it being there -- a variable's type after its name (`: Vec<String>`),
+  a parameter's name before an argument (`count:`) -- drawn dimmed in the
+  line. They take room as the debugger's values do, so the caret, extra
+  carets, Visual selections and soft wrap all go by where the text is
+  drawn, and nothing of them is ever in the file, copied or searched.
+  - Only the first of a file's servers that offers them is asked, for
+    the lines in view and a margin around them: again when the view
+    moves past those, about a third of a second after typing pauses, and
+    when the server says they changed. Until then they move with your
+    typing: a type stays after the name, a parameter's name before the
+    argument you type into.
+  - A label is cut at 48 characters; a hint's tooltip and its edits
+    aren't shown.
+  - `lsp.inlay_hints_off` lists languages that show none; `SPC t i`
+    turns them all off or on again (saved).
 - **Code lens** (`lsp.code_lens`, off for now): what a file's language
   servers offer for a function, a test or a type, on a dimmed row of its
   own above it ("▶ Run | Debug", "3 references"). A click on one runs
@@ -273,9 +330,34 @@ its extension. The rest is built into Fenix.
   machine the first time (Linux, x86_64 or aarch64; no administrator
   rights). It runs as you, only while connected, and listens on nothing.
 
-  Not there yet on a remote project: terminals, Git, search, language
-  servers, tasks, the debugger and agents. Files that aren't text open
-  as text.
+  Terminals, Git and search work there too, by the same keys as for a
+  local project:
+
+  - A terminal (`SPC o t`, `SPC o T`) opened in a remote project is a
+    shell on that machine, in the project's folder: your own login
+    shell there, in a terminal of its own (`TERM=xterm-256color`), at
+    the pane's size, with your login profile's `PATH`. It goes over the
+    connection already open, so it asks nothing and starts at once.
+    Closing it hangs it up, as closing any terminal does: what you
+    started in it ends with it (a program started with `nohup`, or that
+    starts a session of its own, keeps going). `terminal.shell` names a
+    shell on this machine, so it isn't used there.
+  - Git is the machine's own `git`, run there in the repository: the
+    status page (`SPC g g`), staging and committing, diffs and the
+    gutter's marks, the log, branches, stashes, rebases and the
+    operation log, and the explorer's badges. Fetch, pull and push use
+    the machine's credentials and config; nothing of yours goes there,
+    and a remote that would ask for a password fails and says so rather
+    than wait.
+  - The Search page (`SPC /`, `SPC p s`, `SPC s s`) searches on the
+    machine, with Fenix's own search engine (ripgrep's): the machine
+    needs no `rg`, and only the matches come over the network. Open
+    files are searched as they are here, unsaved edits and all. A
+    replace writes the files there; `SPC s u` undoes it. `SPC s T`
+    lists the project's TODOs the same way.
+
+  Not there yet on a remote project: language servers, tasks, the
+  debugger and agents. Files that aren't text open as text.
 
   What a preview means for trust, so you can decide where to use it:
 
@@ -819,6 +901,32 @@ its extension. The rest is built into Fenix.
   the same geometry at runtime, and the committed `fenix.ico` and
   `docs/brand/*.png` are regenerated with `cargo run -p fenix-brand
   --example write-icon` -- a test fails if they drift.
+- **Accessibility.**
+  - *Text that comes without a key.* Dictation, the on-screen
+    keyboard, password managers' auto-type and automation tools often
+    send text as characters rather than key presses (on Windows,
+    `SendInput` with `KEYEVENTF_UNICODE`); it's typed wherever typing
+    goes -- a buffer in Insert, a prompt, a picker, a terminal -- and in
+    Normal it's keys like any other. Text an input method commits is
+    typed the same way.
+  - *Right-to-left text.* A line in Hebrew or Arabic, or mixing them
+    with left-to-right text, is laid out left to right from the gutter,
+    as every line is, with its right-to-left runs reordered and shaped
+    so they read correctly; its line number stays. The caret, the
+    selection, search matches and a click go by the characters as
+    drawn: a block caret is on the letter it's on, a bar in Insert at
+    the edge you'd type at. Motions, edits and column numbers still go
+    by the text's own (logical) order, and a whole right-to-left
+    paragraph isn't right-aligned: Fenix has no right-to-left mode.
+  - *Screen readers.* Fenix tells a screen reader (Narrator, NVDA,
+    JAWS, Orca, VoiceOver) about the text you're in: its lines around
+    the cursor, the cursor and the selection, so moving reads the line,
+    word or character you land on; a prompt (`:`, `/`, a rename) as you
+    type in it; the modeline; and each change of mode and each message
+    as it comes, errors at once. Nothing is worked out until a screen
+    reader asks. Pickers, which-key, the terminal and the other panes
+    come next -- see [the plan](plans/screen-reader.md).
+    `accessibility.screen_reader` (on) turns it off, from the next start.
 
 ## Containers
 
@@ -1557,9 +1665,11 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   blades lighting in turn; the mode colour blends between modes; the
   active tab's accent slides to the next tab; sideways scrolling eases;
   a theme change cross-fades. The caret blinks for 30 seconds after the
-  last key or click, then stays lit, so an idle window draws nothing; an
+  last key or click, then stays lit, so an idle window draws nothing --
+  nor does a look at the disk, or at Git, that finds nothing new, and
+  the extensions' deadline clock sleeps while none of their code runs; an
   extension's layer that moves (a pet walking) is drawn at most 30 times
-  a second. `full` adds the caret gliding along a
+  a second. `fenix/state`'s `stats` counts frames and wake-ups, to check. `full` adds the caret gliding along a
   motion, unfolded rows opening downwards, and panes moving to a split
   or close. Popups get rounded corners and soft shadows; problems from
   language servers are underlined with a wave, with the cursor line's
@@ -1580,14 +1690,33 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   session for it is running right now, and, for anything missing, the
   one-line command that installs it (`rustup component add
   rust-analyzer`, `uv tool install pyright`, `npm install -g
-  typescript-language-server typescript`, ...). Detect and guide only --
-  Fenix never downloads or manages a tool binary itself, the same
-  posture the debugger bullet above already takes for adapters it
-  doesn't have. A language server that failed -- couldn't start, crashed,
+  typescript-language-server typescript`, ...) -- the same one the
+  doctor (`SPC p h`) offers as its fix. A language server that failed -- couldn't start, crashed,
   or didn't answer `initialize` within 30 seconds -- is listed with why
   and the last lines it wrote to stderr, until `:lsp-restart` tries it
   again. A server is looked for and started on a thread of its own, so a
   slow `PATH` or a server slow to start never holds up the window.
+- **Installing a missing language server**: opening a file whose
+  built-in server (pyright, rust-analyzer, clangd, bash-language-server,
+  typescript-language-server, gopls, lua-language-server) isn't installed
+  brings a notice, once a session, saying so and with the command that
+  installs it. `SPC l i` (`lsp.install`), or the notice's action
+  (`SPC o .`), shows that exact command and asks; `y` runs it in Task
+  Output, where you watch it, and once it succeeds the server starts for
+  the files that wanted it. Nothing is installed without that `y`. The
+  commands need no administrator rights: `rustup component add
+  rust-analyzer`, `uv tool install pyright` (else `npm install -g
+  pyright`), `npm install -g` for the Bash and TypeScript servers, `go
+  install golang.org/x/tools/gopls@latest`, and on Windows `winget` for
+  clangd (LLVM) and lua-language-server. Where the installer isn't
+  there, or no install exists that Fenix would run for you (clangd and
+  lua-language-server on Linux come from your distribution, with
+  `sudo`), the notice says what to do and links to it. A server an
+  installer put somewhere not yet on Fenix's `PATH` (`~/.cargo/bin`,
+  `~/go/bin`, uv's, npm's or winget's folder) is started from there.
+  `lsp.offer_install` (on) turns the notice off; `SPC l i` still works.
+  A server you named yourself (`[lsp]`, `.fenix/tools.json`) is never
+  offered.
 - **Symbol picker**: with the Tcl extension, `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -1931,10 +2060,16 @@ An extension installed, switched on or off, or removed is put in use
 at once, in the running editor: its code starts or stops (its pages,
 language servers, tasks and checks with it), and its commands, keys,
 snippets, templates and launches come and go. Only its themes and
-languages wait for the next start, and the Extensions page says so.
+languages wait for the next start, and the Extensions page says so. One
+installed from a terminal (`fenix --install-extension`) is noticed and
+put in use the same way within a few seconds. An extension's setting it
+reads only as it starts (its manifest says `restart = true`) starts that
+extension again when it's changed, in the running editor, and the
+settings page says so. Those that start with Fenix load once the
+window has drawn, so they don't hold it up.
 `SPC q r` restarts Fenix where you are -- the session, unsaved text
-included, comes back -- for those, and for a setting only read at start
-(the settings page marks it).
+included, comes back -- for themes and languages, and for a setting of
+Fenix's own only read at start (the settings page marks it).
 `:lsp-restart` reloads language services for the current project;
 `:lsp-restart NAME` restarts one server. Task rerun history is per project; debugger
 and task controls guard against operating on another project's active process.

@@ -513,6 +513,87 @@ mod tests {
         assert_eq!(app.remote.reopen, [fenix_vfs::remote("another-box", "/x")], "another machine's wait for it");
     }
 
+    /// A terminal opened in a remote project is on its machine (the real
+    /// helper, in this process); one opened in a local project is here.
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_projects_terminal_runs_on_its_machine() {
+        let _machine = fenix_ssh::testing::Loopback::mount("term-app-box").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.project_root = Some(fenix_vfs::remote("term-app-box", &dir.path().to_string_lossy()));
+        app.open_terminal_buffer();
+        let id = app.focused_buffer_id();
+        let state = app.terminal_buffers.get(&id).expect("a terminal opened");
+        assert!(state.session.is_remote(), "{}", app.modeline_pieces().1);
+        assert_eq!(state.session.start_dir(), app.project_root.as_deref());
+        // The panel too.
+        app.toggle_terminal();
+        assert!(app.terminal.as_ref().expect("the panel's terminal").session.is_remote());
+
+        let mut local = App::with_file(None);
+        local.project_root = Some(dir.path().to_path_buf());
+        local.open_terminal_buffer();
+        let id = local.focused_buffer_id();
+        assert!(!local.terminal_buffers.get(&id).expect("a terminal opened").session.is_remote(), "a local project's terminal is local");
+    }
+
+    /// Against a real machine, over the system's `ssh`: a project there
+    /// gets its terminal, Git and search. Run by hand, as
+    /// dev/remote-ssh/README.md says: `FENIX_REMOTE_TEST` is
+    /// `user@host /path/to/a/git/repository`, `FENIX_REMOTE_TEST_SSH`
+    /// the `ssh` options, `FENIX_REMOTE_TEST_HELPERS` where the helpers
+    /// are (`packaging/build-remote-helpers.sh`'s `remote/`).
+    #[test]
+    #[ignore = "needs a machine to connect to: see dev/remote-ssh/README.md"]
+    fn a_real_machines_project_has_its_terminal_git_and_search() {
+        let Ok(test) = std::env::var("FENIX_REMOTE_TEST") else { return };
+        let (host, dir) = test.split_once(' ').expect("FENIX_REMOTE_TEST is `user@host /path`");
+        let options = std::env::var("FENIX_REMOTE_TEST_SSH").unwrap_or_default().split_whitespace().map(str::to_string).collect();
+        let helpers = fenix_ssh::Helpers { folder: std::env::var("FENIX_REMOTE_TEST_HELPERS").unwrap_or_else(|_| "target/remote-check/remote".into()).into() };
+        let target = fenix_ssh::Target { options, ..fenix_ssh::Target::new(host.to_string()) };
+        let machine = fenix_ssh::Host::connect("real-box", target, helpers, |_| None).expect("connected");
+        let root = fenix_vfs::remote("real-box", dir);
+        let mut app = App::with_file(None);
+        app.remote.hosts.insert("real-box".into(), machine.clone());
+        app.remote.statuses.insert("real-box".into(), fenix_ssh::Status::Connected);
+
+        // Git: the repository found there, its status read there, and a
+        // change made here seen by it.
+        let file = fenix_vfs::join(&root, "README.md");
+        app.open_project(root.clone(), Some(file.clone()), false);
+        let before = app.open().buffer.text();
+        app.test_insert_str("an edit\n");
+        app.save();
+        assert_eq!(fenix_project::vcs::repository_root(&file), Some(root.clone()));
+        assert!(fenix_git::list_files(&root).iter().any(|f| f.path == "README.md"), "git there sees the edit");
+        app.open_git_status();
+        let page = app.focused_buffer_id();
+        assert!(matches!(app.pages.get(&page).map(|s| &s.model), Some(PageModel::Git(g)) if g.root == root), "{}", app.modeline_pieces().1);
+        assert_eq!(fenix_git::status(&root).map(|s| s.branch).as_deref(), Some("main"));
+
+        // Search, by the helper's engine.
+        app.search_open(crate::app::search_host::SearchOpen::Project);
+        let id = app.search_page_id().unwrap();
+        for c in "an edit".chars() {
+            let action = app.search_page_mut(id).unwrap().key(crate::page::Key::Char(c));
+            app.search_action(id, action);
+        }
+        app.search_fire_due(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let found: Vec<PathBuf> = app.search_page(id).unwrap().files.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(found, std::slice::from_ref(&file), "{:?}", app.search_page(id).unwrap().status);
+
+        // A terminal, there.
+        app.open_terminal_buffer();
+        let terminal = app.focused_buffer_id();
+        let state = app.terminal_buffers.get_mut(&terminal).expect("a terminal opened");
+        assert!(state.session.is_remote() && state.session.is_alive());
+
+        // Put back as it was.
+        fenix_vfs::write(&file, before.as_bytes(), fenix_vfs::Over::Anything).unwrap();
+        app.remote_close_all();
+    }
+
     #[test]
     fn a_name_that_is_no_machine_is_refused() {
         let mut app = App::with_file(None);

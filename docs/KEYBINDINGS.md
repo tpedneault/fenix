@@ -18,6 +18,48 @@ A `:` command that doesn't exist says so. `:s` and `:g` take Vim's patterns:
 `\(`, `\|` and `\+` are operators and bare `(`, `|` and `+` are literal, or
 the other way round after `\v`.
 
+## Vim's editing keys
+
+Vim's motions, operators, text objects, registers, counts, `.` and macros
+work as in Vim; [Differences from Vim](VIM_DIFFERENCES.md) lists what
+Fenix does otherwise. Among them:
+
+| Keys | |
+|---|---|
+| `ge` `gE` | Back to the end of the previous word, WORD |
+| `g_` | The line's last non-blank (a count: lines down) |
+| `\|` | To the column the count names |
+| `+` `Enter` / `-` / `_` | The first non-blank of the next line / the one before / `count - 1` lines down |
+| `(` `)` | The start of this sentence, the next |
+| `H` `M` `L` | The pane's top, middle and bottom line (a count: lines in from the edge) |
+| `gU` `gu` `g~` `g?` {motion} | Upper case, lower case, case toggled, rot13 -- doubled (`gUU`, `g??`) for the line |
+| `gq` / `gw` {motion} | Wrap the lines at the text width (`:set tw=N`, 79 without); `gw` keeps the cursor on its text |
+| `>` `<` {motion} | Indent, dedent the lines (`>ip`, `>>`) |
+| `!` {motion} | Filter the lines through a command: the command line opens on them (`:.,.+2!`) |
+| `J` / `gJ` | Join lines with a space / as they are |
+| `R` | Replace mode: typing overwrites, Backspace puts back what was there |
+| `U` | Every change on the last changed line, back |
+| `gi` / `gI` | Insert where Insert was last left / at column 1 |
+| `d/foo<CR>` `dn` `d*` `d'a` `` d`a `` | An operator up to a search's match, or a mark |
+| ``` `` ``` `''` | Back to where the last jump left |
+| `3.` | Repeat the last change with a count of 3 in place of its own |
+| Visual `Ctrl-A` / `g Ctrl-A` | Add the count to each line's number / 1, 2, 3... times it |
+
+In Insert:
+
+| Keys | |
+|---|---|
+| `Ctrl-W` | Delete the word before the cursor |
+| `Ctrl-U` | Delete back to the indent, then to the line's start |
+| `Ctrl-H` | Backspace |
+| `Ctrl-R {register}` | Put a register in: `"`, `a`-`z`, `0`, `.` (the last text typed), `/` (the last search), `:` (the last command), `+` and `*` (the clipboard) |
+| `Ctrl-T` `Ctrl-D` | Indent, dedent the line |
+| `Ctrl-O` | One Normal command, then back |
+
+Wrapping, case and joining are commands too, for either key scheme:
+`edit.wrap_lines`, `edit.upper_case`, `edit.lower_case`, `edit.join_lines`
+(in the palette).
+
 ## Standard keys
 
 With `editor.keys = "standard"`. A file's text is typed into at once and
@@ -155,7 +197,9 @@ is the F-keys. `SPC h ?` (`Ctrl+K h ?`) lists the keys in use on a page;
 The bracket keys are where a US keyboard has them; on another layout,
 bind the commands (`nav.matching_bracket`, `code.fold`, `code.unfold`,
 `edit.indent_lines`, `edit.outdent_lines`) in `keybindings.toml`. The
-F-keys are the debugger's in every mode with either keys.
+F-keys are the debugger's in every mode with either keys, unless your
+`keybindings.toml` or a keymap extension binds one (`F9` to
+`debug.start_or_continue`, say): then it's that binding's.
 
 Not in standard keys: the `:` command line, `.` and macros (they're Vim
 keys'; the palette has the commands).
@@ -186,6 +230,7 @@ keys'; the palette has the commands).
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |
 | `SPC f R` | Rename the current file on disk |
+| `SPC f c` | What `.editorconfig` says of this file (indent, line endings, whitespace), and from which files |
 | `SPC f D` | Delete the current file (with confirmation) |
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |
@@ -198,6 +243,7 @@ keys'; the palette has the commands).
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Cycle motion: off, subtle, full |
 | `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
+| `SPC t i` | Inlay hints on or off: types and parameter names from language servers, dimmed in the line |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC t k` | Vim keys or standard keys (`editor.keys`) |
 | `SPC e e` | Open the file explorer here |
@@ -228,7 +274,7 @@ keys'; the palette has the commands).
 | `SPC p ,` | Project settings |
 | `SPC p a` / `SPC p d` | Add / remove a project from the known-projects list |
 | `SPC p y` | Look at the programs this project names (`.fenix/tools.json`) and allow or refuse them |
-| `SPC p R` | A project on another machine, over SSH: pick a host of `~/.ssh/config` or type `user@host`, then `S` on its folder |
+| `SPC p R` | A project on another machine, over SSH: pick a host of `~/.ssh/config` or type `user@host`, then `S` on its folder. Its terminals, Git and search are that machine's, by the same keys |
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |
@@ -256,6 +302,7 @@ keys'; the palette has the commands).
 | F9 / F10 / F11 / Shift-F11 | Breakpoint / step over / in / out, in every mode |
 | `n` `s` `o` `c` `r` in DEBUG | Step over / in / out, continue, run to the cursor; Esc goes back to Normal, still stopped |
 | `SPC l m` | Show LSP/DAP tool status (found on PATH, running, install hints) |
+| `SPC l i` | Install this file's missing language server: shows the command, `y` runs it in Task Output |
 | `SPC s s` | Search this file, or the selection, on the Search page (a buffer that isn't a file: find a line) |
 | `SPC s t` | List the TODO/FIXME/NOTE-style comments in the current buffer |
 | `SPC s T` | List the TODO-style comments across the project (also becomes the quickfix list) |
@@ -287,6 +334,7 @@ keys'; the palette has the commands).
 | `SPC ] f` | Open the file named under the cursor, as `gf` |
 | `SPC C-i` | Hover, as `K` (standard keys' `Ctrl+K Ctrl+I`) |
 | `SPC h x` / `SPC h w` | The Extensions page / the welcome (keys, look, packs, where to learn) |
+| `SPC h i` | Bring your settings and keys over from VS Code, Vim or Neovim: what would be written is shown first ([Coming from another editor](COMING_FROM.md#bringing-your-settings-over)) |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |
 | `SPC h b` / `SPC h K` | The keys bound here / where keys disagree |
 | `SPC h e` / `SPC h l` | Your keybindings (`keybindings.toml`) / what the code extensions said |
@@ -678,6 +726,7 @@ Docker panel's own `s`/`S`/`R` already established.
 | `←` `→` / `Ctrl-←` `Ctrl-→` | Move the caret a character / a word |
 | `Home` `End` | To the start, the end |
 | `Backspace` `Delete` / `Ctrl-Backspace` `Ctrl-W` | Delete a character / the word before the caret |
+| `Ctrl-U` | Delete everything before the caret |
 | `Ctrl-O` | Browse for the path being typed (a path setting, a list of paths, the project's program and cwd) |
 | `Ctrl-V` | Paste at the caret |
 
@@ -1084,6 +1133,11 @@ scheme = "standard"     # vim, standard or any (the default)
 when = "text"           # anywhere (the default), text, typing, not_typing, page, terminal
 # context = "sql"       # only in a buffer of that SPC m menu
 ```
+
+`SPC h i` writes entries here from VS Code's `keybindings.json` or a
+Vim config's maps, after showing them; a keymap extension (JetBrains
+keys, in the store) lays a whole set of `[[keys]]` between Fenix's and
+yours. `SPC h ?` says whose each chord is.
 
 Keys are written as the key menu writes them: `C-` Ctrl, `M-` Alt, `s-`
 Super, `S-` Shift (`C-S-p`, `S-Down`, `M-Left`, `F12`, `<F2>`), `SPC` the

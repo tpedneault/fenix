@@ -46,6 +46,13 @@ impl App {
         let names: Vec<&str> = contexts.iter().map(|c| c.name()).collect();
         keymap::chord_map().lookup_in(key, &self.chord_context(), &names)
     }
+
+    /// Whether an F-key is bound by a chord here, ahead of the debugger's
+    /// own F5, F9, F10 and F11 (which Fenix's keymap leaves alone): your
+    /// `keybindings.toml`, or an extension's keymap -- a flavour's F9.
+    pub(crate) fn chord_takes_function_key(&self, key: KeyPress) -> bool {
+        key.is_function() && self.chord_command(key).is_some()
+    }
 }
 
 impl App {

@@ -38,6 +38,8 @@ pub enum Key {
     WordRight,
     /// While a field is typed (`Ctrl-Backspace`): the word before the caret.
     DeleteWordBack,
+    /// While a field is typed (`Ctrl-U`): everything before the caret.
+    DeleteToStart,
 }
 
 /// A colour role, resolved against the theme by `App`.
@@ -589,6 +591,10 @@ pub fn edit_line(text: &mut String, caret: &mut usize, key: Key) -> bool {
             text.replace_range(byte(from)..byte(at), "");
             *caret = from;
         }
+        Key::DeleteToStart => {
+            text.replace_range(..byte(at), "");
+            *caret = 0;
+        }
         Key::Delete => {
             if at < n {
                 text.remove(byte(at));
@@ -1138,6 +1144,14 @@ mod tests {
         assert_eq!(fit_tail("abc", 3), "abc");
         assert_eq!(fit_tail("abcd", 3), "…cd");
         assert_eq!(fit_tail("abcd", 0), "");
+    }
+
+    #[test]
+    fn ctrl_u_in_a_field_deletes_everything_before_the_caret() {
+        let mut text = "cargo build".to_string();
+        let mut caret = 6;
+        assert!(edit_line(&mut text, &mut caret, Key::DeleteToStart));
+        assert_eq!((text.as_str(), caret), ("build", 0));
     }
 
     #[test]

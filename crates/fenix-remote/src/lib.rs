@@ -11,6 +11,8 @@
 //! every answer, and every piece of a started program's output, carries
 //! the id of the request that asked.
 
+pub mod pty;
+pub mod search;
 pub mod server;
 
 use std::io::{self, Read, Write};
@@ -19,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 /// The protocol's version. Fenix and the helper are of one release, so
 /// this only has to catch a stale helper left running or misplaced.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// What the helper's first line starts with.
 pub const BANNER: &str = "FENIX-REMOTE ";
@@ -53,6 +55,8 @@ pub enum Kind {
     BodyEnd = 3,
     /// Stop: the program and everything it started, or the transfer.
     Kill = 4,
+    /// A terminal's new size: a JSON [`Size`].
+    Resize = 5,
     /// The answer, as JSON.
     Ok = 16,
     /// The request failed: a JSON [`Failure`].
@@ -66,6 +70,8 @@ pub enum Kind {
     Stderr = 20,
     /// A program ended: a JSON [`Exit`]. Always after its last output.
     Exit = 21,
+    /// What a search found so far: a JSON [`Found`].
+    Found = 22,
 }
 
 impl Kind {
@@ -75,12 +81,14 @@ impl Kind {
             2 => Kind::Body,
             3 => Kind::BodyEnd,
             4 => Kind::Kill,
+            5 => Kind::Resize,
             16 => Kind::Ok,
             17 => Kind::Err,
             18 => Kind::Bytes,
             19 => Kind::Stdout,
             20 => Kind::Stderr,
             21 => Kind::Exit,
+            22 => Kind::Found,
             _ => return None,
         })
     }
@@ -201,6 +209,98 @@ pub enum Request {
     /// Starts a program → `Stdout`/`Stderr` frames, then `Exit`. `Err`
     /// if it couldn't be started.
     Exec(Exec),
+    /// Starts a program in a terminal of its own (a pty) → `Stdout`
+    /// frames, then `Exit`. `Body` is what's typed, `Resize` a new size,
+    /// `Kill` ends it and all it started. `Err` if there's no terminal to
+    /// be had, or the program couldn't be started.
+    Pty(Pty),
+    /// Searches files for a regex → `Found` frames, file by file, then
+    /// `Ok` [`Searched`]. `Kill` stops it.
+    Search(Search),
+}
+
+/// A program to run in a terminal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Pty {
+    /// What to run; none for the user's own shell, as a login shell.
+    #[serde(default)]
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    pub size: Size,
+}
+
+/// A terminal's size, in characters.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Size {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+/// A search through files, as ripgrep does one: the folders walked with
+/// what `.gitignore` and the like leave out left out, unless `hidden`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Search {
+    /// Folders to walk.
+    #[serde(default)]
+    pub folders: Vec<String>,
+    /// Files to search whatever the ignore files say; a folder among
+    /// them is walked.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// The regex, as the `regex` crate reads it.
+    pub pattern: String,
+    /// Hidden files, and those the ignore files leave out, too.
+    #[serde(default)]
+    pub hidden: bool,
+    /// `*.rs` keeps only those, `!target` leaves those out.
+    #[serde(default)]
+    pub globs: Vec<String>,
+    /// Lines given around each match.
+    #[serde(default)]
+    pub context: usize,
+    /// Files not to search: Fenix searches what it has open itself.
+    #[serde(default)]
+    pub skip: Vec<String>,
+}
+
+/// What a search says as it goes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "found", rename_all = "snake_case")]
+pub enum Found {
+    /// Lines of one file, matches and the context around them, in
+    /// order. A file with many may come in several, one after another.
+    File { path: String, lines: Vec<FoundLine> },
+    /// Still searching: how many files so far. Sent when nothing else
+    /// has been for a while, so a search through a large tree with few
+    /// matches isn't taken for a machine that stopped answering.
+    Progress { searched: usize },
+}
+
+/// A line a search gives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FoundLine {
+    /// 1-based.
+    pub number: u64,
+    /// Without its line ending; a very long one is cut at [`LONGEST_LINE`].
+    pub text: String,
+    /// A match, or context around one.
+    pub matched: bool,
+}
+
+/// The longest line a search sends whole.
+pub const LONGEST_LINE: usize = 64 * 1024;
+
+/// How a search ended.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Searched {
+    pub files_searched: usize,
+    /// Files left out because they aren't text.
+    pub binary_skipped: usize,
 }
 
 /// A program to run.
@@ -290,12 +390,18 @@ mod tests {
     #[test]
     fn a_frame_survives_the_wire() {
         let frame = Frame::json(Kind::Request, 7, &Request::Read { path: "/etc/hosts".into() });
+        let pty = Frame::json(Kind::Request, 9, &Request::Pty(Pty { size: Size { rows: 24, cols: 80 }, ..Pty::default() }));
         let mut wire = Vec::new();
         frame.write(&mut wire).unwrap();
         Frame::new(Kind::Body, 8, vec![0u8, 255, 10]).write(&mut wire).unwrap();
+        pty.write(&mut wire).unwrap();
+        Frame::json(Kind::Resize, 9, &Size { rows: 30, cols: 100 }).write(&mut wire).unwrap();
         let mut input = wire.as_slice();
         assert_eq!(Frame::read(&mut input).unwrap(), Some(frame));
         assert_eq!(Frame::read(&mut input).unwrap().unwrap().payload, vec![0u8, 255, 10]);
+        assert_eq!(Frame::read(&mut input).unwrap(), Some(pty));
+        let resize = Frame::read(&mut input).unwrap().unwrap();
+        assert_eq!((resize.kind, serde_json::from_slice::<Size>(&resize.payload).unwrap()), (Kind::Resize, Size { rows: 30, cols: 100 }));
         assert_eq!(Frame::read(&mut input).unwrap(), None);
     }
 

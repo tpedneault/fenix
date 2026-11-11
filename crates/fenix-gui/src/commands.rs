@@ -103,6 +103,7 @@ impl CommandRegistry {
         registry.external("view.pick_theme", "Pick a theme by name", |app| app.picker_pick_theme());
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
+        registry.register("view.toggle_inlay_hints", "Inlay hints on or off: types and parameter names from language servers, dimmed in the line", |ctx| ctx.app.toggle_inlay_hints());
         registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
         registry.register("view.toggle_wrap", "Wrap long lines in the current buffer, or stop", |ctx| ctx.app.toggle_wrap());
         registry.register(
@@ -221,6 +222,7 @@ impl CommandRegistry {
         registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());
         registry.external("extensions.welcome", "Extension packs: extensions that go together, installed as one", |app| app.open_extension_packs());
         registry.external("help.welcome", "The welcome: how you edit, how Fenix looks, what to add, where to learn", |app| app.open_welcome_page());
+        registry.external("settings.import", "Bring your settings and keys over from VS Code, Vim or Neovim: what would be written is shown first", |app| app.open_import_page());
         registry.external("tutorial.open", "The tutorial: Fenix's keys, a lesson at a time, in a practice buffer", |app| app.open_tutorial());
         registry.external("extensions.output", "What the extensions that run code said, and why one stopped", |app| app.open_extension_output());
         registry.external("agents.panel", "A coding agent's thread beside your code: the project's last, or a new one (SPC a a)", |app| app.agents_open_panel());
@@ -325,6 +327,10 @@ impl CommandRegistry {
         registry.register("edit.new_line_below", "Open a line below the cursor's and type there (o)", |ctx| ctx.app.cmd_new_line(true));
         registry.register("edit.new_line_above", "Open a line above the cursor's and type there (O)", |ctx| ctx.app.cmd_new_line(false));
         registry.register("edit.select_line", "Select the cursor's line; again, the next one too (V)", |ctx| ctx.app.cmd_select_line());
+        registry.register("edit.wrap_lines", "Wrap the cursor's paragraph, or the selected lines, at the text width (gq, gw)", |ctx| ctx.app.cmd_wrap_lines());
+        registry.register("edit.upper_case", "The word at the cursor, or the selection, in upper case (gU)", |ctx| ctx.app.cmd_change_case(true));
+        registry.register("edit.lower_case", "The word at the cursor, or the selection, in lower case (gu)", |ctx| ctx.app.cmd_change_case(false));
+        registry.register("edit.join_lines", "Join the cursor's line and the next, or the selected lines (J)", |ctx| ctx.app.cmd_join_lines());
         registry.register("edit.indent_lines", "Indent the cursor's line, or the selected lines (>>)", |ctx| ctx.app.cmd_indent_lines(true));
         registry.register("edit.outdent_lines", "Dedent the cursor's line, or the selected lines (<<)", |ctx| ctx.app.cmd_indent_lines(false));
         registry.register("nav.matching_bracket", "Go to the bracket that pairs with the one at the cursor (%)", |ctx| ctx.app.cmd_matching_bracket());
@@ -342,6 +348,8 @@ impl CommandRegistry {
         registry.register("edit.sort_lines_numeric", "Sort the selected lines, or the buffer's, by the number in each (:sort n)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Numeric));
         registry.register("edit.sort_lines_unique", "Sort the selected lines, or the buffer's, dropping repeats (:sort u)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Unique));
         registry.register("lsp.restart", "Restart this project's language servers (:lsp-restart)", |ctx| ctx.app.restart_project_lsp(""));
+        registry.register("file.editorconfig", "What .editorconfig says of this file, and from which files", |ctx| ctx.app.cmd_show_editorconfig());
+        registry.register("lsp.install", "Install this file's language server: shows the command, runs it on y", |ctx| ctx.app.cmd_lsp_install());
         registry.register("nav.goto_line", "Go to a line, by its number", |ctx| ctx.app.start_goto_line_prompt());
         registry.register("nav.next_problem", "The next problem in the file (]d)", |ctx| ctx.app.jump_to_diagnostic(true, 1));
         registry.register("nav.prev_problem", "The previous problem in the file ([d)", |ctx| ctx.app.jump_to_diagnostic(false, 1));

@@ -380,6 +380,56 @@ impl VimState {
     }
 }
 
+impl VimState {
+    /// `edit.wrap_lines` with standard keys: the selection's lines, or the
+    /// cursor's paragraph, wrapped at the text width (Vim's `gw`); the
+    /// cursor stays on its text.
+    pub fn wrap_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let (first, last) = if self.mode == Mode::Visual {
+            let lines = self.standard_lines(buffer, cursor);
+            self.exit_visual_mode(cursor);
+            lines
+        } else {
+            let span = crate::textobject::span(buffer, cursor, crate::textobject::TextObject::InnerParagraph, &self.iskeyword_extra);
+            super::range_to_lines(buffer, &span)
+        };
+        self.format_lines(buffer, cursor, first, last, true);
+        self.enter_insert_here(buffer, cursor);
+    }
+
+    /// `edit.upper_case` / `edit.lower_case` with standard keys: the
+    /// selection, or the word at the cursor, in upper or lower case; the
+    /// selection kept.
+    pub fn change_case(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, upper: bool) {
+        let range = if self.mode == Mode::Visual {
+            self.visual_range(buffer, cursor).0
+        } else {
+            crate::textobject::span(buffer, cursor, crate::textobject::TextObject::InnerWord, &self.iskeyword_extra)
+        };
+        let text = buffer.text_range(range.start, range.end);
+        let changed = if upper { text.to_uppercase() } else { text.to_lowercase() };
+        if changed != text && changed.chars().count() == text.chars().count() {
+            let at = *cursor;
+            buffer.replace_range(cursor, range.start, range.end, &changed);
+            *cursor = at;
+        }
+    }
+
+    /// `edit.join_lines` with standard keys: the selection's lines, or the
+    /// cursor's and the next, joined with a space (Vim's `J`).
+    pub fn join_selected_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let (first, last) = self.standard_lines(buffer, cursor);
+        if self.mode == Mode::Visual {
+            self.exit_visual_mode(cursor);
+        }
+        cursor.char_idx = buffer.line_start_char(first);
+        for _ in 0..(last - first).max(1) {
+            self.join_lines(buffer, cursor, true);
+        }
+        self.enter_insert_here(buffer, cursor);
+    }
+}
+
 /// The movement a key is, if it's one.
 fn movement(key: KeyPress) -> Option<Move> {
     if key.mods.alt || key.mods.super_ {

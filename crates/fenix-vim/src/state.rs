@@ -149,11 +149,17 @@ pub enum VimEvent {
     /// folds.
     Fold(FoldCommand),
     /// `.` -- asks the host to replay whatever it last recorded as a
-    /// repeatable change. The host owns that capture (raw keystrokes
+    /// repeatable change; with `count` (`3.`), in place of the count it
+    /// was typed with (`with_count`). The host owns that capture (raw keystrokes
     /// since the last idle point that produced a real edit), the same
     /// reason it owns macro storage/replay (`MacroPlay`'s own doc
     /// comment) -- `fenix-vim` only ever sees one key at a time.
-    RepeatLastChange,
+    RepeatLastChange { count: Option<u32> },
+    /// `:{range}!command` (`!{motion}`, `!!`, Visual `!`) -- asks the host
+    /// to run `command` with lines `first..=last` (inclusive, from 0) on
+    /// its stdin and put what it writes in their place: this crate runs
+    /// no programs.
+    FilterLines { first: usize, last: usize, command: String },
     /// `gcc`/`gc{motion}` -- asks the host to toggle line-comments across
     /// `start_line..=end_line` (inclusive). Host-resolved since only it
     /// knows the buffer's language-specific comment token; `fenix-vim`
@@ -248,6 +254,58 @@ struct Register {
 enum PendingMark {
     Set,
     Jump { linewise: bool },
+    /// `d'a`, `` y`a ``: the mark ends an operator's range.
+    Operator { op: Operator, linewise: bool },
+    /// `'a` / `` `a `` in Visual: the cursor goes there.
+    Visual { linewise: bool },
+}
+
+/// Where a `/` or `?` search goes once Enter is pressed: an operator's
+/// range ends at the match (`d/foo`), or Visual is back with the cursor
+/// on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchTarget {
+    Operator(Operator),
+    Visual,
+}
+
+/// `keys` (what `.` replays) with `count` in place of the count it was
+/// typed with: Vim's `3.`. A leading count goes (after a `"x`), and one
+/// typed between the operator and its motion (`d3w`); `count` goes in
+/// front.
+pub fn with_count(keys: &[KeyPress], count: u32) -> Vec<KeyPress> {
+    let plain = |k: &KeyPress| k.mods == Mods::default();
+    let digit = |k: &KeyPress, first: bool| plain(k) && matches!(k.code, KeyCode::Char(c) if c.is_ascii_digit() && !(first && c == '0'));
+    let mut i = 0;
+    let mut out = Vec::new();
+    // A register first: `"a3dd`.
+    if keys.len() >= 2 && keys[0] == KeyPress::char('"') {
+        out.extend_from_slice(&keys[..2]);
+        i = 2;
+    }
+    let mut first = true;
+    while i < keys.len() && digit(&keys[i], first) {
+        i += 1;
+        first = false;
+    }
+    out.extend(count.to_string().chars().map(KeyPress::char));
+    // An operator's own count, after its keys: `d3w`, `gU2w`.
+    let op_len = match keys.get(i).map(|k| k.code) {
+        Some(KeyCode::Char('d' | 'c' | 'y' | '>' | '<' | '!')) => 1,
+        Some(KeyCode::Char('g')) if matches!(keys.get(i + 1).map(|k| k.code), Some(KeyCode::Char('U' | 'u' | '~' | '?' | 'q' | 'w'))) => 2,
+        _ => 0,
+    };
+    out.extend_from_slice(&keys[i..(i + op_len).min(keys.len())]);
+    i = (i + op_len).min(keys.len());
+    if op_len > 0 {
+        let mut first = true;
+        while i < keys.len() && digit(&keys[i], first) {
+            i += 1;
+            first = false;
+        }
+    }
+    out.extend_from_slice(&keys[i..]);
+    out
 }
 
 /// vim-surround/evil-surround's own three commands (`ys`/`ds`/`cs`),
@@ -303,6 +361,8 @@ struct BlockInsert {
     pad: bool,
     /// `$A`: at the end of each line, whatever its length.
     at_line_end: bool,
+    /// `A`: where the cursor goes once it's done -- the block's top-left.
+    land: Option<usize>,
 }
 
 /// `:s///c` asking about one match at a time.
@@ -424,7 +484,7 @@ pub struct VimState {
     /// Set by `.`; consumed by `handle_key` and turned into `VimEvent::
     /// RepeatLastChange` -- same drain-chain shape as `pending_scroll`,
     /// just with no payload to carry.
-    pending_repeat_last_change: bool,
+    pending_repeat_last_change: Option<Option<u32>>,
     /// `y`/`d`/`c` followed by `s` (`ys`/`ds`/`cs`) -- vim-surround's own
     /// pending-state machine, driving `ys{motion}{char}`, `ds{char}`,
     /// `cs{old}{new}`. `Copy`, so read via `if let Some(pending) = self.
@@ -502,6 +562,9 @@ pub struct VimState {
     /// sw=N` (see `substitute::run_ex_command`), persisted by the host
     /// app the same way it already persists the theme/font size.
     indent_width: usize,
+    /// A level is a tab, not `indent_width` spaces: the host's to say,
+    /// for a file whose `.editorconfig` has `indent_style = tab`.
+    indent_tabs: bool,
     /// Whether the next Enter in Insert mode indents a level more, by the
     /// language's own rules (a grammar's `indents.scm`), over and above
     /// the bracket before the cursor: the host's to say, just before.
@@ -521,6 +584,38 @@ pub struct VimState {
     /// (`set_screen_rows`), and the cell a run of moves by row keeps to.
     screen: std::sync::Arc<dyn crate::screen::ScreenRows>,
     row_goals: crate::screen::Goals,
+    /// The focused pane's first and last line, for `H`/`M`/`L`
+    /// (`set_viewport`); `None` for the whole buffer.
+    viewport: Option<(usize, usize)>,
+    /// The focused buffer's marks, as the host keeps them (`set_marks`),
+    /// and those set since: for `d'a`, `` y`a ``, `gi` and Visual's `'a`.
+    local_marks: HashMap<char, usize>,
+    /// Where the cursor was when Insert was last left, before Escape's
+    /// step back: the `^` mark, `gi`'s place.
+    last_insert_exit: Option<usize>,
+    /// What's been typed since Insert began, for the `.` register.
+    insert_typed: String,
+    /// Replace mode (`R`): the char each typed one overwrote (`None`
+    /// where it went past the line's end), for Backspace to put back.
+    replace_backup: Vec<Option<char>>,
+    /// `3R`: how many times what's typed goes in, in all.
+    replace_count: u32,
+    /// `3i`, `3o`: the same, for Insert, and how it was entered.
+    insert_count: u32,
+    insert_entry: InsertEntry,
+    /// `U`: the line the last changes were on, and its text before them.
+    line_undo: Option<(usize, String)>,
+    /// Set by `U` while it edits, so its own edit doesn't count as one.
+    undoing_line: bool,
+    /// `gq`'s width (`:set textwidth=N`).
+    text_width: usize,
+    /// `Ctrl-R` in Insert: the next key names the register to put in.
+    pending_insert_register: bool,
+    /// The last command line run, for the `:` register.
+    last_command: Option<String>,
+    /// An operator waiting on a `/` or `?` search for its range, and the
+    /// count it had; or Visual, to go back to once the search is done.
+    search_target: Option<SearchTarget>,
 
     normal_matcher: Matcher<'static, VimAction>,
     visual_matcher: Matcher<'static, VisualAction>,
@@ -569,7 +664,7 @@ impl VimState {
             pending_mark_jump: None,
             pending_scroll: None,
             pending_fold: None,
-            pending_repeat_last_change: false,
+            pending_repeat_last_change: None,
             pending_surround: None,
             command_line: String::new(),
             pending_find: None,
@@ -582,10 +677,25 @@ impl VimState {
             sub_confirm: None,
             last_visual_lines: None,
             indent_width: indent::DEFAULT_INDENT_WIDTH,
+            indent_tabs: false,
             syntax_indent: None,
             iskeyword_extra: crate::charclass::DEFAULT_ISKEYWORD_EXTRA.to_vec(),
             screen: std::sync::Arc::new(crate::screen::LineRows),
             row_goals: crate::screen::Goals::default(),
+            viewport: None,
+            local_marks: HashMap::new(),
+            last_insert_exit: None,
+            insert_typed: String::new(),
+            replace_backup: Vec::new(),
+            replace_count: 1,
+            insert_count: 1,
+            insert_entry: InsertEntry::Before,
+            line_undo: None,
+            undoing_line: false,
+            text_width: crate::format::DEFAULT_TEXT_WIDTH,
+            pending_insert_register: false,
+            last_command: None,
+            search_target: None,
             normal_matcher: keymaps::normal_trie().matcher(),
             visual_matcher: keymaps::visual_trie().matcher(),
             pending_matcher: keymaps::pending_trie().matcher(),
@@ -607,6 +717,25 @@ impl VimState {
     /// or not; `None` leaves it to the bracket before the cursor.
     pub fn set_syntax_indent(&mut self, indent: Option<bool>) {
         self.syntax_indent = indent;
+    }
+
+    /// Whether a level is a tab (`true`) or `indent_width` spaces: Tab,
+    /// `>>`, and the level Enter adds after an opening bracket.
+    pub fn set_indent_tabs(&mut self, tabs: bool) {
+        self.indent_tabs = tabs;
+    }
+
+    pub fn indent_tabs(&self) -> bool {
+        self.indent_tabs
+    }
+
+    /// One indent level, as typed.
+    fn indent_unit(&self) -> String {
+        if self.indent_tabs {
+            "\t".to_string()
+        } else {
+            " ".repeat(self.indent_width)
+        }
     }
 
     /// Sets the indent width directly -- used by the host app to apply a
@@ -940,6 +1069,8 @@ impl VimState {
         self.pending_surround = None;
         self.pending_visual_surround = false;
         self.pending_comment = false;
+        self.pending_insert_register = false;
+        self.search_target = None;
         self.normal_matcher.cancel();
         self.visual_matcher.cancel();
         self.pending_matcher.cancel();
@@ -1023,8 +1154,14 @@ impl VimState {
         self.screen = rows;
     }
 
+    /// The lines the focused pane shows, first and last, for `H`, `M`
+    /// and `L`: the host's to say before a key, as it says the rows.
+    pub fn set_viewport(&mut self, viewport: Option<(usize, usize)>) {
+        self.viewport = viewport;
+    }
+
     fn screen(&self) -> crate::screen::Screen<'_> {
-        crate::screen::Screen { rows: &*self.screen, goals: &self.row_goals }
+        crate::screen::Screen { rows: &*self.screen, goals: &self.row_goals, viewport: self.viewport }
     }
 
     /// A key is coming, for every cursor at once: the cells the last
@@ -1129,6 +1266,11 @@ impl VimState {
             self.note_visual_lines(buffer, cursor);
         }
         let one_shot_from = self.one_shot_from;
+        let was_inserting = self.is_inserting();
+        if !was_inserting {
+            self.insert_count = 1;
+        }
+        let line_before = self.line_undo_snapshot(buffer, cursor);
         let event = match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
             Mode::Replace => self.handle_insert_key(buffer, cursor, key, true),
@@ -1138,6 +1280,11 @@ impl VimState {
             Mode::Search => self.handle_search_key(buffer, cursor, key),
         };
         buffer.end_undo_group();
+        if !was_inserting && self.is_inserting() {
+            self.insert_typed.clear();
+            self.replace_backup.clear();
+        }
+        self.note_line_undo(buffer, line_before);
         if let Some(from) = one_shot_from {
             if matches!(self.mode, Mode::Insert | Mode::Replace) {
                 // The command went into Insert itself (`o`, `cw`).
@@ -1160,7 +1307,7 @@ impl VimState {
         let macro_play = self.pending_macro_play.take();
         let scroll = self.pending_scroll.take();
         let fold = self.pending_fold.take();
-        let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
+        let repeat_last_change = self.pending_repeat_last_change.take();
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
         let bracket_jump = self.pending_bracket_jump.take();
@@ -1186,13 +1333,54 @@ impl VimState {
             .or_else(|| macro_play.map(|(register, count)| VimEvent::MacroPlay { register, count }))
             .or_else(|| scroll.map(VimEvent::ScrollWindow))
             .or_else(|| fold.map(VimEvent::Fold))
-            .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
+            .or_else(|| repeat_last_change.map(|count| VimEvent::RepeatLastChange { count }))
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
             .or_else(|| bracket_jump.map(|(target, forward, count)| VimEvent::BracketJump { target, forward, count }))
             .or_else(|| tab.map(VimEvent::Tab))
             .or_else(|| diff.map(|put| VimEvent::Diff { put }))
             .unwrap_or(event)
+    }
+
+    /// Before a key: the cursor's line, its text, and the buffer's edit
+    /// count and line count -- what `note_line_undo` needs to tell
+    /// whether the key's edits stayed on that one line, for `U`.
+    fn line_undo_snapshot(&self, buffer: &Buffer, cursor: &Cursor) -> (usize, String, u64, usize, u64) {
+        let (line, _) = buffer.line_col(cursor);
+        let start = buffer.line_start_char(line);
+        (line, buffer.text_range(start, start + buffer.line_len(line)), buffer.edit_count(), buffer.line_count(), buffer.edits_logged())
+    }
+
+    /// After a key: `U`'s line follows the edits. Ones all on the line
+    /// the cursor was on keep (or start) its text from before; any other
+    /// edit forgets it. `U` itself sets it.
+    fn note_line_undo(&mut self, buffer: &Buffer, (line, text, edits, lines, logged): (usize, String, u64, usize, u64)) {
+        if buffer.edit_count() == edits || self.undoing_line {
+            self.undoing_line = false;
+            return;
+        }
+        let on_line = buffer.line_count() == lines
+            && line < buffer.line_count()
+            && buffer.edits_since(logged).is_some_and(|mut edits| {
+                let start = buffer.line_start_char(line);
+                let mut end = start + text.chars().count();
+                // Line `line`'s bounds as of before the key, moved by each
+                // edit in turn; every edit must be inside them.
+                edits.all(|e| {
+                    let inside = e.start >= start && e.start + e.removed <= end;
+                    if inside {
+                        end = end - e.removed + (e.new_end - e.start);
+                    }
+                    inside
+                })
+            });
+        if on_line {
+            if self.line_undo.as_ref().is_none_or(|(l, _)| *l != line) {
+                self.line_undo = Some((line, text));
+            }
+        } else {
+            self.line_undo = None;
+        }
     }
 
     fn handle_insert_key(
@@ -1202,21 +1390,99 @@ impl VimState {
         key: KeyPress,
         replace: bool,
     ) -> VimEvent {
+        if std::mem::take(&mut self.pending_insert_register) {
+            // `Ctrl-R Ctrl-R {reg}` (and `Ctrl-O`, `Ctrl-P`): literally,
+            // which is how plain `Ctrl-R` puts text in here too.
+            if key.mods.ctrl && matches!(key.code, KeyCode::Char('r' | 'o' | 'p')) {
+                self.pending_insert_register = true;
+            } else if let KeyCode::Char(name) = key.code {
+                if let Some(text) = self.register_text(name).filter(|_| key.mods == Mods::default()) {
+                    buffer.insert_str(cursor, &text);
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                    self.insert_typed.push_str(&text);
+                    if let Some(bi) = &mut self.block_insert {
+                        bi.typed.push_str(&text);
+                    }
+                }
+            }
+            return VimEvent::None;
+        }
         if key == KeyPress::char('o').with_ctrl() {
             self.one_shot_from = Some(self.mode);
             self.mode = Mode::Normal;
             return VimEvent::None;
         }
+        // Insert's own Vim chords. (Standard keys take every Ctrl chord
+        // before it gets here.)
+        let key = if key == KeyPress::char('h').with_ctrl() { KeyPress::named(NamedKey::Backspace) } else { key };
+        if key.mods.ctrl && !key.mods.alt {
+            match key.code {
+                KeyCode::Char('w') => {
+                    self.delete_before_cursor(buffer, cursor, false);
+                    return VimEvent::None;
+                }
+                KeyCode::Char('u') => {
+                    self.delete_before_cursor(buffer, cursor, true);
+                    return VimEvent::None;
+                }
+                KeyCode::Char('r') => {
+                    self.pending_insert_register = true;
+                    return VimEvent::None;
+                }
+                KeyCode::Char(c @ ('t' | 'd')) => {
+                    let (line, col) = buffer.line_col(cursor);
+                    let before = buffer.line_len(line);
+                    let mut at = *cursor;
+                    if c == 't' {
+                        indent::indent_line_with(buffer, &mut at, line, &self.indent_unit());
+                    } else {
+                        indent::dedent_line(buffer, &mut at, line, self.indent_width);
+                    }
+                    let after = buffer.line_len(line);
+                    let col = (col + after).saturating_sub(before);
+                    cursor.char_idx = buffer.line_start_char(line) + col.min(after);
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                    return VimEvent::None;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Named(NamedKey::Escape) => {
+                self.finish_insert(buffer, cursor, replace);
                 self.mode = Mode::Normal;
+                self.last_insert_exit = Some(cursor.char_idx);
                 let (_, col) = buffer.line_col(cursor);
                 if col > 0 {
                     buffer.move_left(cursor);
                 }
+                if let Some(land) = self.block_insert.as_ref().and_then(|bi| bi.land) {
+                    cursor.char_idx = land.min(buffer.len_chars());
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                }
                 self.replay_block_insert(buffer);
             }
+            KeyCode::Named(NamedKey::Backspace) if replace => {
+                // What was overwritten comes back; past what was typed,
+                // only the cursor goes back, as in Vim.
+                match self.replace_backup.pop() {
+                    Some(Some(original)) if cursor.char_idx > 0 => {
+                        let at = cursor.char_idx - 1;
+                        buffer.replace_range(cursor, at, at + 1, &original.to_string());
+                        cursor.char_idx = at;
+                    }
+                    Some(_) => buffer.delete_backward(cursor),
+                    None => {
+                        if buffer.line_col(cursor).1 > 0 {
+                            cursor.char_idx -= 1;
+                        }
+                    }
+                }
+                cursor.sticky_col = buffer.line_col(cursor).1;
+                self.insert_typed.pop();
+            }
             KeyCode::Named(NamedKey::Backspace) => {
+                self.insert_typed.pop();
                 // Backspace right between an empty bracket pair (`{|}`)
                 // removes both characters at once rather than leaving the
                 // close bracket dangling behind -- the companion to
@@ -1243,7 +1509,18 @@ impl VimState {
                 }
             }
             KeyCode::Named(NamedKey::Delete) => buffer.delete_forward(cursor),
+            KeyCode::Named(NamedKey::Enter) if replace => {
+                // A new line, nothing overwritten -- what Backspace takes
+                // back with no char to restore.
+                let before = buffer.len_chars();
+                let event = self.handle_insert_key(buffer, cursor, key, false);
+                for _ in before..buffer.len_chars() {
+                    self.replace_backup.push(None);
+                }
+                return event;
+            }
             KeyCode::Named(NamedKey::Enter) => {
+                self.insert_typed.push('\n');
                 // Carries over the current line's leading whitespace onto
                 // the new line, plus one extra indent level if the char
                 // right before the cursor opens a bracket -- inserted as
@@ -1281,7 +1558,7 @@ impl VimState {
                 } else {
                     let mut new_indent = base_indent.clone();
                     if bumps {
-                        new_indent.push_str(&" ".repeat(self.indent_width));
+                        new_indent.push_str(&self.indent_unit());
                     }
                     // Enter right between an open/close bracket pair
                     // (`{|}`, almost always auto-paired a moment ago)
@@ -1322,18 +1599,22 @@ impl VimState {
                 }
             }
             KeyCode::Named(NamedKey::Tab) => {
-                // Soft-tab: spaces up to the next stop, not a literal
-                // '\t' -- the render pipeline has no tab-stop logic (see
-                // `indent.rs`'s doc comment), so a raw tab wouldn't align
-                // to anything. A char-at-a-time loop, not `insert_str`,
-                // so it coalesces with the surrounding Insert-mode run.
-                let (_, col) = buffer.line_col(cursor);
-                let n = indent::spaces_to_next_stop(col, self.indent_width);
-                for _ in 0..n {
-                    buffer.insert_char(cursor, ' ');
+                // Soft-tab: spaces up to the next stop, or a literal '\t'
+                // where the file indents with tabs (`indent_tabs`). A
+                // char-at-a-time loop, not `insert_str`, so it coalesces
+                // with the surrounding Insert-mode run.
+                let typed = if self.indent_tabs {
+                    "\t".to_string()
+                } else {
+                    let (_, col) = buffer.line_col(cursor);
+                    " ".repeat(indent::spaces_to_next_stop(col, self.indent_width))
+                };
+                for c in typed.chars() {
+                    buffer.insert_char(cursor, c);
                 }
+                self.insert_typed.push_str(&typed);
                 if let Some(bi) = &mut self.block_insert {
-                    bi.typed.push_str(&" ".repeat(n));
+                    bi.typed.push_str(&typed);
                 }
             }
             KeyCode::Named(NamedKey::Left) => buffer.move_left(cursor),
@@ -1370,8 +1651,15 @@ impl VimState {
                 None => buffer.move_end(cursor),
             },
             KeyCode::Char(c) if key.mods == Mods::default() => {
-                if replace && buffer.char_at(cursor.char_idx).is_some() {
-                    buffer.delete_forward(cursor);
+                self.insert_typed.push(c);
+                if replace {
+                    // Over the char under the cursor -- never the line's
+                    // end, which Replace types past.
+                    let over = buffer.char_at(cursor.char_idx).filter(|&c| c != '\n');
+                    if over.is_some() {
+                        buffer.delete_forward(cursor);
+                    }
+                    self.replace_backup.push(over);
                 }
                 if !replace && indent::is_closing_bracket(c) && buffer.char_at(cursor.char_idx) == Some(c) {
                     // Type-through: the bracket you just typed is already
@@ -1439,6 +1727,100 @@ impl VimState {
             _ => {}
         }
         VimEvent::None
+    }
+
+    /// `Ctrl-W` (a word) and `Ctrl-U` (`to_line_start`: back to the
+    /// indent, then to the line's start) before the cursor, in Insert. At
+    /// a line's start either joins it to the line before, as Vim does
+    /// with `backspace=eol`.
+    fn delete_before_cursor(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, to_line_start: bool) {
+        let (line, col) = buffer.line_col(cursor);
+        if col == 0 {
+            if line > 0 {
+                buffer.delete_backward(cursor);
+                self.insert_typed.pop();
+            }
+            return;
+        }
+        let start = buffer.line_start_char(line);
+        let at = cursor.char_idx;
+        let to = if to_line_start {
+            let indent_end = motion::line_first_non_blank(buffer, line);
+            let indent_end = if buffer.char_at(indent_end).is_some_and(|c| c.is_whitespace()) { start + buffer.line_len(line) } else { indent_end };
+            if at > indent_end { indent_end } else { start }
+        } else {
+            let mut i = at;
+            while i > start && buffer.char_at(i - 1).is_some_and(|c| c == ' ' || c == '\t') {
+                i -= 1;
+            }
+            if i > start {
+                let class = crate::charclass::classify(buffer.char_at(i - 1).unwrap_or(' '), &self.iskeyword_extra);
+                while i > start && buffer.char_at(i - 1).is_some_and(|c| crate::charclass::classify(c, &self.iskeyword_extra) == class) {
+                    i -= 1;
+                }
+            }
+            i
+        };
+        if to < at {
+            buffer.delete_range(cursor, to, at);
+            cursor.char_idx = to;
+            cursor.sticky_col = buffer.line_col(cursor).1;
+            let keep = self.insert_typed.chars().count().saturating_sub(at - to);
+            self.insert_typed = self.insert_typed.chars().take(keep).collect();
+            if let Some(bi) = &mut self.block_insert {
+                let keep = bi.typed.chars().count().saturating_sub(at - to);
+                bi.typed = bi.typed.chars().take(keep).collect();
+            }
+        }
+    }
+
+    /// What `Ctrl-R {name}` puts in: `"` (and `+`, `*`: the clipboard,
+    /// which the host keeps in the unnamed register), `a`-`z`, `0`, `.`
+    /// (the last text typed in Insert), `/` (the last search) and `:` (the
+    /// last command line). `None` for a register with nothing in it.
+    fn register_text(&self, name: char) -> Option<String> {
+        let text = match name {
+            '"' | '+' | '*' => self.register.text.clone(),
+            '/' => self.last_search.as_ref()?.0.clone(),
+            ':' => self.last_command.clone()?,
+            _ => self.registers.get(&name.to_ascii_lowercase())?.text.clone(),
+        };
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Whether `Ctrl-R` is waiting for its register's name: the host
+    /// pulls the clipboard in first, as it does before `p`.
+    pub fn is_awaiting_insert_register(&self) -> bool {
+        self.pending_insert_register && self.is_inserting()
+    }
+
+    /// Escape, ending Insert or Replace: what was typed goes in the `.`
+    /// register, and a count (`3ifoo`, `2o`, `3Rab`) types it again.
+    fn finish_insert(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, replace: bool) {
+        let typed = std::mem::take(&mut self.insert_typed);
+        self.registers.insert('.', Register { text: typed.clone(), linewise: false });
+        let count = std::mem::replace(if replace { &mut self.replace_count } else { &mut self.insert_count }, 1);
+        if count <= 1 || typed.is_empty() || self.block_insert.is_some() {
+            return;
+        }
+        for _ in 1..count {
+            if replace {
+                for c in typed.chars() {
+                    if c != '\n' && buffer.char_at(cursor.char_idx).is_some_and(|o| o != '\n') {
+                        buffer.delete_forward(cursor);
+                    }
+                    buffer.insert_char(cursor, c);
+                }
+            } else if matches!(self.insert_entry, InsertEntry::NewlineBelow | InsertEntry::NewlineAbove) {
+                let (line, _) = buffer.line_col(cursor);
+                let indent = indent::leading_whitespace(buffer, line);
+                cursor.char_idx = buffer.line_start_char(line) + buffer.line_len(line);
+                buffer.insert_str(cursor, &format!("\n{indent}{typed}"));
+            } else {
+                buffer.insert_str(cursor, &typed);
+            }
+        }
+        cursor.sticky_col = buffer.line_col(cursor).1;
     }
 
     /// Replays a Visual-Block `I` session's typed text at the same column
@@ -1574,7 +1956,7 @@ impl VimState {
                 for line in first..=last {
                     for _ in 0..by {
                         if right {
-                            indent::indent_line(buffer, cursor, line, self.indent_width);
+                            indent::indent_line_with(buffer, cursor, line, &self.indent_unit());
                         } else {
                             indent::dedent_line(buffer, cursor, line, self.indent_width);
                         }
@@ -1585,7 +1967,7 @@ impl VimState {
             ExCommand::Join => {
                 cursor.char_idx = buffer.line_start_char(first);
                 for _ in 0..(last - first).max(1) {
-                    self.join_lines(buffer, cursor);
+                    self.join_lines(buffer, cursor, true);
                 }
             }
             ExCommand::Normal(keys) => {
@@ -1632,7 +2014,16 @@ impl VimState {
             }
             KeyCode::Named(NamedKey::Enter) => {
                 let typed = std::mem::take(&mut self.command_line);
+                self.last_command = Some(typed.clone());
                 let cmd = self.expand_visual_range(&typed);
+                if let Some(width) = text_width_setting(cmd.trim()) {
+                    self.mode = Mode::Normal;
+                    match width {
+                        Some(width) => self.text_width = if width == 0 { crate::format::DEFAULT_TEXT_WIDTH } else { width },
+                        None => return VimEvent::Message(format!("textwidth={}", self.text_width)),
+                    }
+                    return VimEvent::None;
+                }
                 self.mode = Mode::Normal;
                 if matches!(cmd.trim(), "noh" | "nohl" | "nohlsearch") {
                     self.hlsearch_active = false;
@@ -1640,6 +2031,19 @@ impl VimState {
                 }
                 let (here, last_line) = (buffer.line_col(cursor).0, motion::last_line(buffer));
                 let (range, rest) = crate::ex::parse_range(cmd.trim(), here, last_line);
+                // `:{range}!cmd`: the lines through a command, which the
+                // host runs.
+                if let Some(command) = rest.trim_start().strip_prefix('!') {
+                    let command = command.trim();
+                    return match range {
+                        _ if command.is_empty() => VimEvent::Error("E471: a command to filter through is needed".to_string()),
+                        None => VimEvent::Error(":! runs a command over lines (:%!sort, or !{motion}); for a shell, Fenix has its terminal".to_string()),
+                        Some((first, last)) => {
+                            let clamp = |l: isize| l.clamp(0, last_line as isize) as usize;
+                            VimEvent::FilterLines { first: clamp(first), last: clamp(last), command: command.to_string() }
+                        }
+                    };
+                }
                 if rest.trim().is_empty() && range.is_some() {
                     return self.go_to_line(buffer, cursor, range.map_or(0, |(_, end)| end), last_line);
                 }
@@ -1681,11 +2085,21 @@ impl VimState {
         match key.code {
             KeyCode::Named(NamedKey::Escape) => {
                 self.search_query.clear();
-                self.mode = Mode::Normal;
+                self.mode = if self.search_target.take() == Some(SearchTarget::Visual) { Mode::Visual } else { Mode::Normal };
             }
             KeyCode::Named(NamedKey::Enter) => {
                 let query = std::mem::take(&mut self.search_query);
-                self.mode = Mode::Normal;
+                self.mode = if self.search_target == Some(SearchTarget::Visual) { Mode::Visual } else { Mode::Normal };
+                // Empty: the last pattern again, as Vim's `//` is.
+                let query = if query.is_empty() { self.last_search.as_ref().map(|(p, _)| p.clone()).unwrap_or_default() } else { query };
+                if let Some(SearchTarget::Operator(op)) = self.search_target.take() {
+                    if !query.is_empty() {
+                        self.last_search = Some((query.clone(), self.search_forward));
+                        self.operate_to_search(buffer, cursor, op, &query, self.search_forward);
+                    }
+                    return VimEvent::None;
+                }
+                self.search_target = None;
                 if !query.is_empty() {
                     self.last_search = Some((query.clone(), self.search_forward));
                     let before = cursor.char_idx;
@@ -1859,7 +2273,7 @@ impl VimState {
         if let Some(pending) = self.pending_mark.take() {
             if let KeyCode::Char(name) = key.code {
                 if key.mods == Mods::default() {
-                    self.resolve_mark(cursor, pending, name);
+                    self.resolve_mark(buffer, cursor, pending, name);
                 }
             }
             // Anything else (Escape, ...) just silently aborts.
@@ -2023,7 +2437,7 @@ impl VimState {
                     self.pending_jump = Some(before);
                 }
             }
-            VimAction::Motion(m @ Motion::MatchingBracket) => {
+            VimAction::Motion(m) if m.is_jump() => {
                 let before = cursor.char_idx;
                 apply_motion(buffer, cursor, m, count, &self.iskeyword_extra, &self.screen());
                 if cursor.char_idx != before {
@@ -2035,7 +2449,11 @@ impl VimState {
                 self.pending_op = Some(op);
                 self.pending_op_count = count;
             }
-            VimAction::EnterInsert(entry) => self.enter_insert(buffer, cursor, entry),
+            VimAction::EnterInsert(entry) => {
+                self.enter_insert(buffer, cursor, entry);
+                self.insert_count = count;
+                self.insert_entry = entry;
+            }
             VimAction::EnterVisual(kind) => {
                 self.mode = Mode::Visual;
                 self.visual_kind = kind;
@@ -2077,6 +2495,12 @@ impl VimState {
                 if end > cursor.char_idx {
                     let text = buffer.delete_range(cursor, cursor.char_idx, end);
                     self.write_register(text, false);
+                    // Not past the line's last char.
+                    let len = buffer.line_len(line);
+                    if len > 0 {
+                        cursor.char_idx = cursor.char_idx.min(buffer.line_start_char(line) + len - 1);
+                    }
+                    cursor.sticky_col = buffer.line_col(cursor).1;
                 }
             }
             VimAction::DeleteCharBefore => {
@@ -2089,11 +2513,13 @@ impl VimState {
             VimAction::PasteAfter => self.paste(buffer, cursor, true, count),
             VimAction::PasteBefore => self.paste(buffer, cursor, false, count),
             VimAction::IndentLine | VimAction::DedentLine => {
+                // Bound as `>`/`<` operators now (`>>` is their doubled
+                // form); kept for hosts that send it.
                 let (line, _) = buffer.line_col(cursor);
                 let end_line = (line + count as usize - 1).min(motion::last_line(buffer));
                 for l in line..=end_line {
                     if action == VimAction::IndentLine {
-                        indent::indent_line(buffer, cursor, l, self.indent_width);
+                        indent::indent_line_with(buffer, cursor, l, &self.indent_unit());
                     } else {
                         indent::dedent_line(buffer, cursor, l, self.indent_width);
                     }
@@ -2122,13 +2548,20 @@ impl VimState {
                 }
                 self.mode = Mode::Insert;
             }
-            VimAction::JoinLines => {
+            VimAction::JoinLines { spaces } => {
                 // "NJ" joins N lines together (N-1 individual joins); bare
                 // J (count=1) and 2J both mean "join with just the next line".
                 for _ in 0..count.saturating_sub(1).max(1) {
-                    self.join_lines(buffer, cursor);
+                    self.join_lines(buffer, cursor, spaces);
                 }
             }
+            VimAction::EnterReplace => {
+                self.mode = Mode::Replace;
+                self.replace_backup.clear();
+                self.replace_count = count;
+                self.insert_count = 1;
+            }
+            VimAction::UndoLine => self.undo_line(buffer, cursor),
             VimAction::ToggleCase => {
                 for _ in 0..count.max(1) {
                     self.toggle_case(buffer, cursor);
@@ -2167,13 +2600,15 @@ impl VimState {
             VimAction::MarkJumpPrompt { linewise } => self.pending_mark = Some(PendingMark::Jump { linewise }),
             VimAction::ScrollWindow(target) => self.pending_scroll = Some(target),
             VimAction::Fold(command) => self.pending_fold = Some(command),
-            VimAction::IncrementNumber { delta } => self.increment_number(buffer, cursor, delta * count as i64),
+            VimAction::IncrementNumber { delta } => {
+                self.increment_number(buffer, cursor, delta * count as i64);
+            }
             // No buffer mutation here -- replay is host-driven (mirrors
             // `VimEvent::MacroPlay`), since only the host owns the raw-
             // keystroke capture this replays. Plain `.` only for v1: no
             // count-override semantics (`3.` isn't "repeat with count 3
             // instead" the way real Vim's is) -- out of scope for now.
-            VimAction::RepeatLastChange => self.pending_repeat_last_change = true,
+            VimAction::RepeatLastChange => self.pending_repeat_last_change = Some(raw_count),
             VimAction::RepeatSubstitute { whole_buffer } => match self.last_substitute.clone() {
                 Some(spec) => {
                     let spec = if whole_buffer { spec } else { crate::substitute::substitute_spec(&format!("s{spec}"), 0, 0).unwrap_or(spec) };
@@ -2230,17 +2665,64 @@ impl VimState {
     /// drain into a `VimEvent` (`MarkSet`/`JumpToMark`); the actual
     /// bookkeeping/cursor movement is entirely the host's, see those
     /// variants' own doc comments.
-    fn resolve_mark(&mut self, cursor: &Cursor, pending: PendingMark, name: char) {
+    ///
+    /// An operator's mark (`d'a`) and Visual's are this buffer's, as the
+    /// host last said (`set_marks`) or set since: the range or the
+    /// selection ends there. `` ` `` and `'` both name the place before
+    /// the last jump.
+    fn resolve_mark(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, pending: PendingMark, name: char) {
+        let name = if name == '`' { '\'' } else { name };
+        let mark = self.local_marks.get(&name).map(|&at| at.min(buffer.len_chars()));
         match pending {
-            PendingMark::Set => self.pending_mark_set = Some((name, cursor.char_idx)),
+            PendingMark::Set => {
+                self.local_marks.insert(name, cursor.char_idx);
+                self.pending_mark_set = Some((name, cursor.char_idx));
+            }
             PendingMark::Jump { linewise } => self.pending_mark_jump = Some((name, linewise)),
+            PendingMark::Operator { op, linewise } => {
+                let Some(at) = mark else {
+                    self.pending_error = Some(format!("E20: mark {name} isn't set"));
+                    return;
+                };
+                if linewise {
+                    let (from, to) = (buffer.line_col(cursor).0, buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 }).0);
+                    self.operate(buffer, cursor, op, linewise_range(buffer, from, to), true);
+                } else {
+                    let (lo, hi) = (cursor.char_idx.min(at), cursor.char_idx.max(at));
+                    self.operate(buffer, cursor, op, lo..hi, false);
+                }
+            }
+            PendingMark::Visual { linewise } => {
+                let Some(at) = mark else {
+                    self.pending_error = Some(format!("E20: mark {name} isn't set"));
+                    return;
+                };
+                cursor.char_idx = if linewise { motion::line_first_non_blank(buffer, buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 }).0) } else { at };
+                cursor.sticky_col = buffer.line_col(cursor).1;
+            }
         }
     }
 
+    /// This buffer's marks, as the host keeps them -- for an operator's
+    /// mark (`d'a`), Visual's (`'a`) and `gi` (`^`). `'` is the place
+    /// before the last jump.
+    pub fn set_marks(&mut self, marks: impl IntoIterator<Item = (char, usize)>) {
+        self.local_marks = marks.into_iter().collect();
+    }
+
+    /// Where the cursor was when Insert was last left, before Escape's
+    /// step back a character: Vim's `^` mark.
+    pub fn last_insert_exit(&self) -> Option<usize> {
+        self.last_insert_exit
+    }
+
     /// `J`: joins the current line with the next, trimming the next
-    /// line's leading whitespace and separating with a single space.
-    /// A no-op on the buffer's last real line.
-    fn join_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+    /// line's leading whitespace and separating with a single space --
+    /// none when the next line is blank or starts with `)`, or this one
+    /// ends in a blank, as in Vim. `gJ` (`!spaces`) puts them together
+    /// as they are. A no-op on the buffer's last real line. The cursor
+    /// lands where they meet.
+    pub(crate) fn join_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, spaces: bool) {
         let (line, _) = buffer.line_col(cursor);
         if line >= motion::last_line(buffer) {
             return;
@@ -2249,15 +2731,38 @@ impl VimState {
         let next_start = buffer.line_start_char(line + 1);
         let next_len = buffer.line_len(line + 1);
         let mut skip = 0;
-        while skip < next_len && buffer.char_at(next_start + skip).is_some_and(|c| c.is_whitespace()) {
-            skip += 1;
+        if spaces {
+            while skip < next_len && buffer.char_at(next_start + skip).is_some_and(|c| c.is_whitespace()) {
+                skip += 1;
+            }
         }
-        buffer.delete_range(cursor, this_line_end, next_start + skip);
-        cursor.char_idx = this_line_end;
-        buffer.insert_str(cursor, " ");
-        cursor.char_idx = this_line_end;
+        let rest_blank = skip == next_len;
+        let next_char = buffer.char_at(next_start + skip);
+        let ends_blank = this_line_end > buffer.line_start_char(line) && buffer.char_at(this_line_end - 1).is_some_and(|c| c == ' ' || c == '\t');
+        let space = spaces && !rest_blank && next_char != Some(')') && !ends_blank && buffer.line_len(line) > 0;
+        buffer.replace_range(cursor, this_line_end, next_start + skip, if space { " " } else { "" });
+        let line_start = buffer.line_start_char(line);
+        cursor.char_idx = this_line_end.min(line_start + buffer.line_len(line).saturating_sub(1));
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
+    }
+
+    /// `U`: the last changed line as it was before its changes -- itself
+    /// a change, so `u` takes it back and `U` again redoes them.
+    fn undo_line(&mut self, buffer: &mut Buffer, cursor: &mut Cursor) {
+        let Some((line, original)) = self.line_undo.take() else { return };
+        if line > motion::last_line(buffer) {
+            return;
+        }
+        let start = buffer.line_start_char(line);
+        let current = buffer.text_range(start, start + buffer.line_len(line));
+        if current != original {
+            buffer.replace_range(cursor, start, start + buffer.line_len(line), &original);
+            self.undoing_line = true;
+        }
+        self.line_undo = Some((line, current));
+        cursor.char_idx = start;
+        cursor.sticky_col = 0;
     }
 
     /// `~`: flips the case of the char under the cursor and advances,
@@ -2283,16 +2788,16 @@ impl VimState {
     /// (longer than `i64` can hold -- not worth a bigint dependency for
     /// this). Scoped to the current line -- a number spanning a newline
     /// isn't a real case worth handling.
-    fn increment_number(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, delta: i64) {
+    fn increment_number(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, delta: i64) -> bool {
         let (line, _) = buffer.line_col(cursor);
         let line_start = buffer.line_start_char(line);
         let line_text = buffer.text_range(line_start, line_start + buffer.line_len(line));
         let chars: Vec<char> = line_text.chars().collect();
         let cursor_col = cursor.char_idx.saturating_sub(line_start);
 
-        let Some((rel_start, rel_end)) = find_number(&chars, cursor_col) else { return };
+        let Some((rel_start, rel_end)) = find_number(&chars, cursor_col) else { return false };
         let old_text: String = chars[rel_start..rel_end].iter().collect();
-        let Ok(value) = old_text.parse::<i64>() else { return };
+        let Ok(value) = old_text.parse::<i64>() else { return false };
         let new_text = value.saturating_add(delta).to_string();
 
         let start = line_start + rel_start;
@@ -2301,6 +2806,7 @@ impl VimState {
         cursor.char_idx = start + new_text.chars().count() - 1;
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
+        true
     }
 
     /// `r<char>`, with `count` (`3rx` replaces 3 chars with `x`). Vim
@@ -2316,7 +2822,8 @@ impl VimState {
         buffer.delete_range(cursor, start, end);
         let replacement: String = std::iter::repeat_n(c, count).collect();
         buffer.insert_str(cursor, &replacement);
-        cursor.char_idx = start;
+        // On the last char replaced, as in Vim.
+        cursor.char_idx = start + count - 1;
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
     }
@@ -2412,6 +2919,15 @@ impl VimState {
     fn enter_insert(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, entry: InsertEntry) {
         match entry {
             InsertEntry::Before => {}
+            InsertEntry::LastInsert => {
+                if let Some(at) = self.local_marks.get(&'^').copied().or(self.last_insert_exit) {
+                    cursor.char_idx = at.min(buffer.len_chars());
+                }
+            }
+            InsertEntry::LineColumnZero => {
+                let (line, _) = buffer.line_col(cursor);
+                cursor.char_idx = buffer.line_start_char(line);
+            }
             InsertEntry::After => {
                 if buffer.char_at(cursor.char_idx).is_some() {
                     cursor.char_idx += 1;
@@ -2487,62 +3003,13 @@ impl VimState {
             }
         }
 
-        // `f`/`F`/`t`/`T` as an operator's motion (`dfx`, `d3fx`): not a
-        // `pending_matcher` leaf (the target char isn't known at
-        // trie-build time, same reason it isn't a Normal-trie leaf
-        // either) -- recognized directly here, same as the digit check
-        // above, and resolved once the target char arrives via the
-        // `pending_find` check at the top of `handle_normal_key` (which
-        // every key reaches regardless of `pending_op`, `resolve_find`
-        // itself branches on it).
-        if !self.pending_matcher.is_pending() {
-            if let KeyCode::Char(c) = key.code {
-                if key.mods == Mods::default() {
-                    let find = match c {
-                        'f' => Some((true, false)),
-                        'F' => Some((false, false)),
-                        't' => Some((true, true)),
-                        'T' => Some((false, true)),
-                        _ => None,
-                    };
-                    if let Some((forward, till)) = find {
-                        let count = self.count.take().unwrap_or(1).max(1);
-                        self.pending_find = Some((forward, till, count));
-                        return;
-                    }
-                }
-            }
-        }
-
-        // vim-surround/evil-surround: `y`/`d`/`c` followed by `s` doesn't
-        // mean "yank/delete/change the letter s" (there's no motion/
-        // text-object named `s`) -- it starts `ys`/`ds`/`cs` instead.
-        // Checked before the doubled-operator check below since `s` can
-        // never collide with `op.trigger_key()` (`y`/`d`/`c`).
-        if !self.pending_matcher.is_pending() && key == KeyPress::char('s') {
-            self.pending_op = None;
-            self.pending_surround = Some(match op {
-                Operator::Yank => SurroundPending::Target,
-                Operator::Delete => SurroundPending::Delete,
-                Operator::Change => SurroundPending::ChangeOld,
-            });
-            return;
-        }
-
-        // `do`/`dp` (Vim's diff obtain / diff put): no motion is named
-        // `o` or `p`, so after `d` they can only mean this.
-        if !self.pending_matcher.is_pending() && op == Operator::Delete && (key == KeyPress::char('o') || key == KeyPress::char('p')) {
-            self.pending_op = None;
-            self.count = None;
-            self.pending_diff = Some(key == KeyPress::char('p'));
-            return;
-        }
-
-        // Doubled operator (dd/cc/yy): linewise, current line(s). Only
-        // applies as the very first key after the operator, matching Vim.
-        // cc (unlike dd/yy) keeps the line itself -- it only clears the
-        // content, leaving a blank line to type into.
-        if !self.pending_matcher.is_pending() && key == op.trigger_key() {
+        // Doubled operator (dd/cc/yy, gUU, g??, >>): linewise, current
+        // line(s). The first key after the operator, matching Vim -- or,
+        // for a `g` operator, its two keys again (`gUgU`).
+        let doubled = key == op.doubled_key()
+            && (!self.pending_matcher.is_pending() || (op.keys().len() == 2 && self.pending_matcher.path() == [KeyPress::char('g')]));
+        if doubled {
+            self.pending_matcher.cancel();
             self.pending_op = None;
             let total_count = self.pending_op_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
             let (line, _) = buffer.line_col(cursor);
@@ -2553,6 +3020,88 @@ impl VimState {
                 let range = linewise_range(buffer, line, end_line);
                 self.finish_operator(buffer, cursor, op, range, true);
             }
+            return;
+        }
+
+        if !self.pending_matcher.is_pending() && key.mods == Mods::default() {
+            if let KeyCode::Char(c) = key.code {
+                // `f`/`F`/`t`/`T` as an operator's motion (`dfx`, `d3fx`):
+                // not a `pending_matcher` leaf (the target char isn't known
+                // at trie-build time) -- resolved once the target char
+                // arrives via the `pending_find` check at the top of
+                // `handle_normal_key`, which branches on `pending_op`.
+                let find = match c {
+                    'f' => Some((true, false)),
+                    'F' => Some((false, false)),
+                    't' => Some((true, true)),
+                    'T' => Some((false, true)),
+                    _ => None,
+                };
+                if let Some((forward, till)) = find {
+                    let count = self.count.take().unwrap_or(1).max(1);
+                    self.pending_find = Some((forward, till, count));
+                    return;
+                }
+                match c {
+                    // A mark ends the range: `d'a` by lines, `` d`a `` exactly.
+                    '\'' | '`' => {
+                        self.pending_op = None;
+                        self.count = None;
+                        self.pending_mark = Some(PendingMark::Operator { op, linewise: c == '\'' });
+                        return;
+                    }
+                    // A search ends it: `d/foo<CR>`, `dn`, `d*`.
+                    '/' | '?' => {
+                        self.pending_op = None;
+                        self.count = None;
+                        self.search_target = Some(SearchTarget::Operator(op));
+                        self.mode = Mode::Search;
+                        self.search_query.clear();
+                        self.search_forward = c == '/';
+                        return;
+                    }
+                    'n' | 'N' | '*' | '#' => {
+                        self.pending_op = None;
+                        self.count = None;
+                        let search = if matches!(c, 'n' | 'N') {
+                            self.last_search.clone().map(|(pattern, dir)| (pattern, if c == 'N' { !dir } else { dir }))
+                        } else {
+                            crate::search::word_under_cursor_pattern(buffer, cursor).map(|pattern| {
+                                self.last_search = Some((pattern.clone(), c == '*'));
+                                (pattern, c == '*')
+                            })
+                        };
+                        if let Some((pattern, forward)) = search {
+                            self.operate_to_search(buffer, cursor, op, &pattern, forward);
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // vim-surround/evil-surround: `y`/`d`/`c` followed by `s` doesn't
+        // mean "yank/delete/change the letter s" (there's no motion/
+        // text-object named `s`) -- it starts `ys`/`ds`/`cs` instead.
+        let surround = match op {
+            Operator::Yank => Some(SurroundPending::Target),
+            Operator::Delete => Some(SurroundPending::Delete),
+            Operator::Change => Some(SurroundPending::ChangeOld),
+            _ => None,
+        };
+        if let Some(surround) = surround.filter(|_| !self.pending_matcher.is_pending() && key == KeyPress::char('s')) {
+            self.pending_op = None;
+            self.pending_surround = Some(surround);
+            return;
+        }
+
+        // `do`/`dp` (Vim's diff obtain / diff put): no motion is named
+        // `o` or `p`, so after `d` they can only mean this.
+        if !self.pending_matcher.is_pending() && op == Operator::Delete && (key == KeyPress::char('o') || key == KeyPress::char('p')) {
+            self.pending_op = None;
+            self.count = None;
+            self.pending_diff = Some(key == KeyPress::char('p'));
             return;
         }
 
@@ -2584,15 +3133,48 @@ impl VimState {
                     }
                     PendingTarget::Motion(m) => {
                         let m = adjust_for_change_word(op, m, buffer, cursor);
+                        // `dj` on the last line, `dk` on the first: no
+                        // line to go to, nothing done -- as in Vim.
+                        if matches!(m, Motion::Up | Motion::Down | Motion::NextLineStart | Motion::PrevLineStart) {
+                            let to = motion_target_repeated(buffer, cursor, m, total_count, &self.iskeyword_extra, &self.screen());
+                            if buffer.line_col(&Cursor { char_idx: to, sticky_col: 0 }).0 == buffer.line_col(cursor).0 {
+                                return;
+                            }
+                        }
                         (range_for_motion(buffer, cursor, m, total_count, &self.iskeyword_extra, &self.screen()), m.is_linewise())
                     }
                     // Counts on text objects aren't supported ("2diw" behaves
                     // like "diw") -- a disclosed simplification.
                     PendingTarget::TextObject(obj) => (textobject::span(buffer, cursor, obj, &self.iskeyword_extra), textobject::is_linewise(obj)),
                 };
-                self.finish_operator(buffer, cursor, op, range, linewise);
+                self.operate(buffer, cursor, op, range, linewise);
             }
         }
+    }
+
+    /// An operator over a resolved range: a linewise change keeps a line
+    /// to type on (`cj`, `cip`), as `cc` does; everything else is
+    /// `finish_operator`'s.
+    fn operate(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, op: Operator, range: Range<usize>, linewise: bool) {
+        if op == Operator::Change && linewise && !range.is_empty() {
+            let (first, last) = range_to_lines(buffer, &range);
+            self.change_lines(buffer, cursor, first, last);
+        } else {
+            self.finish_operator(buffer, cursor, op, range, linewise);
+        }
+    }
+
+    /// An operator up to the next match of `pattern` (`d/foo`, `dn`):
+    /// charwise and exclusive, as Vim's search motions are. Nothing done
+    /// without a match.
+    fn operate_to_search(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, op: Operator, pattern: &str, forward: bool) {
+        let mut probe = *cursor;
+        self.jump_to_search(buffer, &mut probe, pattern, forward);
+        if probe.char_idx == cursor.char_idx {
+            return;
+        }
+        let (lo, hi) = (cursor.char_idx.min(probe.char_idx), cursor.char_idx.max(probe.char_idx));
+        self.operate(buffer, cursor, op, lo..hi, false);
     }
 
     fn finish_operator(
@@ -2603,23 +3185,130 @@ impl VimState {
         range: Range<usize>,
         linewise: bool,
     ) {
+        // Where a linewise operator that leaves the text in place puts
+        // the cursor: its first line, the column it was at (`yj`, `gUU`).
+        let first_line_at = |buffer: &Buffer, cursor: &Cursor| {
+            let (first, _) = buffer.line_col(&Cursor { char_idx: range.start.min(buffer.len_chars()), sticky_col: 0 });
+            let (_, col) = buffer.line_col(cursor);
+            buffer.line_start_char(first) + col.min(buffer.line_len(first).saturating_sub(1))
+        };
         match op {
             Operator::Yank => {
-                let text = buffer.text_range(range.start, range.end);
+                let mut text = buffer.text_range(range.start, range.end);
+                // Lines are lines in the register, the last one's newline
+                // too (`yG` on a file with none at its end).
+                if linewise && !text.ends_with('\n') {
+                    text.push('\n');
+                }
                 self.pending_pulse = Some(range.clone());
                 self.write_yank(text, linewise);
-                cursor.char_idx = range.start.min(buffer.len_chars());
+                cursor.char_idx = if linewise { first_line_at(buffer, cursor) } else { range.start.min(buffer.len_chars()) };
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
             }
             Operator::Delete | Operator::Change => {
-                let text = buffer.delete_range(cursor, range.start, range.end);
+                // The buffer's last lines, with no newline after them:
+                // the one before them goes too, and the register has the
+                // lines as lines (`"b\nc\n"`), as Vim's has.
+                let unterminated = linewise && range.end == buffer.len_chars() && range.start > 0 && buffer.char_at(range.end.saturating_sub(1)) != Some('\n');
+                let start = if unterminated && op == Operator::Delete { range.start - 1 } else { range.start };
+                let mut text = buffer.delete_range(cursor, start, range.end);
+                if start < range.start {
+                    text.remove(0);
+                    text.push('\n');
+                }
                 self.write_register(text, linewise);
                 if op == Operator::Change {
                     self.mode = Mode::Insert;
+                } else if linewise {
+                    // `dd`, `dj`: onto the first non-blank of the line that
+                    // took their place.
+                    let line = buffer.line_col(cursor).0.min(motion::last_line(buffer));
+                    cursor.char_idx = motion::line_first_non_blank(buffer, line);
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                } else {
+                    // Not past the line's last char, in Normal mode.
+                    let (line, col) = buffer.line_col(cursor);
+                    let len = buffer.line_len(line);
+                    if len > 0 && col >= len {
+                        cursor.char_idx = buffer.line_start_char(line) + len - 1;
+                    }
+                    cursor.sticky_col = buffer.line_col(cursor).1;
                 }
             }
+            Operator::Upper | Operator::Lower | Operator::ToggleCase | Operator::Rot13 => {
+                let mode = match op {
+                    Operator::Upper => CaseChange::Upper,
+                    Operator::Lower => CaseChange::Lower,
+                    Operator::ToggleCase => CaseChange::Toggle,
+                    _ => CaseChange::Rot13,
+                };
+                // Linewise, the first line's start, as Vim's `gUU` goes.
+                let land = range.start;
+                let text = buffer.text_range(range.start, range.end);
+                let changed: String = text.chars().map(|c| apply_case(c, mode)).collect();
+                if changed != text {
+                    buffer.replace_range(cursor, range.start, range.end, &changed);
+                }
+                cursor.char_idx = land.min(buffer.len_chars());
+                cursor.sticky_col = buffer.line_col(cursor).1;
+            }
+            Operator::Indent | Operator::Dedent => {
+                let (first, last) = range_to_lines(buffer, &range);
+                for line in first..=last {
+                    // An empty line isn't indented, as in Vim.
+                    if op == Operator::Indent && buffer.line_len(line) > 0 {
+                        indent::indent_line_with(buffer, cursor, line, &self.indent_unit());
+                    } else if op == Operator::Dedent {
+                        indent::dedent_line(buffer, cursor, line, self.indent_width);
+                    }
+                }
+                cursor.char_idx = motion::line_first_non_blank(buffer, first);
+                cursor.sticky_col = buffer.line_col(cursor).1;
+            }
+            Operator::Format | Operator::FormatKeep => {
+                let (first, last) = range_to_lines(buffer, &range);
+                self.format_lines(buffer, cursor, first, last, op == Operator::FormatKeep);
+            }
+            Operator::Filter => {
+                // The command line, open on the lines for a command to
+                // filter them through, as Vim's `!` opens it.
+                let (first, last) = range_to_lines(buffer, &range);
+                cursor.char_idx = motion::line_first_non_blank(buffer, first);
+                cursor.sticky_col = buffer.line_col(cursor).1;
+                self.mode = Mode::Command;
+                self.command_line = if last == first { ".!".to_string() } else { format!(".,.+{}!", last - first) };
+            }
         }
+    }
+
+    /// `gq` / `gw` over lines `first..=last`: wrapped at `text_width`, in
+    /// one edit. `keep` (`gw`) leaves the cursor on the same text; `gq`
+    /// puts it on the last line's first non-blank.
+    pub(crate) fn format_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, first: usize, last: usize, keep: bool) {
+        let start = buffer.line_start_char(first);
+        let end = buffer.line_start_char(last) + buffer.line_len(last);
+        let old = buffer.text_range(start, end);
+        let lines: Vec<String> = old.split('\n').map(str::to_string).collect();
+        let new = crate::format::wrap_lines(&lines, self.text_width).join("\n");
+        // The cursor's place among the non-blanks, kept across the edit.
+        let nth = old.chars().take(cursor.char_idx.saturating_sub(start)).filter(|c| !c.is_whitespace()).count();
+        if new != old {
+            buffer.replace_range(cursor, start, end, &new);
+        }
+        if keep {
+            let mut seen = 0;
+            let offset = new.chars().position(|c| {
+                let here = !c.is_whitespace() && seen == nth;
+                seen += usize::from(!c.is_whitespace());
+                here
+            });
+            cursor.char_idx = start + offset.unwrap_or(0);
+        } else {
+            let last_line = first + new.split('\n').count() - 1;
+            cursor.char_idx = motion::line_first_non_blank(buffer, last_line);
+        }
+        cursor.sticky_col = buffer.line_col(cursor).1;
     }
 
     /// `cc`/`S`: the lines' text goes, into the register whole, and the
@@ -2908,13 +3597,20 @@ impl VimState {
             if !block.ends_with('\n') {
                 block.push('\n');
             }
-            let block = block.repeat(count);
+            let mut block = block.repeat(count);
             let (line, _) = buffer.line_col(cursor);
             let insert_line = if after { line + 1 } else { line };
-            let at = if insert_line < buffer.line_count() {
-                buffer.line_start_char(insert_line)
+            // After a last line with no newline: one before the lines,
+            // none after them.
+            let unterminated = insert_line >= buffer.line_count() || (after && line == motion::last_line(buffer) && buffer.char_at(buffer.len_chars().saturating_sub(1)).is_some_and(|c| c != '\n'));
+            let at = if unterminated {
+                let len = buffer.len_chars();
+                cursor.char_idx = len;
+                buffer.insert_str(cursor, "\n");
+                block.pop();
+                len + 1
             } else {
-                buffer.len_chars()
+                buffer.line_start_char(insert_line)
             };
             cursor.char_idx = at;
             buffer.insert_str(cursor, &block);
@@ -3086,6 +3782,45 @@ impl VimState {
             self.resolve_pending_prefix(pending, key);
             return VimEvent::None;
         }
+        if let Some(pending) = self.pending_mark.take() {
+            if let KeyCode::Char(name) = key.code {
+                if key.mods == Mods::default() {
+                    self.resolve_mark(buffer, cursor, pending, name);
+                }
+            }
+            self.count = None;
+            return VimEvent::None;
+        }
+        // Marks and searches move the selection's end: `'a`, `/foo`, `n`.
+        if !self.visual_matcher.is_pending() && key.mods == Mods::default() {
+            match key.code {
+                KeyCode::Char(c @ ('\'' | '`')) => {
+                    self.pending_mark = Some(PendingMark::Visual { linewise: c == '\'' });
+                    return VimEvent::None;
+                }
+                KeyCode::Char(c @ ('/' | '?')) => {
+                    self.count = None;
+                    self.search_target = Some(SearchTarget::Visual);
+                    self.mode = Mode::Search;
+                    self.search_query.clear();
+                    self.search_forward = c == '/';
+                    return VimEvent::None;
+                }
+                KeyCode::Char(c @ ('n' | 'N' | '*' | '#')) => {
+                    self.count = None;
+                    let search = if matches!(c, 'n' | 'N') {
+                        self.last_search.clone().map(|(pattern, dir)| (pattern, if c == 'N' { !dir } else { dir }))
+                    } else {
+                        crate::search::word_under_cursor_pattern(buffer, cursor).inspect(|pattern| self.last_search = Some((pattern.clone(), c == '*'))).map(|pattern| (pattern, c == '*'))
+                    };
+                    if let Some((pattern, forward)) = search {
+                        self.jump_to_search(buffer, cursor, &pattern, forward);
+                    }
+                    return VimEvent::None;
+                }
+                _ => {}
+            }
+        }
         // `"{name}` selects which register `d`/`y`/`c` below reads or
         // writes -- a bare, unmodified `"`, never a trie leaf (mirrors
         // `handle_normal_key`'s own treatment of it), since the Visual
@@ -3136,7 +3871,7 @@ impl VimState {
                     let (_, col) = buffer.line_col(cursor);
                     cursor.sticky_col = col;
                 }
-                VisualAction::Join => {
+                VisualAction::Join { spaces } => {
                     self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
                     let anchor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
                     let (a, b) = (buffer.line_col(&anchor).0, buffer.line_col(cursor).0);
@@ -3144,20 +3879,20 @@ impl VimState {
                     cursor.char_idx = buffer.line_start_char(first);
                     // One line selected still joins it to the next.
                     for _ in 0..(last - first).max(1) {
-                        self.join_lines(buffer, cursor);
+                        self.join_lines(buffer, cursor, spaces);
                     }
                     self.mode = Mode::Normal;
                 }
                 VisualAction::BlockAppend => {
                     if self.visual_kind == VisualKind::Block {
-                        let (line_lo, line_hi, _, col_hi) = self.block_bounds(buffer, cursor);
+                        let (line_lo, line_hi, col_lo, col_hi) = self.block_bounds(buffer, cursor);
                         let at_line_end = self.block_to_line_end;
                         let len = buffer.line_len(line_lo);
                         let col = if at_line_end { len } else { col_hi };
                         let padding = " ".repeat(col.saturating_sub(len));
                         cursor.char_idx = buffer.line_start_char(line_lo) + len.min(col);
                         buffer.insert_str(cursor, &padding);
-                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col, typed: String::new(), pad: true, at_line_end });
+                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col, typed: String::new(), pad: true, at_line_end, land: Some(buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo))) });
                         self.mode = Mode::Insert;
                         let (_, col) = buffer.line_col(cursor);
                         cursor.sticky_col = col;
@@ -3165,7 +3900,7 @@ impl VimState {
                 }
                 VisualAction::Apply(op) => {
                     self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
-                    if self.visual_kind == VisualKind::Block {
+                    if self.visual_kind == VisualKind::Block && matches!(op, Operator::Delete | Operator::Change | Operator::Yank) {
                         self.apply_block_operator(buffer, cursor, op);
                     } else {
                         let (range, linewise) = self.visual_range(buffer, cursor);
@@ -3173,6 +3908,10 @@ impl VimState {
                     }
                     if self.mode == Mode::Visual {
                         self.mode = Mode::Normal;
+                    }
+                    // Visual `!`: the selection's lines, as Vim names them.
+                    if op == Operator::Filter {
+                        self.command_line = "'<,'>!".to_string();
                     }
                 }
                 VisualAction::SetKind(kind) => {
@@ -3195,7 +3934,7 @@ impl VimState {
                     let (line_lo, line_hi) = if anchor_was_top { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) };
                     for l in line_lo..=line_hi {
                         if *action == VisualAction::Indent {
-                            indent::indent_line(buffer, cursor, l, self.indent_width);
+                            indent::indent_line_with(buffer, cursor, l, &self.indent_unit());
                         } else {
                             indent::dedent_line(buffer, cursor, l, self.indent_width);
                         }
@@ -3237,7 +3976,7 @@ impl VimState {
                     if self.visual_kind == VisualKind::Block {
                         let (line_lo, line_hi, col_lo, _) = self.block_bounds(buffer, cursor);
                         cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
-                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new(), pad: false, at_line_end: false });
+                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new(), pad: false, at_line_end: false, land: None });
                         self.mode = Mode::Insert;
                         let (_, col) = buffer.line_col(cursor);
                         cursor.sticky_col = col;
@@ -3248,6 +3987,32 @@ impl VimState {
                 }
                 VisualAction::Surround => {
                     self.pending_visual_surround = true;
+                }
+                VisualAction::Increment { delta, progressive } => {
+                    self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                    let step = delta * raw_count.unwrap_or(1).max(1) as i64;
+                    let anchor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
+                    let (a, b) = (buffer.line_col(&anchor), buffer.line_col(cursor));
+                    let (first, last) = (a.0.min(b.0), a.0.max(b.0));
+                    // From the selection's left edge in Char and Block,
+                    // the whole line in Line.
+                    let from_col = match self.visual_kind {
+                        VisualKind::Line => 0,
+                        VisualKind::Block => a.1.min(b.1),
+                        VisualKind::Char => 0,
+                    };
+                    let land = if self.visual_kind == VisualKind::Line { buffer.line_start_char(first) } else { self.visual_anchor.min(cursor.char_idx) };
+                    let mut n = 0;
+                    for line in first..=last {
+                        let col = if self.visual_kind == VisualKind::Char && line == first { if a.0 <= b.0 { a.1 } else { b.1 } } else { from_col };
+                        let mut at = Cursor { char_idx: buffer.line_start_char(line) + col.min(buffer.line_len(line)), sticky_col: 0 };
+                        if self.increment_number(buffer, &mut at, if progressive { step * (n + 1) } else { step }) {
+                            n += 1;
+                        }
+                    }
+                    cursor.char_idx = land.min(buffer.len_chars());
+                    cursor.sticky_col = buffer.line_col(cursor).1;
+                    self.mode = Mode::Normal;
                 }
                 VisualAction::ChangeCase(mode) => {
                     self.visual_change_case(buffer, cursor, mode);
@@ -3356,7 +4121,7 @@ impl VimState {
         cursor.sticky_col = col;
 
         if op == Operator::Change {
-            self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new(), pad: false, at_line_end: false });
+            self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new(), pad: false, at_line_end: false, land: None });
             self.mode = Mode::Insert;
         }
     }
@@ -3366,6 +4131,17 @@ impl Default for VimState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// `:set textwidth=N` / `:set tw=N` (`Some(Some(N))`), or `:set tw?`
+/// (`Some(None)`): `gq`'s width. `None` for any other command.
+fn text_width_setting(cmd: &str) -> Option<Option<usize>> {
+    let rest = cmd.strip_prefix("set ").or_else(|| cmd.strip_prefix("se "))?.trim();
+    if matches!(rest, "tw?" | "textwidth?" | "tw" | "textwidth") {
+        return Some(None);
+    }
+    let value = rest.strip_prefix("textwidth=").or_else(|| rest.strip_prefix("tw="))?;
+    value.parse().ok().map(Some)
 }
 
 /// `,`'s own view of `;`: the opposite-direction counterpart of a
@@ -3407,6 +4183,11 @@ fn apply_motion(buffer: &Buffer, cursor: &mut Cursor, m: Motion, count: u32, isk
             return;
         }
     }
+    if let Some(target) = motion::counted_target(buffer, cursor, m, count, screen.viewport) {
+        cursor.char_idx = target;
+        cursor.sticky_col = buffer.line_col(cursor).1;
+        return;
+    }
     for _ in 0..count.max(1) {
         let target = motion::target(buffer, cursor, m, iskeyword_extra);
         if target == cursor.char_idx {
@@ -3428,7 +4209,7 @@ fn motion_target_repeated(buffer: &Buffer, cursor: &Cursor, m: Motion, count: u3
     let mut probe = *cursor;
     // An operator's range is only looked at: it keeps no goal cell.
     let goals = crate::screen::Goals { kept: std::cell::RefCell::new(screen.goals.kept.borrow().clone()), keeping: std::cell::RefCell::new(screen.goals.keeping.borrow().clone()) };
-    apply_motion(buffer, &mut probe, m, count, iskeyword_extra, &crate::screen::Screen { rows: screen.rows, goals: &goals });
+    apply_motion(buffer, &mut probe, m, count, iskeyword_extra, &crate::screen::Screen { rows: screen.rows, goals: &goals, viewport: screen.viewport });
     probe.char_idx
 }
 
@@ -3506,7 +4287,7 @@ fn surround_pair_for(c: char) -> Option<(String, String)> {
 /// `w` stopping at the start of a following line) doesn't spuriously
 /// pull that next line in as "touched." An empty range still resolves
 /// to its own single line.
-fn range_to_lines(buffer: &Buffer, range: &Range<usize>) -> (usize, usize) {
+pub(crate) fn range_to_lines(buffer: &Buffer, range: &Range<usize>) -> (usize, usize) {
     let start_char = range.start.min(buffer.len_chars().saturating_sub(1));
     let end_char = range.end.saturating_sub(1).max(range.start).min(buffer.len_chars().saturating_sub(1));
     let (start_line, _) = buffer.line_col(&Cursor { char_idx: start_char, sticky_col: 0 });
@@ -3533,6 +4314,11 @@ fn apply_case(c: char, mode: CaseChange) -> char {
         }
         CaseChange::Upper => c.to_uppercase().next().unwrap_or(c),
         CaseChange::Lower => c.to_lowercase().next().unwrap_or(c),
+        CaseChange::Rot13 => match c {
+            'a'..='z' => (b'a' + (c as u8 - b'a' + 13) % 26) as char,
+            'A'..='Z' => (b'A' + (c as u8 - b'A' + 13) % 26) as char,
+            _ => c,
+        },
     }
 }
 
@@ -5859,6 +6645,23 @@ two
         assert_eq!(b.text(), "      foo\n");
     }
 
+    /// With tabs (`.editorconfig`'s `indent_style = tab`), a level is a
+    /// tab: Tab types one, `>>` adds one, `<<` takes one away.
+    #[test]
+    fn with_indent_tabs_a_level_is_a_tab() {
+        let mut b = buf("x\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_indent_tabs(true);
+        keys(&mut vim, &mut b, &mut c, ">>");
+        assert_eq!(b.text(), "\tx\n");
+        keys(&mut vim, &mut b, &mut c, "<<");
+        assert_eq!(b.text(), "x\n");
+        keys(&mut vim, &mut b, &mut c, "I");
+        named(&mut vim, &mut b, &mut c, NamedKey::Tab);
+        assert_eq!(b.text(), "\tx\n");
+    }
+
     #[test]
     fn set_indent_width_applies_a_persisted_setting_directly() {
         let mut vim = VimState::new();
@@ -6777,5 +7580,231 @@ two
         assert!(vim.is_idle());
         keys(&mut vim, &mut b, &mut c, "w");
         assert_eq!(c.char_idx, 4, "w moves one word, not deletes three");
+    }
+
+    // -- What the conformance file can't say (events, the host's state) --
+
+    fn presses(seq: &str) -> Vec<KeyPress> {
+        seq.chars().map(KeyPress::char).collect()
+    }
+
+    #[test]
+    fn with_count_puts_a_new_count_in_place_of_the_old_one() {
+        assert_eq!(with_count(&presses("dd"), 2), presses("2dd"));
+        assert_eq!(with_count(&presses("3dw"), 2), presses("2dw"));
+        assert_eq!(with_count(&presses("d3w"), 2), presses("2dw"));
+        assert_eq!(with_count(&presses("\"a3dd"), 4), presses("\"a4dd"));
+        assert_eq!(with_count(&presses("gU2w"), 3), presses("3gUw"));
+        assert_eq!(with_count(&presses("x"), 12), presses("12x"));
+        assert_eq!(with_count(&presses("0x"), 2), presses("20x"), "a leading 0 is a motion, not a count");
+    }
+
+    #[test]
+    fn a_count_on_dot_goes_to_the_host_with_it() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3");
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('.')), VimEvent::RepeatLastChange { count: Some(3) });
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('.')), VimEvent::RepeatLastChange { count: None });
+    }
+
+    #[test]
+    fn h_m_and_l_go_by_the_lines_the_pane_shows() {
+        let text: String = (0..30).map(|n| format!("line {n}\n")).collect();
+        let mut b = buf(&text);
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_viewport(Some((10, 20)));
+        let line = |b: &Buffer, c: &Cursor| b.line_col(c).0;
+        keys(&mut vim, &mut b, &mut c, "H");
+        assert_eq!(line(&b, &c), 10);
+        keys(&mut vim, &mut b, &mut c, "L");
+        assert_eq!(line(&b, &c), 20);
+        keys(&mut vim, &mut b, &mut c, "M");
+        assert_eq!(line(&b, &c), 15);
+        keys(&mut vim, &mut b, &mut c, "3H");
+        assert_eq!(line(&b, &c), 12);
+        keys(&mut vim, &mut b, &mut c, "2L");
+        assert_eq!(line(&b, &c), 19);
+        keys(&mut vim, &mut b, &mut c, "99H");
+        assert_eq!(line(&b, &c), 20, "a count past the window stops at its edge");
+        keys(&mut vim, &mut b, &mut c, "Hd");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('L'));
+        assert_eq!(b.line_count(), 31 - 11, "dL takes the window's lines from the cursor down");
+    }
+
+    #[test]
+    fn h_and_sentences_are_jumps() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor { char_idx: 4, sticky_col: 0 };
+        let mut vim = VimState::new();
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('H')), VimEvent::JumpRecorded(4));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('H')), VimEvent::None, "no move, no jump");
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char(')')), VimEvent::JumpRecorded(0));
+    }
+
+    #[test]
+    fn an_operator_reads_the_hosts_marks() {
+        let mut b = buf("a\nb\nc\nd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_marks([('x', 4)]);
+        keys(&mut vim, &mut b, &mut c, "d'x");
+        assert_eq!(b.text(), "d");
+        assert!(vim.is_idle());
+        let event = {
+            keys(&mut vim, &mut b, &mut c, "d'");
+            vim.handle_key(&mut b, &mut c, KeyPress::char('q'))
+        };
+        assert!(matches!(event, VimEvent::Error(_)), "a mark that isn't set says so: {event:?}");
+        assert_eq!(b.text(), "d");
+    }
+
+    #[test]
+    fn gi_goes_to_the_hosts_caret_mark_when_it_has_one() {
+        let mut b = buf("one two");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_marks([('^', 4)]);
+        keys(&mut vim, &mut b, &mut c, "giX");
+        assert_eq!(b.text(), "one Xtwo");
+    }
+
+    #[test]
+    fn leaving_insert_says_where_for_the_caret_mark() {
+        let mut b = buf("abcd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "llix");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(vim.last_insert_exit(), Some(3), "after the x, before Escape's step back");
+        assert_eq!(c.char_idx, 2);
+    }
+
+    #[test]
+    fn ctrl_r_tells_the_host_its_waiting_for_a_register() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_register("clip".to_string(), false);
+        keys(&mut vim, &mut b, &mut c, "i");
+        assert!(!vim.is_awaiting_insert_register());
+        vim.handle_key(&mut b, &mut c, KeyPress::char('r').with_ctrl());
+        assert!(vim.is_awaiting_insert_register());
+        keys(&mut vim, &mut b, &mut c, "+");
+        assert!(!vim.is_awaiting_insert_register());
+        assert_eq!(b.text(), "clip", "+ is the clipboard, which the host keeps in the unnamed register");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('r').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "z");
+        assert_eq!(b.text(), "clip", "an empty register puts nothing in");
+    }
+
+    #[test]
+    fn textwidth_sets_where_gq_wraps() {
+        let mut b = buf("aa bb cc dd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, ":set tw=5");
+        named(&mut vim, &mut b, &mut c, NamedKey::Enter);
+        keys(&mut vim, &mut b, &mut c, "gqq");
+        assert_eq!(b.text(), "aa bb\ncc dd");
+        keys(&mut vim, &mut b, &mut c, ":set tw?");
+        assert_eq!(named(&mut vim, &mut b, &mut c, NamedKey::Enter), VimEvent::Message("textwidth=5".to_string()));
+    }
+
+    #[test]
+    fn u_line_forgets_after_a_change_across_lines() {
+        let mut b = buf("ab\ncd");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "x");
+        keys(&mut vim, &mut b, &mut c, "onew");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        // `o` made a line: what's typed on it is the line `U` knows.
+        keys(&mut vim, &mut b, &mut c, "U");
+        assert_eq!(b.text(), "b\n\ncd");
+        keys(&mut vim, &mut b, &mut c, "ggJU");
+        assert_eq!(b.text(), "b\ncd", "a join isn't a change on one line: nothing for U");
+    }
+
+    #[test]
+    fn standard_keys_take_none_of_inserts_vim_chords() {
+        let mut b = buf("");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_policy(EditPolicy::Standard);
+        vim.enter_insert_here(&b, &mut c);
+        keys(&mut vim, &mut b, &mut c, "foo bar");
+        for chord in ['w', 'u', 'h', 't', 'd', 'r'] {
+            vim.handle_key(&mut b, &mut c, KeyPress::char(chord).with_ctrl());
+        }
+        assert_eq!(b.text(), "foo bar");
+        assert_eq!(vim.mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn standard_keys_wrap_join_and_change_case() {
+        let mut b = buf("one two\nthree");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        vim.set_policy(EditPolicy::Standard);
+        vim.enter_insert_here(&b, &mut c);
+        vim.change_case(&mut b, &mut c, true);
+        assert_eq!(b.text(), "ONE two\nthree");
+        vim.join_selected_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "ONE two three");
+        assert_eq!(vim.mode(), Mode::Insert);
+        vim.text_width = 8;
+        vim.wrap_lines(&mut b, &mut c);
+        assert_eq!(b.text(), "ONE two\nthree");
+        assert_eq!(vim.mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn replace_mode_is_shown_as_such_and_escape_leaves_it() {
+        let mut b = buf("abc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "R");
+        assert_eq!(vim.mode(), Mode::Replace);
+        assert!(vim.is_inserting());
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(vim.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn a_g_operator_shows_its_targets_and_cancels_cleanly() {
+        let mut b = buf("foo bar");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "gU");
+        assert!(vim.is_pending());
+        assert!(!vim.pending_children().is_empty(), "the motions it takes");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert!(vim.is_idle());
+        keys(&mut vim, &mut b, &mut c, "gUiw");
+        assert_eq!(b.text(), "FOO bar");
+        assert_eq!(vim.mode(), Mode::Normal, "no stray Insert from the i");
+    }
+
+    #[test]
+    fn bang_opens_the_command_line_on_the_lines_and_asks_the_host_to_filter() {
+        let mut b = buf("a\nb\nc");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "!!");
+        assert_eq!((vim.mode(), vim.command_line()), (Mode::Command, ".!"));
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        keys(&mut vim, &mut b, &mut c, "!j");
+        assert_eq!(vim.command_line(), ".,.+1!");
+        keys(&mut vim, &mut b, &mut c, "sort");
+        assert_eq!(named(&mut vim, &mut b, &mut c, NamedKey::Enter), VimEvent::FilterLines { first: 0, last: 1, command: "sort".to_string() });
+        keys(&mut vim, &mut b, &mut c, ":!ls");
+        assert!(matches!(named(&mut vim, &mut b, &mut c, NamedKey::Enter), VimEvent::Error(_)), "no range: no lines to filter");
+        keys(&mut vim, &mut b, &mut c, "Vj!");
+        assert_eq!(vim.command_line(), "'<,'>!");
+        keys(&mut vim, &mut b, &mut c, "tac");
+        assert_eq!(named(&mut vim, &mut b, &mut c, NamedKey::Enter), VimEvent::FilterLines { first: 0, last: 1, command: "tac".to_string() });
     }
 }
