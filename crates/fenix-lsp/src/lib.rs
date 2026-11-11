@@ -29,6 +29,7 @@ pub mod fanout;
 pub mod per_language;
 mod position;
 pub mod pull;
+pub mod code_lens;
 pub mod semantic;
 mod sync;
 mod uri;
