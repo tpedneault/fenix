@@ -5308,6 +5308,11 @@ pub struct App {
     /// path as servers know it), worked out when it's synced, so drawing
     /// it looks at nothing on disk.
     semantic_of: HashMap<BufferId, semantic::SemanticTarget>,
+    /// A test's seam: every pane that could wrap goes by rows (at
+    /// `rows::UNBOUNDED` when it doesn't wrap), with or without rows
+    /// above its lines, so the row path can be checked against the
+    /// line path it stands in for.
+    force_row_path: bool,
     /// The grammar's comments and strings (bytes) in what was last drawn
     /// of each buffer with semantic tokens: where none is laid.
     semantic_protected: HashMap<BufferId, Vec<std::ops::Range<usize>>>,
@@ -6303,6 +6308,7 @@ impl App {
             break_cache: std::cell::RefCell::new(HashMap::new()),
             virtual_rows: HashMap::new(),
             semantic_of: HashMap::new(),
+            force_row_path: false,
             semantic_protected: HashMap::new(),
             screen_decorations: None,
             pane_text_cols: HashMap::new(),
@@ -16853,10 +16859,16 @@ impl App {
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
-            // A wrapped pane: by its rows, a pane less one.
+            // A pane by rows: by its rows, a pane less one. One that
+            // doesn't wrap (lens rows above its lines) counts them, as
+            // Vim's rows don't.
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
-            if self.wrap_cols(pane, id).is_some() {
+            if self.row_cols(pane, id).is_some() {
                 let rows = self.pane_text_rows(pane).unwrap_or(page_size).saturating_sub(1).max(1) as isize;
+                if self.page_by_rows(pane, id, if down { rows } else { -rows }) {
+                    self.wake_caret();
+                    return;
+                }
                 if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                     if self.vim.move_rows(&mut ob.buffer, &mut state.cursor, if down { rows } else { -rows }) {
                         self.wake_caret();
@@ -20211,8 +20223,11 @@ impl App {
                     }
                 } else if pane == self.focused_pane_id() {
                     // A wrapped pane's view goes by rows, the cursor only
-                    // as far as keeps it in view.
+                    // as far as keeps it in view. One by rows only for the
+                    // rows above its lines (a code lens's) moves its cursor
+                    // by lines, as 1.5 did, and the view follows.
                     let wrapped = self.main_view == MainView::Editor
+                        && self.wrap_cols(pane, self.focused_buffer_id()).is_some()
                         && geometry.panes.iter().find(|(id, _)| *id == pane).is_some_and(|(_, rect)| {
                             let visible = text::lines_that_fit(pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height);
                             let buffer = self.focused_buffer_id();
@@ -20801,6 +20816,9 @@ impl App {
             };
             self.set_pane_text_cols(pane, visible_cols);
             let wrap = if is_dashboard { None } else { self.wrap_cols(pane, buffer_id) };
+            // By rows: wrapped, or with rows that aren't text (a code
+            // lens's) at `UNBOUNDED`, scrolled sideways as any other.
+            let by_rows = if is_dashboard { None } else { self.row_cols(pane, buffer_id) };
             if wrap.is_some() && self.pane_state(pane).scroll_col != 0 {
                 self.pane_state_mut(pane).scroll_col = 0;
             }
@@ -20832,7 +20850,7 @@ impl App {
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
             let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
             // A wrapped pane's scroll snaps a row at a time.
-            let render_frac = if wrap.is_some() { 0.0 } else { rendered_scroll - rendered_scroll.floor() };
+            let render_frac = if by_rows.is_some() { 0.0 } else { rendered_scroll - rendered_scroll.floor() };
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
             // the cursor's own row in the per-line pad table.
@@ -20878,8 +20896,8 @@ impl App {
             let syntax_highlights = self.syntax_highlights_in_columns(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col, row_columns.as_ref(), true);
             let tab_stops = self.tab_stops_for(buffer_id);
             let content_spans = match self.buffers.get(buffer_id) {
-                // A wrapped pane is drawn by its rows.
-                Some(ob) if wrap.is_some() => self.row_content_spans(
+                // A pane by rows is drawn by its rows.
+                Some(ob) if by_rows.is_some() => self.row_content_spans(
                     ob, row_map, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
                     line, &tab_stops, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &layout.decorated,
                 ),
@@ -21034,7 +21052,7 @@ impl App {
                     buffer: buffer_id,
                     map: row_map,
                     rows: pane_visible_lines + 1,
-                    wrapped: wrap.is_some(),
+                    wrapped: by_rows.is_some(),
                     gutter_chars,
                     scroll_col: shown_scroll_col,
                     rendered_scroll,
@@ -21050,7 +21068,7 @@ impl App {
                 extra.underlines.extend(polished.underlines);
                 extra.ruler = polished.ruler;
                 // Off in a wrapped pane, for now.
-                if !folds_active && wrap.is_none() {
+                if !folds_active && by_rows.is_none() {
                     extra.sticky = self.sticky_rows(buffer_id, render_base_line, hl_row, gutter_chars, &tab_stops, line);
                 }
             }

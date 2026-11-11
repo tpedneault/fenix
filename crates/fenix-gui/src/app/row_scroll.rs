@@ -191,6 +191,11 @@ pub(super) fn follow(walk: &mut RowWalk, top: RowPos, cursor: RowPos, visible: u
             Some(_) if !jumped => with_rows_above(walk, cursor, visible),
             _ => centred(walk),
         }
+    } else if cursor == top && top.1 > 0 && walk.above(top.0) == top.1 {
+        // On the top line's first text row, with rows above it hidden (a
+        // code lens's): they're shown, as for a line scrolled up to. So
+        // `gg`, `k` or the wheel at the top reach a lens there.
+        with_rows_above(walk, cursor, visible)
     } else {
         // Past the bottom by no more than half a pane: just far enough,
         // as above the top.
@@ -346,6 +351,9 @@ impl App {
     /// focused pane's, when it's text and wraps, else a row a line.
     pub(super) fn sync_screen_rows(&mut self) {
         let (pane, buffer) = (self.focused_pane_id(), self.focused_buffer_id());
+        // Only wrapping gives a line more than one row of text; a pane by
+        // rows at `UNBOUNDED` (rows above its lines that aren't text) moves
+        // by lines exactly as 1.5 did.
         let wrap = (self.main_view == MainView::Editor && !self.terminal_focused && !self.sidebar_focused).then(|| self.wrap_cols(pane, buffer)).flatten();
         let rows: std::sync::Arc<dyn fenix_vim::ScreenRows> = match wrap {
             Some(width) => {
@@ -367,9 +375,10 @@ impl App {
         self.vim.set_screen_rows(rows);
     }
 
-    /// `pane`'s rows to walk, when it shows `buffer` wrapped.
+    /// `pane`'s rows to walk, when it shows `buffer` by rows (wrapped,
+    /// or with rows that aren't text).
     pub(super) fn row_walk(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Option<RowWalk<'_>> {
-        let width = self.wrap_cols(pane, buffer)?;
+        let width = self.row_cols(pane, buffer)?;
         let ob = self.buffers.get(buffer)?;
         let cursor_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
         Some(RowWalk { app: self, buffer, lines: self.pane_display_lines(pane, buffer), width, cursor_line, rows: HashMap::new() })
@@ -409,6 +418,27 @@ impl App {
         if top != (state.scroll_line, state.scroll_row) || state.rendered_scroll != state.scroll_line as f32 {
             self.set_row_top(pane, top);
         }
+        true
+    }
+
+    /// PageUp and PageDown in a pane by rows whose lines don't wrap (rows
+    /// above them that aren't text): the cursor `rows` rows on (back,
+    /// when negative), counting those rows, onto that line, at its column
+    /// as a page a line moves it. False, doing nothing, in a pane that
+    /// wraps or goes a row a line.
+    pub(super) fn page_by_rows(&mut self, pane: fenix_window::WindowId, buffer: BufferId, rows: isize) -> bool {
+        if self.row_cols(pane, buffer) != Some(rows::UNBOUNDED) {
+            return false;
+        }
+        let Some(mut walk) = self.row_walk(pane, buffer) else { return false };
+        let from = self.cursor_row_pos(&mut walk, pane, buffer);
+        let to = walk.step(from, rows);
+        let (Some(&from_line), Some(&to_line)) = (walk.lines.get(from.0), walk.lines.get(to.0)) else { return false };
+        drop(walk);
+        let mut cursor = self.pane_state(pane).cursor;
+        let Some(ob) = self.buffers.get_mut(buffer) else { return false };
+        ob.buffer.move_page(&mut cursor, from_line.abs_diff(to_line), to_line > from_line);
+        self.pane_state_mut(pane).cursor = cursor;
         true
     }
 

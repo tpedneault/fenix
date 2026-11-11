@@ -248,4 +248,63 @@ there for anyone who wants them.
 
 ## 5. As built
 
-To be filled in as the stages land.
+### Stage 1
+
+`fenix_lsp::code_lens` as planned. The plan was revised after review:
+lenses are off by default until stage 6.
+
+### Stage 2
+
+- **`App::row_cols(pane, buffer)`** decides the row path: `wrap_cols`, else `rows::UNBOUNDED` when the
+  buffer has virtual rows (or `App::force_row_path`, a test seam) and
+  the pane could wrap. Its users:
+  - `frame_layout`;
+  - `row_walk` (follow, `zt`/`zz`/`zb`, and the wheel on an unfocused
+    pane);
+  - the mouse's hit test;
+  - PageUp/PageDown;
+  - and in `redraw`: the drawer choice, the snapping and sticky
+    headers.
+- **What still asks `wrap_cols`**, meaning "the lines really break":
+  - the reset of sideways scroll;
+  - `ensure_cursor_visible_horizontally`;
+  - the eased sideways scroll;
+  - the per-line highlight windows;
+  - Vim's motions by row: at `UNBOUNDED`, `sync_screen_rows` gives
+    `LineRows`, so `gj`/`gk` are `j`/`k` with the sticky column;
+  - the focused wheel, which at `UNBOUNDED` moves the cursor by lines
+    as 1.5 did while the view follows.
+- **Sideways scroll.** `frame_layout` keeps `scroll_col` when the rows
+  are `UNBOUNDED`, and `RowMap` already offsets by it.
+  `row_content_spans` starts a row at the scroll and draws at most
+  `MAX_ROW_CHARS` of it, as the line path does. Lens rows don't scroll.
+- **`App::set_virtual_rows(buffer, rows)`** replaces a buffer's rows
+  and keeps each pane's top text row in place.
+- **Tested.**
+  - `force_row_path` against the line path: frame by frame, the drawn
+    chars and their colours, the overlays, every cell's hit, the
+    scroll and the cursor match. Covered: moves, `gj`/`gk`, `$`/`0`/`w`/`%`,
+    a long line with tabs, `é` and `漢` scrolled sideways, Visual,
+    search, folds, the wheel, a click.
+  - The line path's frames are compared once settled, since it eases
+    and the row path snaps.
+  - With lens rows on lines 1 and 3: the same moves, and the caret,
+    the selection and the search's matches shifted by exactly the lens
+    rows above them.
+  - Rows appearing and going keep the top text row in place, and with
+    none left the pane is on the line path again.
+- **After review.**
+  - Panes in every workspace and frame keep their top through
+    `set_virtual_rows`, not just the live workspace's.
+  - A top at its line's very first row stays there when rows come
+    above that line, so a lens arriving on the top line shows (on line
+    0 it couldn't be reached otherwise). `follow` shows a line's lens
+    when the cursor is on the top line's first text row with the lens
+    hidden, so `gg`, `k` and the wheel reach it.
+  - Off the rows (above, below, right of a line's end, a drag past an
+    edge) in a pane that doesn't wrap, a hit is where the line path has
+    it, through the sideways scroll. A wrapped pane keeps soft wrap's
+    own: the line before the first row shown, or after the last. A lens row is no place in the text: a click, drag or hover
+    there moves no cursor and scrolls nothing.
+  - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
+    lens rows counted (`page_by_rows`), as in a wrapped pane.
