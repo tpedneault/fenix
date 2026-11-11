@@ -339,5 +339,130 @@ impl App {
     }
 }
 
+/// A lens to run: its server, its document, which of its lenses.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct LensPick {
+    pub key: LspKey,
+    pub path: PathBuf,
+    pub index: usize,
+}
+
+impl App {
+    /// The lens under `pos` in `pane` (laid out at `rect`), if the pointer
+    /// is on one's title: what a click runs, and its row's line and
+    /// columns, for the hover.
+    pub(super) fn lens_at(&self, pane: fenix_window::WindowId, rect: fenix_window::Rect, pos: (f32, f32)) -> Option<(LensPick, usize, std::ops::Range<usize>)> {
+        let buffer = self.mouse_text_buffer(pane)?;
+        // Nothing to look for: no layout worked out.
+        let rows = self.lens_rows.get(&buffer)?;
+        let ob = self.buffers.get(buffer)?;
+        let (char_width, line_height) = self.cell_size();
+        let content = super::pane_content_rect(rect, line_height, self.pane_has_breadcrumb(pane));
+        let row = ((pos.1 - content.y - crate::text::PAD_TOP) / line_height).floor();
+        let x = pos.0 - content.x - crate::text::PAD_LEFT - self.gutter_chars(ob) as f32 * char_width;
+        if row < 0.0 || x < 0.0 || pos.1 > content.y + content.h {
+            return None;
+        }
+        let state = *self.pane_state(pane);
+        let top = state.rendered_scroll.floor().max(0.0) as usize;
+        let map = self.pane_rows(pane, buffer, top, state.scroll_row, row as usize + 1);
+        let r = map.row(row as usize)?;
+        if !matches!(r.kind, super::rows::RowKind::Virtual(_)) {
+            return None;
+        }
+        let lead = super::rows::virtual_row_lead(ob, r.line, &self.tab_stops_for(buffer), map.width().unwrap_or(usize::MAX));
+        let col = ((x / char_width).floor() as usize).checked_sub(lead)?;
+        let lens_row = rows.get(&r.line)?;
+        let (cols, (key, index)) = lens_row.spans.iter().find(|(c, _)| c.contains(&col))?;
+        let path = self.lens_of.get(&buffer)?.1.clone();
+        Some((LensPick { key: key.clone(), path, index: *index }, r.line, cols.clone()))
+    }
+
+    /// The pointer moved to `pos` over `pane`: the lens under it (if any)
+    /// drawn as the one a click runs. Whether that changed.
+    pub(super) fn hover_lens(&mut self, pane: Option<(fenix_window::WindowId, fenix_window::Rect)>, pos: (f32, f32)) -> bool {
+        if self.lens_rows.is_empty() && self.lens_hover.is_none() {
+            return false;
+        }
+        let now = pane.and_then(|(p, rect)| {
+            let buffer = *self.windows().content(p)?;
+            self.lens_at(p, rect, pos).map(|(_, line, cols)| (buffer, line, cols))
+        });
+        if now == self.lens_hover {
+            return false;
+        }
+        self.lens_hover = now;
+        true
+    }
+
+    /// Runs `pick`: the server's command sent back to it, or what Fenix
+    /// does for a command it's expected to run itself; why not, when it
+    /// can't.
+    pub(super) fn run_lens(&mut self, pick: &LensPick) {
+        let Some(session) = self.lsp_sessions.get_mut(&pick.key) else { return };
+        let Some(code_lens) = session.lenses.get(&pick.path).and_then(|d| d.lenses.get(pick.index)).cloned() else { return };
+        let caps = session.capabilities.clone().unwrap_or_default();
+        match lens::action(&code_lens, |c| lens::executes(&caps, c)) {
+            lens::Action::Server { command, arguments } => {
+                let title = code_lens.command.as_ref().map_or(String::new(), |c| c.title.clone());
+                let params = lsp_types::ExecuteCommandParams { command, arguments, work_done_progress_params: Default::default() };
+                match session.client.request::<lsp_types::request::ExecuteCommand>(params) {
+                    Ok(id) => {
+                        session.pending.insert(id, PendingLspRequest::LensCommand { title });
+                    }
+                    Err(e) => self.set_error(format!("couldn't ask the server to run {title}: {e}")),
+                }
+            }
+            lens::Action::ShowReferences { locations } if locations.is_empty() => self.set_message("no references"),
+            lens::Action::ShowReferences { locations } => self.apply_lsp_references(locations),
+            lens::Action::CargoRun(runnable) => {
+                let root = runnable.cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| pick.key.root.clone());
+                let mut args = runnable.cargo_args.clone();
+                if !runnable.executable_args.is_empty() {
+                    args.push("--".into());
+                    args.extend(runnable.executable_args.iter().cloned());
+                }
+                let name = if runnable.label.is_empty() { format!("cargo {}", args.join(" ")) } else { runnable.label.clone() };
+                self.run_task_as(fenix_tasks::TaskDef { name, command: "cargo".into(), args }, root, None);
+            }
+            lens::Action::CargoDebug(runnable) => {
+                self.set_error(format!("Fenix can't debug from a lens yet ({}): SPC u u starts the debugger", runnable.label));
+            }
+            lens::Action::RunTest { path, line } => {
+                let _ = self.run_test_at(Path::new(&path), line);
+            }
+            lens::Action::Unknown { title, command } => self.set_error(format!("Fenix can't run {title} ({command})")),
+            lens::Action::Unresolved => self.set_message("that lens is still being worked out"),
+        }
+    }
+
+    /// `code.lens` (`SPC c l`): the cursor line's lenses -- one runs, more
+    /// are listed to choose from.
+    pub(crate) fn code_lens_at_cursor(&mut self) {
+        let buffer = self.focused_buffer_id();
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let Some(path) = self.lens_of.get(&buffer).map(|(_, p)| p.clone()) else {
+            self.set_message(if self.code_lens_on() { "no code lenses here" } else { "code lens is off: lsp.code_lens turns it on" });
+            return;
+        };
+        let Some(row) = self.lens_rows.get(&buffer).and_then(|rows| rows.get(&line)) else {
+            self.set_message("no code lenses on this line");
+            return;
+        };
+        let picks: Vec<(String, LensPick)> = row
+            .spans
+            .iter()
+            .map(|(cols, (key, index))| (row.text.chars().skip(cols.start).take(cols.len()).collect(), LensPick { key: key.clone(), path: path.clone(), index: *index }))
+            .collect();
+        if let [(_, pick)] = picks.as_slice() {
+            let pick = pick.clone();
+            self.run_lens(&pick);
+            return;
+        }
+        let candidates = picks.into_iter().map(|(label, pick)| fenix_picker::Candidate::new(label, pick)).collect();
+        self.enter_picker(super::ActivePicker::Lenses(fenix_picker::PickerState::new(candidates)));
+    }
+}
+
 /// Buffers' lens servers and path, by buffer (`App::lens_of`).
 pub(super) type LensOf = HashMap<BufferId, (Vec<LspKey>, PathBuf)>;

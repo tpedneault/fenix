@@ -326,3 +326,36 @@ lenses are off by default until stage 6.
     the line path again.
 - **Moved to stage 4:** the hover colour, which belongs with the click
   it shows.
+
+### Stage 4
+
+- **Running** (`App::run_lens`): `fenix_lsp::code_lens::action` decides
+  what a lens does.
+  - A command the server lists in `executeCommandProvider` goes back as
+    `workspace/executeCommand`, and an error answer is said. Edits the
+    server then asks to apply (`workspace/applyEdit`) are refused, as
+    they always have been.
+  - `showReferences` fills the references list, as `gr` does.
+  - rust-analyzer's `runSingle` runs `cargo <cargoArgs> -- <executableArgs>`
+    in Task Output, in its workspace root.
+  - Fenix's own `fenix.runTest` runs as `SPC p r` does.
+  - Anything else is said: "Fenix can't run *title* (*command*)".
+- **Changed from the plan: `debugSingle`.** Fenix has no way yet to
+  debug a single test: `SPC p r` runs one, and `SPC u u` starts the
+  debugger from a launch configuration. A Debug lens says "Fenix can't
+  debug from a lens yet: SPC u u starts the debugger". Mapping
+  rust-analyzer's runnable to a debug session (building with
+  `--no-run`, finding the test binary, launching codelldb or lldb-dap)
+  is follow-up work.
+- **Click.** `text_press` checks `lens_at` first: on a lens row
+  (`RowKind::Virtual`), the cell less the row's lead
+  (`rows::virtual_row_lead`, shared with drawing) is the column in the
+  row's text, and the `LensRow` span there is the lens. Separators and
+  the space after the titles run nothing. The cursor doesn't move.
+- **Hover.** `update_hover_cursor` keeps `lens_hover`, the lens under
+  the pointer. `row_content_spans` draws that title in the text colour,
+  the rest in the gutter's, and the pointer becomes a hand over it.
+  Nothing is worked out while no buffer has lenses.
+- **`SPC c l`** (`code.lens`). One lens on the cursor's line runs.
+  Several open a picker (`ActivePicker::Lenses`, "Code lenses") whose
+  Enter runs the one chosen. With none, or lenses off, it says so.

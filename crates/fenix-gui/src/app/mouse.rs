@@ -133,7 +133,7 @@ pub(super) struct TextHit {
 }
 
 impl App {
-    fn cell_size(&self) -> (f32, f32) {
+    pub(super) fn cell_size(&self) -> (f32, f32) {
         match &self.text {
             Some(t) => (t.char_width(), t.line_height()),
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
@@ -328,6 +328,11 @@ impl App {
     /// the cursor to the glyph, a word on a double click, a line on a
     /// triple, the selection stretched to it with Shift.
     pub(super) fn text_press(&mut self, pane: fenix_window::WindowId, rect: fenix_window::Rect, pos: (f32, f32), now: Instant) -> bool {
+        // On a code lens's title: that lens run.
+        if let Some((pick, _, _)) = self.lens_at(pane, rect, pos) {
+            self.run_lens(&pick);
+            return true;
+        }
         let Some(hit) = self.text_hit(pane, rect, pos) else { return false };
         let clicks = self.mouse.clicks.press(now, pos);
         let (shift, alt) = (self.modifiers.shift_key(), self.modifiers.alt_key());

@@ -255,6 +255,14 @@ pub(super) fn shown_char_columns(map: &RowMap, line: usize, col_map: Option<&Vec
     Some((char_of(a.cols.start), char_of(b.cols.end).saturating_add(1)))
 }
 
+/// How far in a row above `line` that isn't text (a code lens's) is
+/// drawn: the line's indent in display columns, a tab as wide as it's
+/// drawn, at most half of `width`. What a click on one is measured from.
+pub(super) fn virtual_row_lead(ob: &super::OpenBuffer, line: usize, tab_stops: &super::TabStops, width: usize) -> usize {
+    let leading: String = ob.buffer.rope().line(line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    tabstops::expand_line(&leading, tab_stops).0.chars().count().min(width / 2)
+}
+
 /// A pane's text as a frame lays it out: its rows, and the lines whose
 /// columns aren't one a char (a tab, a decoration).
 pub(super) struct PaneLayout {
@@ -641,13 +649,22 @@ impl App {
                 Some(row) if row.kind == RowKind::Filler => spans.push((" ".repeat(gutter_chars), theme.gutter_fg)),
                 // A row above its line that isn't its text: as its indent.
                 Some(row) if let RowKind::Virtual(i) = row.kind => {
-                    // Its line's leading whitespace in display columns: a
-                    // tab as wide as it's drawn.
-                    let leading: String = ob.buffer.rope().line(row.line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-                    let lead = tabstops::expand_line(&leading, tab_stops).0.chars().count();
                     let width = map.width().unwrap_or(usize::MAX);
-                    let text: String = format!("{}{}", " ".repeat(lead.min(width / 2)), map.virtual_text(i)).chars().take(width.saturating_sub(1)).collect();
-                    spans.push((format!("{}{text}", " ".repeat(gutter_chars)), theme.gutter_fg));
+                    let lead = virtual_row_lead(ob, row.line, tab_stops, width);
+                    let text: String = map.virtual_text(i).chars().take(width.saturating_sub(1).saturating_sub(lead)).collect();
+                    spans.push((" ".repeat(gutter_chars + lead), theme.gutter_fg));
+                    // The lens under the pointer, in the text's colour: a
+                    // click runs it.
+                    match self.lens_hover.as_ref().filter(|(b, line, _)| *line == row.line && self.buffers.get(*b).is_some_and(|o| std::ptr::eq(o, ob))) {
+                        Some((_, _, cols)) => {
+                            let part = |r: std::ops::Range<usize>| text.chars().skip(r.start).take(r.len()).collect::<String>();
+                            let n = text.chars().count();
+                            spans.push((part(0..cols.start.min(n)), theme.gutter_fg));
+                            spans.push((part(cols.start.min(n)..cols.end.min(n)), theme.fg));
+                            spans.push((part(cols.end.min(n)..n), theme.gutter_fg));
+                        }
+                        None => spans.push((text, theme.gutter_fg)),
+                    }
                 }
                 Some(row) if row.kind == RowKind::Text && row.line < visual_lines => {
                     if row.first {
