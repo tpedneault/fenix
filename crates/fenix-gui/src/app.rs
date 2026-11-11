@@ -20862,7 +20862,7 @@ impl App {
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
             // This pane's own view, for a document asked by range.
-            self.note_semantic_view(buffer_id, pane, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
+            self.note_semantic_view(buffer_id, pane, &row_map.runs());
             // A wrapped pane: the columns its rows show of each line.
             let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
                 let mut columns: HashMap<usize, (usize, usize)> = HashMap::new();
@@ -23521,6 +23521,8 @@ impl App {
 }
 
 #[cfg(test)]
+// A view of one run of lines is a list of one range.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
@@ -36966,21 +36968,21 @@ name = \"orbit\"
         let _ = app.syntax_highlights_for_visible_range(id, 0, 1);
         app.ask_due_semantic_tokens();
         assert!(app.lsp_sessions[&key].pending.is_empty(), "only a pane's view asks");
-        app.note_semantic_view(id, pane, 0, 1);
+        app.note_semantic_view(id, pane, &[0..1]);
         app.ask_due_semantic_tokens();
         let (req, pending) = only_pending(&app, &key);
         assert!(matches!(&pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if *lines == (0..101)), "{pending:?}");
         answer(&mut app, &key, req, serde_json::json!({"data": MAIN_AND_X}));
         assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
         // Further down, past what's covered: those lines asked.
-        app.note_semantic_view(id, pane, 5000, 10);
+        app.note_semantic_view(id, pane, &[5000..5010]);
         app.ask_due_semantic_tokens();
         let (req, pending) = only_pending(&app, &key);
         assert!(matches!(pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if lines == (4900..5110)));
         answer(&mut app, &key, req, serde_json::json!({"data": []}));
         assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro), "the first range's tokens kept beside the second's");
         // Near the end: no further than the document.
-        app.note_semantic_view(id, pane, 11_990, 10);
+        app.note_semantic_view(id, pane, &[11_990..12000]);
         app.ask_due_semantic_tokens();
         assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if lines == (11_890..12_001)));
 
@@ -37024,7 +37026,7 @@ name = \"orbit\"
         let text = format!("mod m {{\n{}}}\n", "    fn f() {}\n".repeat(12_000));
         let (asks, quiet) = range_frames("semantic_sticky", &text, 12, &|app| {
             let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
-            app.note_semantic_view(id, pane, 5000, 40);
+            app.note_semantic_view(id, pane, &[5000..5040]);
             // Sticky scroll's header line, looked up on its own.
             let _ = app.syntax_highlights_for_visible_range(id, 0, 1);
         });
@@ -37040,8 +37042,8 @@ name = \"orbit\"
                 app.run_cmd("window.split_vertical");
             }
             let panes = app.windows().windows();
-            app.note_semantic_view(id, panes[0], 0, 40);
-            app.note_semantic_view(id, panes[1], 6000, 40);
+            app.note_semantic_view(id, panes[0], &[0..40]);
+            app.note_semantic_view(id, panes[1], &[6000..6040]);
         });
         assert_eq!((asks, quiet), (2, true));
     }
@@ -37052,9 +37054,130 @@ name = \"orbit\"
         let text = format!("{}{}", "fn f() {}\n".repeat(9_990), "\u{c}x\n".repeat(20));
         let (asks, quiet) = range_frames("semantic_ff", &text, 8, &|app| {
             let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
-            app.note_semantic_view(id, pane, 0, 40);
+            app.note_semantic_view(id, pane, &[0..40]);
         });
         assert_eq!((asks, quiet), (1, true));
+    }
+
+    #[test]
+    fn more_views_than_ranges_kept_each_asked_once_then_quiet() {
+        let text = "fn f() {}\n".repeat(40_000);
+        for views in [9usize, 12] {
+            let (asks, quiet) = range_frames(&format!("semantic_views_{views}"), &text, 40, &|app| {
+                let id = app.focused_buffer_id();
+                while app.windows().windows().len() < views {
+                    app.run_cmd("window.split_vertical");
+                }
+                for (i, pane) in app.windows().windows().into_iter().enumerate() {
+                    app.note_semantic_view(id, pane, &[i * 3000..i * 3000 + 40]);
+                }
+            });
+            assert_eq!((asks, quiet), (views, true), "{views} views");
+        }
+    }
+
+    /// A large Rust file with a server answering by range, a view at the
+    /// top: its app, server and document.
+    fn range_fixture(name: &str, lines: usize) -> (TempDir, App, LspKey, PathBuf) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", &"fn f() {}\n".repeat(lines));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function"], "tokenModifiers": []}, "full": true, "range": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        (dir, app, key, canonical)
+    }
+
+    fn asked_lines(app: &App, key: &LspKey) -> Option<(i64, std::ops::Range<usize>)> {
+        app.lsp_sessions[key].pending.iter().find_map(|(id, p)| match p {
+            PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } => Some((*id, lines.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_refresh_while_a_range_ask_is_out_asks_those_lines_again() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refresh_out", 12_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.note_semantic_view(id, pane, &[0..40]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        let mut asks = 0;
+        for _ in 0..5 {
+            app.note_semantic_view(id, pane, &[0..40]);
+            app.ask_due_semantic_tokens();
+            if let Some((req, _)) = asked_lines(&app, &key) {
+                asks += 1;
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asks, 1, "asked again once, after the refresh");
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].stale);
+    }
+
+    #[test]
+    fn a_view_across_a_fold_asks_for_what_it_shows_no_more() {
+        let (_dir, mut app, key, _canonical) = range_fixture("semantic_fold_view", 37_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        // Lines 0..10 and 30 010..30 040 shown, a fold closed between.
+        app.note_semantic_view(id, pane, &[0..10, 30_010..30_040]);
+        let mut asked = Vec::new();
+        for _ in 0..4 {
+            app.ask_due_semantic_tokens();
+            if let Some((req, lines)) = asked_lines(&app, &key) {
+                asked.push(lines);
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asked, vec![0..110, 29_910..30_140], "each run with its margin");
+        // A view far taller than any pane: no more than one ask's worth.
+        app.note_semantic_view(id, pane, &[5_000..15_000]);
+        app.ask_due_semantic_tokens();
+        assert!(asked_lines(&app, &key).is_some_and(|(_, l)| l.len() <= 2_000));
+    }
+
+    #[test]
+    fn a_range_refused_moves_on_to_the_next_view_and_typing_s_pause_holds() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refused_next", 12_000);
+        let id = app.focused_buffer_id();
+        app.run_cmd("window.split_vertical");
+        let panes = app.windows().windows();
+        app.note_semantic_view(id, panes[0], &[0..40]);
+        app.note_semantic_view(id, panes[1], &[6_000..6_040]);
+        app.ask_due_semantic_tokens();
+        let (req, first) = asked_lines(&app, &key).unwrap();
+        answer_error(&mut app, &key, req, -32603);
+        app.ask_due_semantic_tokens();
+        let (req, second) = asked_lines(&app, &key).unwrap();
+        assert_ne!(first, second, "the other view asked");
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        // Typing, then the view moves: still after the pause.
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        let paused = app.lsp_sessions[&key].semantic[&canonical].due.unwrap();
+        app.note_semantic_view(id, panes[0], &[1..41]);
+        assert!(app.lsp_sessions[&key].semantic[&canonical].due.unwrap() >= paused, "not before the pause");
+    }
+
+    #[test]
+    fn ranges_let_go_take_their_tokens_with_them() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_evict", 40_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        for i in 0..12 {
+            let top = i * 3_000;
+            app.note_semantic_view(id, pane, &[top..top + 40]);
+            app.ask_due_semantic_tokens();
+            let (req, _) = asked_lines(&app, &key).unwrap();
+            // One token, on the view's first line.
+            answer(&mut app, &key, req, serde_json::json!({"data": [top, 3, 1, 0, 0]}));
+        }
+        let doc = &app.lsp_sessions[&key].semantic[&canonical];
+        assert!(doc.covered.len() <= 8, "{:?}", doc.covered);
+        assert_eq!(doc.tokens.len(), doc.covered.len(), "a token for each range kept, none for those let go");
     }
 
     #[test]
@@ -37067,12 +37190,12 @@ name = \"orbit\"
         let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
         app.sync_lsp_for_focused_buffer();
         let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
-        app.note_semantic_view(id, pane, 0, 40);
+        app.note_semantic_view(id, pane, &[0..40]);
         app.ask_due_semantic_tokens();
         let (req, _) = only_pending(&app, &key);
         answer_error(&mut app, &key, req, -32603);
         for top in [0, 1, 2] {
-            app.note_semantic_view(id, pane, top, 40);
+            app.note_semantic_view(id, pane, &[top..top + 40]);
             app.ask_due_semantic_tokens();
         }
         assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "tried, until an edit");

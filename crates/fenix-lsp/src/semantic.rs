@@ -258,9 +258,13 @@ pub fn read_answer(value: serde_json::Value) -> Result<Option<Answer>, serde_jso
 /// one overlapping a token before it (Fenix doesn't ask for those). A
 /// token's length stops at its line's end (nor for multi-line ones).
 pub fn decode(data: &[u32], text: &str, styles: &Styles) -> Vec<Token> {
+    decode_in(data, &Rope::from_str(text), styles)
+}
+
+/// `decode`, against the text already in a rope.
+pub fn decode_in(data: &[u32], rope: &Rope, styles: &Styles) -> Vec<Token> {
     let mut out = Vec::with_capacity(data.len() / 5);
-    let rope = ropey::Rope::from_str(text);
-    let mut lines = Lines::new(&rope);
+    let mut lines = Lines::new(rope);
     let (mut line, mut start) = (0u32, 0u32);
     for t in data.chunks_exact(5) {
         let [delta_line, delta_start, length, ty, modifiers] = [t[0], t[1], t[2], t[3], t[4]];
@@ -400,15 +404,25 @@ pub struct Extent {
     pub end: lsp_types::Position,
 }
 
+/// The text as ropey holds it: what a document's extent, its lines and
+/// its answers are worked out against, built once a sync.
+pub use ropey::Rope;
+
 pub fn extent(text: &str) -> Extent {
-    let rope = ropey::Rope::from_str(text);
-    Extent { lines: rope.len_lines(), bytes: text.len(), end: crate::char_offset_to_position(&rope, rope.len_chars()) }
+    extent_of(&Rope::from_str(text))
+}
+
+pub fn extent_of(rope: &Rope) -> Extent {
+    Extent { lines: rope.len_lines(), bytes: rope.len_bytes(), end: crate::char_offset_to_position(rope, rope.len_chars()) }
 }
 
 /// The chars of `text`'s lines `lines` (a range of line numbers): from the
 /// first's start to the start of the line after the last, or the end.
 pub fn line_chars(text: &str, lines: Range<usize>) -> Range<usize> {
-    let rope = ropey::Rope::from_str(text);
+    line_chars_in(&Rope::from_str(text), lines)
+}
+
+pub fn line_chars_in(rope: &Rope, lines: Range<usize>) -> Range<usize> {
     let at = |line: usize| if line >= rope.len_lines() { rope.len_chars() } else { rope.line_to_char(line) };
     at(lines.start)..at(lines.end)
 }

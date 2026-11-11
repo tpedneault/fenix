@@ -491,6 +491,27 @@ These supersede the table and rules above where they differ.
     refresh clears `covered`, so the lines shown are asked again.
   - **The document's end.** A range ask ends at the document's last
     position, not a line past it.
+- **Revised after the fourth review.**
+  - **Never evicting a viewed range.** The 8-range cap applies only to
+    ranges no view reaches, so a document with more views keeps a range
+    for each. An evicted range takes its tokens with it, so what's held
+    is what's been in view lately, not everything ever shown.
+  - **The document's rope.** Each document keeps the rope its sync
+    built. A range's answer is decoded, and its lines found, against
+    that rope, with no rebuild per answer.
+  - **Refresh while asking.** A refresh while a range ask is out marks
+    the ask: its answer is merged, but its lines aren't counted as
+    answered, so they're asked again. Any ask sent after a refresh
+    clears the refresh.
+  - **Views as runs.** A pane's view is the runs of lines it shows, with
+    each closed fold between them left out. One ask is for at most 2 000
+    lines.
+  - **Refusals move on.** A range refused or unreadable moves on to the
+    next view not covered.
+  - **The typing pause holds.** A view that moves while typing waits
+    for the pause.
+  - **Early out.** With nothing held, the frame does no work for tokens
+    (no set of shown panes is built).
 - **No range and over 50 000 lines:** not asked, and no wake is set.
 - **Wake.** `semantic_wake` gives the next due time, or now for one
   already due (a draw just made it due). `ask` clears `due` on every
