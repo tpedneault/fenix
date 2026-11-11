@@ -389,6 +389,8 @@ impl App {
         let buffers = &self.buffers;
         self.semantic_of.retain(|b, _| buffers.get(*b).is_some());
         let of = &self.semantic_of;
+        self.semantic_protected.retain(|b, _| of.contains_key(b));
+        let of = &self.semantic_of;
         for (key, session) in self.lsp_sessions.iter_mut() {
             if session.semantic.is_empty() {
                 continue;
