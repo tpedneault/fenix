@@ -583,7 +583,10 @@ impl App {
             // One of Fenix's own: the test at its line.
             let Some(own) = self.own_lenses.get(&pick.buffer).and_then(|(_, own)| own.get(pick.index)).cloned() else { return };
             if let lens::Action::RunTest { path, line } = lens::action(&own, |_| false) {
-                let _ = self.run_test_at(Path::new(&path), line);
+                let path = PathBuf::from(path);
+                if self.lens_may_start(&super::tool_sessions::root_for_path(&path)) {
+                    let _ = self.run_test_at(&path, line);
+                }
             }
             return;
         };

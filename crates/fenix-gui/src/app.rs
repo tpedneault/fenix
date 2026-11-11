@@ -37553,6 +37553,27 @@ name = \"orbit\"
     }
 
     #[test]
+    fn fenix_s_own_run_test_lens_runs_only_in_a_trusted_project() {
+        let dir = TempDir::new("lens_own_trust");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        dir.write(".fenix/tools.json", r#"{"tasks": {"build": {"executable": "make"}}}"#);
+        let path = dir.write("test_ledger.py", "def test_totals():\n    assert 1 == 1\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let state = TempDir::new("lens_own_trust_state");
+        app.known_projects = fenix_project::KnownProjects::load_or_default(state.path().join("projects.txt"));
+        app.project_trust_begin(Some(state.path().join("trusted-projects.json")));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app), vec![(0, "▶ Run test".to_string())]);
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("only in a trusted project (SPC p y)"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        app.trust_project_as_written(dir.path());
+        app.run_cmd("code.lens");
+        assert!(app.task_session.is_some(), "{}", said_now(&app));
+    }
+
+    #[test]
     fn a_server_s_run_lens_stands_in_for_fenix_s_own() {
         let dir = TempDir::new("lens_own_server");
         dir.write(".fenix/project.ini", "");
