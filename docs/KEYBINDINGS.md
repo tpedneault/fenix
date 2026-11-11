@@ -199,6 +199,7 @@ keys'; the palette has the commands).
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Cycle motion: off, subtle, full |
 | `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
+| `SPC t i` | Inlay hints on or off: types and parameter names from language servers, dimmed in the line |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC t k` | Vim keys or standard keys (`editor.keys`) |
 | `SPC e e` | Open the file explorer here |

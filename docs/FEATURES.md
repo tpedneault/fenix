@@ -210,6 +210,23 @@ its extension. The rest is built into Fenix.
     `syntax.macro`; every built-in theme does.
   - `lsp.semantic_highlighting_off` lists languages that keep the
     grammar's colours alone.
+- **Inlay hints** (`SPC t i`, `lsp.inlay_hints`, on): where a file's
+  language server offers them, what it would write into the code without
+  it being there -- a variable's type after its name (`: Vec<String>`),
+  a parameter's name before an argument (`count:`) -- drawn dimmed in the
+  line. They take room as the debugger's values do, so the caret, extra
+  carets, Visual selections and soft wrap all go by where the text is
+  drawn, and nothing of them is ever in the file, copied or searched.
+  - Only the first of a file's servers that offers them is asked, for
+    the lines in view and a margin around them: again when the view
+    moves past those, about a third of a second after typing pauses, and
+    when the server says they changed. Until then they move with your
+    typing: a type stays after the name, a parameter's name before the
+    argument you type into.
+  - A label is cut at 48 characters; a hint's tooltip and its edits
+    aren't shown.
+  - `lsp.inlay_hints_off` lists languages that show none; `SPC t i`
+    turns them all off or on again (saved).
 - **Code lens** (`lsp.code_lens`, off for now): what a file's language
   servers offer for a function, a test or a type, on a dimmed row of its
   own above it ("▶ Run | Debug", "3 references"). A click on one runs

@@ -103,6 +103,7 @@ impl CommandRegistry {
         registry.external("view.pick_theme", "Pick a theme by name", |app| app.picker_pick_theme());
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
+        registry.register("view.toggle_inlay_hints", "Inlay hints on or off: types and parameter names from language servers, dimmed in the line", |ctx| ctx.app.toggle_inlay_hints());
         registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
         registry.register("view.toggle_wrap", "Wrap long lines in the current buffer, or stop", |ctx| ctx.app.toggle_wrap());
         registry.register(

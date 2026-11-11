@@ -15,8 +15,9 @@ use fenix_syntax::LanguageId;
 /// there's no support (yet) for a server registering/unregistering one
 /// mid-session. Semantic tokens are asked for only when `semantic`
 /// (`lsp.semantic_highlighting`): off, nothing says Fenix takes them.
-/// Code lenses likewise, when `lens` (`lsp.code_lens`).
-pub fn client_capabilities(semantic: bool, lens: bool) -> lsp_types::ClientCapabilities {
+/// Code lenses likewise, when `lens` (`lsp.code_lens`); inlay hints when
+/// `inlay` (`lsp.inlay_hints`).
+pub fn client_capabilities(semantic: bool, lens: bool, inlay: bool) -> lsp_types::ClientCapabilities {
     lsp_types::ClientCapabilities {
         workspace: Some(lsp_types::WorkspaceClientCapabilities {
             apply_edit: Some(false),
@@ -29,6 +30,7 @@ pub fn client_capabilities(semantic: bool, lens: bool) -> lsp_types::ClientCapab
             // `workspace/semanticTokens/refresh`: asked again likewise.
             semantic_tokens: semantic.then_some(lsp_types::SemanticTokensWorkspaceClientCapabilities { refresh_support: Some(true) }),
             code_lens: lens.then(fenix_lsp::code_lens::workspace_capabilities),
+            inlay_hint: inlay.then(fenix_lsp::inlay::workspace_capabilities),
             workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
                 document_changes: Some(true),
                 resource_operations: Some(vec![]),
@@ -69,6 +71,7 @@ pub fn client_capabilities(semantic: bool, lens: bool) -> lsp_types::ClientCapab
             diagnostic: Some(lsp_types::DiagnosticClientCapabilities { dynamic_registration: Some(false), related_document_support: Some(true) }),
             semantic_tokens: semantic.then(fenix_lsp::semantic::client_capabilities),
             code_lens: lens.then(fenix_lsp::code_lens::client_capabilities),
+            inlay_hint: inlay.then(fenix_lsp::inlay::client_capabilities),
             ..Default::default()
         }),
         ..Default::default()

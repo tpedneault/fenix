@@ -22,6 +22,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   true` and glob sections. It comes after a project's
   `.fenix/settings.toml` and before your `settings.toml`. `SPC f c` shows
   what applies to the file.
+- Inlay hints, on by default: where a file's language server offers
+  them, a variable's type after its name and a parameter's name before
+  an argument, dimmed in the line. Asked for the lines in view, after
+  typing pauses and when the server refreshes them; they move with your
+  typing until then, and soft wrap, extra carets and selections go by
+  where they're drawn. `lsp.inlay_hints` (on), `lsp.inlay_hints_off`
+  per language, and `SPC t i` to turn them off and on.
 
 ## [1.5.2] - 2026-11-11
 

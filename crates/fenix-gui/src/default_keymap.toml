@@ -180,6 +180,11 @@ label = "motion"
 command = "view.toggle_animations"
 
 [[leader]]
+keys = "SPC t i"
+label = "inlay hints"
+command = "view.toggle_inlay_hints"
+
+[[leader]]
 keys = "SPC t d"
 label = "inline problems"
 command = "view.cycle_diagnostics"

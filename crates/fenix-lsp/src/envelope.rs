@@ -71,7 +71,8 @@ pub fn server_request_reply(method: &str) -> Result<Value, ResponseError> {
         | "client/unregisterCapability"
         | "workspace/diagnostic/refresh"
         | "workspace/semanticTokens/refresh"
-        | "workspace/codeLens/refresh" => Ok(Value::Null),
+        | "workspace/codeLens/refresh"
+        | "workspace/inlayHint/refresh" => Ok(Value::Null),
         _ => Err(ResponseError { code: -32601, message: format!("not implemented: {method}"), data: None }),
     }
 }
@@ -82,10 +83,10 @@ mod tests {
 
     #[test]
     fn the_refreshes_fenix_acts_on_are_answered_with_null() {
-        for method in ["workspace/semanticTokens/refresh", "workspace/codeLens/refresh", "workspace/diagnostic/refresh"] {
+        for method in ["workspace/semanticTokens/refresh", "workspace/codeLens/refresh", "workspace/diagnostic/refresh", "workspace/inlayHint/refresh"] {
             assert_eq!(server_request_reply(method), Ok(Value::Null), "{method}");
         }
-        assert_eq!(server_request_reply("workspace/inlayHint/refresh").unwrap_err().code, -32601);
+        assert_eq!(server_request_reply("workspace/foldingRange/refresh").unwrap_err().code, -32601);
     }
 
     #[test]
