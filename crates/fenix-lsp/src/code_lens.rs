@@ -87,20 +87,44 @@ impl<T: Clone> LensRow<T> {
     }
 }
 
+/// The most chars of a title shown.
+pub const MAX_TITLE: usize = 200;
+
+/// A title as it's drawn on one row: line breaks, tabs and other control
+/// characters as spaces, runs of spaces as one, none at either end, and
+/// no longer than `MAX_TITLE` chars (cut with `…`).
+pub fn clean_title(title: &str) -> String {
+    let mut out = String::new();
+    for word in title.split(|c: char| c.is_control() || c.is_whitespace()).filter(|w| !w.is_empty()) {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    if out.chars().count() > MAX_TITLE {
+        out = out.chars().take(MAX_TITLE - 1).collect::<String>().trim_end().to_string();
+        out.push_str(UNRESOLVED);
+    }
+    out
+}
+
 /// `lenses` (each with its tag, in the order they're to be shown: the
 /// primary server's first) as rows, by the line each is on. A lens with
-/// no command yet shows as `…`; one whose title is empty isn't shown.
+/// no command yet shows as `…`; one whose title is empty shows nothing,
+/// but its line's row is there all the same.
 pub fn rows<'a, T: Clone + 'a>(lenses: impl IntoIterator<Item = (T, &'a lsp_types::CodeLens)>) -> BTreeMap<usize, LensRow<T>> {
     let mut by_line: BTreeMap<usize, Vec<(T, String)>> = BTreeMap::new();
     for (tag, lens) in lenses {
         let title = match &lens.command {
-            Some(command) => command.title.trim().to_string(),
+            Some(command) => clean_title(&command.title),
             None => UNRESOLVED.to_string(),
         };
-        if title.is_empty() {
-            continue;
+        // A lens with no title still has its row, so the text below
+        // doesn't move as lenses resolve; the title just isn't there.
+        let line = by_line.entry(lens.range.start.line as usize).or_default();
+        if !title.is_empty() {
+            line.push((tag, title));
         }
-        by_line.entry(lens.range.start.line as usize).or_default().push((tag, title));
     }
     by_line
         .into_iter()
@@ -128,14 +152,30 @@ pub fn rows<'a, T: Clone + 'a>(lenses: impl IntoIterator<Item = (T, &'a lsp_type
 /// at a line's start moves that line down.
 pub fn changed_lines(old: &str, new: &str) -> (usize, usize, usize) {
     let (start, old_end, new_end) = crate::changed_span(old, new);
-    let line_of = |text: &str, char: usize| text.chars().take(char).filter(|&c| c == '\n').count();
-    // The first line wholly after `char`: its own when it's at a line's
-    // start, else the next.
-    let after = |text: &str, char: usize| {
-        let at_start = char == 0 || text.chars().nth(char - 1) == Some('\n');
-        line_of(text, char) + usize::from(!at_start)
+    // The lines before `start` and through each end, in one pass a text.
+    let lines_before = |text: &str, ends: [usize; 2]| {
+        let mut counts = [0usize; 2];
+        let mut previous = None;
+        for (i, c) in text.chars().enumerate().take(ends[1]) {
+            if c == '\n' {
+                counts[1] += 1;
+                if i < ends[0] {
+                    counts[0] += 1;
+                }
+            }
+            previous = Some(c);
+        }
+        (counts, previous)
     };
-    (line_of(old, start), after(old, old_end).max(line_of(old, start)), after(new, new_end).max(line_of(new, start)))
+    let ([start_line, old_end_line], before_old_end) = lines_before(old, [start, old_end]);
+    let ([_, new_end_line], _) = lines_before(new, [start, new_end]);
+    // The first line of `old` wholly after the change: the one its end
+    // is on when that's a line's start, else the next.
+    let at_line_start = old_end == 0 || before_old_end == Some('\n');
+    let after_old = (old_end_line + usize::from(!at_line_start)).max(start_line);
+    // The text after the change is the same in both: so are its lines,
+    // moved by the lines the change added or took away.
+    (start_line, after_old, after_old + new_end_line - old_end_line)
 }
 
 /// `lenses` moved by line through a change (`changed_lines`): those
@@ -278,12 +318,25 @@ mod tests {
         let c = lens(7, None, "", None);
         let d = lens(9, Some("  "), "e", None);
         let got = rows([(0, &a), (1, &b), (2, &c), (3, &d)]);
-        assert_eq!(got.keys().copied().collect::<Vec<_>>(), [3, 7], "an empty title isn't shown");
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), [3, 7, 9], "a row for each line with a lens");
+        assert_eq!(got[&9], LensRow { text: String::new(), spans: vec![] }, "an empty title shows nothing");
         assert_eq!(got[&3].text, "▶ Run | Debug");
         assert_eq!(got[&3].spans, vec![(0..5, 0), (8..13, 1)]);
         assert_eq!(got[&7].text, UNRESOLVED, "not resolved yet");
         assert_eq!(got[&3].at(9), Some(&1));
         assert_eq!(got[&3].at(6), None, "the separator runs nothing");
+    }
+
+    #[test]
+    fn a_title_is_one_row_of_plain_text_and_no_longer_than_the_most_shown() {
+        assert_eq!(clean_title("  Run\nDebug\r\n\tnow\u{7}x  "), "Run Debug now x");
+        let long = clean_title(&"y".repeat(200_000));
+        assert_eq!(long.chars().count(), MAX_TITLE);
+        assert!(long.ends_with('…'));
+        let a = lens(1, Some("Run\nDebug"), "r", None);
+        assert_eq!(rows([(0, &a)])[&1].text, "Run Debug");
+        let b = lens(2, Some("\n\t"), "r", None);
+        assert!(rows([(0, &b)])[&2].text.is_empty(), "nothing left to show");
     }
 
     #[test]
@@ -305,6 +358,50 @@ mod tests {
         assert_eq!(changed_lines("a\nb\nc\n", "a\nb\nx\ny\nc\n"), (2, 2, 4), "two lines inserted before line 2");
         assert_eq!(changed_lines("a\nb\nc\nd\n", "a\nd\n"), (1, 3, 1), "lines 1 and 2 taken away");
         assert_eq!(changed_lines("fn a\n", "// x\nfn a\n"), (0, 0, 1), "a line typed above line 0 moves it down");
+        assert_eq!(changed_lines("fn a() {}\nb\nc\n", "fn a() {\n}\nb\nc\n"), (0, 1, 2), "Enter inside line 0");
+        assert_eq!(changed_lines("a\nb\nc\nd\n", "ab\nc\nd\n"), (0, 1, 0), "line 1 joined to line 0");
+        assert_eq!(changed_lines("ab\nc\n", "ax\ny\nb\nc\n"), (0, 1, 3), "two lines pasted mid-line");
+    }
+
+    #[test]
+    fn lenses_after_any_change_move_by_the_lines_it_added_and_before_it_stay() {
+        // A small generator, the same every run.
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let alphabet = ['a', 'b', '\n'];
+        for _ in 0..4_000 {
+            let old: String = (0..next(14)).map(|_| alphabet[next(3)]).collect();
+            let chars: Vec<char> = old.chars().collect();
+            let cut = next(chars.len() + 1);
+            let cut_end = cut + next(chars.len() - cut + 1);
+            let inserted: String = (0..next(5)).map(|_| alphabet[next(3)]).collect();
+            let new = format!("{}{inserted}{}", chars[..cut].iter().collect::<String>(), chars[cut_end..].iter().collect::<String>());
+            let added = new.matches('\n').count() as isize - old.matches('\n').count() as isize;
+            // The change as it's sent (the text both share around it
+            // isn't in it), which is what the server's lines follow.
+            let (from, to, _) = crate::changed_span(&old, &new);
+            // Where each line of `old` starts.
+            let mut starts = vec![0];
+            starts.extend(chars.iter().enumerate().filter(|(_, c)| **c == '\n').map(|(i, _)| i + 1));
+            let mut lenses: Vec<CodeLens> = (0..starts.len() as u32).map(|l| lens(l, Some("x"), "", None)).collect();
+            shift_lines(&mut lenses, changed_lines(&old, &new));
+            for (line, &first) in starts.iter().enumerate() {
+                let got = lenses[line].range.start.line as isize;
+                // Its newline and all before it ahead of the change.
+                if starts.get(line + 1).is_some_and(|&next_line| next_line <= from) {
+                    assert_eq!(got, line as isize, "{old:?} -> {new:?}: line {line}, before the change");
+                }
+                // Starting where the change ends, or after.
+                if first >= to {
+                    assert_eq!(got, line as isize + added, "{old:?} -> {new:?}: line {line}, after the change");
+                }
+            }
+        }
     }
 
     fn lines_of(lenses: &[CodeLens]) -> Vec<u32> {

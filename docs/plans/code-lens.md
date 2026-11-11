@@ -293,6 +293,20 @@ lenses are off by default until stage 6.
     rows above them.
   - Rows appearing and going keep the top text row in place, and with
     none left the pane is on the line path again.
+- **After review.**
+  - Panes in every workspace and frame keep their top through
+    `set_virtual_rows`, not just the live workspace's.
+  - A top at its line's very first row stays there when rows come
+    above that line, so a lens arriving on the top line shows (on line
+    0 it couldn't be reached otherwise). `follow` shows a line's lens
+    when the cursor is on the top line's first text row with the lens
+    hidden, so `gg`, `k` and the wheel reach it.
+  - Off the rows (above, below, right of a line's end, a drag past an
+    edge), a hit is where the line path has it, through the sideways
+    scroll. A lens row is no place in the text: a click, drag or hover
+    there moves no cursor and scrolls nothing.
+  - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
+    lens rows counted (`page_by_rows`), as in a wrapped pane.
 
 ### Stage 3
 
@@ -326,3 +340,24 @@ lenses are off by default until stage 6.
     the line path again.
 - **Moved to stage 4:** the hover colour, which belongs with the click
   it shows.
+- **After review.**
+  - A resolve is tried once a lens per answer, whatever comes back (an
+    error, null, still no command); resolves out 10 s are cancelled and
+    count as tried. The 16 out at once are per server, over all its
+    documents, as planned.
+  - A full answer keeps on show what the last answer's lens in the same
+    place (range and data) said, until the new one's resolve lands, so
+    titles don't blink to `…`. A line with a lens keeps its row whatever
+    its title (an empty one shows nothing).
+  - A good answer clears the timeout, so a later timeout is asked once
+    more again. Refusals (cancelled, modified) are asked again 5 times,
+    then not until an edit, an answer or a refresh; semantic tokens the
+    same.
+  - Lenses moved by an agent's edit are laid out again in the next
+    frame; a closed buffer's rows go; `lsp.code_lens_off` applies at
+    once; edits with no lenses held skip the line count.
+  - Resolves look only at the runs a pane shows (none in a closed fold),
+    the lenses kept in line order and found by search.
+  - A lens row is cut to the pane's real width by whole titles
+    (`LensRow::fit`), wrapped or not, and its indent is at most half the
+    pane, so it stays in view.
