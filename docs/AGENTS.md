@@ -86,6 +86,13 @@ prompt goes to and in which mode.
   it asks for your attention (`agents.notify`).
 - A command's card says what ran (`$ rg -n session`) when the agent's
   own title for it doesn't ("Ran command").
+- A question to run a command shows the command itself, its own lines:
+  the first five and the last, with how many more between (`… 10 more
+  lines · v shows it all …`), never more than eight rows, so the answers
+  stay on screen in a short dock. The end is where a `&& rm -rf` would
+  be. `v` on the card shows the whole command, then what the agent gave
+  as it gave it. Any other question's title takes three rows at most, and
+  once answered its line keeps your answer whole.
 - When the agent asks you for something as it works -- a choice, a
   few values, a sign-in -- its question is a card too, with each field and
   its choices. A form: `y` asks it a field at a time, a picker for the
@@ -248,10 +255,11 @@ comes with five:
 
 *Plan, build, review* goes like this, and the others the same way:
 
-1. **plan**: the default agent, in its plan mode, plans the change. You
-   see the plan and say `y` to go on, `e` to edit what's passed on
-   first (in a compose pane), or `n` to stop. Or write to it, for as many
-   rounds as it takes.
+1. **plan**: the default agent, in its plan mode, plans the change, in
+   its answer rather than a file. You see the plan and say `y` to go on,
+   `e` to edit what's passed on first (in a compose pane), `r` to run the
+   step again on a thread of its own, or `n` to stop. Or write to it, for
+   as many rounds as it takes.
 2. **build**: carries it out and runs the tests, then waits at a gate the
    same way: write to it to ask for more, `y` when you're happy. If it
    changed nothing, the question says so.
@@ -268,10 +276,41 @@ A step in a plan or read-only mode can't change files: anything it
 writes anyway is put back, and when its agent offers to leave its plan
 mode, the plan is what the step gives and the gate is what's asked, not
 the agent's own card. A run ends on the thread that has the changes.
-`SPC a k` stops the step, and the pipeline; on a round you asked for at
-a gate, it stops that round and the gate comes back. In the prompt at a
-gate, typing is for another round: `y` and `n` answer from Normal mode or
-the thread.
+In the prompt at a gate, typing is for another round: `y` and `n` answer
+from Normal mode or the thread.
+
+A step that ends badly asks rather than ending the run: you refused a
+command it asked to run, you stopped it (`SPC a k`), the agent hit a
+token or request limit, refused, or stopped (it's started again), a
+review answered without its findings list, or a command still fails with
+its rounds used up. Its gate comes up saying why:
+
+```text
+ ? Fenix asks: Pipeline: plan stopped early (cancelled). Go on to build
+   with what it has, or write to it for another round
+   y  Go on to build
+   e  Edit what's passed on, then go on
+   r  Run plan again
+   n  Stop
+```
+
+What goes on is what the step got to: the plan it offered, else its last
+answer (for a command, what came before it: `y` goes on anyway). With
+nothing, only `r` and `n` are offered. So `SPC a k` stops the step and
+brings up its gate; `n` there stops the run.
+
+A run that stops -- `n` at a gate, `q` in the pane `e` opened, its
+agent unable to take the prompt, Fenix closed on it -- isn't over. It's
+kept, its steps and what each passed, beside its threads, and the step
+it stopped at says so: *Pipeline Plan, build, review: stopped at plan's
+gate -- SPC a g picks it up*. `SPC a g` (`Ctrl+K a g` with standard keys) on any of its steps, or `Alt+G`
+on its run in `SPC a t`, brings that gate back as it was (a step that
+stopped at work asks with why it stopped); at a gate, `SPC a g` is `y`;
+on a step at work, it says `SPC a k` stops it first. This holds across a
+restart: a run Fenix was closed on is listed as stopped, comes back at
+the step it was on, and its threads resume as any thread does. A run is
+kept until it's done, archived or deleted. An older Fenix reads the
+threads and ignores the run beside them.
 
 Pipelines are files: `pipelines/<name>.toml` in Fenix's settings folder,
 or a project's `.fenix/pipelines/<name>.toml`, with a step per
@@ -325,8 +364,9 @@ It runs in the project as you, as written: no `{input}` goes into it. A
 command that exits 0 hands what came before it to the next step, and its
 output is `{test}`, by its name. One that fails sends the end of its output
 back to `on_failure`, then runs again; with no `on_failure`, or its rounds
-used up, the pipeline stops. The thread before it says how it went, and
-`SPC a k` stops it. The `SPC a P` list shows each step's command, so you
+used up, its gate asks whether to go on anyway, run it again or stop.
+The thread before it says how it went and has its gate, and `SPC a k`
+stops it, bringing up the same gate. The `SPC a P` list shows each step's command, so you
 see what a project's pipeline runs before you pick it.
 
 ## Shortcuts

@@ -1,6 +1,8 @@
 //! Threads kept on disk: `<dir>/index.json`, a line of metadata per
 //! thread (enough for the threads page and its picker without reading
-//! every thread), and `<dir>/threads/<id>.json`, each thread whole.
+//! every thread), and `<dir>/threads/<id>.json`, each thread whole. A
+//! pipeline run that can still go on is beside them, in
+//! `<dir>/runs/<run id>.json` (1.5.1): an older Fenix doesn't look there.
 //! Written through `fenix-storage`'s staged writes, so a crash never
 //! leaves half a file.
 //!
@@ -39,6 +41,20 @@ pub struct IndexEntry {
     pub archived: bool,
 }
 
+/// A pipeline run kept beside its threads: the run as it is (the spec as
+/// it ran, what was asked, what each step passed, the rounds, where it
+/// was) and which threads are its steps.
+#[derive(Clone, Debug)]
+pub struct SavedRun {
+    pub run: crate::pipeline::Run,
+    pub root: PathBuf,
+    /// Each step's thread, in the order they ran.
+    pub threads: Vec<ThreadId>,
+    pub ledger: Option<ThreadId>,
+    pub usual_mode: Option<String>,
+    pub tag: RunTag,
+}
+
 /// What's read back of a thread.
 pub struct Saved {
     pub meta: ThreadMeta,
@@ -65,6 +81,60 @@ impl Store {
 
     fn index_path(&self) -> PathBuf {
         self.dir.join("index.json")
+    }
+
+    fn run_path(&self, id: &str) -> PathBuf {
+        let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+        self.dir.join("runs").join(format!("{name}.json"))
+    }
+
+    /// A run kept, as it is now: written each time it moves.
+    pub fn save_run(&self, saved: &SavedRun) -> io::Result<()> {
+        std::fs::create_dir_all(self.dir.join("runs"))?;
+        let mut tag = json!({});
+        add_run_and_archived(&mut tag, Some(&saved.tag), false, false);
+        let body = json!({
+            "version": VERSION,
+            "run": serde_json::to_value(&saved.run)?,
+            "root": saved.root.to_string_lossy(),
+            "threads": saved.threads.iter().map(|t| &t.0).collect::<Vec<_>>(),
+            "ledger": saved.ledger.as_ref().map(|t| &t.0),
+            "usualMode": saved.usual_mode,
+            "tag": tag["run"],
+        });
+        fenix_storage::write(&self.run_path(&saved.tag.id), &serde_json::to_vec(&body)?)
+    }
+
+    /// Run `id` as it was kept. One that was under way when it was kept
+    /// -- Fenix was closed on it -- comes back stopped at the step it was
+    /// on, to be picked up.
+    pub fn load_run(&self, id: &str) -> io::Result<SavedRun> {
+        let body: Value = serde_json::from_slice(&std::fs::read(self.run_path(id))?)?;
+        let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("run {id}: {what}"));
+        if body.get("version").and_then(Value::as_u64).unwrap_or(0) > VERSION {
+            return Err(invalid("written by a newer Fenix"));
+        }
+        let mut run: crate::pipeline::Run = serde_json::from_value(body.get("run").cloned().ok_or_else(|| invalid("no run"))?).map_err(|e| invalid(&e.to_string()))?;
+        if run.is_live() {
+            run.stop("interrupted, when Fenix closed");
+        }
+        let thread = |v: &Value| v.as_str().map(|s| ThreadId(s.to_string()));
+        Ok(SavedRun {
+            run,
+            root: PathBuf::from(body.get("root").and_then(Value::as_str).unwrap_or("")),
+            threads: body.get("threads").and_then(Value::as_array).map(|a| a.iter().filter_map(thread).collect()).unwrap_or_default(),
+            ledger: body.get("ledger").and_then(thread),
+            usual_mode: body.get("usualMode").and_then(Value::as_str).map(str::to_string),
+            tag: body.get("tag").and_then(parse_run).ok_or_else(|| invalid("no tag"))?,
+        })
+    }
+
+    /// A run that's done, archived or deleted: no longer kept.
+    pub fn forget_run(&self, id: &str) -> io::Result<()> {
+        match std::fs::remove_file(self.run_path(id)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 
     pub fn save(&self, meta: &ThreadMeta, thread: &Thread, extra: &Value, updated: u64) -> io::Result<()> {
@@ -593,6 +663,37 @@ mod tests {
         store.set_archived(&id, false).unwrap();
         assert!(!store.load(&id).unwrap().meta.archived && !store.index()[0].archived);
         assert!(store.set_archived(&ThreadId("t-none".into()), true).is_err(), "nothing kept, nothing to archive");
+    }
+
+    /// A run kept and read back goes on from the same step with the same
+    /// prompt; one that was under way comes back stopped there. The
+    /// threads beside it read as they did, and the index knows nothing
+    /// of it, as an older Fenix would read it.
+    #[test]
+    fn a_run_is_kept_beside_its_threads_and_comes_back_stopped_where_it_was() {
+        use crate::pipeline::{Next, PipelineSpec, Run, State, StepEnd};
+        let dir = temp().join("runs");
+        let store = Store::new(&dir);
+        let (meta, thread) = sample();
+        store.save(&meta, &thread, &Value::Null, 5).unwrap();
+        let (mut run, _) = Run::start(PipelineSpec::review(), "Add a flag");
+        run.step_ended(StepEnd { stop: "end_turn".into(), plan: Some("1. Parse it".into()), ..Default::default() });
+        run.gate_answered(true, None);
+        let tag = RunTag { id: "run-9".into(), pipeline: "Plan, build, review".into(), request: "Add a flag".into(), step: 1, step_name: "build".into(), seq: 1, started: 7, ended: None, ledger: None };
+        let saved = SavedRun { run: run.clone(), root: PathBuf::from("/work/p"), threads: vec![ThreadId("t-0".into()), meta.id.clone()], ledger: Some(meta.id.clone()), usual_mode: Some("default".into()), tag: tag.clone() };
+        store.save_run(&saved).unwrap();
+        let mut back = store.load_run("run-9").unwrap();
+        assert_eq!(back.run.state, State::Stopped { step: 1, why: "interrupted, when Fenix closed".into() });
+        assert_eq!((back.threads, back.ledger, back.usual_mode, back.tag), (saved.threads.clone(), saved.ledger.clone(), saved.usual_mode.clone(), tag));
+        assert!(matches!(back.run.resume(), Some(Next::Gate { step: 1, .. })));
+        let (Next::Start { step: 1, prompt }, Some(1)) = (back.run.retry(), run.step()) else { panic!() };
+        assert_eq!(prompt, run.prompt_for(1), "the prompt it was started with");
+        assert!(prompt.contains("1. Parse it"));
+        assert_eq!(store.index().len(), 1, "the index is the threads'");
+        assert_eq!(store.load(&meta.id).unwrap().thread.entries.len(), thread.entries.len());
+        store.forget_run("run-9").unwrap();
+        assert!(store.load_run("run-9").is_err());
+        store.forget_run("run-9").unwrap();
     }
 
     #[test]
