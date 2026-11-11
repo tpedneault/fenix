@@ -23521,9 +23521,9 @@ impl App {
 }
 
 #[cfg(test)]
-// A view of one run of lines is a list of one range.
-#[allow(clippy::single_range_in_vec_init)]
 mod tests {
+    // A view of one run of lines is a list of one range.
+    #![allow(clippy::single_range_in_vec_init)]
     use super::*;
 
     /// The layout the git dashboard's accordion asks for has to be the
