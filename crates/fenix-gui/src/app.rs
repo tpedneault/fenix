@@ -16929,10 +16929,16 @@ impl App {
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
-            // A wrapped pane: by its rows, a pane less one.
+            // A pane by rows: by its rows, a pane less one. One that
+            // doesn't wrap (lens rows above its lines) counts them, as
+            // Vim's rows don't.
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
             if self.row_cols(pane, id).is_some() {
                 let rows = self.pane_text_rows(pane).unwrap_or(page_size).saturating_sub(1).max(1) as isize;
+                if self.page_by_rows(pane, id, if down { rows } else { -rows }) {
+                    self.wake_caret();
+                    return;
+                }
                 if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                     if self.vim.move_rows(&mut ob.buffer, &mut state.cursor, if down { rows } else { -rows }) {
                         self.wake_caret();
@@ -20954,9 +20960,18 @@ impl App {
             }
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
-            // This pane's own view, for a document asked by range.
-            self.note_semantic_view(buffer_id, pane, &row_map.runs());
-            self.note_lens_view(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
+            // Its lines shown, for semantic tokens asked by range and the
+            // lenses resolved: worked out only when either wants them.
+            let (semantic, lensed) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id));
+            if semantic || lensed {
+                let runs = row_map.runs();
+                if semantic {
+                    self.note_semantic_view(buffer_id, pane, &runs);
+                }
+                if lensed {
+                    self.note_lens_view(buffer_id, &runs);
+                }
+            }
             // A wrapped pane: the columns its rows show of each line.
             let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
                 let mut columns: HashMap<usize, (usize, usize)> = HashMap::new();
@@ -37229,10 +37244,20 @@ name = \"orbit\"
             }
         }
         assert_eq!(asked, vec![0..110, 29_910..30_140], "each run with its margin");
-        // A view far taller than any pane: no more than one ask's worth.
+        // A view far taller than any pane: no more than one ask's worth
+        // at a time, each from where the last left off, then quiet.
         app.note_semantic_view(id, pane, &[5_000..15_000]);
-        app.ask_due_semantic_tokens();
-        assert!(asked_lines(&app, &key).is_some_and(|(_, l)| l.len() <= 2_000));
+        let mut asked = Vec::new();
+        for _ in 0..12 {
+            app.ask_due_semantic_tokens();
+            if let Some((req, lines)) = asked_lines(&app, &key) {
+                assert!(lines.len() <= 2_000, "{lines:?}");
+                asked.push(lines);
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asked, vec![4_900..6_900, 6_900..8_900, 8_900..10_900, 10_900..12_900, 12_900..14_900, 14_900..15_100]);
+        assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "quiet");
     }
 
     #[test]
@@ -37273,6 +37298,70 @@ name = \"orbit\"
         let doc = &app.lsp_sessions[&key].semantic[&canonical];
         assert!(doc.covered.len() <= 8, "{:?}", doc.covered);
         assert_eq!(doc.tokens.len(), doc.covered.len(), "a token for each range kept, none for those let go");
+    }
+
+    #[test]
+    fn ranges_let_go_after_an_edit_or_a_refresh_still_take_their_tokens_with_them() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_evict_edit", 70_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        for i in 0..20 {
+            let top = i * 3_000 + 100;
+            app.note_semantic_view(id, pane, &[top..top + 40]);
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+            app.ask_due_semantic_tokens();
+            let (req, _) = asked_lines(&app, &key).unwrap();
+            answer(&mut app, &key, req, serde_json::json!({"data": [top, 3, 1, 0, 0]}));
+            // An edit (on line 0, the lines kept) or a refresh between.
+            if i % 2 == 0 {
+                app.test_insert_str("x");
+                app.sync_lsp_for_focused_buffer();
+            } else {
+                app.refresh_semantic_tokens(&key);
+            }
+        }
+        let doc = &app.lsp_sessions[&key].semantic[&canonical];
+        assert!(doc.held.len() <= 8, "{:?}", doc.held);
+        assert!(doc.tokens.len() <= 8, "tokens for at most 8 ranges, not all 20: {}", doc.tokens.len());
+    }
+
+    #[test]
+    fn a_refresh_marks_only_the_ask_out_however_that_ask_ends() {
+        // Refused as modified: the next ask's lines count as answered.
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refresh_refused", 12_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.note_semantic_view(id, pane, &[0..40]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        answer_error(&mut app, &key, req, -32801);
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].refreshed_while_asking);
+        let mut asks = 0;
+        for _ in 0..5 {
+            // Past any back-off: due now.
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+            app.ask_due_semantic_tokens();
+            if let Some((req, _)) = asked_lines(&app, &key) {
+                asks += 1;
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asks, 1, "asked again once, not twice");
+        // Edited since asked: the same.
+        app.note_semantic_view(id, pane, &[6_000..6_040]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].refreshed_while_asking);
+        // A whole document's ask: cleared when it's answered.
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refresh_full");
+        app.ask_due_semantic_tokens();
+        let (req, _) = only_pending(&app, &key);
+        app.refresh_semantic_tokens(&key);
+        answer(&mut app, &key, req, serde_json::json!({"data": MAIN_AND_X}));
+        assert!(app.lsp_sessions[&key].semantic.values().all(|d| !d.refreshed_while_asking));
     }
 
     #[test]
@@ -37364,6 +37453,18 @@ name = \"orbit\"
         let (_dir, mut app, _key) = lensed("lens_debug", serde_json::json!([debug]));
         app.run_cmd("code.lens");
         assert!(said_now(&app).contains("can't debug from a lens yet"), "{}", said_now(&app));
+        // A run where the server says, outside the project: not run.
+        let away = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["test"], "cwd": "/"}}]}});
+        let (_dir, mut app, _key) = lensed("lens_run_away", serde_json::json!([away]));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("is outside the project"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        // Fenix's own command in a server's lens: not run.
+        let own = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run test", "command": "fenix.runTest", "arguments": ["/elsewhere/t.rs", 1]}});
+        let (_dir, mut app, _key) = lensed("lens_run_own_from_server", serde_json::json!([own]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run ▶ Run test (fenix.runTest)");
+        assert!(app.task_session.is_none());
         let other = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Peek", "command": "editor.peek"}});
         let (_dir, mut app, _key) = lensed("lens_unknown", serde_json::json!([other]));
         app.run_cmd("code.lens");
@@ -37396,6 +37497,16 @@ name = \"orbit\"
         app.handle_click_at(at(1.0), 800.0, 600.0);
         assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::LensCommand { ref title } if title == "▶ Run"));
         assert_eq!(app.line_col(), (0, 0), "the cursor stays");
+        // A pane too narrow for both: "▶ Run …" drawn, and "Debug", not
+        // drawn, isn't there to click.
+        app.set_pane_text_cols(pane, 12);
+        let layout = app.focused_layout(3);
+        let rows::RowKind::Virtual(i) = layout.map.row(0).unwrap().kind else { panic!("a lens row") };
+        assert_eq!(layout.map.virtual_text(i), "▶ Run …");
+        app.hover_lens(Some((pane, rect)), at(9.0));
+        assert!(app.lens_hover.is_none(), "cut off");
+        app.hover_lens(Some((pane, rect)), at(1.0));
+        assert_eq!(app.lens_hover.as_ref().map(|(_, _, cols)| cols.clone()), Some(0..5));
     }
 
     #[test]
@@ -37420,7 +37531,7 @@ name = \"orbit\"
         assert_eq!(app.row_cols(pane, app.focused_buffer_id()), Some(rows::UNBOUNDED), "the pane goes by rows");
         // In view: the one without a command resolved.
         let buffer = app.focused_buffer_id();
-        app.note_lens_view(buffer, 0, 5);
+        app.note_lens_view(buffer, &[0..5]);
         let (rid, pending) = only_pending(&app, &key);
         assert!(matches!(pending, PendingLspRequest::CodeLensResolve { index: 1, .. }), "{pending:?}");
         answer(&mut app, &key, rid, lens_json(0, Some("Debug")));
@@ -37475,9 +37586,204 @@ name = \"orbit\"
         app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = None;
         app.ask_due_lenses();
         assert!(app.lsp_sessions[&key].pending.is_empty(), "not until drawn");
-        app.note_lens_view(buffer, 0, 5);
+        app.note_lens_view(buffer, &[0..5]);
         app.ask_due_lenses();
         assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::CodeLens { .. }));
+    }
+
+    /// `lens_fixture` with one lens answered on each of `lines`, none
+    /// resolved: its app, path, server and the document's canonical path.
+    fn lens_answered(name: &str, text: &str, lines: &[u32]) -> (TempDir, App, PathBuf, LspKey, PathBuf) {
+        let (dir, mut app, path, key) = lens_fixture(name);
+        app.test_insert_str(text);
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::Value::Array(lines.iter().map(|&l| lens_json(l, None)).collect()));
+        (dir, app, path, key, canonical)
+    }
+
+    fn resolves_out(app: &App, key: &LspKey) -> Vec<i64> {
+        app.lsp_sessions[key].pending.iter().filter(|(_, p)| matches!(p, PendingLspRequest::CodeLensResolve { .. })).map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn a_resolve_that_comes_to_nothing_isn_t_sent_again_until_the_next_answer() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_resolve_once", "a\nb\nc\n", &[0, 1, 2]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        assert_eq!(out.len(), 3);
+        // An error, null, and a lens still without a command.
+        answer_error(&mut app, &key, out[0], -32603);
+        answer(&mut app, &key, out[1], serde_json::Value::Null);
+        answer(&mut app, &key, out[2], lens_json(2, None));
+        for _ in 0..50 {
+            app.note_lens_view(buffer, &[0..5]);
+            app.ask_due_lenses();
+        }
+        assert!(resolves_out(&app, &key).is_empty(), "tried, whatever came back");
+        // A resolve left unanswered: cancelled after the timeout, tried.
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().tried.clear();
+        app.note_lens_view(buffer, &[0..1]);
+        assert_eq!(resolves_out(&app, &key).len(), 1);
+        assert!(app.lens_wake().is_some(), "woken for its timeout");
+        let doc = app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap();
+        for (_, at) in doc.resolving.values_mut() {
+            *at -= Duration::from_secs(11);
+        }
+        app.ask_due_lenses();
+        assert!(resolves_out(&app, &key).is_empty());
+        app.note_lens_view(buffer, &[0..1]);
+        assert!(resolves_out(&app, &key).is_empty(), "not again until the next answer");
+    }
+
+    #[test]
+    fn no_more_than_sixteen_resolves_are_out_from_a_server() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_cap", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..10, 20..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16, "still sixteen");
+        // Not those in a fold: only the runs shown.
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_fold", "a\nb\nc\nd\n", &[0, 1, 2, 3]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..1, 3..4]);
+        let asked: Vec<usize> = app.lsp_sessions[&key].pending.values().filter_map(|p| match p {
+            PendingLspRequest::CodeLensResolve { index, .. } => Some(*index),
+            _ => None,
+        }).collect();
+        assert_eq!(asked.iter().copied().collect::<std::collections::BTreeSet<_>>(), [0, 3].into());
+    }
+
+    #[test]
+    fn a_resolved_title_stays_on_show_through_the_next_answer_until_it_s_resolved_again() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_carry", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())]);
+        // Asked again (a refresh): the same lens, unresolved.
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let (id, _) = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, p)| (*id, p.clone())).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "not back to …");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        assert_eq!(out.len(), 1, "resolved again all the same");
+        // Resolved to an empty title: its row stays, so the text doesn't move.
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "", "command": "x.run"}}));
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())]);
+        let _ = canonical;
+    }
+
+    #[test]
+    fn a_timeout_after_a_good_answer_is_asked_once_more_again() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_timeout_again", "a\n", &[0]);
+        let back = |app: &mut App| {
+            let doc = app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap();
+            if let Some((_, at)) = doc.asked.as_mut() {
+                *at -= Duration::from_secs(11);
+            }
+        };
+        let asks = |app: &App| app.lsp_sessions[&key].pending.values().filter(|p| matches!(p, PendingLspRequest::CodeLens { .. })).count();
+        let buffer = app.focused_buffer_id();
+        for round in 0..2 {
+            // Asked (a refresh, drawn), timed out: asked once more.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..1]);
+            app.ask_due_lenses();
+            assert_eq!(asks(&app), 1, "round {round}");
+            back(&mut app);
+            app.ask_due_lenses();
+            app.ask_due_lenses();
+            assert_eq!(asks(&app), 1, "round {round}: asked once more");
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("ok"))]));
+        }
+    }
+
+    #[test]
+    fn refusals_are_asked_again_a_few_times_then_not_until_an_edit() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_refusals");
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        let mut asked = 0;
+        for _ in 0..12 {
+            app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due.iter_mut().for_each(|d| *d = Instant::now());
+            app.ask_due_lenses();
+            if let Some(id) = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id) {
+                asked += 1;
+                answer_error(&mut app, &key, id, -32801);
+            }
+        }
+        assert_eq!(asked, code_lens::MAX_REFUSALS as usize);
+        assert!(app.lens_wake().is_none(), "quiet");
+        // The semantic side the same.
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refusals");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        let mut asked = 0;
+        for _ in 0..12 {
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due.iter_mut().for_each(|d| *d = Instant::now());
+            app.ask_due_semantic_tokens();
+            if let Some(id) = app.lsp_sessions[&key].pending.keys().next().copied() {
+                asked += 1;
+                answer_error(&mut app, &key, id, -32801);
+            }
+        }
+        assert_eq!(asked, code_lens::MAX_REFUSALS as usize);
+        assert!(app.semantic_wake().is_none());
+    }
+
+    #[test]
+    fn lenses_follow_an_agent_s_edit_go_with_their_language_left_out_and_with_their_buffer() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_follow", "a\nb\n", &[1]);
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [1]);
+        // An agent's edit, a line above: laid out again in the next frame.
+        let session = app.lsp_sessions.get_mut(&key).unwrap();
+        let (count, version) = session.open_documents[&canonical];
+        let text = format!("x\n{}", session.synced_text[&canonical]);
+        record_lsp_sync(session, &canonical, &text, count + 1, version + 1, semantic::SemanticSync::Follow, semantic::SemanticSync::Follow);
+        app.ask_due_lenses();
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [2]);
+        // Its language left out: the rows go at once.
+        app.config.set_value("lsp.code_lens_off", Some(fenix_config::Value::List(vec!["Rust".into()])));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+        // Closed: nothing kept for it.
+        let (_dir, mut app, _path, _key, _canonical) = lens_answered("lens_close", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        assert!(app.virtual_rows.contains_key(&buffer));
+        app.buffers.close(buffer);
+        app.ask_due_lenses();
+        assert!(!app.virtual_rows.contains_key(&buffer) && !app.lens_rows.contains_key(&buffer));
+    }
+
+    #[test]
+    fn a_lens_row_is_cut_to_the_pane_and_its_indent_kept_in_view() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_fit");
+        app.test_insert_str(&format!("{}fn deep() {{}}\n", " ".repeat(60)));
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("12 references")), lens_json(0, Some("3 implementations")), lens_json(0, Some(&"y".repeat(5000)))]));
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 40);
+        let map = app.focused_layout(4).map;
+        let row = map.row(0).unwrap();
+        assert!(matches!(row.kind, rows::RowKind::Virtual(_)));
+        let rows::RowKind::Virtual(i) = row.kind else { unreachable!() };
+        let lead = rows::virtual_row_lead(app.open(), 0, &app.tab_stops_for(app.focused_buffer_id()), 40);
+        assert_eq!(lead, 20, "half the pane at most");
+        assert_eq!(map.virtual_text(i), "12 references …", "whole titles that fit, then …");
     }
 
     #[test]
