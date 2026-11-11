@@ -1273,6 +1273,7 @@ impl App {
                 PageModel::AgentReview(_) => named("agent-changes"),
                 PageModel::AgentUsage(_) => named("agent-usage"),
                 PageModel::Welcome(_) => named("welcome"),
+                PageModel::Import(_) => named("import-settings"),
                 // A listing in a pane and its preview are the explorer's.
                 PageModel::Explorer(..) | PageModel::Preview(_) => Focus::None,
             };

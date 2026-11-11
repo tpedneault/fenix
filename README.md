@@ -218,6 +218,8 @@ tutorial (`SPC h T`) is the quickest way in. A few places to start:
   do otherwise, or don't do
 - [Configuration](docs/CONFIGURATION.md): `settings.toml`, where files
   live, and every setting
+- [Coming from another editor](docs/COMING_FROM.md): Fenix for Neovim,
+  Helix and VS Code users, and bringing your settings over
 - [Coding agents](docs/AGENTS.md): setting up Claude Code, Codex, Devin
   and others, threads, and reviewing what they change
 - [Snippets](docs/SNIPPETS.md), [project tools](docs/PROJECT_TOOLS.md)

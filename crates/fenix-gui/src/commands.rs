@@ -222,6 +222,7 @@ impl CommandRegistry {
         registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());
         registry.external("extensions.welcome", "Extension packs: extensions that go together, installed as one", |app| app.open_extension_packs());
         registry.external("help.welcome", "The welcome: how you edit, how Fenix looks, what to add, where to learn", |app| app.open_welcome_page());
+        registry.external("settings.import", "Bring your settings and keys over from VS Code, Vim or Neovim: what would be written is shown first", |app| app.open_import_page());
         registry.external("tutorial.open", "The tutorial: Fenix's keys, a lesson at a time, in a practice buffer", |app| app.open_tutorial());
         registry.external("extensions.output", "What the extensions that run code said, and why one stopped", |app| app.open_extension_output());
         registry.external("agents.panel", "A coding agent's thread beside your code: the project's last, or a new one (SPC a a)", |app| app.agents_open_panel());

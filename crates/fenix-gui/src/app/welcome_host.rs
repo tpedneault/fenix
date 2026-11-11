@@ -27,7 +27,7 @@ impl App {
     }
 
     /// Changes the welcome, if it's open, and lays it out again.
-    fn with_welcome_page(&mut self, change: impl FnOnce(&mut WelcomePage)) {
+    pub(super) fn with_welcome_page(&mut self, change: impl FnOnce(&mut WelcomePage)) {
         let Some(id) = self.find_page(|m| matches!(m, PageModel::Welcome(_))) else { return };
         if let Some(state) = self.pages.get_mut(&id) {
             if let PageModel::Welcome(page) = &mut state.model {
@@ -71,6 +71,7 @@ impl App {
             Action::Extensions => self.open_extension_packs(),
             Action::Tutorial => self.open_tutorial(),
             Action::KeysPage => self.open_keys_sheet(),
+            Action::Import => self.open_import_page(),
             Action::OpenProject => {
                 self.run_command_with(None, "project.hub");
             }

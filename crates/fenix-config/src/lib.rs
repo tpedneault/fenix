@@ -18,6 +18,7 @@
 
 pub mod editorconfig;
 mod project;
+pub mod import;
 pub mod schema;
 pub mod keychain;
 pub mod secrets;

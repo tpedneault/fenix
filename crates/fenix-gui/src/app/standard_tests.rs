@@ -545,3 +545,20 @@ fn the_new_commands_run_from_the_palette_too() {
         app.active_picker = None;
     }
 }
+
+#[test]
+fn an_f_key_a_chord_binds_goes_to_it_and_the_rest_are_the_debugger_s() {
+    let (mut app, _f) = app_on_file("a.txt", "x\n");
+    let key = |k: &str| crate::keymap::parse_key(k).unwrap();
+    // Vim keys: Fenix's keymap binds none of the debugger's F-keys.
+    for k in ["F5", "F9", "F10", "F11", "S-F11"] {
+        assert!(!app.chord_takes_function_key(key(k)), "{k}");
+    }
+    standard(&mut app);
+    for k in ["F5", "S-F5", "F9", "F10", "F11"] {
+        assert!(!app.chord_takes_function_key(key(k)), "{k} stays the debugger's");
+    }
+    assert!(app.chord_takes_function_key(key("M-F5")), "Alt+F5 is the next hunk's, not F5's");
+    assert!(app.chord_takes_function_key(key("F12")));
+    assert!(!app.chord_takes_function_key(key("C-s")), "only F-keys are asked");
+}

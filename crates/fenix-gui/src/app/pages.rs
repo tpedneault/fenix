@@ -139,6 +139,8 @@ pub(super) enum PageModel {
     AgentUsage(Box<crate::agent_usage_page::UsagePage>),
     /// The welcome: a first run's introduction.
     Welcome(Box<crate::welcome_page::WelcomePage>),
+    /// `SPC h i`: another editor's settings, brought over (`import_host`).
+    Import(Box<crate::import_page::ImportPage>),
 }
 
 pub(super) struct PageState {
@@ -175,7 +177,7 @@ impl PageState {
             PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Tutorial(_) | PageModel::Preview(_) => false,
             PageModel::Search(p) => p.typing(),
             PageModel::Agent(p) => p.typing(),
-            PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) => false,
+            PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) | PageModel::Import(_) => false,
             PageModel::Notifications(p) => p.typing(),
             PageModel::Code(c) => c.typing(),
             PageModel::Extensions(e) => e.typing(),
@@ -211,7 +213,7 @@ impl PageState {
                 p.paste(text);
             }
             PageModel::Agent(p) => p.filter.paste(text),
-            PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) => {}
+            PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) | PageModel::Import(_) => {}
             PageModel::Notifications(p) => p.paste(text),
             PageModel::Extensions(e) => e.paste(text),
             PageModel::Git(g) => g.type_text(text),
@@ -445,6 +447,7 @@ impl App {
             Some(PageModel::AgentReview(_)) => "*agent changes*".to_string(),
             Some(PageModel::AgentUsage(_)) => "*agent usage*".to_string(),
             Some(PageModel::Welcome(_)) => "*welcome*".to_string(),
+            Some(PageModel::Import(_)) => "*import settings*".to_string(),
             Some(PageModel::Agent(p)) => match self.agents.hub.view(&p.thread) {
                 Some(view) => format!("*agent: {}*", crate::page::fit(&view.thread.display_title(), 32)),
                 None => "*agent*".to_string(),
@@ -673,6 +676,7 @@ impl App {
             PageModel::Notifications(p) => crate::notifications_page::layout(p, cols),
             PageModel::AgentUsage(p) => crate::agent_usage_page::layout(p, cols),
             PageModel::Welcome(p) => crate::welcome_page::layout(p, cols),
+            PageModel::Import(p) => crate::import_page::layout(p, cols),
             PageModel::Code(c) => crate::code_page::layout(c, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
@@ -885,6 +889,10 @@ impl App {
             PageModel::Welcome(p) => {
                 let action = p.key(key);
                 self.welcome_action(id, action);
+            }
+            PageModel::Import(p) => {
+                let action = p.key(key);
+                self.import_action(id, action);
             }
             PageModel::Code(c) => match c.key(key) {
                 crate::code_page::Action::Close => self.close_page(id),
