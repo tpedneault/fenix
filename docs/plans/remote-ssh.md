@@ -356,6 +356,29 @@ terminal, Windows' `ssh.exe`, or the joining of git's paths above; a
 real network; `git push` and `fetch` against a remote that needs
 credentials; zsh and fish as the remote shell.
 
+### Where Phase 4 starts
+
+Found while doing this phase, for the next:
+
+- **Language servers**: `App::sync_lsp_for` returns early for a remote
+  path; that's the gate. A server there is started through the stand-in
+  (`Host::command`), which `LspClient::spawn_command` already takes. The
+  work is the URIs: `fenix_lsp::uri::path_to_uri` and `uri_to_path` are
+  free functions with no idea which machine a server is on, called from
+  about 35 places, most in `app.rs`. A server's URIs are its machine's
+  paths, so each place a URI comes back from a server needs the
+  session's machine (`uri_to_path` given the session's root, say),
+  rather than a guess from the path.
+- **Tasks**: `fenix_tasks::discover_tasks` reads the project's files
+  with `std::fs`, and a task's command is put to this machine's shell.
+  On a remote project both are the machine's: its files through
+  `fenix-vfs`, its `sh -c` through the stand-in, which `TaskRunner::
+  spawn_command` takes as it is. Killing a stand-in already ends what it
+  ran (Phase 1), so stopping a task carries over.
+- **The terminal programs** an extension or an agent opens with a
+  program of their own still run here (see above): Phase 4 and 5 decide
+  where those run.
+
 ## The design
 
 ### One connection, one helper
