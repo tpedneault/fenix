@@ -44,6 +44,31 @@ pub enum Motion {
     ScreenDown,
     /// `gk`: a screen row up.
     ScreenUp,
+    /// `g_`: the last non-blank of the line (with a count, `count - 1`
+    /// lines down).
+    LineLastNonBlank,
+    /// `ge`: back to the end of the previous word.
+    WordEndBackward,
+    /// `gE`: back to the end of the previous WORD.
+    BigWordEndBackward,
+    /// `|`: to the screen column the count names (1 without one).
+    Column,
+    /// `+` / Enter: the first non-blank of the next line.
+    NextLineStart,
+    /// `-`: the first non-blank of the line before.
+    PrevLineStart,
+    /// `_`: the first non-blank of the line `count - 1` lines down.
+    LineDownFirstNonBlank,
+    /// `)`: the start of the next sentence.
+    SentenceForward,
+    /// `(`: the start of this sentence, or the one before.
+    SentenceBackward,
+    /// `H`: the window's top line (with a count, that many lines from it).
+    WindowTop,
+    /// `M`: the window's middle line.
+    WindowMiddle,
+    /// `L`: the window's bottom line (with a count, that many from it).
+    WindowBottom,
 }
 
 /// Whether composing this motion with an operator includes the char it
@@ -63,7 +88,10 @@ impl Motion {
             | Motion::LineEnd
             | Motion::FindChar(_)
             | Motion::TillChar(_)
-            | Motion::MatchingBracket => Inclusivity::Inclusive,
+            | Motion::MatchingBracket
+            | Motion::LineLastNonBlank
+            | Motion::WordEndBackward
+            | Motion::BigWordEndBackward => Inclusivity::Inclusive,
             // `FindCharBack`/`TillCharBack` land at or before the found
             // char with the cursor itself past it, so the plain
             // start..cursor range (what Exclusive already gives every
@@ -75,9 +103,38 @@ impl Motion {
     }
 
     /// Whether this motion composes with an operator over whole lines
-    /// (`dG`, `dgg`) rather than a char range.
+    /// (`dG`, `dgg`, `dj`, `dL`) rather than a char range. `gj`/`gk` are
+    /// charwise, as in Vim.
     pub fn is_linewise(self) -> bool {
-        matches!(self, Motion::BufferTop | Motion::BufferBottom)
+        matches!(
+            self,
+            Motion::BufferTop
+                | Motion::BufferBottom
+                | Motion::Up
+                | Motion::Down
+                | Motion::NextLineStart
+                | Motion::PrevLineStart
+                | Motion::LineDownFirstNonBlank
+                | Motion::WindowTop
+                | Motion::WindowMiddle
+                | Motion::WindowBottom
+        )
+    }
+
+    /// Whether Vim counts this motion as a jump (`:h jump-motions`): the
+    /// place it left goes on the jumplist.
+    pub fn is_jump(self) -> bool {
+        matches!(
+            self,
+            Motion::BufferTop
+                | Motion::BufferBottom
+                | Motion::MatchingBracket
+                | Motion::SentenceForward
+                | Motion::SentenceBackward
+                | Motion::WindowTop
+                | Motion::WindowMiddle
+                | Motion::WindowBottom
+        )
     }
 }
 
@@ -137,7 +194,147 @@ pub fn target(buffer: &Buffer, cursor: &Cursor, motion: Motion, iskeyword_extra:
         Motion::MatchingBracket => crate::bracket::find_match(buffer, cursor.char_idx).unwrap_or(cursor.char_idx),
         Motion::ParagraphForward => paragraph_forward(buffer, cursor),
         Motion::ParagraphBackward => paragraph_backward(buffer, cursor),
+        Motion::WordEndBackward => word_end_backward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),
+        Motion::BigWordEndBackward => word_end_backward(buffer, cursor.char_idx, classify_big),
+        Motion::NextLineStart => {
+            let (line, _) = buffer.line_col(cursor);
+            if line >= last_line(buffer) {
+                cursor.char_idx
+            } else {
+                line_first_non_blank(buffer, line + 1)
+            }
+        }
+        Motion::PrevLineStart => {
+            let (line, _) = buffer.line_col(cursor);
+            if line == 0 {
+                cursor.char_idx
+            } else {
+                line_first_non_blank(buffer, line - 1)
+            }
+        }
+        Motion::SentenceForward => sentence_forward(buffer, cursor.char_idx),
+        Motion::SentenceBackward => sentence_backward(buffer, cursor.char_idx),
+        // The motions a count doesn't repeat: `counted_target` has them.
+        Motion::LineLastNonBlank | Motion::Column | Motion::LineDownFirstNonBlank | Motion::WindowTop | Motion::WindowMiddle | Motion::WindowBottom => {
+            counted_target(buffer, cursor, motion, 1, None).unwrap_or(cursor.char_idx)
+        }
     }
+}
+
+/// Where a motion whose count isn't a repeat lands: `|` (the count is a
+/// column), `g_` and `_` (`count - 1` lines down), `H`/`L` (`count`
+/// lines in from the window's edge) and `M`. `viewport` is the window's
+/// first and last line, `None` for the whole buffer. `None` for any
+/// other motion.
+pub fn counted_target(buffer: &Buffer, cursor: &Cursor, motion: Motion, count: u32, viewport: Option<(usize, usize)>) -> Option<usize> {
+    let count = count.max(1) as usize;
+    let (line, _) = buffer.line_col(cursor);
+    let last = last_line(buffer);
+    let (top, bottom) = viewport.map_or((0, last), |(top, bottom)| (top.min(last), bottom.min(last).max(top.min(last))));
+    Some(match motion {
+        Motion::Column => buffer.line_start_char(line) + (count - 1).min(buffer.line_len(line).saturating_sub(1)),
+        Motion::LineLastNonBlank => line_last_non_blank(buffer, (line + count - 1).min(last)),
+        Motion::LineDownFirstNonBlank => line_first_non_blank(buffer, (line + count - 1).min(last)),
+        Motion::WindowTop => line_first_non_blank(buffer, (top + count - 1).min(bottom)),
+        Motion::WindowBottom => line_first_non_blank(buffer, bottom.saturating_sub(count - 1).max(top)),
+        Motion::WindowMiddle => line_first_non_blank(buffer, top + (bottom - top) / 2),
+        _ => return None,
+    })
+}
+
+/// The line's last non-blank char, or its start when it's all blank.
+pub(crate) fn line_last_non_blank(buffer: &Buffer, line: usize) -> usize {
+    let start = buffer.line_start_char(line);
+    let mut i = start + buffer.line_len(line);
+    while i > start {
+        if buffer.char_at(i - 1).is_some_and(|c| !c.is_whitespace()) {
+            return i - 1;
+        }
+        i -= 1;
+    }
+    start
+}
+
+/// Whether `i` is on an empty line (its own `\n`, nothing before it).
+fn empty_line_at(buffer: &Buffer, i: usize) -> bool {
+    buffer.char_at(i) == Some('\n') && (i == 0 || buffer.char_at(i - 1) == Some('\n'))
+}
+
+/// Where a sentence starts, as Vim reads one: after a `.`, `!` or `?`
+/// (closed by any `)`, `]`, `"` or `'`) and whitespace; the first
+/// non-blank after an empty line, and the first empty line of a run;
+/// and the buffer's first non-blank.
+fn is_sentence_start(buffer: &Buffer, i: usize) -> bool {
+    let Some(c) = buffer.char_at(i) else { return false };
+    if c == '\n' {
+        return empty_line_at(buffer, i) && !(i > 0 && empty_line_at(buffer, i - 1));
+    }
+    if c.is_whitespace() {
+        return false;
+    }
+    let mut j = i;
+    let mut blank_before = false;
+    while j > 0 && buffer.char_at(j - 1).is_some_and(char::is_whitespace) {
+        if empty_line_at(buffer, j - 1) {
+            return true;
+        }
+        blank_before = true;
+        j -= 1;
+    }
+    if j == 0 {
+        return true;
+    }
+    if !blank_before {
+        return false;
+    }
+    while j > 0 && matches!(buffer.char_at(j - 1), Some(')' | ']' | '"' | '\'')) {
+        j -= 1;
+    }
+    j > 0 && matches!(buffer.char_at(j - 1), Some('.' | '!' | '?'))
+}
+
+/// `)`: the next sentence's start, or the buffer's last char.
+fn sentence_forward(buffer: &Buffer, idx: usize) -> usize {
+    let len = buffer.len_chars();
+    (idx + 1..len).find(|&i| is_sentence_start(buffer, i)).unwrap_or(len.saturating_sub(1).max(idx.min(len)))
+}
+
+/// `(`: the start of the sentence the cursor is in (or, at one's start,
+/// the one before), or the buffer's start.
+fn sentence_backward(buffer: &Buffer, idx: usize) -> usize {
+    (0..idx.min(buffer.len_chars())).rev().find(|&i| is_sentence_start(buffer, i)).unwrap_or(0)
+}
+
+/// `ge`/`gE`: back to the last char of the word before the one the
+/// cursor is in -- an empty line counts as a word, as in Vim.
+fn word_end_backward(buffer: &Buffer, idx: usize, classify: impl Fn(char) -> CharClass) -> usize {
+    let len = buffer.len_chars();
+    if idx == 0 || len == 0 {
+        return 0;
+    }
+    let mut i = idx.min(len - 1);
+    let class_at = |i: usize| buffer.char_at(i).map_or(CharClass::Space, &classify);
+    // To the start of the word the cursor is in.
+    let start = class_at(i);
+    if start != CharClass::Space {
+        while i > 0 && class_at(i - 1) == start {
+            i -= 1;
+        }
+    }
+    if i == 0 {
+        return 0;
+    }
+    i -= 1;
+    while class_at(i) == CharClass::Space {
+        if empty_line_at(buffer, i) {
+            return i;
+        }
+        if i == 0 {
+            return 0;
+        }
+        i -= 1;
+    }
+    i
 }
 
 /// Char index of the next `target` char on the cursor's current line,

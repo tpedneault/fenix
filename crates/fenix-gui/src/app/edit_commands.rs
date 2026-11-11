@@ -305,6 +305,49 @@ impl App {
         }
     }
 
+    /// `edit.wrap_lines`: the cursor's paragraph, or the selection's
+    /// lines, wrapped at the text width -- `gwip` and `gw`, the cursor
+    /// kept on its text.
+    pub(crate) fn cmd_wrap_lines(&mut self) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.wrap_lines(buffer, cursor));
+        } else {
+            self.vim_line_keys("gwip", "gw");
+        }
+    }
+
+    /// `edit.upper_case` / `edit.lower_case`: the word at the cursor, or
+    /// the selection, in upper or lower case -- `gUiw` and `U`, `guiw`
+    /// and `u`.
+    pub(crate) fn cmd_change_case(&mut self, upper: bool) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.change_case(buffer, cursor, upper));
+        } else if upper {
+            self.vim_line_keys("gUiw", "U");
+        } else {
+            self.vim_line_keys("guiw", "u");
+        }
+    }
+
+    /// `edit.join_lines`: the cursor's line and the next, or the
+    /// selection's lines, joined with a space -- `J`.
+    pub(crate) fn cmd_join_lines(&mut self) {
+        if !self.focused_takes_typing() {
+            return;
+        }
+        if self.standard_keys() {
+            self.standard_edit(|vim, buffer, cursor| vim.join_selected_lines(buffer, cursor));
+        } else {
+            self.vim_line_keys("J", "J");
+        }
+    }
+
     /// `edit.new_line_below` / `_above` (Ctrl+Enter / Ctrl+Shift+Enter): a
     /// line opened below (or above) the cursor's, indented, typing there
     /// -- `o` and `O`.

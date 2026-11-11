@@ -3,7 +3,7 @@ scheme = "vim"
 track = "Editing"
 order = 3
 title = "Operators and text objects"
-about = "d, c and y with a text object: the word, the quotes, the brackets, the paragraph."
+about = "d, c, y and gU with a text object: the word, the quotes, the brackets, the paragraph."
 text = """
 An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
 or a text object: iw is the word under the cursor, i" inside quotes,
@@ -78,6 +78,25 @@ Copy me.
 """
 
 [[step]]
+say = "gU is an operator too, upper case: gUiw shouts the word under the cursor. Make the cherry CHERRY."
+hint = "Cursor anywhere on cherry, gUiw. (gu lowers, g~ toggles, gUU takes the line.)"
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "goodbye";
+call();
+My favourite fruit is CHERRY.
+
+This paragraph goes,
+both of its lines.
+
+Copy me.
+"""
+
+[[step]]
 say = "dap deletes a paragraph and the blank line after it: delete the two lines that say so."
 hint = "Cursor on either line, dap. (dip leaves the blank line.)"
 text = """
@@ -88,7 +107,7 @@ brackets or blank line too.
 
 let greeting = "goodbye";
 call();
-My favourite fruit is cherry.
+My favourite fruit is CHERRY.
 
 Copy me.
 """
@@ -104,7 +123,7 @@ brackets or blank line too.
 
 let greeting = "goodbye";
 call();
-My favourite fruit is cherry.
+My favourite fruit is CHERRY.
 
 Copy me.
 Copy me.

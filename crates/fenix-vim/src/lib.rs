@@ -1,6 +1,7 @@
 mod bracket;
 mod charclass;
 mod ex;
+mod format;
 mod indent;
 mod keymaps;
 mod keynotation;
@@ -27,7 +28,8 @@ pub use occurrence::{at_column, is_whole_word, next_occurrence, occurrences, occ
 pub use motion::Motion;
 pub use screen::{LineRows, ScreenRows};
 pub use operator::Operator;
-pub use state::{BracketTarget, EditPolicy, LspRequestKind, SplitWay, TabMove, VimEvent, VimState};
+pub use format::{wrap_lines, DEFAULT_TEXT_WIDTH};
+pub use state::{with_count, BracketTarget, EditPolicy, LspRequestKind, SplitWay, TabMove, VimEvent, VimState};
 pub use search::all_matches_in_range;
 pub use substitute::{replace_in_text, SubstitutePreview};
 pub use textobject::{word_at, TextObject};

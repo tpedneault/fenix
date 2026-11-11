@@ -204,6 +204,9 @@ const MACRO_REPLAY_BUDGET: u32 = 10_000;
 /// just spending time. Real Vim has the exact same guard for the exact
 /// same reason (`E169: command too recursive`, `'maxmapdepth'`).
 const MAX_MACRO_REPLAY_DEPTH: u32 = 100;
+
+/// How long `:{range}!command` waits for its command.
+const FILTER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Jumps larger than this many screens snap instantly instead of
 /// animating. Panning smoothly through a huge jump (`G` on a large file)
 /// would either blur past unreadably fast or need fetching far more
@@ -9097,6 +9100,42 @@ impl App {
         }
     }
 
+    /// `:{range}!command`, `!{motion}`: lines `first..=last` through
+    /// `command` (`cmd /C` on Windows, `sh -c` elsewhere, in the project's
+    /// folder), what it writes in their place as one change, the cursor on
+    /// the first of them. It runs while you wait, for a few seconds at
+    /// most; one that fails says why and leaves the lines.
+    pub(crate) fn filter_lines(&mut self, first: usize, last: usize, command: &str) {
+        let root = self.project_root.clone().or_else(|| self.open().buffer.path().and_then(Path::parent).map(Path::to_path_buf)).or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let (program, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
+        let spec = fenix_project::tools::CommandSpec::new(program.into(), vec![flag.into(), command.into()]);
+        let (input, start, end) = {
+            let buffer = &self.open().buffer;
+            let last = last.min(buffer.line_count().saturating_sub(1));
+            let start = buffer.line_start_char(first.min(last));
+            let end = buffer.line_start_char(last) + buffer.line_len(last);
+            (format!("{}\n", buffer.text_range(start, end)), start, end)
+        };
+        let file = root.join("filter");
+        match crate::formatter::run(&spec, &input, &file, &root, FILTER_TIMEOUT, true) {
+            Ok(output) => {
+                let output = output.replace("\r\n", "\n");
+                let output = output.strip_suffix('\n').unwrap_or(&output).to_string();
+                let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+                buffer.begin_undo_group();
+                buffer.replace_range(cursor, start, end, &output);
+                buffer.break_undo_run();
+                buffer.end_undo_group();
+                cursor.char_idx = start.min(buffer.len_chars());
+                cursor.sticky_col = 0;
+                if !self.replaying_change {
+                    self.change_capture_dirty = true;
+                }
+            }
+            Err(why) => self.set_error(why),
+        }
+    }
+
     /// The formatter an extension gave for the focused buffer's language
     /// in its project (`formatter-set`), run on it: its text replaced as
     /// one change you can undo, the cursor kept on its line and column.
@@ -15474,6 +15513,8 @@ impl App {
     /// for why a new jump invalidates old forward history rather than
     /// preserving it the way real Vim's jumplist does.
     fn record_jump(&mut self, from: JumpEntry) {
+        // Vim's `'` (and `` ` ``) mark: where the last jump left.
+        self.marks.insert('\'', from);
         self.jump_back_stack.push(from);
         self.jump_forward_stack.clear();
         self.mark_jump();
@@ -15533,6 +15574,8 @@ impl App {
     /// navigation_allowed`'s own doc comment -- `goto_jump_entry` is
     /// exactly as unsafe to call from there for a mark as for a jump).
     fn jump_to_mark(&mut self, name: char, linewise: bool) {
+        // `` ` `` and `'` are one mark: the place before the last jump.
+        let name = if name == '`' { '\'' } else { name };
         let Some(&entry) = self.marks.get(&name) else { return };
         if self.buffers.get(entry.buffer).is_none() {
             self.marks.remove(&name);
@@ -15577,11 +15620,16 @@ impl App {
             self.refresh_project_root();
         }
         self.mark_jump();
+        let normal = self.vim.mode() == Mode::Normal;
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
+        let (line, col) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
         cursor.char_idx = if linewise {
-            let (line, _) = buffer.line_col(&Cursor { char_idx: target, sticky_col: 0 });
             line_first_non_blank_char(buffer, line)
+        } else if normal && col > 0 && col >= buffer.line_len(line) {
+            // Not past the line's last char in Normal mode (`` `^ `` after
+            // typing at a line's end).
+            target - 1
         } else {
             target
         };
@@ -15669,6 +15717,26 @@ impl App {
             KeyCode::Named(FenixNamedKey::Escape) => self.picker_cancel(),
             KeyCode::Named(FenixNamedKey::Enter) => self.picker_confirm(),
             KeyCode::Named(FenixNamedKey::Backspace) => picker_backspace(picker),
+            // As in a shell: `Ctrl-W` the word before, `Ctrl-U` all of it.
+            KeyCode::Char(c @ ('w' | 'u')) if key.mods.ctrl => {
+                let query: Vec<char> = picker_query(picker).chars().collect();
+                let mut keep = query.len();
+                if c == 'u' {
+                    keep = 0;
+                } else {
+                    while keep > 0 && query[keep - 1].is_whitespace() {
+                        keep -= 1;
+                    }
+                    let word = |c: char| c.is_alphanumeric() || c == '_';
+                    let in_word = keep > 0 && word(query[keep - 1]);
+                    while keep > 0 && !query[keep - 1].is_whitespace() && word(query[keep - 1]) == in_word {
+                        keep -= 1;
+                    }
+                }
+                for _ in keep..query.len() {
+                    picker_backspace(picker);
+                }
+            }
             KeyCode::Named(FenixNamedKey::Down) => picker_move_selection(picker, 1),
             KeyCode::Named(FenixNamedKey::Up) => picker_move_selection(picker, -1),
             KeyCode::Char('n') if key.mods.ctrl => picker_move_selection(picker, 1),
@@ -16665,6 +16733,36 @@ impl App {
         }
     }
 
+    /// What Vim's keys need of the focused pane that only the host
+    /// knows: its buffer's marks (`d'a`, `gi`, Visual's `'a`) and the
+    /// lines it shows (`H`, `M`, `L`).
+    ///
+    /// The lines are worked out only for the keys that read them, so the
+    /// other keys (and a long macro's) don't lay the frame out each time.
+    fn sync_vim_view(&mut self, key: KeyPress) {
+        let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+        self.vim.set_marks(self.marks.iter().filter(|(_, entry)| entry.buffer == id).map(|(&name, entry)| (name, entry.char_idx)));
+        if !matches!(key.code, KeyCode::Char('H' | 'M' | 'L')) || key.mods.ctrl || key.mods.alt {
+            return;
+        }
+        let viewport = self.pane_text_rows(pane).and_then(|rows| {
+            let ob = self.buffers.get(id)?;
+            let top = self.pane_state(pane).scroll_line;
+            let last = ob.buffer.line_count().saturating_sub(1);
+            // Folds and a side by side's filler rows put other lines on
+            // the rows than their numbers say; only then are the rows read
+            // line by line.
+            let plain = self.code_folds.get(&id).is_none_or(|folds| folds.is_empty()) && !self.is_side_by_side_pane(pane);
+            if plain {
+                return Some((top.min(last), (top + rows.saturating_sub(1)).min(last)));
+            }
+            let lines = self.pane_display_lines(pane, id);
+            let shown = lines.get(top..(top + rows).min(lines.len()))?;
+            Some((*shown.first()?, *shown.last()?))
+        });
+        self.vim.set_viewport(viewport);
+    }
+
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         let _profile = crate::profile::Scope::new("route_keypress");
         // What a move by row goes by: the focused pane's rows now, for a
@@ -16672,6 +16770,7 @@ impl App {
         // gone to another pane); and the cells the last key's moves by
         // row kept.
         self.sync_screen_rows();
+        self.sync_vim_view(keypress);
         self.vim.begin_key();
         // Everything but the chords reads keys as it always has, without
         // Shift (see `KeyPress::legacy`).
@@ -17509,8 +17608,9 @@ impl App {
             // Automatic `` `^ `` mark (real Vim's own "position when
             // Insert mode was last exited") -- same reasoning, on the
             // Insert -> non-Insert transition instead of an edit.
-            if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
-                self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+            if matches!(mode_before, Mode::Insert | Mode::Replace) && !self.vim.is_inserting() {
+                let char_idx = self.vim.last_insert_exit().unwrap_or(pane_state.cursor.char_idx);
+                self.marks.insert('^', JumpEntry { buffer: id, char_idx });
             }
             event
         };
@@ -17578,8 +17678,9 @@ impl App {
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
             VimEvent::Fold(command) => self.fold_command(command),
-            VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
+            VimEvent::RepeatLastChange { count } => self.repeat_last_change(count, event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
+            VimEvent::FilterLines { first, last, command } => self.filter_lines(first, last, &command),
             VimEvent::Pulse(range) => {
                 if self.motion().yank_pulse {
                     self.pulse = Some(Pulse { range, started: Instant::now() });
@@ -17705,6 +17806,19 @@ impl App {
         self.replay_depth -= 1;
     }
 
+    /// What `.` replays: the last change's keys, with `count` (`3.`) in
+    /// place of the count they were typed with -- which `.` then keeps,
+    /// as Vim's does, so a later bare `.` repeats with it too.
+    fn last_change_keys_with(&mut self, count: Option<u32>) -> Option<Vec<KeyPress>> {
+        let keys = self.last_change_keys.as_ref()?;
+        if let Some(count) = count {
+            let counted = fenix_vim::with_count(keys, count);
+            self.last_change_keys = Some(counted.clone());
+            return Some(counted);
+        }
+        Some(keys.clone())
+    }
+
     /// `.` -- replays `last_change_keys` (the most recently completed
     /// change-producing key span, captured by `dispatch_keypress`) the
     /// same way `play_macro` replays a register's decoded content:
@@ -17716,8 +17830,8 @@ impl App {
     /// keypress's own span look dirty too, and `last_change_keys` would
     /// get overwritten with just `['.']` on every repeat. A silent no-op
     /// if nothing's been recorded yet.
-    fn repeat_last_change(&mut self, event_loop: Option<&ActiveEventLoop>) {
-        let Some(keys) = self.last_change_keys.clone() else { return };
+    fn repeat_last_change(&mut self, count: Option<u32>, event_loop: Option<&ActiveEventLoop>) {
+        let Some(keys) = self.last_change_keys_with(count) else { return };
         self.replaying_change = true;
         for key in &keys {
             self.route_keypress(*key, event_loop);
@@ -17735,11 +17849,13 @@ impl App {
     /// matcher) while a `g`-prefixed or operator-pending sequence never
     /// misreads its own continuation key as a paste.
     fn pull_clipboard_before_paste(&mut self, keypress: KeyPress) {
+        // Insert's `Ctrl-R "` (or `+`, `*`) puts the clipboard in too.
+        let ctrl_r = self.vim.is_awaiting_insert_register() && keypress.mods == Mods::default() && matches!(keypress.code, KeyCode::Char('"' | '+' | '*'));
         // Visual too: `p`/`P` there replace the selection with it.
-        if !matches!(self.vim.mode(), Mode::Normal | Mode::Visual) || self.vim.is_pending() || keypress.mods != Mods::default() {
+        if !ctrl_r && (!matches!(self.vim.mode(), Mode::Normal | Mode::Visual) || self.vim.is_pending() || keypress.mods != Mods::default()) {
             return;
         }
-        if !matches!(keypress.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+        if !ctrl_r && !matches!(keypress.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             return;
         }
         let Some(clipboard) = self.clipboard.as_mut() else { return };
@@ -23446,6 +23562,7 @@ impl App {
     /// as ordinary top-level input, but `b`'s *expanded* replay must not
     /// also be appended on top of that.
     fn test_route_key(&mut self, kp: KeyPress) {
+        self.sync_vim_view(kp);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
         let vim_event = {
@@ -23468,8 +23585,9 @@ impl App {
                     ob.buffer.undo(&mut pane_state.cursor);
                 }
             }
-            if mode_before == Mode::Insert && self.vim.mode() != Mode::Insert {
-                self.marks.insert('^', JumpEntry { buffer: id, char_idx: pane_state.cursor.char_idx });
+            if matches!(mode_before, Mode::Insert | Mode::Replace) && !self.vim.is_inserting() {
+                let char_idx = self.vim.last_insert_exit().unwrap_or(pane_state.cursor.char_idx);
+                self.marks.insert('^', JumpEntry { buffer: id, char_idx });
             }
             event
         };
@@ -23484,10 +23602,14 @@ impl App {
                 self.vim.finish_recording(register, &keys, self.macro_recording_append);
             }
             VimEvent::MacroPlay { register, count } => self.test_play_macro(register, count),
-            VimEvent::RepeatLastChange => self.test_repeat_last_change(),
+            VimEvent::RepeatLastChange { count } => self.test_repeat_last_change(count),
+            VimEvent::MarkSet(name, char_idx) => {
+                self.marks.insert(name, JumpEntry { buffer: id, char_idx });
+            }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
+            VimEvent::FilterLines { first, last, command } => self.filter_lines(first, last, &command),
             // Along the Ember Trail while there's one here; the TODOs
             // otherwise.
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } if self.debug_trail_here() => self.debug_trail_scrub(forward, count as usize),
@@ -23527,8 +23649,8 @@ impl App {
     /// Test-only mirror of `repeat_last_change` -- identical logic,
     /// replaying through `test_route_key` instead of the real `route_
     /// keypress`.
-    fn test_repeat_last_change(&mut self) {
-        let Some(keys) = self.last_change_keys.clone() else { return };
+    fn test_repeat_last_change(&mut self, count: Option<u32>) {
+        let Some(keys) = self.last_change_keys_with(count) else { return };
         self.replaying_change = true;
         for key in &keys {
             self.test_route_key(*key);
@@ -26669,6 +26791,34 @@ configure_board stm32
 
         app.jump_forward();
         assert_eq!(app.cursor().char_idx, 4);
+    }
+
+    #[test]
+    fn backtick_backtick_goes_back_to_where_the_last_jump_left() {
+        let dir = TempDir::new("quote_quote");
+        let file = dir.write("abc.txt", "a\nb\nc");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let event = app.test_vim_key(KeyPress::char('G'));
+        let VimEvent::JumpRecorded(from) = event else { panic!("expected a JumpRecorded event from G, got {event:?}") };
+        let buffer = app.focused_buffer_id();
+        app.record_jump(JumpEntry { buffer, char_idx: from });
+        app.test_vim_key(KeyPress::char('`'));
+        let event = app.test_vim_key(KeyPress::char('`'));
+        let VimEvent::JumpToMark { name, linewise } = event else { panic!("expected a JumpToMark event, got {event:?}") };
+        app.jump_to_mark(name, linewise);
+        assert_eq!(app.cursor().char_idx, 0, "back where G left");
+        app.test_vim_key(KeyPress::char('\''));
+        let event = app.test_vim_key(KeyPress::char('\''));
+        let VimEvent::JumpToMark { name, linewise } = event else { panic!("expected a JumpToMark event, got {event:?}") };
+        app.jump_to_mark(name, linewise);
+        assert_eq!(app.cursor().char_idx, 4, "and '' goes back again");
+    }
+
+    #[test]
+    fn an_operator_reaches_a_mark_the_host_keeps() {
+        let mut app = macro_app("a\nb\nc\nd");
+        dispatch_all(&mut app, "majjd'a");
+        assert_eq!(app.open().buffer.text(), "d");
     }
 
     #[test]
@@ -35230,6 +35380,23 @@ configure_board stm32
     }
 
     #[test]
+    fn ctrl_w_and_ctrl_u_edit_a_pickers_query_as_a_shell_does() {
+        let candidates = vec![fenix_picker::Candidate::new("apple", PathBuf::from("apple"))];
+        let mut app = App::with_file(None);
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        for c in "src/main rs".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let query = |app: &App| app.active_picker.as_ref().map(|p| picker_query(p).to_string());
+        app.picker_key(KeyPress::char('w').with_ctrl());
+        assert_eq!(query(&app).as_deref(), Some("src/main "));
+        app.picker_key(KeyPress::char('w').with_ctrl());
+        assert_eq!(query(&app).as_deref(), Some("src/"));
+        app.picker_key(KeyPress::char('u').with_ctrl());
+        assert_eq!(query(&app).as_deref(), Some(""));
+    }
+
+    #[test]
     fn picker_key_routes_typing_navigation_and_escape() {
         let candidates = vec![
             fenix_picker::Candidate::new("apple", PathBuf::from("apple")),
@@ -35798,6 +35965,58 @@ configure_board stm32
         assert_eq!(app.open().buffer.text(), "aa");
         app.test_dispatch_key(KeyPress::char('.'));
         assert_eq!(app.open().buffer.text(), "a");
+    }
+
+    fn dispatch_all(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            app.test_dispatch_key(KeyPress::char(c));
+        }
+    }
+
+    #[test]
+    fn a_count_on_dot_takes_the_place_of_the_changes_own() {
+        let mut app = macro_app("a\nb\nc\nd\ne\nf\ng");
+        dispatch_all(&mut app, "dd");
+        assert_eq!(app.open().buffer.text(), "b\nc\nd\ne\nf\ng");
+        dispatch_all(&mut app, "2.");
+        assert_eq!(app.open().buffer.text(), "d\ne\nf\ng", "2. deletes two lines");
+        dispatch_all(&mut app, ".");
+        assert_eq!(app.open().buffer.text(), "f\ng", "and a bare . keeps the 2, as in Vim");
+        let mut app = macro_app("a b c d e f");
+        dispatch_all(&mut app, "3dw1.");
+        assert_eq!(app.open().buffer.text(), "e f");
+    }
+
+    #[test]
+    fn bang_filters_lines_through_a_command() {
+        let mut app = macro_app("pear\napple\nfig\nkeep");
+        dispatch_all(&mut app, "!2j");
+        assert_eq!(app.vim.command_line(), ".,.+2!", "the command line opens on the lines, as Vim's does");
+        dispatch_all(&mut app, "sort");
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Enter));
+        assert_eq!(app.open().buffer.text().replace("\r\n", "\n"), "apple\nfig\npear\nkeep");
+        dispatch_all(&mut app, "u");
+        assert_eq!(app.open().buffer.text(), "pear\napple\nfig\nkeep", "one change to undo");
+    }
+
+    #[test]
+    fn dot_repeats_the_new_operators() {
+        let mut app = macro_app("ab\ncd\nef");
+        dispatch_all(&mut app, "gUUj.");
+        assert_eq!(app.open().buffer.text(), "AB\nCD\nef");
+        let mut app = macro_app("abcdef");
+        dispatch_all(&mut app, "RXY");
+        app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+        dispatch_all(&mut app, "l.");
+        assert_eq!(app.open().buffer.text(), "XYXYef");
+    }
+
+    #[test]
+    fn a_macro_replays_the_new_keys() {
+        let mut app = macro_app("one two\nthree four");
+        dispatch_all(&mut app, "qagUiwjq");
+        dispatch_all(&mut app, "k0w@a");
+        assert_eq!(app.open().buffer.text(), "ONE TWO\nthree four");
     }
 
     #[test]

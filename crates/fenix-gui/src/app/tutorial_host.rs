@@ -509,7 +509,7 @@ mod tests {
     const SOLUTIONS: &[(&str, &[&str])] = &[
         ("editing.modes", &["jjjjjjllllllll", "i", "<Esc>jj$hhhii<Esc>", "j$hhhx", "oI can do this.<Esc>", "gg"]),
         ("editing.words", &["j$b", "/is is<CR>dw", "j/Remove<CR>D", "jdd", "J", "j3dd"]),
-        ("editing.objects", &["/hello<CR>ci\"goodbye<Esc>", "j/first<CR>di(", "/banana<CR>ciwcherry<Esc>", "/paragraph<CR>dap", "Gyyp"]),
+        ("editing.objects", &["/hello<CR>ci\"goodbye<Esc>", "j/first<CR>di(", "/banana<CR>ciwcherry<Esc>", "gUiw", "/paragraph<CR>dap", "Gyyp"]),
         ("editing.visual", &["/make this<CR>VU", "jVjd", "0<C-v>jjI- <Esc>", "j/two<CR>vecdeux<Esc>"]),
         ("editing.search", &["/needle<CR>", "j:s/cat/bird/g<CR>", "0/dog<CR>n", ":%s/color/colour/g<CR>"]),
         ("editing.macros", &["/Copy me<CR>\"ayyj\"ap", "/- item<CR>qaA done<Esc>jq3@a", "/TODO<CR>cwDONE<Esc>w.w."]),

@@ -325,6 +325,10 @@ impl CommandRegistry {
         registry.register("edit.new_line_below", "Open a line below the cursor's and type there (o)", |ctx| ctx.app.cmd_new_line(true));
         registry.register("edit.new_line_above", "Open a line above the cursor's and type there (O)", |ctx| ctx.app.cmd_new_line(false));
         registry.register("edit.select_line", "Select the cursor's line; again, the next one too (V)", |ctx| ctx.app.cmd_select_line());
+        registry.register("edit.wrap_lines", "Wrap the cursor's paragraph, or the selected lines, at the text width (gq, gw)", |ctx| ctx.app.cmd_wrap_lines());
+        registry.register("edit.upper_case", "The word at the cursor, or the selection, in upper case (gU)", |ctx| ctx.app.cmd_change_case(true));
+        registry.register("edit.lower_case", "The word at the cursor, or the selection, in lower case (gu)", |ctx| ctx.app.cmd_change_case(false));
+        registry.register("edit.join_lines", "Join the cursor's line and the next, or the selected lines (J)", |ctx| ctx.app.cmd_join_lines());
         registry.register("edit.indent_lines", "Indent the cursor's line, or the selected lines (>>)", |ctx| ctx.app.cmd_indent_lines(true));
         registry.register("edit.outdent_lines", "Dedent the cursor's line, or the selected lines (<<)", |ctx| ctx.app.cmd_indent_lines(false));
         registry.register("nav.matching_bracket", "Go to the bracket that pairs with the one at the cursor (%)", |ctx| ctx.app.cmd_matching_bracket());
