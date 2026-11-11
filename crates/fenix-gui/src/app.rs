@@ -5346,6 +5346,8 @@ pub struct App {
     lens_of: code_lens::LensOf,
     /// Each buffer's rows of lenses, by line: what a click on one runs.
     lens_rows: HashMap<BufferId, std::collections::BTreeMap<usize, fenix_lsp::code_lens::LensRow<code_lens::LensTag>>>,
+    /// Fenix's own "Run test" lenses, by buffer, as of an edit count.
+    own_lenses: HashMap<BufferId, (u64, Vec<lsp_types::CodeLens>)>,
     /// The lens under the pointer: its buffer, its row's line, its columns.
     lens_hover: Option<(fenix_window::WindowId, usize, std::ops::Range<usize>)>,
     /// A test's seam: every pane that could wrap goes by rows (at
@@ -6351,6 +6353,7 @@ impl App {
             lens_of: HashMap::new(),
             lens_rows: HashMap::new(),
             lens_hover: None,
+            own_lenses: HashMap::new(),
             force_row_path: false,
             semantic_protected: HashMap::new(),
             screen_decorations: None,
@@ -37615,6 +37618,115 @@ name = \"orbit\"
         assert!(app.lens_hover.is_none(), "cut off");
         app.hover_lens(Some((pane, rect)), at(1.0));
         assert_eq!(app.lens_hover.as_ref().map(|(_, _, cols)| cols.clone()), Some(0..5));
+    }
+
+    #[test]
+    fn fenix_s_own_run_test_lenses_go_over_tests_no_server_offers_to_run() {
+        let dir = TempDir::new("lens_own");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        let path = dir.write("test_ledger.py", "def helper():\n    pass\n\ndef test_totals():\n    assert 1 == 1\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app), vec![(3, "▶ Run test".to_string())], "with no language server at all");
+        // Run from its line: as SPC p r there.
+        app.press_all("3 j");
+        app.run_cmd("code.lens");
+        let session = app.task_session.as_ref().expect("Task Output opened");
+        assert!(app.buffers.get(session.buffer).unwrap().buffer.text().starts_with("$ pytest test_ledger.py::test_totals"));
+        // Off on their own: gone in the next frame.
+        app.config.set_value("lsp.code_lens_tests", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+    }
+
+    #[test]
+    fn fenix_s_own_run_test_lens_runs_only_in_a_trusted_project() {
+        let dir = TempDir::new("lens_own_trust");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        dir.write(".fenix/tools.json", r#"{"tasks": {"build": {"executable": "make"}}}"#);
+        let path = dir.write("test_ledger.py", "def test_totals():\n    assert 1 == 1\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let state = TempDir::new("lens_own_trust_state");
+        app.known_projects = fenix_project::KnownProjects::load_or_default(state.path().join("projects.txt"));
+        app.project_trust_begin(Some(state.path().join("trusted-projects.json")));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app), vec![(0, "▶ Run test".to_string())]);
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("only in a trusted project (SPC p y)"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        app.trust_project_as_written(dir.path());
+        app.run_cmd("code.lens");
+        assert!(app.task_session.is_some(), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn a_server_s_run_lens_stands_in_for_fenix_s_own() {
+        let dir = TempDir::new("lens_own_server");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "#[test]\nfn adds() {}\n\n#[test]\nfn takes() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        let run = serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "▶ Run Test", "command": "rust-analyzer.runSingle"}});
+        answer(&mut app, &key, id, serde_json::json!([run]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "▶ Run Test".to_string()), (4, "▶ Run test".to_string())], "the server's where it has one, Fenix's where it hasn't");
+    }
+
+    /// What lenses cost on a large file (`--release -- --ignored
+    /// --nocapture`): 20 000 lines, a test and a server lens every four.
+    #[test]
+    #[ignore]
+    fn measure_lenses_on_a_large_file() {
+        let dir = TempDir::new("lens_measure");
+        dir.write(".fenix/project.ini", "");
+        let text: String = (0..5_000).map(|i| format!("#[test]\nfn t{i}() {{\n    x();\n}}\n")).collect();
+        let path = dir.write("main.rs", &text);
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        let started = Instant::now();
+        app.sync_lsp_for_focused_buffer();
+        let first = started.elapsed();
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        let lenses: Vec<serde_json::Value> = (0..5_000).map(|i| lens_json(i * 5 + 1, Some("3 references"))).collect();
+        let started = Instant::now();
+        answer(&mut app, &key, id, serde_json::Value::Array(lenses));
+        let answered = started.elapsed();
+        app.test_insert_str("// x\n");
+        let started = Instant::now();
+        app.sync_lsp_for_focused_buffer();
+        let edited = started.elapsed();
+        let started = Instant::now();
+        let _ = app.focused_layout(60);
+        let laid = started.elapsed();
+        println!("open with own lenses {first:?}; 5000 server lenses laid out {answered:?}; an edit's sync {edited:?}; a frame's 60 rows {laid:?}; rows {}", app.virtual_rows[&app.focused_buffer_id()].len());
+        // The same lenses unresolved, answered twice: the second carries
+        // the first's titles over by place.
+        let unresolved: Vec<serde_json::Value> = (0..5_000).map(|i| lens_json(i * 4 + 1, None)).collect();
+        app.refresh_lenses(&key);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..60]);
+        for _ in 0..2 {
+            app.lsp_sessions.get_mut(&key).unwrap().lenses.values_mut().for_each(|d| d.due = Some(Instant::now()));
+            app.sync_lsp_for_focused_buffer();
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            let started = Instant::now();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+            println!("5000 unresolved lenses answered (titles carried) {:?}", started.elapsed());
+        }
+        // A Python class of 5 000 tests: Fenix's own found.
+        let text = format!("class TestBig:\n{}", (0..5_000).map(|i| format!("    def test_{i}(self):\n        x()\n\n\n")).collect::<String>());
+        let path = dir.write("test_big.py", &text);
+        let started = Instant::now();
+        let found = fenix_tasks::test_lines(&path, &text, dir.path());
+        println!("a Python class of 5000 tests, 20 000 lines: {} found in {:?}", found.len(), started.elapsed());
     }
 
     #[test]

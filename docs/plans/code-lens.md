@@ -424,3 +424,26 @@ lenses are off by default until stage 6.
     count as another project.
   - Standard keys have no chord for `code.lens`: it's in the palette,
     and a click runs a lens.
+
+### Stage 5
+
+- **Fenix's own lenses** (`find_own_lenses`): "▶ Run test" over each
+  line `fenix_tasks::test_lines` finds (Rust `#[test]`, pytest, Go
+  `TestXxx`; the same finder as `SPC p r`), worked out again only after
+  an edit. Its command is `fenix.runTest`, run as `SPC p r` on that line.
+- They're shown in any file lenses are wanted for (`lsp.code_lens` on,
+  its language not in `lsp.code_lens_off`), with or without a language
+  server. On a line where a server's lens already runs something (its
+  command names "run", or its title has "▶"), Fenix's own isn't added.
+- A "▶ Run test" lens runs only in a trusted project; otherwise it says
+  so and names `SPC p y`.
+- **Measured** (release, `measure_lenses_on_a_large_file`, ignored by
+  default): a 20 000-line Rust file of 5 000 tests, answered with 5 000
+  server lenses, 9 000 lens rows in all. The first sync with Fenix's own
+  lenses found 6.1 ms; laying out the answer 11.3 ms; an edit's sync
+  (lenses moved and laid out again) 10.2 ms; a frame's 60 rows 1.6 ms.
+  After review: 5 000 unresolved lenses answered again, the last
+  answer's titles carried over, 27–31 ms (the answer read, carried and
+  laid out); a Python class of 5 000 tests, 20 000 lines, its own
+  lenses found in 2.7 ms, in one pass (it walked up from each `def`
+  before, about 1 s).

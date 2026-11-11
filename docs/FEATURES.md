@@ -202,6 +202,24 @@ its extension. The rest is built into Fenix.
     `syntax.macro`; every built-in theme does.
   - `lsp.semantic_highlighting_off` lists languages that keep the
     grammar's colours alone.
+- **Code lens** (`lsp.code_lens`, off for now): what a file's language
+  servers offer for a function, a test or a type, on a dimmed row of its
+  own above it ("▶ Run | Debug", "3 references"). A click on one runs
+  it, and `SPC c l` runs the cursor line's, or lists them to choose from.
+  - Each runs as the server says: a command the server runs, the
+    references list, or rust-analyzer's `cargo` run in Task Output.
+  - Fenix says plainly when it can't run one; debugging from a lens
+    isn't there yet.
+  - Fenix offers its own "▶ Run test" over a Rust `#[test]`, a pytest
+    test or a Go `TestXxx` where the server gives no run lens, with or
+    without a language server (`lsp.code_lens_tests`), run as `SPC p r`
+    runs it, in a trusted project. So with code lens on, a file of tests
+    snaps a row at a time without sticky scroll, as any file with lenses
+    does.
+  - Lenses move with your edits and are refreshed after you pause.
+  - `lsp.code_lens_off` lists languages that show none.
+  - While a file has lenses, its pane snaps a row at a time rather than
+    easing, and sticky scroll is off.
 - **Bracket pairs by colour** (`appearance.rainbow_brackets`, off
   unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
   it's nested, a pair the same colour. They're the code's own brackets,
