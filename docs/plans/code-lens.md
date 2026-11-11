@@ -379,7 +379,7 @@ lenses are off by default until stage 6.
   - `showReferences` fills the references list, as `gr` does.
   - rust-analyzer's `runSingle` runs `cargo <cargoArgs> -- <executableArgs>`
     in Task Output, by its arguments with no shell, in the `cwd` it
-    gives when that's inside the project (else it says so and runs
+    gives when that's a folder in the project (else it says so and runs
     nothing), and only from the Rust server. Its task's name never
     picks a project task of the same name in its place.
   - A lens that starts a program (rust-analyzer's run, Fenix's own
@@ -410,3 +410,17 @@ lenses are off by default until stage 6.
 - **`SPC c l`** (`code.lens`). One lens on the cursor's line runs.
   Several open a picker (`ActivePicker::Lenses`, "Code lenses") whose
   Enter runs the one chosen. With none, or lenses off, it says so.
+- **After review.**
+  - A pick keeps the answer it came in and what the lens was (place,
+    command, arguments): a lens answered again since is found again by
+    that, or not run ("the lenses changed").
+  - A double or triple click on a title runs it once.
+  - The lit title is worked out again whenever the rows are laid out,
+    and only in the pane the pointer is over.
+  - A line whose lenses all have empty titles has none to run, not an
+    empty picker.
+  - A run's folder must be one that exists in the project. The task is
+    the project's, run in that folder, so a member crate's lens doesn't
+    count as another project.
+  - Standard keys have no chord for `code.lens`: it's in the palette,
+    and a click runs a lens.

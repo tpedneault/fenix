@@ -65,6 +65,8 @@ pub(crate) struct RowMap {
     /// The columns of text the pane has room for, when they're known:
     /// what a `Virtual` row is cut to, its lead with it.
     view_cols: Option<usize>,
+    /// The pane it's laid out for, when it's a pane's.
+    pane: Option<fenix_window::WindowId>,
 }
 
 impl RowMap {
@@ -94,7 +96,7 @@ impl RowMap {
             }
         }
         debug_assert!(firsts.windows(2).all(|w| w[0].0 < w[1].0), "a pane's lines go down in order");
-        RowMap { rows, scroll_col, firsts, width: None, virtuals: Vec::new(), view_cols: None }
+        RowMap { rows, scroll_col, firsts, width: None, virtuals: Vec::new(), view_cols: None, pane: None }
     }
 
     /// What `RowKind::Virtual(i)` rows draw: `texts[i]`.
@@ -567,7 +569,9 @@ impl App {
             wrap,
             view_cols: if wrapped { wrap } else { Some(self.pane_text_cols.get(&pane).copied().unwrap_or(80)) },
         };
-        self.pane_layout(buffer, want, cursor_line, dashboard)
+        let mut layout = self.pane_layout(buffer, want, cursor_line, dashboard);
+        layout.map.pane = Some(pane);
+        layout
     }
 
     /// `buffer`'s text on the rows `want` asks for: the rows, each line's
@@ -702,7 +706,7 @@ impl App {
                     spans.push((" ".repeat(gutter_chars + lead), theme.gutter_fg));
                     // The lens under the pointer, in the text's colour: a
                     // click runs it.
-                    match self.lens_hover.as_ref().filter(|(b, line, _)| *line == row.line && self.buffers.get(*b).is_some_and(|o| std::ptr::eq(o, ob))) {
+                    match self.lens_hover.as_ref().filter(|(pane, line, _)| *line == row.line && map.pane == Some(*pane)) {
                         Some((_, _, cols)) => {
                             let part = |r: std::ops::Range<usize>| text.chars().skip(r.start).take(r.len()).collect::<String>();
                             let n = text.chars().count();

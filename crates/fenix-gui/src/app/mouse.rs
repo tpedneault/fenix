@@ -346,7 +346,10 @@ impl App {
     pub(super) fn text_press(&mut self, pane: fenix_window::WindowId, rect: fenix_window::Rect, pos: (f32, f32), now: Instant) -> bool {
         // On a code lens's title: that lens run.
         if let Some((pick, _, _)) = self.lens_at(pane, rect, pos) {
-            self.run_lens(&pick);
+            // Once a click: not again on its double or triple.
+            if self.mouse.clicks.press(now, pos) == 1 {
+                self.run_lens(&pick);
+            }
             return true;
         }
         let Some(hit) = self.text_hit(pane, rect, pos) else { return false };
