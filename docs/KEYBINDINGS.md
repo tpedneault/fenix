@@ -256,6 +256,7 @@ keys'; the palette has the commands).
 | F9 / F10 / F11 / Shift-F11 | Breakpoint / step over / in / out, in every mode |
 | `n` `s` `o` `c` `r` in DEBUG | Step over / in / out, continue, run to the cursor; Esc goes back to Normal, still stopped |
 | `SPC l m` | Show LSP/DAP tool status (found on PATH, running, install hints) |
+| `SPC l i` | Install this file's missing language server: shows the command, `y` runs it in Task Output |
 | `SPC s s` | Search this file, or the selection, on the Search page (a buffer that isn't a file: find a line) |
 | `SPC s t` | List the TODO/FIXME/NOTE-style comments in the current buffer |
 | `SPC s T` | List the TODO-style comments across the project (also becomes the quickfix list) |

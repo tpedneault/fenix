@@ -1579,14 +1579,33 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   session for it is running right now, and, for anything missing, the
   one-line command that installs it (`rustup component add
   rust-analyzer`, `uv tool install pyright`, `npm install -g
-  typescript-language-server typescript`, ...). Detect and guide only --
-  Fenix never downloads or manages a tool binary itself, the same
-  posture the debugger bullet above already takes for adapters it
-  doesn't have. A language server that failed -- couldn't start, crashed,
+  typescript-language-server typescript`, ...) -- the same one the
+  doctor (`SPC p h`) offers as its fix. A language server that failed -- couldn't start, crashed,
   or didn't answer `initialize` within 30 seconds -- is listed with why
   and the last lines it wrote to stderr, until `:lsp-restart` tries it
   again. A server is looked for and started on a thread of its own, so a
   slow `PATH` or a server slow to start never holds up the window.
+- **Installing a missing language server**: opening a file whose
+  built-in server (pyright, rust-analyzer, clangd, bash-language-server,
+  typescript-language-server, gopls, lua-language-server) isn't installed
+  brings a notice, once a session, saying so and with the command that
+  installs it. `SPC l i` (`lsp.install`), or the notice's action
+  (`SPC o .`), shows that exact command and asks; `y` runs it in Task
+  Output, where you watch it, and once it succeeds the server starts for
+  the files that wanted it. Nothing is installed without that `y`. The
+  commands need no administrator rights: `rustup component add
+  rust-analyzer`, `uv tool install pyright` (else `npm install -g
+  pyright`), `npm install -g` for the Bash and TypeScript servers, `go
+  install golang.org/x/tools/gopls@latest`, and on Windows `winget` for
+  clangd (LLVM) and lua-language-server. Where the installer isn't
+  there, or no install exists that Fenix would run for you (clangd and
+  lua-language-server on Linux come from your distribution, with
+  `sudo`), the notice says what to do and links to it. A server an
+  installer put somewhere not yet on Fenix's `PATH` (`~/.cargo/bin`,
+  `~/go/bin`, uv's, npm's or winget's folder) is started from there.
+  `lsp.offer_install` (on) turns the notice off; `SPC l i` still works.
+  A server you named yourself (`[lsp]`, `.fenix/tools.json`) is never
+  offered.
 - **Symbol picker**: with the Tcl extension, `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan

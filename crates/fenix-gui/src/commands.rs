@@ -342,6 +342,7 @@ impl CommandRegistry {
         registry.register("edit.sort_lines_numeric", "Sort the selected lines, or the buffer's, by the number in each (:sort n)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Numeric));
         registry.register("edit.sort_lines_unique", "Sort the selected lines, or the buffer's, dropping repeats (:sort u)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Unique));
         registry.register("lsp.restart", "Restart this project's language servers (:lsp-restart)", |ctx| ctx.app.restart_project_lsp(""));
+        registry.register("lsp.install", "Install this file's language server: shows the command, runs it on y", |ctx| ctx.app.cmd_lsp_install());
         registry.register("nav.goto_line", "Go to a line, by its number", |ctx| ctx.app.start_goto_line_prompt());
         registry.register("nav.next_problem", "The next problem in the file (]d)", |ctx| ctx.app.jump_to_diagnostic(true, 1));
         registry.register("nav.prev_problem", "The previous problem in the file ([d)", |ctx| ctx.app.jump_to_diagnostic(false, 1));

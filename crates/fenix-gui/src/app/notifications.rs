@@ -270,6 +270,10 @@ impl App {
             self.agents_show(fenix_acp::hub::ThreadId(thread.to_string()));
             return;
         }
+        if let Some(program) = command.strip_prefix("lsp.install:") {
+            self.notice_server_install(program);
+            return;
+        }
         if let Some(path) = command.strip_prefix("open:") {
             let (path, line) = match path.rsplit_once(':') {
                 Some((p, l)) if l.parse::<usize>().is_ok() => (p, l.parse::<usize>().ok()),

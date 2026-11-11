@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A file whose built-in language server isn't installed (rust-analyzer,
+  pyright, clangd, gopls, ...) brings a notice with the command that
+  installs it; `SPC l i` (or the notice's action) shows the command and
+  runs it in Task Output on `y`, then starts the server. Nothing is
+  installed without that `y`; where no safe install exists (clangd on
+  Linux), the notice links to how. The doctor and Tool Status offer the
+  same commands, Go and Lua included (#43). `lsp.offer_install` (on)
+  turns the notice off.
+
 ## [1.5.2] - 2026-11-11
 
 ### Added

@@ -29,6 +29,8 @@ mod rows;
 mod row_scroll;
 mod semantic;
 mod code_lens;
+mod server_install;
+use server_install::spawn_lsp_server;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -5571,6 +5573,8 @@ pub struct App {
     /// Why each of `lsp_unavailable` stopped, with the last it wrote to
     /// stderr: what Tool Status shows.
     lsp_failures: HashMap<LspKey, String>,
+    /// A missing language server offered, asked about, or installing.
+    server_install: server_install::InstallState,
     /// Each project root's additional servers (`tools.json`'s
     /// `lsp.additional`), read once and again on `:lsp-restart`.
     lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
@@ -6431,6 +6435,7 @@ impl App {
             restart_requested: false,
             lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
+            server_install: Default::default(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
             next_lsp_fanout: 1,
@@ -7526,7 +7531,7 @@ impl App {
     /// window (#33). With no event loop to hear of it, it starts here.
     fn start_lsp_session(&mut self, key: LspKey, name: String, languages: Vec<String>, spec: &fenix_project::tools::CommandSpec, cwd: &Path) {
         let Some(send) = self.lsp_start_sender() else {
-            let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+            let spawned = spawn_lsp_server(spec, &key.root);
             return self.lsp_started(key, name, languages, &spec.executable, cwd, spawned);
         };
         let generation = tool_sessions::generation();
@@ -7535,7 +7540,7 @@ impl App {
         std::thread::Builder::new()
             .name("fenix-lsp-start".into())
             .spawn(move || {
-                let result = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+                let result = spawn_lsp_server(&spec, &key.root);
                 send(FenixUserEvent::LspStarted(Box::new(LspStart { key, generation, name, languages, executable: spec.executable, cwd, result })));
             })
             .expect("a thread to start a language server");
@@ -7596,8 +7601,12 @@ impl App {
             }
             Err(err) => {
                 self.lsp_failures.insert(key.clone(), format!("couldn't start {executable}: {err}"));
+                // A built-in server that isn't installed is offered, in a
+                // notice, rather than reported as an error.
+                if !self.offer_server_install(&key, executable, &err) {
+                    self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
+                }
                 self.lsp_unavailable.insert(key);
-                self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
             }
         }
     }
@@ -10862,10 +10871,14 @@ impl App {
             fenix_tasks::TaskEvent::Finished(outcome) => {
                 match outcome {
                     fenix_tasks::TaskOutcome::Exited { success, .. } => self.finish_task_run(buffer, Some(success)),
-                    fenix_tasks::TaskOutcome::Cancelled => self.append_task_output_text(buffer, "-- task cancelled --"),
+                    fenix_tasks::TaskOutcome::Cancelled => {
+                        self.append_task_output_text(buffer, "-- task cancelled --");
+                        self.server_install_finished(false);
+                    }
                     fenix_tasks::TaskOutcome::Failed(error) => {
                         self.append_task_output_text(buffer, &format!("-- task error: {error} --"));
                         self.set_error(format!("Task failed: {error}"));
+                        self.server_install_finished(false);
                     }
                 }
                 if let Some(session) = self.task_session.as_mut() {
@@ -10993,6 +11006,7 @@ impl App {
             ok: success == Some(true),
             tests: fenix_tasks::test_counts(&output),
         });
+        self.server_install_finished(success == Some(true));
         let took = self.task_session.as_mut().and_then(|s| s.started.take()).map(|t| t.elapsed());
         self.task_notify(success == Some(true), took);
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
@@ -16814,6 +16828,10 @@ impl App {
             self.delete_file_confirm_key(keypress);
             return;
         }
+        if self.server_install.confirm.is_some() {
+            self.server_install_confirm_key(keypress);
+            return;
+        }
 
         // The grep search-term prompt and an open picker both capture
         // input the same way -- checked ahead of the explorer/sidebar-
@@ -18290,6 +18308,7 @@ impl App {
             .or_else(|| self.workspace_rename_prompt_text())
             .or_else(|| self.goto_line_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
+            .or_else(|| self.server_install_confirm_text())
     }
 
     /// Test-only: the modeline as one plain string, for assertions --
