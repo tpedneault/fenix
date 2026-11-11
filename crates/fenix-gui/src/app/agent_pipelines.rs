@@ -5,13 +5,19 @@
 //! What the steps change goes into one ledger -- the first thread's -- so
 //! you review the outcome once (`SPC a r`). A read-only step's changes
 //! are put back. A gate is a question in the step's thread: `y` goes on,
-//! `n` stops, and writing to the step is another round of it, the question
-//! taken back until that's done. A step with a command runs in the
-//! project on `fenix-tasks`' runner, off the event loop, and says how it
-//! went on the thread before it.
+//! `r` runs the step again, `n` stops, and writing to the step is another
+//! round of it, the question taken back until that's done. A step that
+//! ends badly (refused, cancelled, cut off) asks at its gate too. A step
+//! with a command runs in the project on `fenix-tasks`' runner, off the
+//! event loop, and says how it went on the thread before it.
+//!
+//! A run that stops is kept, in memory and beside its threads in the
+//! store (`store::SavedRun`), written each time it moves: `SPC a g`
+//! (`agents.pipeline_go`) picks it up at the step it stopped at, in this
+//! Fenix or after a restart. A run that's done is forgotten.
 
 use fenix_acp::hub::ThreadId;
-use fenix_acp::pipeline::{Next, PipelineSpec, Run, StepEnd};
+use fenix_acp::pipeline::{Next, PipelineSpec, Run, State, StepEnd};
 use fenix_acp::protocol::ContentBlock;
 use fenix_tasks::{OutputLine, TaskEvent, TaskOutcome, TaskRunner};
 use serde_json::json;
@@ -86,6 +92,11 @@ fn gate_key(run: u64, step: usize) -> String {
     format!("pipeline-gate-{run}-{step}")
 }
 
+/// How a run that stopped for `why` says so: `stopped: ...`, once.
+fn stopped_how(why: &str) -> String {
+    if why.starts_with("stopped") { why.to_string() } else { format!("stopped: {why}") }
+}
+
 impl App {
     /// The pipelines there are: Fenix's own, then yours
     /// (`pipelines/*.toml` in the settings folder), then the project's
@@ -157,35 +168,84 @@ impl App {
         match next {
             Next::Start { step, prompt } => self.pipeline_start_step(id, step, prompt),
             Next::Run { command, .. } => self.pipeline_run_command(id, command),
-            Next::Gate { step, passing } => {
-                let Some(thread) = self.pipelines.runs.get(&id).and_then(|r| r.threads.last().cloned()) else { return };
-                let name = self.pipelines.runs[&id].run.spec.steps[step].name.clone();
-                let next = self.pipelines.runs[&id].run.spec.steps.get(step + 1).map(|s| s.name.clone()).unwrap_or_default();
-                let onward = if next.is_empty() { "Finish".to_string() } else { format!("Go on to {next}") };
-                let key = gate_key(id, step);
-                let answers = [
-                    ("allow_once", "Go on", fenix_acp::protocol::PermissionKind::AllowOnce),
-                    ("edit", "Edit what's passed on, then go on", fenix_acp::protocol::PermissionKind::Other),
-                    ("reject_once", "Stop", fenix_acp::protocol::PermissionKind::RejectOnce),
-                ];
-                let question = if passing == fenix_acp::pipeline::NO_CHANGES { format!("Pipeline: {name} changed nothing. {onward} anyway, or write to it") } else { format!("Pipeline: {name} is done. {onward}, or write to it for another round") };
-                let fx = self.agents.hub.ask_fenix_with(&thread, &key, &question, fenix_acp::protocol::ToolKind::Other, json!({ "passing": passing }), &answers);
-                self.pipelines.passing.insert(id, passing);
-                self.pipelines.gates.insert(key, id);
-                self.agents_run(fx);
-            }
-            Next::Done { summary } => self.pipeline_finished(id, &format!("done: {summary}")),
-            Next::Stopped { why } => self.pipeline_finished(id, &format!("stopped: {why}")),
+            Next::Gate { step, passing, trouble } => self.pipeline_ask_at_gate(id, step, passing, trouble),
+            Next::Done { summary } => return self.pipeline_finished(id, &format!("done: {summary}")),
+            Next::Stopped { why } => return self.pipeline_finished(id, &stopped_how(&why)),
+        }
+        self.pipeline_keep(id);
+    }
+
+    /// The gate's question, on the step's thread (a command's: the thread
+    /// before it): go on with what it passes, edit it first, run the step
+    /// again, or stop. With nothing to pass, only the last two.
+    fn pipeline_ask_at_gate(&mut self, id: u64, step: usize, passing: String, trouble: Option<String>) {
+        let Some(thread) = self.pipelines.runs.get(&id).and_then(|r| r.threads.last().cloned()) else { return };
+        let steps = &self.pipelines.runs[&id].run.spec.steps;
+        let name = steps[step].name.clone();
+        let command = steps[step].run.is_some();
+        let next = steps.get(step + 1).map(|s| s.name.clone()).unwrap_or_default();
+        let onward = if next.is_empty() { "Finish".to_string() } else { format!("Go on to {next}") };
+        // A step that ended well passes what it has, even nothing; one
+        // that didn't, only what it got to.
+        let has = trouble.is_none() || !passing.trim().is_empty();
+        let key = gate_key(id, step);
+        use fenix_acp::protocol::PermissionKind;
+        let again = format!("Run {name} again");
+        let go = if trouble.is_some() && command { format!("{onward} anyway") } else { onward.clone() };
+        let mut answers: Vec<(&str, &str, PermissionKind)> = Vec::new();
+        if has {
+            answers.push(("allow_once", &go, PermissionKind::AllowOnce));
+            answers.push(("edit", "Edit what's passed on, then go on", PermissionKind::Other));
+        }
+        answers.push(("retry", &again, PermissionKind::Other));
+        answers.push(("reject_once", "Stop", PermissionKind::RejectOnce));
+        let question = match (&trouble, has) {
+            (Some(why), true) if command => format!("Pipeline: {why}. {go}, or run it again"),
+            (Some(why), true) => format!("Pipeline: {why}. {onward} with what it has, or write to it for another round"),
+            (Some(why), false) if command => format!("Pipeline: {why}. Run it again, or stop"),
+            (Some(why), false) => format!("Pipeline: {why}. Run {name} again, or write to it for another round"),
+            (None, _) if passing == fenix_acp::pipeline::NO_CHANGES => format!("Pipeline: {name} changed nothing. {onward} anyway, or write to it"),
+            (None, _) => format!("Pipeline: {name} is done. {onward}, or write to it for another round"),
+        };
+        let fx = self.agents.hub.ask_fenix_with(&thread, &key, &question, fenix_acp::protocol::ToolKind::Other, json!({ "passing": passing }), &answers);
+        self.pipelines.passing.insert(id, passing);
+        self.pipelines.gates.insert(key, id);
+        self.agents_run(fx);
+    }
+
+    /// The run kept as it is now, beside its threads.
+    fn pipeline_keep(&mut self, id: u64) {
+        let (Some(store), Some(r)) = (self.agents.store.as_ref(), self.pipelines.runs.get(&id)) else { return };
+        let saved = fenix_acp::store::SavedRun { run: r.run.clone(), root: r.root.clone(), threads: r.threads.clone(), ledger: r.ledger.clone(), usual_mode: r.usual_mode.clone(), tag: r.tag.clone() };
+        if let Err(e) = store.save_run(&saved) {
+            eprintln!("fenix: couldn't keep pipeline run {}: {e}", r.tag.id);
         }
     }
 
+    /// Run `id` stops where it is, for `why`: kept, to be picked up.
+    fn pipeline_stop(&mut self, id: u64, why: &str) {
+        if let Some(r) = self.pipelines.runs.get_mut(&id) {
+            r.run.stop(why);
+        }
+        self.pipeline_finished(id, &stopped_how(why));
+    }
+
+    /// A run done with (`how`): one that stopped is kept, its steps told
+    /// how it ended and how to go on; one that's done is forgotten.
     fn pipeline_finished(&mut self, id: u64, how: &str) {
+        if self.pipelines.runs.get(&id).is_some_and(|r| r.run.stopped_at().is_some()) {
+            return self.pipeline_stopped(id, how);
+        }
         let Some(running) = self.pipelines.runs.remove(&id) else { return };
+        if let Some(store) = &self.agents.store {
+            let _ = store.forget_run(&running.tag.id);
+        }
         self.pipelines.passing.remove(&id);
         if let Some(command) = self.pipelines.commands.remove(&id) {
             command.runner.cancel();
         }
         self.pipelines.ended.push(running.threads.clone());
+        self.pipelines.gates.retain(|_, run| *run != id);
         for thread in &running.threads {
             self.pipelines.steps.remove(thread);
             self.pipelines.held.remove(thread);
@@ -212,6 +272,140 @@ impl App {
             }
             self.agents_run(vec![fenix_acp::hub::Effect::Changed(thread)]);
         }
+    }
+
+    /// Run `id` stopped: kept as it is -- its run, its threads, its
+    /// ledger -- and each step told how it ended, the notice saying how
+    /// it's picked up.
+    fn pipeline_stopped(&mut self, id: u64, how: &str) {
+        self.pipelines.passing.remove(&id);
+        self.pipelines.gates.retain(|_, run| *run != id);
+        if let Some(command) = self.pipelines.commands.remove(&id) {
+            command.runner.cancel();
+        }
+        let Some(running) = self.pipelines.runs.get(&id) else { return };
+        let (title, threads, ledger) = (running.run.spec.title.clone(), running.threads.clone(), running.ledger.clone());
+        for thread in &threads {
+            self.pipelines.held.remove(thread);
+            if let Some(tag) = self.agents.hub.meta_mut(thread).and_then(|m| m.run.as_mut()) {
+                tag.ended = Some(how.to_string());
+                tag.ledger = ledger.clone();
+            }
+            self.agents_keep_thread(thread);
+        }
+        self.pipeline_keep(id);
+        let said = self.keys_text(&format!("Pipeline {title}: {how} -- SPC a g picks it up"));
+        self.set_message(said.trim_start_matches("Pipeline ").to_string());
+        match threads.last() {
+            Some(thread) => {
+                if let Some(t) = self.agents.hub.thread_mut(thread) {
+                    t.notice(fenix_acp::thread::NoticeKind::Info, said);
+                }
+                self.agents_run(vec![fenix_acp::hub::Effect::Changed(thread.clone())]);
+            }
+            // Stopped before its first step had a thread: nothing to pick
+            // up from.
+            None => {
+                if let Some(r) = self.pipelines.runs.remove(&id) {
+                    if let Some(store) = &self.agents.store {
+                        let _ = store.forget_run(&r.tag.id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `SPC a g` (`agents.pipeline_go`) on a pipeline's step: a stopped
+    /// run's gate back, at the step it stopped at; at a gate, `y`.
+    pub(crate) fn pipeline_go(&mut self) {
+        let Some(thread) = self.agents.shown(&self.pages) else {
+            return self.set_message(self.keys_text("no agent thread open: SPC a g on a pipeline's step, or Alt+G on its run in SPC a t"));
+        };
+        let run = self.pipelines.steps.get(&thread).and_then(|id| self.pipelines.runs.get(id)).map(|r| r.tag.id.clone()).or_else(|| self.agents.hub.meta(&thread).and_then(|m| m.run.as_ref().map(|r| r.id.clone())));
+        match run {
+            Some(run) => self.pipeline_go_run(&run),
+            None => self.set_message("this thread isn't a pipeline's step"),
+        }
+    }
+
+    /// Run `run` (its tag's id) picked up: read back when it isn't here.
+    pub(crate) fn pipeline_go_run(&mut self, run: &str) {
+        let found = self.pipelines.runs.iter().find(|(_, r)| r.tag.id == run).map(|(id, _)| *id);
+        let Some(id) = found.or_else(|| self.pipeline_read_back(run)) else {
+            return self.set_message("that run can't be picked up: it's done, or an older Fenix ran it");
+        };
+        let running = &self.pipelines.runs[&id];
+        let title = running.run.spec.title.clone();
+        let step_name = |i: usize| running.run.spec.steps[i].name.clone();
+        match running.run.state.clone() {
+            State::Running(i) => self.set_message(self.keys_text(&format!("{title}: {} is at work -- SPC a k stops it first", step_name(i)))),
+            State::AtGate(i) => {
+                let key = gate_key(id, i);
+                let thread = running.threads.last().cloned();
+                let can_go = running.run.gate.as_ref().is_some_and(|g| g.trouble.is_none() || !g.passing.trim().is_empty());
+                match thread.filter(|_| can_go && self.pipelines.gates.contains_key(&key)) {
+                    Some(thread) => {
+                        let fx = self.agents.hub.answer_permission(&thread, &key, Some("allow_once"));
+                        self.agents_run(fx);
+                    }
+                    None => self.set_message(format!("{title}: {} has nothing to pass on -- r on its question runs it again, n stops", step_name(i))),
+                }
+            }
+            State::Stopped { .. } => {
+                let threads = running.threads.clone();
+                for thread in &threads {
+                    if let Some(tag) = self.agents.hub.meta_mut(thread).and_then(|m| m.run.as_mut()) {
+                        tag.ended = None;
+                    }
+                    self.agents_keep_thread(thread);
+                }
+                if let Some(last) = threads.last() {
+                    self.agents_show(last.clone());
+                }
+                let Some(next) = self.pipelines.runs.get_mut(&id).and_then(|r| r.run.resume()) else { return };
+                self.pipeline_do(id, next);
+            }
+            State::Done => self.set_message(format!("{title} is done")),
+        }
+    }
+
+    /// A run kept in the store, read back and made one of this Fenix's,
+    /// its threads read in: its local id. `None` when there's none.
+    fn pipeline_read_back(&mut self, run: &str) -> Option<u64> {
+        let saved = self.agents.store.as_ref()?.load_run(run).ok()?;
+        for thread in &saved.threads {
+            self.agents.load_one(thread);
+        }
+        self.pipelines.next += 1;
+        let id = self.pipelines.next;
+        for thread in &saved.threads {
+            self.pipelines.steps.insert(thread.clone(), id);
+        }
+        self.pipelines.runs.insert(id, Running { run: saved.run, root: saved.root, threads: saved.threads, ledger: saved.ledger, usual_mode: saved.usual_mode, tag: saved.tag });
+        Some(id)
+    }
+
+    /// Run `run` (its tag's id) archived or deleted: no longer kept to be
+    /// picked up.
+    pub(crate) fn pipeline_forget(&mut self, run: &str) {
+        let ids: Vec<u64> = self.pipelines.runs.iter().filter(|(_, r)| r.tag.id == run && !r.run.is_live()).map(|(id, _)| *id).collect();
+        for id in ids {
+            if let Some(r) = self.pipelines.runs.remove(&id) {
+                for thread in &r.threads {
+                    self.pipelines.steps.remove(thread);
+                }
+                self.pipelines.ended.push(r.threads);
+            }
+        }
+        if let Some(store) = &self.agents.store {
+            let _ = store.forget_run(run);
+        }
+    }
+
+    /// Whether run `run` (its tag's id) is under way here: a step at work
+    /// or at its gate. A stopped one isn't.
+    pub(crate) fn pipeline_is_live(&self, run: &str) -> bool {
+        self.pipelines.runs.values().any(|r| r.tag.id == run && r.run.is_live())
     }
 
     /// A word on the run's latest thread, or the status line before it
@@ -271,7 +465,7 @@ impl App {
                 self.pipelines.commands.insert(id, Command { line: line.clone(), runner, state });
                 self.pipeline_say(id, fenix_acp::thread::NoticeKind::Info, format!("Pipeline ({progress}): running `{line}`"));
             }
-            Err(e) => self.pipeline_finished(id, &format!("stopped: couldn't run `{line}`: {e}")),
+            Err(e) => self.pipeline_stop(id, &format!("couldn't run `{line}`: {e}")),
         }
     }
 
@@ -301,7 +495,7 @@ impl App {
     }
 
     /// `SPC a k` while a command step runs on the thread in front: true
-    /// when there was one to stop, which stops the run.
+    /// when there was one to stop, which brings up its gate.
     pub(super) fn pipeline_cancel_command(&mut self) -> bool {
         let shown = self.agents.shown(&self.pages);
         let found = self.pipelines.commands.iter().find(|(id, _)| self.pipelines.runs.get(*id).is_some_and(|r| r.threads.is_empty() || shown.as_ref().is_some_and(|t| r.threads.contains(t))));
@@ -320,7 +514,7 @@ impl App {
         let agent = spec.agent.clone().filter(|a| !a.is_empty()).map(|a| fenix_acp::catalog::slug(&a)).or_else(|| self.agents_default_of(&entries));
         let Some(agent) = agent else {
             self.agents_none_found(&entries);
-            return self.pipeline_finished(id, "stopped: no agent to run it");
+            return self.pipeline_stop(id, "no agent to run it");
         };
         let thread = self.agents.hub.new_thread(&agent, &root);
         let seq = self.pipelines.runs[&id].threads.len();
@@ -353,11 +547,18 @@ impl App {
     /// waits for it, and what it comes up with is what's passed on.
     fn pipeline_reopen_gate(&mut self, thread: &ThreadId) {
         let Some(&id) = self.pipelines.steps.get(thread) else { return };
-        if !self.agents.hub.view(thread).is_some_and(|v| v.is_working()) {
+        // A turn under way, not only its agent starting: a step's thread
+        // shown again after a restart attaches, and that's no round.
+        if !self.agents.hub.view(thread).is_some_and(|v| !matches!(v.turn, fenix_acp::hub::Turn::Idle)) {
             return;
         }
         let Some(running) = self.pipelines.runs.get_mut(&id).filter(|r| r.threads.last() == Some(thread)) else { return };
-        let fenix_acp::pipeline::State::AtGate(step) = running.run.state else { return };
+        let State::AtGate(step) = running.run.state else { return };
+        // A command's gate is on the step before it: writing there isn't
+        // a round of the command.
+        if running.run.spec.steps[step].run.is_some() {
+            return;
+        }
         let key = gate_key(id, step);
         if self.pipelines.gates.remove(&key).is_none() {
             return;
@@ -369,6 +570,7 @@ impl App {
         }
         let fx = self.agents.hub.withdraw_fenix(thread, &key);
         self.agents_run(fx);
+        self.pipeline_keep(id);
     }
 
     /// Whether `thread` is a step at its gate, its question up.
@@ -386,7 +588,7 @@ impl App {
             if let fenix_acp::hub::Link::ReadOnly(why) = view.link {
                 let why = why.clone();
                 if let Some(held) = self.pipelines.held.remove(thread) {
-                    self.pipeline_finished(held.run, &format!("stopped: the agent can't take it ({why})"));
+                    self.pipeline_stop(held.run, &format!("the agent can't take it ({why})"));
                 }
             }
             return;
@@ -436,7 +638,8 @@ impl App {
     /// when `thread` is one.
     pub(crate) fn pipeline_strip(&self, thread: &ThreadId) -> Option<String> {
         let run = self.pipelines.steps.get(thread).and_then(|id| self.pipelines.runs.get(id))?;
-        Some(format!("{}: {}", run.run.spec.title, run.run.progress()))
+        let stopped = if run.run.is_live() { "" } else { " (stopped)" };
+        Some(format!("{}: {}{stopped}", run.run.spec.title, run.run.progress()))
     }
 
     /// `]s` / `[s`: the pipeline's next or previous step's thread.
@@ -478,8 +681,9 @@ impl App {
     pub(super) fn pipeline_turn_ended(&mut self, thread: &ThreadId, stop: &str) {
         let Some(&id) = self.pipelines.steps.get(thread) else { return };
         // An earlier step's thread, written to: the run has moved on. So
-        // has it past the last one, while a command runs.
-        if self.pipelines.runs.get(&id).is_some_and(|r| r.threads.last() != Some(thread) || r.run.at_command()) {
+        // has it past the last one, while a command runs. A stopped run's
+        // step, written to, is a thread like any other until it's picked up.
+        if self.pipelines.runs.get(&id).is_some_and(|r| r.threads.last() != Some(thread) || r.run.at_command() || !matches!(r.run.state, State::Running(_))) {
             return;
         }
         let Some(view) = self.agents.hub.view(thread) else { return };
@@ -536,6 +740,12 @@ impl App {
         if option == Some("edit") {
             let passing = self.pipelines.passing.get(&id).cloned().unwrap_or_default();
             self.open_compose_seeded(ComposePurpose::PipelineGate { run: id }, &passing);
+            return true;
+        }
+        // `r`: the step again, on a thread of its own, as it was asked.
+        if option == Some("retry") {
+            let Some(next) = self.pipelines.runs.get_mut(&id).map(|r| r.run.retry()) else { return true };
+            self.pipeline_do(id, next);
             return true;
         }
         let go = matches!(option, Some("allow_once" | "allow_thread"));
@@ -660,8 +870,69 @@ mod tests {
         let key = app.pipelines.gates.keys().next().cloned().expect("a gate is up");
         assert_eq!(app.agents.hub.status().waiting, 1);
         assert!(app.pipeline_gate_answered(&key, Some("reject_once")));
-        assert!(app.pipelines.runs.is_empty(), "stopped");
+        assert!(!app.pipeline_is_live(&app.pipelines.runs.values().next().unwrap().tag.id), "stopped, and kept");
+        assert!(app.pipelines.gates.is_empty());
+        assert!(app.pipeline_strip(&thread).is_some_and(|s| s.contains("a ■") && s.ends_with("(stopped)")));
+        let notice = format!("{:?}", app.agents.hub.view(&thread).unwrap().thread.entries);
+        assert!(notice.contains("stopped at a's gate -- SPC a g picks it up"), "{notice}");
         assert!(!app.pipeline_gate_answered("someone-elses", None));
+        // SPC a g: the gate back, as it was; y goes on.
+        app.agents_show(thread.clone());
+        app.pipeline_go();
+        let key = app.pipelines.gates.keys().next().cloned().expect("the gate is back");
+        assert!(app.pipeline_at_gate(&thread));
+        assert!(app.pipeline_gate_answered(&key, Some("allow_once")));
+        assert_eq!(app.pipelines.runs.values().next().unwrap().threads.len(), 2, "on to b");
+    }
+
+    /// Refusing a command the plan step asked for ends its turn
+    /// `cancelled`: the run is still there, its gate up, and `y` starts
+    /// the next step with the plan.
+    #[test]
+    fn a_step_that_ends_cancelled_asks_at_its_gate() {
+        let mut app = app();
+        app.pipelines.armed = Some(PipelineSpec::parse("p", "title = \"P\"\n[[steps]]\nname = \"plan\"\nagent = \"claude\"\nmode = \"plan\"\nprompt = \"{input}\"\npasses = \"plan\"\ngate = true\n[[steps]]\nname = \"build\"\nagent = \"claude\"\nprompt = \"Do: {previous}\"\n").unwrap());
+        app.pipeline_take_prompt("x");
+        let thread = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        app.pipelines.held.clear();
+        app.agents.hub.thread_mut(&thread).unwrap().taken_plan = Some("1. Change a.rs".into());
+        app.pipeline_turn_ended(&thread, "cancelled");
+        assert_eq!(app.pipelines.runs.len(), 1, "the run is still there");
+        let key = app.pipelines.gates.keys().next().cloned().expect("a gate is up");
+        assert!(app.pipeline_at_gate(&thread));
+        assert_eq!(app.pipeline_strip(&thread).as_deref(), Some("P: plan ● → build"));
+        let card = app.agents.hub.view(&thread).unwrap().thread.entries.iter().rev().find_map(|e| if let fenix_acp::thread::Entry::Permission(c) = e { Some(c.clone()) } else { None }).unwrap();
+        assert!(card.tool_call.title.as_deref().is_some_and(|t| t.contains("plan stopped early (cancelled)")), "{:?}", card.tool_call.title);
+        assert!(app.pipeline_gate_answered(&key, Some("allow_once")));
+        let build = app.pipelines.runs.values().next().unwrap().threads[1].clone();
+        assert_eq!(app.pipelines.held.get(&build).map(|h| h.prompt.as_str()), Some("Do: 1. Change a.rs"));
+    }
+
+    /// `SPC a k` on a step before it said anything: its gate asks, with
+    /// nothing to pass on, so only `r` and `n`; `r` runs the step again on
+    /// a thread of its own with the prompt it had.
+    #[test]
+    fn a_step_stopped_with_nothing_to_pass_runs_again_with_r() {
+        let mut app = app();
+        app.pipelines.armed = Some(PipelineSpec::parse("p", "[[steps]]\nname = \"plan\"\nagent = \"claude\"\nprompt = \"Plan: {input}\"\n[[steps]]\nname = \"build\"\nagent = \"claude\"\nprompt = \"{previous}\"\n").unwrap());
+        app.pipeline_take_prompt("x");
+        let first = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        app.pipelines.held.clear();
+        app.pipeline_turn_ended(&first, "cancelled");
+        let key = app.pipelines.gates.keys().next().cloned().expect("a gate is up");
+        let card = app.agents.hub.view(&first).unwrap().thread.entries.iter().rev().find_map(|e| if let fenix_acp::thread::Entry::Permission(c) = e { Some(c.clone()) } else { None }).unwrap();
+        let ids: Vec<&str> = card.options.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["retry", "reject_once"], "nothing to go on with");
+        assert_eq!(crate::agent_page::answer_for(app.agents.hub.view(&first).unwrap().thread, crate::page::Key::Char('r')), Some(crate::agent_page::Action::Permission { key: key.clone(), option: "retry".into() }));
+        // SPC a g says why it can't go on.
+        app.agents_show(first.clone());
+        app.pipeline_go();
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("nothing to pass on")));
+        assert!(app.pipeline_gate_answered(&key, Some("retry")));
+        let run = app.pipelines.runs.values().next().unwrap();
+        assert_eq!(run.threads.len(), 2, "a thread of its own");
+        assert_eq!(app.pipelines.held.get(&run.threads[1]).map(|h| h.prompt.as_str()), Some("Plan: x"));
+        assert_eq!(app.agents.hub.view(&run.threads[1]).unwrap().meta.run.as_ref().map(|t| (t.step, t.seq)), Some((0, 1)), "the same step, its second round");
     }
 
     #[test]

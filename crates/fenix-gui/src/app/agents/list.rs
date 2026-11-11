@@ -7,7 +7,7 @@
 //! the same with Vim keys and standard keys: `Tab` folds a run, `Alt+A`
 //! archives (or brings back), `Alt+H` shows archived threads, `Alt+P`
 //! switches between this project and every project, `Alt+R` reviews a
-//! run's changes. The commands (`agents.archive`, `agents.threads_archived`,
+//! run's changes, `Alt+G` picks up a run that stopped (`SPC a g`). The commands (`agents.archive`, `agents.threads_archived`,
 //! `agents.threads_everywhere`) do the same from the palette and keymap.
 //! While a query is typed the rows are flat -- each one saying its run
 //! and project -- since they come in the order they match.
@@ -111,7 +111,7 @@ impl App {
     /// said to have been interrupted, not running.
     fn thread_list_listed(&self) -> Vec<Listed> {
         let mut listed = self.agents.listed();
-        let live: HashSet<&str> = self.pipelines.runs.values().map(|r| r.tag.id.as_str()).collect();
+        let live: HashSet<&str> = self.pipelines.runs.values().filter(|r| r.run.is_live()).map(|r| r.tag.id.as_str()).collect();
         let busy: HashSet<String> = listed.iter().filter(|l| l.busy()).filter_map(|l| l.run.as_ref().map(|r| r.id.clone())).collect();
         for l in &mut listed {
             if let Some(run) = l.run.as_mut().filter(|r| r.ended.is_none() && !live.contains(r.id.as_str()) && !busy.contains(&r.id)) {
@@ -273,6 +273,21 @@ impl App {
                 self.thread_list_show(selected, false);
                 true
             }
+            KeyCode::Char('g' | 'G') if alt => {
+                let run = match &selected {
+                    Some(Pick::Run(id)) => Some(id.clone()),
+                    Some(Pick::Thread(id)) => self.thread_list_listed().into_iter().find(|l| &l.id == id).and_then(|l| l.run.map(|r| r.id)),
+                    _ => None,
+                };
+                match run {
+                    Some(run) => {
+                        self.picker_close_for_list();
+                        self.pipeline_go_run(&run);
+                    }
+                    None => self.set_message("Alt+G on a run picks it up where it stopped"),
+                }
+                true
+            }
             KeyCode::Char('r' | 'R') if alt => {
                 match selected {
                     Some(Pick::Run(id)) => {
@@ -331,8 +346,9 @@ impl App {
             Pick::Run(run) => (self.run_threads(run).into_iter().map(|l| l.id).collect(), "the run", Some(run.clone())),
             _ => return,
         };
-        // A run under way (its command step too) isn't put away.
-        let live = run.as_ref().is_some_and(|r| self.pipelines.runs.values().any(|p| &p.tag.id == r));
+        // A run under way (its command step too) isn't put away; one
+        // stopped is, and is no longer kept to be picked up.
+        let live = run.as_ref().is_some_and(|r| self.pipeline_is_live(r));
         if live || ids.iter().any(|id| listed.iter().any(|l| &l.id == id && l.busy())) {
             self.set_message(format!("{what} is at work or waiting on you -- archive it once it's done"));
             return;
@@ -360,6 +376,9 @@ impl App {
         if failed > 0 {
             self.set_error(format!("{failed} of {} couldn't be kept as {} -- where threads are kept can't be read or written", ids.len(), if archive { "archived" } else { "brought back" }));
             return;
+        }
+        if let Some(run) = run.as_ref().filter(|_| archive) {
+            self.pipeline_forget(run);
         }
         self.set_message(if archive { format!("{what} archived -- Alt+H shows archived ones, Alt+A brings it back") } else { format!("{what} brought back") });
     }
