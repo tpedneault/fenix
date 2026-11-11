@@ -1220,9 +1220,13 @@ impl Manifest {
 
     /// Whether this Fenix (`fenix`, its own version) can install it: one
     /// it runs in, and code it can run. `Err` says why not.
+    ///
+    /// A nightly (`1.6.0-nightly.20261112`) counts as the release it leads
+    /// to: a range never matches a pre-release of another version, and
+    /// every extension would be refused otherwise.
     pub fn runs_in(&self, fenix: &semver::Version) -> Result<(), String> {
         let req = semver::VersionReq::parse(&self.engine.fenix).map_err(|e| e.to_string())?;
-        if !req.matches(fenix) {
+        if !req.matches(&semver::Version::new(fenix.major, fenix.minor, fenix.patch)) {
             return Err(format!("{} {} is for Fenix {}, and this is {fenix}", self.extension.name, self.extension.version, self.engine.fenix));
         }
         match self.extension.runtime {
@@ -1275,6 +1279,8 @@ mod tests {
         assert!(m.runs_in(&v("1.0.0")).is_ok());
         assert!(m.runs_in(&v("0.9.0")).unwrap_err().contains("is for Fenix >=1.0, <2"));
         assert!(m.runs_in(&v("2.0.0")).is_err());
+        assert!(m.runs_in(&v("1.6.0-nightly.20261112")).is_ok(), "a nightly counts as its release");
+        assert!(m.runs_in(&v("2.0.0-nightly.20261112")).is_err(), "and only as its release");
     }
 
     #[test]
