@@ -1161,10 +1161,25 @@ mod tests {
     fn every_built_in_theme_tells_apart_what_only_a_language_server_knows() {
         for t in all() {
             let new = [("parameter", t.syntax_parameter), ("interface", t.syntax_interface), ("macro", t.syntax_macro)];
-            let others = [("variable", t.syntax_variable), ("constant", t.syntax_constant), ("type", t.syntax_type), ("function", t.syntax_function), ("keyword", t.syntax_keyword), ("text", t.fg)];
+            let others = [
+                ("variable", t.syntax_variable),
+                ("constant", t.syntax_constant),
+                ("type", t.syntax_type),
+                ("function", t.syntax_function),
+                ("keyword", t.syntax_keyword),
+                ("string", t.syntax_string),
+                ("comment", t.syntax_comment),
+                ("text", t.fg),
+            ];
+            // Apart by at least 0.15 in RGB, each channel 0 to 1.
+            let distance = |a: glyphon::Color, b: glyphon::Color| {
+                let d = |x: u8, y: u8| (x as f32 - y as f32) / 255.0;
+                (d(a.r(), b.r()).powi(2) + d(a.g(), b.g()).powi(2) + d(a.b(), b.b()).powi(2)).sqrt()
+            };
             for (i, (name, colour)) in new.iter().enumerate() {
                 for (other, c) in others.iter().chain(&new[i + 1..]) {
-                    assert_ne!(colour, c, "{}: {name} is {other}'s colour", t.name);
+                    let apart = distance(*colour, *c);
+                    assert!(apart >= 0.15, "{}: {name} only {apart:.3} from {other}", t.name);
                 }
                 let contrast = contrast_of(t.bg, rgba_of(*colour));
                 assert!(contrast >= 4.0, "{}: {name} at {contrast:.2}:1", t.name);

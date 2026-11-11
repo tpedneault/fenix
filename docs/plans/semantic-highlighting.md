@@ -411,6 +411,10 @@ These supersede the table and rules above where they differ.
     when the setting goes off.
   - A buffer with no grammar works out its windows only when it has
     tokens to lay.
+  - **One writer.** Every writer of `synced_text` and `open_documents`
+    goes through `record_lsp_sync`, which moves held tokens through the
+    change sent. There were two: `sync_lsp_document` and a refactor's
+    own sync (`sync_refactor_buffers`), which used to skip it.
 - **Not yet:** delta and range (stage 4).
 
 ### Stage 3
@@ -428,17 +432,20 @@ These supersede the table and rules above where they differ.
     number and operator colours, then its other syntax, mode, Git and
     explorer colours. Where none qualifies, it's the fallback colour
     blended toward one of those.
-  - A test checks the three are pairwise distinct, differ from the
-    colours above, and have 4:1 contrast. The lowest is 4.07:1
-    (everforest-dark).
+  - A test checks that rule as stated: the 0.15 distance from each
+    other and from the eight colours above, and 4:1 contrast. The lowest
+    contrast is 4.07:1 (everforest-dark); the smallest distance is 0.152
+    (catppuccin-frappe's interface against its parameter).
 - **The `mutable` underline.** `App::underlined_tokens` gives the
   mutable tokens on the lines shown. `polish_pane` turns them into row
   segments (`RowMap::segments`, so one split by a row break is
   underlined on each row). The segments are drawn as underlines,
   through the path extensions' decorations already use, in the token's
   colour at 0.8 alpha. None is drawn inside the grammar's comments and
-  strings (`App::semantic_protected`, kept from the frame's highlight
-  pass), where a token's colour isn't laid either.
+  strings, where a token's colour isn't laid either. Those ranges are
+  `App::semantic_protected`, kept only from a pane's own highlight pass
+  (`viewport`), not sticky headers or one-off lookups, and dropped with
+  the buffer's tokens.
 - **Stage 2's tests changed.** A macro token is now drawn in the macro
   colour, not the function colour.
 
@@ -484,6 +491,27 @@ These supersede the table and rules above where they differ.
     refresh clears `covered`, so the lines shown are asked again.
   - **The document's end.** A range ask ends at the document's last
     position, not a line past it.
+- **Revised after the fourth review.**
+  - **Never evicting a viewed range.** The 8-range cap applies only to
+    ranges no view reaches, so a document with more views keeps a range
+    for each. An evicted range takes its tokens with it, so what's held
+    is what's been in view lately, not everything ever shown.
+  - **The document's rope.** Each document keeps the rope its sync
+    built. A range's answer is decoded, and its lines found, against
+    that rope, with no rebuild per answer.
+  - **Refresh while asking.** A refresh while a range ask is out marks
+    the ask: its answer is merged, but its lines aren't counted as
+    answered, so they're asked again. Any ask sent after a refresh
+    clears the refresh.
+  - **Views as runs.** A pane's view is the runs of lines it shows, with
+    each closed fold between them left out. One ask is for at most 2 000
+    lines.
+  - **Refusals move on.** A range refused or unreadable moves on to the
+    next view not covered.
+  - **The typing pause holds.** A view that moves while typing waits
+    for the pause.
+  - **Early out.** With nothing held, the frame does no work for tokens
+    (no set of shown panes is built).
 - **No range and over 50 000 lines:** not asked, and no wake is set.
 - **Wake.** `semantic_wake` gives the next due time, or now for one
   already due (a draw just made it due). `ask` clears `due` on every
