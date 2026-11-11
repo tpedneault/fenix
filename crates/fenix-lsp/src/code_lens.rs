@@ -120,29 +120,37 @@ pub fn rows<'a, T: Clone + 'a>(lenses: impl IntoIterator<Item = (T, &'a lsp_type
         .collect()
 }
 
-/// The lines one change replaced: `old`'s lines `start..=old_end` became
-/// `new`'s `start..=new_end`. From `changed_span`, so it's the change
-/// that was sent.
+/// The lines one change touched, from `changed_span`, so it's the change
+/// that was sent: `(start, after_old, after_new)` -- lines before
+/// `start` are untouched, `old`'s lines from `after_old` on are `new`'s
+/// from `after_new` on, and those between were replaced. A line the
+/// change ends right at the start of is after it, not in it: text typed
+/// at a line's start moves that line down.
 pub fn changed_lines(old: &str, new: &str) -> (usize, usize, usize) {
     let (start, old_end, new_end) = crate::changed_span(old, new);
     let line_of = |text: &str, char: usize| text.chars().take(char).filter(|&c| c == '\n').count();
-    (line_of(old, start), line_of(old, old_end), line_of(new, new_end))
+    // The first line wholly after `char`: its own when it's at a line's
+    // start, else the next.
+    let after = |text: &str, char: usize| {
+        let at_start = char == 0 || text.chars().nth(char - 1) == Some('\n');
+        line_of(text, char) + usize::from(!at_start)
+    };
+    (line_of(old, start), after(old, old_end).max(line_of(old, start)), after(new, new_end).max(line_of(new, start)))
 }
 
-/// `lenses` moved by line through a change of lines `start..=old_end`
-/// into `start..=new_end` (`changed_lines`): those above stay, those
-/// below move by the difference, those on a replaced line stay on it,
-/// or on the change's last line if it shrank past them, until the
-/// server answers again.
-pub fn shift_lines(lenses: &mut [lsp_types::CodeLens], (start, old_end, new_end): (usize, usize, usize)) {
+/// `lenses` moved by line through a change (`changed_lines`): those
+/// above stay, those after move by the difference, those on a replaced
+/// line stay on it (or on the change's last line if it shrank past
+/// them) until the server answers again.
+pub fn shift_lines(lenses: &mut [lsp_types::CodeLens], (start, after_old, after_new): (usize, usize, usize)) {
     for lens in lenses {
         let line = lens.range.start.line as usize;
         let moved = if line < start {
             line
-        } else if line > old_end {
-            line - old_end + new_end
+        } else if line >= after_old {
+            line - after_old + after_new
         } else {
-            line.min(new_end)
+            line.min(after_new.saturating_sub(1).max(start))
         };
         let span = lens.range.end.line.saturating_sub(lens.range.start.line);
         lens.range.start.line = moved as u32;
@@ -293,19 +301,29 @@ mod tests {
 
     #[test]
     fn changed_lines_are_the_change_sent() {
-        assert_eq!(changed_lines("a\nb\nc\n", "a\nB\nc\n"), (1, 1, 1));
-        assert_eq!(changed_lines("a\nb\nc\n", "a\nb\nx\ny\nc\n"), (2, 2, 4));
-        assert_eq!(changed_lines("a\nb\nc\nd\n", "a\nd\n"), (1, 3, 1));
+        assert_eq!(changed_lines("a\nb\nc\n", "a\nB\nc\n"), (1, 2, 2), "line 1 replaced");
+        assert_eq!(changed_lines("a\nb\nc\n", "a\nb\nx\ny\nc\n"), (2, 2, 4), "two lines inserted before line 2");
+        assert_eq!(changed_lines("a\nb\nc\nd\n", "a\nd\n"), (1, 3, 1), "lines 1 and 2 taken away");
+        assert_eq!(changed_lines("fn a\n", "// x\nfn a\n"), (0, 0, 1), "a line typed above line 0 moves it down");
+    }
+
+    fn lines_of(lenses: &[CodeLens]) -> Vec<u32> {
+        lenses.iter().map(|l| l.range.start.line).collect()
     }
 
     #[test]
     fn lenses_move_with_lines_added_and_taken_away_above_them() {
         let mut lenses = vec![lens(0, Some("a"), "", None), lens(5, Some("b"), "", None), lens(9, Some("c"), "", None)];
-        shift_lines(&mut lenses, (2, 2, 4)); // two lines added at line 2
-        assert_eq!(lenses.iter().map(|l| l.range.start.line).collect::<Vec<_>>(), [0, 7, 11]);
-        shift_lines(&mut lenses, (6, 8, 6)); // lines 6..=8 into one: the lens on 7 stays on 6
-        assert_eq!(lenses.iter().map(|l| l.range.start.line).collect::<Vec<_>>(), [0, 6, 9]);
+        shift_lines(&mut lenses, changed_lines("x\n", "// new\nx\n"));
+        assert_eq!(lines_of(&lenses), [1, 6, 10], "a line above all of them");
+        shift_lines(&mut lenses, (2, 2, 4)); // two lines inserted before line 2
+        assert_eq!(lines_of(&lenses), [1, 8, 12]);
+        shift_lines(&mut lenses, (7, 10, 7)); // lines 7..=9 taken away: the lens on 8 stays on line 7
+        assert_eq!(lines_of(&lenses), [1, 7, 9]);
         assert_eq!(lenses[2].range.end.line, 9);
+        // Typing inside a lens's line keeps it there.
+        shift_lines(&mut lenses, changed_lines("a\nfn b\n", "a\nfn bc\n"));
+        assert_eq!(lines_of(&lenses), [1, 7, 9]);
     }
 
     #[test]
