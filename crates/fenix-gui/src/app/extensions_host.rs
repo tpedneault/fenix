@@ -18,6 +18,14 @@ pub(crate) enum RegistryEvent {
     Preview(String, Result<PathBuf, String>),
 }
 
+/// When `extensions.toml` last changed, yours and the machine's.
+fn extensions_stamps() -> Vec<Option<std::time::SystemTime>> {
+    [crate::installed::store(), crate::installed::machine()]
+        .iter()
+        .map(|store| store.as_ref().and_then(|s| std::fs::metadata(s.root().join("extensions.toml")).and_then(|m| m.modified()).ok()))
+        .collect()
+}
+
 impl App {
     /// `SPC h x`.
     pub(crate) fn open_extensions_page(&mut self) {
@@ -241,6 +249,28 @@ impl App {
         }
     }
 
+    /// `extensions.toml` changed under Fenix -- `fenix --install-extension`
+    /// in a terminal, another Fenix's Extensions page: what changed put in
+    /// use, as the Extensions page does, rather than at the next start
+    /// (#40). Looked at on the disk poll's tick.
+    pub(super) fn extensions_installed_if_changed(&mut self) {
+        let stamps = extensions_stamps();
+        let Some(before) = self.extensions_stamp.replace(stamps.clone()) else { return };
+        if before == stamps {
+            return;
+        }
+        let ids = |installed: &[crate::installed::CodeExtension]| installed.iter().map(|e| (e.id.clone(), e.manifest.extension.version.clone())).collect::<Vec<_>>();
+        let was = ids(&self.wasm.installed);
+        let waiting = self.extensions_switched();
+        if ids(&self.wasm.installed) != was || !waiting.is_empty() {
+            let later = if waiting.is_empty() { String::new() } else { format!(" -- {}'s themes and languages come with the next start (SPC q r restarts now)", waiting.join(", ")) };
+            self.set_message(format!("Extensions changed outside Fenix: put in use{later}"));
+            if let Some(id) = self.find_page(|m| matches!(m, PageModel::Extensions(_))) {
+                self.refresh_extensions_page(id);
+            }
+        }
+    }
+
     /// The installed extensions changed (installed, switched, removed):
     /// what they bring put in use without a restart -- code started or
     /// stopped, keys, commands; snippets, templates, launches and lessons
@@ -250,6 +280,9 @@ impl App {
         if crate::installed::safe_mode() {
             return Vec::new();
         }
+        // What's in use now is what `extensions.toml` says: the disk poll
+        // has nothing more to put in use for this change.
+        self.extensions_stamp = Some(extensions_stamps());
         self.code_extensions_now(crate::installed::code_extensions());
         let problems = crate::keymap::reload_leader();
         self.leader_matcher = crate::keymap::leader_trie().matcher();

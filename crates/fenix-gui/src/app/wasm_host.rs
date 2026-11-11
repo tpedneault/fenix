@@ -186,10 +186,21 @@ pub(crate) struct BackgroundTask {
     runner: Option<fenix_tasks::TaskRunner>,
 }
 
+impl WasmHost {
+    /// How many times the extensions' deadline clock has woken: it sleeps
+    /// while no extension code runs (#74).
+    pub(crate) fn clock_wakes(&self) -> u64 {
+        self.engine.as_ref().map_or(0, |(_, ticker)| ticker.wakes())
+    }
+}
+
 /// The code extensions and their workers.
 #[derive(Default)]
 pub(crate) struct WasmHost {
     engine: Option<(fenix_wasm::wasmtime::Engine, fenix_wasm::Ticker)>,
+    /// When those that start with Fenix are to start, until they have:
+    /// at the first frame, or by then (`App::code_startup_tick`).
+    pub(crate) startup_due: Option<Instant>,
     pub(crate) installed: Vec<CodeExtension>,
     workers: HashMap<String, Worker>,
     pub(crate) status: HashMap<String, Status>,
@@ -882,6 +893,26 @@ impl App {
         }
     }
 
+    /// The window's first frame is up: those that start with Fenix start
+    /// now, rather than competing with it for the machine (#33).
+    pub(super) fn code_startup_now(&mut self) {
+        if self.wasm.startup_due.take().is_some() {
+            let _profile = crate::profile::Scope::new("extensions started");
+            self.code_extensions_at_startup();
+        }
+    }
+
+    /// `code_startup_now`, when no first frame has come by the time it's
+    /// due; else when it's due.
+    pub(super) fn code_startup_tick(&mut self, now: Instant) -> Option<Instant> {
+        let due = self.wasm.startup_due?;
+        if now < due {
+            return Some(due);
+        }
+        self.code_startup_now();
+        None
+    }
+
     /// Those that wait for their languages or markers
     /// (`Activation::waits_for`), started when the file you're in is one of
     /// theirs or the project is: one of their markers at its top, or a
@@ -1445,11 +1476,16 @@ impl App {
     /// under new ids, the ones it can't say how to reopen closed. Its
     /// terminals stay open, as plain terminals; a task it ran is let go.
     pub(crate) fn restart_code_extension(&mut self, ext: &str) {
+        self.restart_code_extension_saying(ext, "-- the project changed: starting again there");
+    }
+
+    /// `restart_code_extension`, its output page saying why.
+    pub(crate) fn restart_code_extension_saying(&mut self, ext: &str, why: &str) {
         let pages: Vec<(BufferId, String, Option<String>)> = self.pages.iter().filter_map(|(id, s)| match &s.model {
             PageModel::Code(p) if p.ext == ext => Some((*id, p.kind.clone(), p.state.clone())),
             _ => None,
         }).collect();
-        self.note_output(ext, "-- the project changed: starting again there".into());
+        self.note_output(ext, why.into());
         self.wasm.stale.remove(ext);
         // Let go, not waited for: one still loading or in a call would hold
         // the UI thread until it's done.
@@ -2460,12 +2496,26 @@ impl App {
         one
     }
 
-    /// Setting `key` changed: the extension it's one of reads it anew.
+    /// The extensions that read setting `key` only as they start (its
+    /// manifest says `restart = true`): changing it starts them again.
+    pub(crate) fn code_restarted_by(&self, key: &str) -> Vec<&CodeExtension> {
+        self.wasm.installed.iter().filter(|e| e.manifest.contributes.settings.iter().any(|s| s.key == key && s.restart)).collect()
+    }
+
+    /// The names of those `code_restarted_by(key)` that are running.
+    pub(crate) fn code_running_restarted_by(&self, key: &str) -> Vec<String> {
+        self.code_restarted_by(key).into_iter().filter(|e| self.wasm.workers.contains_key(&e.id)).map(|e| e.name.clone()).collect()
+    }
+
+    /// Setting `key` changed: the extension it's one of reads it anew --
+    /// or, for one that reads it only as it starts, or a folder of its
+    /// that moved, starts again in the running editor (#40).
     pub(crate) fn code_setting_changed(&mut self, key: &str) {
-        // A folder of its moved: it starts again, with it there.
-        let moved: Vec<String> = self.wasm.installed.iter().filter(|e| e.manifest.permissions.folders.values().any(|p| p.contains(&format!("${{setting:{key}}}"))) && self.wasm.workers.contains_key(&e.id)).map(|e| e.id.clone()).collect();
-        for ext in moved {
-            self.restart_code_extension(&ext);
+        let moved = |e: &CodeExtension| e.manifest.permissions.folders.values().any(|p| p.contains(&format!("${{setting:{key}}}")));
+        let restarted = self.code_restarted_by(key).into_iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        let starting_again: Vec<String> = self.wasm.installed.iter().filter(|e| (moved(e) || restarted.contains(&e.id)) && self.wasm.workers.contains_key(&e.id)).map(|e| e.id.clone()).collect();
+        for ext in starting_again {
+            self.restart_code_extension_saying(&ext, &format!("-- {key} changed: starting again to apply it"));
         }
         // Its owner, and those that may read it (`permissions.settings`).
         let namespace = key.split('.').next().unwrap_or(key);
@@ -2494,6 +2544,11 @@ impl App {
             Event::Ready => {
                 self.wasm.status.insert(ext.clone(), Status::Ready);
                 self.note_output(&ext, "-- ready".into());
+                // The last of those starting with Fenix is up.
+                if !self.wasm.status.values().any(|s| matches!(s, Status::Starting)) {
+                    static UP: std::sync::Once = std::sync::Once::new();
+                    UP.call_once(|| crate::profile::launch_mark("extensions ready"));
+                }
                 for (what, ticks, pending) in self.wasm.queued.remove(&ext).unwrap_or_default() {
                     self.code_call(&ext, what, ticks, pending);
                 }
@@ -4497,6 +4552,34 @@ pub(crate) mod tests {
         pump_until(&mut app, |a| said(a, "hello.url changed"));
     }
 
+    /// One it reads only as it starts (`restart = true`): changed, the
+    /// extension starts again in the running editor, and says why, rather
+    /// than waiting for Fenix to restart; the page's help says so. One
+    /// without is told, as before (#40).
+    #[test]
+    fn a_setting_read_only_at_start_starts_its_extension_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        let ext = hello("\n[[contributes.settings]]\nkey = \"hello.debugger\"\nrestart = true\ndescription = \"The debugger\"\n\n[[contributes.settings]]\nkey = \"hello.url\"\n");
+        let help = crate::installed::settings_of(&ext).iter().map(|s| s.help).collect::<Vec<_>>();
+        assert_eq!(help, ["The debugger. *Changing it starts Hello again.*", ""]);
+        app.wasm.installed = vec![ext];
+        assert_eq!(app.code_restarted_by("hello.debugger").len(), 1);
+        assert!(app.code_restarted_by("hello.url").is_empty());
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready));
+
+        app.code_setting_changed("hello.url");
+        pump_until(&mut app, |a| said(a, "hello.url changed"));
+        assert!(!said(&app, "starting again"), "an ordinary setting is told, not restarted for");
+
+        app.code_setting_changed("hello.debugger");
+        assert!(said(&app, "-- hello.debugger changed: starting again to apply it"));
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready));
+        assert_eq!(app.extension_output_text().matches("-- ready").count(), 2, "it started again: {}", app.extension_output_text());
+    }
+
     /// Its setting edited by hand in `settings.toml` reaches it too, as
     /// one changed on the settings page does.
     #[test]
@@ -4706,6 +4789,35 @@ pub(crate) mod tests {
         assert_eq!(root(&app, "test.hello").as_deref(), b.path().file_name());
         pump_until(&mut app, |a| said(a, "hello, Fenix"));
         assert_eq!(app.wasm.output["test.hello"].iter().filter(|l| l.contains("the project changed")).count(), 1);
+    }
+
+    /// Those that start with Fenix wait for the window's first frame, so
+    /// forty of them loading don't hold it up; without one by
+    /// `STARTUP_EXTENSIONS_WITHIN` (stuck on the splash, never shown) they
+    /// start anyway. Either way, once (#33).
+    #[test]
+    fn those_that_start_with_fenix_wait_for_the_first_frame() {
+        // As `App::new` leaves it.
+        let started_up = |app: &mut App| app.wasm.startup_due = Some(Instant::now() + STARTUP_EXTENSIONS_WITHIN);
+        let mut app = App::with_file(None);
+        started_up(&mut app);
+        let due = app.wasm.startup_due.expect("they wait");
+        app.wasm.installed = vec![hello("[activation]\non_startup = true\n")];
+        assert!(app.wasm.workers.is_empty(), "nothing started before the window drew");
+        assert_eq!(app.code_startup_tick(due - Duration::from_millis(1)), Some(due), "not yet");
+        assert!(app.wasm.workers.is_empty());
+        // The first frame.
+        app.code_startup_now();
+        assert!(app.wasm.workers.contains_key("test.hello"), "started once the window drew");
+        assert_eq!(app.code_startup_tick(due + Duration::from_secs(1)), None, "and not again");
+
+        // No frame by the deadline: they start all the same.
+        let mut app = App::with_file(None);
+        started_up(&mut app);
+        app.wasm.installed = vec![hello("[activation]\non_startup = true\n")];
+        let due = app.wasm.startup_due.expect("they wait");
+        assert_eq!(app.code_startup_tick(due), None);
+        assert!(app.wasm.workers.contains_key("test.hello"), "started at the deadline");
     }
 
     /// One for some languages or projects only -- a language pack that

@@ -192,11 +192,20 @@ impl App {
                     }
                 };
                 let restart = fenix_config::setting(key).is_some_and(|s| s.restart);
+                // An extension's that it reads only as it starts: it has
+                // started again (`code_setting_changed`), and says so.
+                let restarted = self.code_running_restarted_by(key);
                 if let Some(page) = self.settings_page(id) {
                     match result {
                         Ok(()) => {
                             page.refused = None;
-                            page.note = restart.then(|| ("saved -- it takes effect when Fenix restarts: SPC q r restarts now, where you are".to_string(), false));
+                            page.note = if restart {
+                                Some(("saved -- it takes effect when Fenix restarts: SPC q r restarts now, where you are".to_string(), false))
+                            } else if !restarted.is_empty() {
+                                Some((format!("saved -- {} started again to apply it", restarted.join(", ")), false))
+                            } else {
+                                None
+                            };
                         }
                         Err(why) => page.refused = Some((key, why)),
                     }
@@ -424,20 +433,23 @@ impl App {
     }
 
     /// The project's settings as the disk probe read them, applied when
-    /// they changed -- and only if it's still the focused project.
-    pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) {
+    /// they changed -- and only if it's still the focused project. Whether
+    /// they did.
+    pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) -> bool {
         if self.project_root.as_ref() != Some(&root) {
-            return;
+            return false;
         }
         let before = self.project_settings.as_ref().map(|(_, p)| p.values());
         let same = self.project_settings.as_ref().is_some_and(|(r, _)| *r == root);
         self.project_settings = Some((root, settings));
         let after = self.project_settings.as_ref().map(|(_, p)| p.values());
-        if before != after || !same {
+        let changed = before != after || !same;
+        if changed {
             for key in ["editor.indent_width", "editor.iskeyword_extra"] {
                 self.apply_setting(key);
             }
         }
+        changed
     }
 
     /// The focused project's own value for `key`, if it sets one.

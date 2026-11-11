@@ -3797,6 +3797,8 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
         store.set_epoch_deadline(activate_ticks);
+        // Timed from here: loading and compiling it above weren't.
+        let _calling = crate::calling();
         let instance = linker.instantiate(&mut store, &component)?;
         let ext = Extension::new(&mut store, &instance)?;
         let optional = Optional::of(&mut store, &instance);
@@ -3875,6 +3877,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             _ => {}
         }
         store.set_epoch_deadline(if ticks == 0 { call_ticks } else { ticks });
+        let calling = crate::calling();
         let result: wasmtime::Result<Result<Reply, String>> = match what {
             Call::SurfaceInput { surface, input } => ext.call_surface_input(&mut *store, surface, input).map(|()| Ok(Reply::Done)),
             Call::Grant(_) => Ok(Ok(Reply::Done)),
@@ -3931,6 +3934,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                 None => Ok(Ok(Reply::Done)),
             },
         };
+        drop(calling);
         match result {
             Ok(said) => {
                 if let Some(call) = call {

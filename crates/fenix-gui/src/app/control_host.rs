@@ -337,6 +337,11 @@ impl App {
         };
         let mut state = StateResult {
             project: self.project_root.as_deref().map(plain),
+            stats: Some(fenix_control::protocol::Stats {
+                frames: self.frames_presented,
+                wakes: self.loop_wakes,
+                extension_clock_wakes: self.wasm.clock_wakes(),
+            }),
             ..StateResult::default()
         };
         if self.main_view == MainView::Editor {

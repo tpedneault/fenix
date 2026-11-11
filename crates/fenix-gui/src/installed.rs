@@ -142,6 +142,8 @@ pub fn settings_of(ext: &CodeExtension) -> Vec<fenix_config::schema::Setting> {
             let label = if c.label.is_empty() { c.key.as_str() } else { c.label.as_str() };
             let section = Category::Extension(leak(c.section.as_deref().unwrap_or(&ext.name)));
             let help = if c.description.is_empty() { String::new() } else { format!("{}.", c.description.trim_end_matches('.')) };
+            // One it reads only as it starts: changing it starts it again.
+            let help = if c.restart { format!("{help} *Changing it starts {} again.*", ext.name).trim_start().to_string() } else { help };
             let setting = Setting::stored(leak(&c.key), section, leak(label), kind, leak(&help)).with_default(leak(&c.default));
             // One a project may set too, in its `.fenix/settings.toml`.
             if c.project { setting.project() } else { setting }
@@ -369,6 +371,10 @@ fn not_managed(id: &str, managed: Option<&Store>) -> Result<(), String> {
 
 /// Carries out `request` on `store`: what to print, and whether it went.
 /// `managed` is the machine's store when `store` is yours.
+/// What `--install-extension` says after installing: a Fenix that's
+/// running puts it in use within a few seconds (#40).
+const RUNNING_FENIX_PUTS_IT_IN_USE: &str = " A Fenix that's running puts it in use in a moment; its themes and languages come with its next start.";
+
 pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<String, String> {
     match request {
         // An id, not a file there: from the registry.
@@ -379,12 +385,12 @@ pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<
             let registry = registry(config.as_ref())?;
             // A running Fenix is another process: it loads it when it's
             // told, or at its next start.
-            install_from(&registry, id, store).map(|said| said + " It's used from the next start.")
+            install_from(&registry, id, store).map(|said| said + RUNNING_FENIX_PUTS_IT_IN_USE)
         }
         Request::Install(path) => {
             not_managed(&fenix_extensions::Package::open(path)?.manifest.extension.id, managed)?;
             let installed = store.install(path, &release())?;
-            Ok(format!("Installed {} {} ({}). It's used from the next start.", installed.name(), installed.version, installed.id))
+            Ok(format!("Installed {} {} ({}).{RUNNING_FENIX_PUTS_IT_IN_USE}", installed.name(), installed.version, installed.id))
         }
         Request::Uninstall(id) => {
             not_managed(id, managed)?;
@@ -484,7 +490,7 @@ mod tests {
         let store = fenix_extensions::Store::new(dir.path().join("extensions"));
         assert!(run(&Request::List, &store, None).unwrap().starts_with("No extensions installed"));
         let pack = extension(dir.path(), "acme.dusk", "1.0.0");
-        assert_eq!(run(&Request::Install(pack), &store, None).unwrap(), "Installed Dusk 1.0.0 (acme.dusk). It's used from the next start.");
+        assert_eq!(run(&Request::Install(pack), &store, None).unwrap(), format!("Installed Dusk 1.0.0 (acme.dusk).{RUNNING_FENIX_PUTS_IT_IN_USE}"));
         assert_eq!(run(&Request::List, &store, None).unwrap(), "acme.dusk  1.0.0  Dusk  (on)");
         assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None).unwrap().starts_with("Removed acme.dusk"));
         assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None).unwrap_err().contains("isn't installed"));

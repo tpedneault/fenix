@@ -26,8 +26,9 @@ pwsh -File package.ps1 -Install    # and installs it into Fenix
 ```
 
 An extension installed or switched on from the Extensions page is used
-at once; one installed with `package.ps1 -Install` (the command line),
-from Fenix's next start, or `SPC q r`. `SPC h l` shows
+at once; one installed with `package.ps1 -Install` (the command line)
+within a few seconds, as a running Fenix notices it. Only its themes and
+languages wait for the next start, or `SPC q r`. `SPC h l` shows
 what each one logs, and why one stopped.
 
 ## The extension
@@ -940,6 +941,10 @@ default = "https://api.example.com"
 project = true                 # a project may set it too (.fenix/settings.toml)
 section = "Counter"            # its section of the settings page (SPC ,);
                                # the extension's name when left out
+restart = false                # true: read only as it starts (a debug
+                               # adapter it sets up then); changing it starts
+                               # the extension again, in the running editor,
+                               # instead of telling it (Event::SettingChanged)
 
 [contributes]
 services = ["counter.count"]

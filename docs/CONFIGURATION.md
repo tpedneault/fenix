@@ -330,7 +330,7 @@ An install replaces any other version of the same extension, and
 needs its dependencies installed first. From the Extensions page it's
 used at once, but for its themes and languages, which come with the
 next start; installed with `fenix --install-extension`, a running Fenix
-uses it from its next start. A package is checked before anything is written: its manifest, the Fenix
+notices within a few seconds and puts it in use the same way. A package is checked before anything is written: its manifest, the Fenix
 it's for, and that none of its files would land outside its own folder.
 
 ### Extensions that run code

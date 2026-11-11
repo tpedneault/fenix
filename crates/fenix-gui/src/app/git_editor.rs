@@ -278,21 +278,28 @@ impl App {
     /// The modeline's Git state has come back: when the repository's
     /// changes moved since the last (a save, a commit, a checkout in the
     /// terminal), the sidebar's badges are read again, off the UI thread.
-    pub(super) fn apply_chrome_git(&mut self, state: Option<ChromeGit>) {
+    ///
+    /// Whether the modeline shows anything new: it's read every couple of
+    /// seconds, and the same state isn't drawn again (#74).
+    pub(super) fn apply_chrome_git(&mut self, state: Option<ChromeGit>) -> bool {
+        if self.chrome_git == state {
+            return false;
+        }
         let moved = state.as_ref().is_some_and(|new| self.chrome_git.as_ref().is_none_or(|old| old.root != new.root || old.changes != new.changes));
         self.chrome_git = state;
         if !moved || !self.sidebar_open {
-            return;
+            return true;
         }
-        let Some(dir) = self.sidebar.as_ref().map(|s| s.cwd.clone()) else { return };
+        let Some(dir) = self.sidebar.as_ref().map(|s| s.cwd.clone()) else { return true };
         let root = self.chrome_git.as_ref().map(|c| c.root.clone()).unwrap_or_default();
         if !(dir.starts_with(&root) || root.starts_with(&dir)) {
-            return;
+            return true;
         }
         self.page_spawn(move |send| {
             let statuses = fenix_explorer::status_for_dir(&dir);
             send(PageEvent::SidebarGit { dir, statuses });
         });
+        true
     }
 
     pub(super) fn apply_sidebar_git(&mut self, dir: PathBuf, statuses: HashMap<PathBuf, fenix_explorer::GitStatus>) {
