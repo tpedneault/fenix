@@ -2093,3 +2093,29 @@ fn a_run_fenix_closed_on_is_picked_up_where_it_stopped() {
     let asked = |app: &App| app.agents.hub.view(&build).is_some_and(|v| v.thread.transcript().contains(&format!("Build: {passing}")));
     assert!(f.pump(asked), "build has the plan: {:?}", f.app.agents.hub.view(&build).map(|v| v.thread.transcript()));
 }
+
+/// The agent panel's page, cards and all, never wraps and never goes by
+/// rows -- not with wrap on everywhere, nor with rows above its lines --
+/// and has no file to ask a server for lenses or tokens; its prompt
+/// wraps.
+#[test]
+fn the_agent_page_never_wraps_and_takes_no_lenses_or_tokens() {
+    let mut f = fixture("");
+    f.app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+    f.app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+    f.app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(true)));
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).is_some()));
+    let page = f.app.agents.page.expect("the panel's page");
+    let pane = f.app.windows().windows().into_iter().find(|&p| f.app.windows().content(p) == Some(&page)).expect("a pane shows it");
+    assert!(f.app.is_page_buffer(page));
+    assert_eq!(f.app.wrap_refusal(pane, page), Some("a page"));
+    assert_eq!(f.app.wrap_cols(pane, page), None);
+    f.app.virtual_rows.entry(page).or_default().insert(0, vec!["lens".into()]);
+    assert_eq!(f.app.row_cols(pane, page), None, "a row a line, as a page is drawn");
+    assert!(f.app.buffers.get(page).unwrap().buffer.path().is_none(), "nothing for a server to be asked about");
+    assert!(!f.app.lens_of.contains_key(&page) && !f.app.semantic_of.contains_key(&page));
+    let composer = f.app.agents.composer.unwrap();
+    let prompt_pane = f.app.windows().windows().into_iter().find(|&p| f.app.windows().content(p) == Some(&composer)).expect("a pane shows the prompt");
+    assert!(f.app.pane_can_wrap(prompt_pane, composer), "an agent's prompt wraps");
+}
