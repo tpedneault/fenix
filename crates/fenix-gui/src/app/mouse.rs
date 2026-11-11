@@ -133,7 +133,7 @@ pub(super) struct TextHit {
 }
 
 impl App {
-    fn cell_size(&self) -> (f32, f32) {
+    pub(super) fn cell_size(&self) -> (f32, f32) {
         match &self.text {
             Some(t) => (t.char_width(), t.line_height()),
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
@@ -143,6 +143,14 @@ impl App {
     fn geometry_at(&self, window_width: f32, window_height: f32) -> FrameGeometry {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top)
+    }
+
+    /// The rows of text `pane` has room for, as the window is now.
+    pub(super) fn pane_text_rows(&self, pane: fenix_window::WindowId) -> Option<usize> {
+        let (w, h) = self.window_size()?;
+        let rect = self.geometry_at(w, h).panes.into_iter().find(|(p, _)| *p == pane)?.1;
+        let (_, line_height) = self.cell_size();
+        Some(text::lines_that_fit(pane_content_rect(rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height))
     }
 
     fn window_size(&self) -> Option<(f32, f32)> {
@@ -182,9 +190,12 @@ impl App {
         let gutter_px = self.gutter_chars(ob) as f32 * char_width;
         let x = pos.0 - content.x - text::PAD_LEFT - gutter_px;
         let cursor_line = ob.buffer.line_col(&state.cursor).0;
+        if self.row_cols(pane, buffer).is_some() {
+            return self.wrapped_text_hit(pane, buffer, content, row, x);
+        }
         // Sticky scroll's headers sit over the top rows, unscrolled.
         let folds_active = lines.len() != ob.buffer.line_count();
-        let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() {
+        let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() && self.row_cols(pane, buffer).is_none() {
             let cursor_row = lines.iter().position(|&l| l == cursor_line).and_then(|r| r.checked_sub(base));
             self.sticky_headers(buffer, base, cursor_row)
         } else {
@@ -201,23 +212,93 @@ impl App {
                 (line, state.scroll_col)
             }
         };
+        let col_map = self.line_col_map(buffer, line, cursor_line);
+        let gutter = x < 0.0;
+        // The row it's on, through the pane's map of them.
+        let map = super::rows::RowMap::lines(&[line], scroll_col);
+        let (_, vcol) = map.at(0, (x / char_width).floor().max(0.0) as usize)?;
+        let (col, past_end) = char_col_at(&col_map, vcol);
+        let shown_row = row.clamp(0, text::lines_that_fit(content.h, line_height) as isize);
+        let glyph_col = map.locate(line, tabstops::visual_col(&col_map, col)).map_or(0, |(_, x)| x);
+        let glyph_x = content.x + text::PAD_LEFT + gutter_px + glyph_col as f32 * char_width;
+        let glyph_bottom = content.y + text::PAD_TOP + (shown_row as f32 + 1.0 - frac) * line_height;
+        Some(TextHit { buffer, line, col, past_end: past_end || index >= lines.len() as isize, gutter, anchor: (glyph_x, glyph_bottom) })
+    }
+
+    /// Char column -> visual column for `buffer`'s `line` as it's drawn:
+    /// its tabs expanded, its decorations laid out (as on the cursor's
+    /// line, `cursor_line`).
+    pub(super) fn line_col_map(&self, buffer: BufferId, line: usize, cursor_line: usize) -> Vec<usize> {
+        let Some(ob) = self.buffers.get(buffer) else { return Vec::new() };
         let start = ob.buffer.line_start_char(line);
         let len = ob.buffer.line_len(line);
         let line_text = ob.buffer.text_range(start, start + len);
         let tab_stops = self.tab_stops_for(buffer);
         let decorations: Vec<&crate::decorations::Decoration> = self.code_decorations(buffer).into_iter().filter(|d| d.start <= start + len && d.end >= start).collect();
-        let col_map = if decorations.is_empty() {
+        if decorations.is_empty() {
             tabstops::expand_line(&line_text, &tab_stops).1
         } else {
             crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).col_map
+        }
+    }
+
+    /// `text_hit` in a pane shown by rows (wrapped, or with rows that
+    /// aren't text): `row` (from the top of `content`, negative above it)
+    /// and `x` (pixels from the text's left edge) through the pane's rows.
+    /// Right of a row that goes on below is that row's last char. Above or
+    /// below the rows shown: wrapped, the line before the first or after
+    /// the last; not wrapped, as a row a line has it, a line on for each
+    /// row past the edge, through the sideways scroll. A row that isn't
+    /// text (a code lens's) is no place in the text.
+    fn wrapped_text_hit(&self, pane: fenix_window::WindowId, buffer: BufferId, content: fenix_window::Rect, row: isize, x: f32) -> Option<TextHit> {
+        let ob = self.buffers.get(buffer)?;
+        let (char_width, line_height) = self.cell_size();
+        let state = *self.pane_state(pane);
+        let fit = text::lines_that_fit(content.h, line_height);
+        let top = state.rendered_scroll.floor().max(0.0) as usize;
+        let map = self.pane_rows(pane, buffer, top, state.scroll_row, fit + 1);
+        let last = map.len().checked_sub(1)?;
+        let cell = (x / char_width).floor().max(0.0) as usize;
+        let display = self.pane_display_lines(pane, buffer);
+        // Off the rows: the display line `rows` on from `edge`'s line.
+        let off = |edge: usize, rows: isize| -> Option<(usize, bool)> {
+            let line = map.row(edge)?.line;
+            let index = display.partition_point(|&l| l < line) as isize + rows;
+            let at = index.clamp(0, display.len() as isize - 1) as usize;
+            Some((display[at], index >= display.len() as isize))
         };
-        let gutter = x < 0.0;
-        let vcol = (x / char_width).floor().max(0.0) as usize + scroll_col;
+        // Unwrapped, the columns go through the sideways scroll.
+        let wrapped = self.row_cols(pane, buffer).is_some_and(|w| w != super::rows::UNBOUNDED);
+        let scroll_col = if wrapped { 0 } else { state.scroll_col };
+        let (line, vcol, past) = match usize::try_from(row).ok().filter(|&r| r <= last) {
+            Some(r) => match map.row(r).map(|row| row.kind) {
+                Some(super::rows::RowKind::Virtual(_)) => return None,
+                // Past a row's end, on a line that goes on below: its
+                // last char (`RowMap::at` holds it there).
+                _ => {
+                    let (line, vcol) = map.at(r, cell)?;
+                    (line, vcol, false)
+                }
+            },
+            // A pane that doesn't wrap: as a row a line has it.
+            None if !wrapped => {
+                let (line, past) = if row < 0 { off(0, row)? } else { off(last, row - last as isize)? };
+                (line, scroll_col + cell, past)
+            }
+            // Wrapped: the line before the first shown, or after the last.
+            None => {
+                let (line, past) = if row < 0 { off(0, -1)? } else { off(last, 1)? };
+                (line, cell, past)
+            }
+        };
+        let cursor_line = ob.buffer.line_col(&state.cursor).0;
+        let col_map = self.line_col_map(buffer, line, cursor_line);
         let (col, past_end) = char_col_at(&col_map, vcol);
-        let shown_row = row.clamp(0, text::lines_that_fit(content.h, line_height) as isize);
-        let glyph_x = content.x + text::PAD_LEFT + gutter_px + tabstops::visual_col(&col_map, col).saturating_sub(scroll_col) as f32 * char_width;
-        let glyph_bottom = content.y + text::PAD_TOP + (shown_row as f32 + 1.0 - frac) * line_height;
-        Some(TextHit { buffer, line, col, past_end: past_end || index >= lines.len() as isize, gutter, anchor: (glyph_x, glyph_bottom) })
+        // Under the glyph it lands on, for a hover's card.
+        let (glyph_row, glyph_col) = map.locate(line, tabstops::visual_col(&col_map, col)).unwrap_or((row.clamp(0, last as isize) as usize, cell));
+        let glyph_x = content.x + text::PAD_LEFT + self.gutter_chars(ob) as f32 * char_width + glyph_col as f32 * char_width;
+        let glyph_bottom = content.y + text::PAD_TOP + (glyph_row as f32 + 1.0) * line_height;
+        Some(TextHit { buffer, line, col, past_end: past_end || past, gutter: x < 0.0, anchor: (glyph_x, glyph_bottom) })
     }
 
     /// The char `hit` puts the cursor on: past the line's end is its last
@@ -237,6 +318,7 @@ impl App {
         let mut cursor = Cursor { char_idx: at, sticky_col: 0 };
         cursor.sticky_col = ob.buffer.line_col(&cursor).1;
         self.pane_state_mut(pane).cursor = cursor;
+        self.vim.forget_row_goals();
     }
 
     /// Leaves Insert (or Replace) the way Escape does, before a selection
@@ -262,6 +344,14 @@ impl App {
     /// the cursor to the glyph, a word on a double click, a line on a
     /// triple, the selection stretched to it with Shift.
     pub(super) fn text_press(&mut self, pane: fenix_window::WindowId, rect: fenix_window::Rect, pos: (f32, f32), now: Instant) -> bool {
+        // On a code lens's title: that lens run.
+        if let Some((pick, _, _)) = self.lens_at(pane, rect, pos) {
+            // Once a click: not again on its double or triple.
+            if self.mouse.clicks.press(now, pos) == 1 {
+                self.run_lens(&pick);
+            }
+            return true;
+        }
         let Some(hit) = self.text_hit(pane, rect, pos) else { return false };
         let clicks = self.mouse.clicks.press(now, pos);
         let (shift, alt) = (self.modifiers.shift_key(), self.modifiers.alt_key());
@@ -1368,7 +1458,7 @@ mod tests {
         click(&mut app, at_pos);
         click(&mut app, at_pos);
         assert_eq!(selection(&app).as_deref(), Some("foo"), "the whole word, as standard keys select");
-        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 3)], "drawn as it is");
+        assert_eq!(app.visual_selection_segments(0..10), vec![(0, 0, 3)], "drawn as it is");
         app.press("C-c");
         assert_eq!(app.clipboard_text().unwrap_or_else(|| app.vim.register().0.to_string()), "foo", "copied whole");
         app.press("C-d");
@@ -1456,4 +1546,161 @@ mod tests {
         assert_eq!(app.text(), "bye world");
     }
 
+    /// Where a cell is, rows from the text's top (negative above it).
+    fn at_row(app: &App, row: f32, col: usize) -> (f32, f32) {
+        let (x, y) = at(app, 0, col);
+        (x, y + row * text::LINE_HEIGHT)
+    }
+
+    #[test]
+    fn off_the_rows_by_rows_is_where_a_row_a_line_has_it_scrolled_sideways_too() {
+        let text = format!("{0}\n{0}\n{0}\n", "x".repeat(200));
+        let mut runs = Vec::new();
+        for forced in [false, true] {
+            let mut app = app_with(&text);
+            app.force_row_path = forced;
+            let pane = app.focused_pane_id();
+            app.pane_state_mut(pane).scroll_col = 50;
+            let rect = app.geometry_at(W, H).panes.into_iter().find(|(p, _)| *p == pane).unwrap().1;
+            let mut seen = Vec::new();
+            // Above the text, below it, and right of a line's end.
+            for (row, col) in [(-1.0, 16), (-3.0, 16), (20.0, 16), (3.0, 16), (3.0, 40)] {
+                let hit = app.text_hit(pane, rect, at_row(&app, row, col));
+                seen.push(hit.map(|h| (h.line, h.col, h.past_end)));
+            }
+            // A drag past each edge, from inside.
+            for row in [-2.0, 30.0] {
+                let from = at_row(&app, 1.0, 5);
+                app.handle_click_at(from, W, H);
+                app.mouse_drag_to(at_row(&app, row, 16), W, H);
+                app.mouse_release();
+                seen.push(Some((cursor_at(&app).0, cursor_at(&app).1, app.pane_state(pane).scroll_col == 50)));
+                app.press("Escape");
+                app.pane_state_mut(pane).scroll_col = 50;
+            }
+            runs.push(seen);
+        }
+        assert_eq!(runs[0], runs[1]);
+        assert_eq!(runs[0][0], Some((0, 66, false)), "through the sideways scroll");
+    }
+
+    #[test]
+    fn a_lens_row_is_no_place_in_the_text() {
+        let mut app = app_with("fn a() {}\nfn b() {}\nfn c() {}\n");
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_virtual_rows(buffer, [(1, vec!["▶ Run".to_string()])].into());
+        app.test_set_cursor(Cursor { char_idx: 3, sticky_col: 3 });
+        app.pane_state_mut(pane).scroll_col = 2;
+        let rect = app.geometry_at(W, H).panes.into_iter().find(|(p, _)| *p == pane).unwrap().1;
+        // Row 1 is line 1's lens, past its title.
+        let pos = at(&app, 1, 20);
+        assert!(app.text_hit(pane, rect, pos).is_none(), "nothing to hover or put a cursor on");
+        click(&mut app, pos);
+        click(&mut app, pos);
+        app.mouse_drag_to(pos, W, H);
+        app.mouse_release();
+        assert_eq!((cursor_at(&app), app.pane_state(pane).scroll_col), ((0, 3), 2), "the cursor and the scroll as they were");
+        assert_eq!(app.vim.mode(), Mode::Normal, "nothing selected");
+    }
+
+    /// `text`, its lines wrapped at `cols` columns.
+    fn wrapped_app(text: &str, cols: usize) -> App {
+        let mut app = app_with(text);
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, cols);
+        app
+    }
+
+    #[test]
+    fn a_click_on_a_continuation_row_is_on_that_part_of_the_line() {
+        // `the quick ` / `brown fox ` / `jumps`, then `next`.
+        let mut app = wrapped_app("the quick brown fox jumps\nnext", 10);
+        let pos = at(&app, 1, 2);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 12));
+        let pos = at(&app, 3, 1);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 1), "the row after a line's last is the next line");
+        let pos = at(&app, 0, 30);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 9), "right of a row the line goes on from: that row's last char");
+        let pos = at(&app, 2, 30);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 24), "right of its last row: the line's last char");
+        let pos = at(&app, 9, 0);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 0), "below the text: the last line");
+    }
+
+    #[test]
+    fn a_click_in_a_continuation_row_s_indent_is_its_first_char() {
+        // `    let total = ` / `    first + ` / `    second;`
+        let mut app = wrapped_app("    let total = first + second;", 16);
+        let pos = at(&app, 1, 1);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 16));
+        let pos = at(&app, 1, 6);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 18));
+    }
+
+    #[test]
+    fn a_drag_across_a_wrapped_line_s_rows_selects_what_is_between() {
+        let mut app = wrapped_app("the quick brown fox jumps", 10);
+        let (from, to) = (at(&app, 0, 4), at(&app, 1, 8));
+        app.handle_click_at(from, W, H);
+        app.mouse_drag_to(to, W, H);
+        assert_eq!(selection(&app).as_deref(), Some("quick brown fox"));
+        app.mouse_release();
+    }
+
+    #[test]
+    fn a_click_on_a_row_above_a_line_that_isn_t_text_moves_nothing() {
+        let mut app = wrapped_app("one\ntwo words\n", 20);
+        let buffer = app.focused_buffer_id();
+        app.virtual_rows.entry(buffer).or_default().insert(1, vec!["a lens".into()]);
+        let pos = at(&app, 1, 4);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 0));
+        let pos = at(&app, 2, 4);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 4), "the text's row below it");
+    }
+
+    #[test]
+    fn a_wide_char_s_row_is_hit_a_cell_a_char() {
+        let mut app = wrapped_app("日本語の文章です", 6);
+        // `日本語の文` / `章です`: five a row, the sixth column the caret's.
+        let pos = at(&app, 1, 1);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 6));
+    }
+
+    #[test]
+    fn a_click_and_a_drag_on_a_wrapped_tab_indented_line_go_by_its_columns() {
+        // `\tlet total = first;` at twelve columns: the tab is eight, so
+        // `        let ` and then, six in, `total ` / `= ` / `first` / `;`.
+        let mut app = wrapped_app("\tlet total = first;", 12);
+        let pos = at(&app, 1, 6);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 5), "`total`'s `t`");
+        // To right of `first`'s row: its last char.
+        let (from, to) = (at(&app, 0, 8), at(&app, 3, 10));
+        app.handle_click_at(from, W, H);
+        app.mouse_drag_to(to, W, H);
+        assert_eq!(selection(&app).as_deref(), Some("let total = first"));
+        app.mouse_release();
+    }
+
+    #[test]
+    fn a_hover_s_card_goes_under_the_glyph_on_a_continuation_row() {
+        let app = wrapped_app("the quick brown fox jumps", 10);
+        let pane = app.focused_pane_id();
+        let rect = app.geometry_at(W, H).panes.into_iter().find(|(p, _)| *p == pane).unwrap().1;
+        let hit = app.text_hit(pane, rect, at(&app, 1, 2)).unwrap();
+        assert_eq!((hit.line, hit.col), (0, 12));
+        let below_row_1 = at(&app, 1, 0).1 + text::LINE_HEIGHT / 2.0;
+        assert_eq!(hit.anchor.1, below_row_1, "under row 1, not under the line's first row");
+    }
 }

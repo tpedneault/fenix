@@ -25,6 +25,10 @@ mod git_page;
 mod git_editor;
 mod git_compare_page;
 mod side_by_side;
+mod rows;
+mod row_scroll;
+mod semantic;
+mod code_lens;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -84,6 +88,7 @@ mod control_host;
 mod startup;
 use tool_sessions::{LspKey, LspServer};
 use wasm_host::Happened;
+use rows::FocusedOverlays;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -316,11 +321,14 @@ struct PaneState {
     /// this axis isn't worth it yet). See `ensure_cursor_visible_
     /// horizontally`.
     scroll_col: usize,
+    /// In a pane whose lines wrap: how many rows of the line at
+    /// `scroll_line` are above the top.
+    scroll_row: usize,
 }
 
 impl PaneState {
     fn seeded_at(cursor: Cursor) -> Self {
-        Self { cursor, scroll_line: 0, rendered_scroll: 0.0, scroll_col: 0 }
+        Self { cursor, scroll_line: 0, rendered_scroll: 0.0, scroll_col: 0, scroll_row: 0 }
     }
 }
 
@@ -1223,6 +1231,11 @@ struct LspSession {
     /// (`textDocument/diagnostic`), each document's: its last
     /// result id, and whether an ask is out and another is due after it.
     pulls: HashMap<PathBuf, LspPull>,
+    /// Each document's semantic tokens, from the one server of its asked
+    /// for them (`App::semantic_server`).
+    semantic: HashMap<PathBuf, semantic::SemanticDoc>,
+    /// Each document's code lenses from this server.
+    lenses: HashMap<PathBuf, code_lens::LensDoc>,
 }
 
 /// Why `SPC u u` can't debug a `language` file: no adapter from the
@@ -1308,7 +1321,15 @@ fn push_python_environment(session: &mut LspSession) {
 /// Brings one server's picture of one document up to date: `didOpen` the
 /// first time (once the server is initialized, and only if it serves
 /// `language`), `didChange` whenever the buffer was edited since.
-fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &str, by_pattern: bool, text: &str, edit_count: u64) {
+///
+/// `semantic`: what it means for this server's semantic tokens of the
+/// document (`semantic::after_sync`).
+///
+/// The edit count alone doesn't say the server has the text: a buffer
+/// opened again starts its count afresh, over a file that may have
+/// changed on disk meanwhile. So the text is compared as well.
+#[allow(clippy::too_many_arguments)]
+fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &str, by_pattern: bool, text: &str, edit_count: u64, semantic: semantic::SemanticSync, lens: semantic::SemanticSync) {
     if session.capabilities.is_none() {
         return;
     }
@@ -1323,12 +1344,11 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
         None => {
             let params = lsp_types::DidOpenTextDocumentParams { text_document: lsp_types::TextDocumentItem { uri, language_id, version: 0, text: text.to_string() } };
             if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
-                session.open_documents.insert(canonical.to_path_buf(), (edit_count, 1));
-                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                record_lsp_sync(session, canonical, text, edit_count, 1, semantic, lens);
                 pull_lsp_diagnostics(session, canonical);
             }
         }
-        Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count => {
+        Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count || session.synced_text.get(canonical).is_none_or(|t| t != text) => {
             let incremental = session.capabilities.as_ref().is_some_and(fenix_lsp::wants_incremental);
             let change = fenix_lsp::change_event(session.synced_text.get(canonical).map(String::as_str), text, incremental);
             let params = lsp_types::DidChangeTextDocumentParams {
@@ -1336,13 +1356,49 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
                 content_changes: vec![change],
             };
             if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
-                session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version + 1));
-                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                record_lsp_sync(session, canonical, text, edit_count, next_version + 1, semantic, lens);
                 pull_lsp_diagnostics(session, canonical);
             }
         }
-        Some(_) => {} // already open and already in sync -- the common case, most frames
+        // Already open and already in sync -- the common case, most
+        // frames; its tokens asked for if it's become the server asked
+        // for this buffer (one before it stopped, the buffer opened
+        // again), let go if it no longer is.
+        Some(_) => {
+            let held = session.semantic.get(canonical).map(|d| d.buffer);
+            let redo = match semantic {
+                semantic::SemanticSync::Ask(buffer) => held != Some(buffer),
+                semantic::SemanticSync::Drop => held.is_some(),
+                semantic::SemanticSync::Follow => false,
+            };
+            if redo {
+                semantic::after_sync(session, canonical, None, text, edit_count, semantic);
+            }
+            let held = session.lenses.get(canonical).map(|d| d.buffer);
+            let redo = match lens {
+                semantic::SemanticSync::Ask(buffer) => held != Some(buffer),
+                semantic::SemanticSync::Drop => held.is_some(),
+                semantic::SemanticSync::Follow => false,
+            };
+            if redo {
+                code_lens::after_sync(session, canonical, None, text, lens);
+            }
+        }
     }
+}
+
+/// What `session` was just sent of `canonical` (`didOpen` or
+/// `didChange`): its text at `edit_count`, the next version to send. The
+/// one place that's recorded, so what's held by position (semantic
+/// tokens) always moves with it -- every writer of `synced_text` and
+/// `open_documents` comes through here.
+fn record_lsp_sync(session: &mut LspSession, canonical: &Path, text: &str, edit_count: u64, next_version: i32, semantic: semantic::SemanticSync, lens: semantic::SemanticSync) {
+    let old_count = session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version)).map(|(count, _)| count);
+    let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+    let change = old.as_deref().zip(old_count);
+    semantic::after_sync(session, canonical, change, text, edit_count, semantic);
+    // Code lenses, which move by line, likewise.
+    code_lens::after_sync(session, canonical, old.as_deref(), text, lens);
 }
 
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
@@ -1365,6 +1421,17 @@ enum PendingLspRequest {
     Completion { buffer: BufferId, prefix_start: usize, generation: u64 },
     /// `textDocument/diagnostic` for the document at `path` (canonical).
     PullDiagnostics { path: PathBuf },
+    /// `textDocument/semanticTokens/*` for `path` (canonical) as it was
+    /// at `edit_count`: the whole of it, a delta or a range (`how`), by
+    /// request `request`.
+    SemanticTokens { path: PathBuf, edit_count: u64, how: semantic::SemanticAsk, request: i64 },
+    /// `textDocument/codeLens` for `path` (canonical) as it was at
+    /// `edit_count`, by request `request`.
+    CodeLens { path: PathBuf, edit_count: u64, request: i64 },
+    /// `codeLens/resolve` for lens `index` of `path`'s answer `generation`.
+    CodeLensResolve { path: PathBuf, generation: u64, index: usize },
+    /// `workspace/executeCommand` for the lens titled `title`.
+    LensCommand { title: String },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -2361,6 +2428,18 @@ struct CompletionState {
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
 type Segments = Vec<(usize, usize, usize)>;
 
+/// A line as drawn (`App::drawn_line`): its display text, the colours of
+/// its bytes, and what to add to a byte of `text` to find it in them.
+pub(super) struct DrawnLine<'a> {
+    pub text: String,
+    pub ranges: std::borrow::Cow<'a, [(std::ops::Range<usize>, glyphon::Color)]>,
+    pub base: usize,
+}
+
+/// Highlight segments in the text: (buffer line, start char column, end
+/// char column), put on rows by the pane's `rows::RowMap`.
+type LineSegments = Vec<(usize, usize, usize)>;
+
 /// A content or sidebar row's rich-text spans: (text, color, use_icon_font).
 type RowSpans = Vec<(String, glyphon::Color, bool)>;
 
@@ -2453,6 +2532,9 @@ enum ActivePicker {
     /// `code.problems` (Ctrl+Shift+M): every problem reported, in every
     /// file, as places to go -- confirming goes there, as `ProjectTodos`.
     Problems(fenix_picker::PickerState<fenix_project::GrepMatch>),
+    /// `code.lens` (`SPC c l`): the cursor line's code lenses -- confirming
+    /// runs the one chosen.
+    Lenses(fenix_picker::PickerState<code_lens::LensPick>),
     /// `code.project_symbols` (Ctrl+T): what the language servers find
     /// for what's typed (`workspace/symbol`), asked again as it changes.
     ProjectSymbols(fenix_picker::PickerState<fenix_project::GrepMatch>),
@@ -2582,6 +2664,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::BufferTodos(s) => s.push_char(c),
         ActivePicker::ProjectTodos(s) => s.push_char(c),
         ActivePicker::Problems(s) => s.push_char(c),
+        ActivePicker::Lenses(s) => s.push_char(c),
         ActivePicker::ProjectSymbols(s) => s.push_char(c),
         ActivePicker::SwitchWorkspace(s) => s.push_char(c),
         ActivePicker::WorkspaceLauncher(s) => s.push_char(c),
@@ -2620,6 +2703,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::BufferTodos(s) => s.backspace(),
         ActivePicker::ProjectTodos(s) => s.backspace(),
         ActivePicker::Problems(s) => s.backspace(),
+        ActivePicker::Lenses(s) => s.backspace(),
         ActivePicker::ProjectSymbols(s) => s.backspace(),
         ActivePicker::SwitchWorkspace(s) => s.backspace(),
         ActivePicker::WorkspaceLauncher(s) => s.backspace(),
@@ -2658,6 +2742,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::BufferTodos(s) => s.move_selection(delta),
         ActivePicker::ProjectTodos(s) => s.move_selection(delta),
         ActivePicker::Problems(s) => s.move_selection(delta),
+        ActivePicker::Lenses(s) => s.move_selection(delta),
         ActivePicker::ProjectSymbols(s) => s.move_selection(delta),
         ActivePicker::SwitchWorkspace(s) => s.move_selection(delta),
         ActivePicker::WorkspaceLauncher(s) => s.move_selection(delta),
@@ -2699,6 +2784,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::BufferTodos(s) => s.toggle_mark(),
         ActivePicker::ProjectTodos(s) => s.toggle_mark(),
         ActivePicker::Problems(s) => s.toggle_mark(),
+        ActivePicker::Lenses(s) => s.toggle_mark(),
         ActivePicker::ProjectSymbols(s) => s.toggle_mark(),
         ActivePicker::SwitchWorkspace(s) => s.toggle_mark(),
         ActivePicker::WorkspaceLauncher(s) => s.toggle_mark(),
@@ -2737,6 +2823,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::BufferTodos(s) => s.query(),
         ActivePicker::ProjectTodos(s) => s.query(),
         ActivePicker::Problems(s) => s.query(),
+        ActivePicker::Lenses(s) => s.query(),
         ActivePicker::ProjectSymbols(s) => s.query(),
         ActivePicker::SwitchWorkspace(s) => s.query(),
         ActivePicker::WorkspaceLauncher(s) => s.query(),
@@ -2775,6 +2862,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::BufferTodos(s) => s.len(),
         ActivePicker::ProjectTodos(s) => s.len(),
         ActivePicker::Problems(s) => s.len(),
+        ActivePicker::Lenses(s) => s.len(),
         ActivePicker::ProjectSymbols(s) => s.len(),
         ActivePicker::SwitchWorkspace(s) => s.len(),
         ActivePicker::WorkspaceLauncher(s) => s.len(),
@@ -2813,6 +2901,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::BufferTodos(s) => s.selected_row(),
         ActivePicker::ProjectTodos(s) => s.selected_row(),
         ActivePicker::Problems(s) => s.selected_row(),
+        ActivePicker::Lenses(s) => s.selected_row(),
         ActivePicker::ProjectSymbols(s) => s.selected_row(),
         ActivePicker::SwitchWorkspace(s) => s.selected_row(),
         ActivePicker::WorkspaceLauncher(s) => s.selected_row(),
@@ -2856,6 +2945,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::BufferTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectTodos(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Problems(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Lenses(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::ProjectSymbols(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchWorkspace(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkspaceLauncher(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -3166,6 +3256,36 @@ fn split_line_by_highlights(
         spans.push((line_text.to_string(), default_color));
     }
     spans
+}
+
+/// The byte ranges of `buffer` highlighting is asked about for `rows`
+/// rows from display line `base`: all of them at once, or, past
+/// `MAX_HIGHLIGHT_CHARS`, each line's columns shown (`columns`, by line,
+/// for a wrapped pane; from `scroll_col` otherwise). `None` past the end.
+fn highlight_windows(buffer: &Buffer, base: usize, rows: usize, scroll_col: usize, columns: Option<&HashMap<usize, (usize, usize)>>) -> Option<Vec<std::ops::Range<usize>>> {
+    let visual_lines = buffer.visual_line_count();
+    if base >= visual_lines {
+        return None;
+    }
+    let last_line = (base + rows).min(visual_lines) - 1;
+    let start_char = buffer.line_start_char(base);
+    let end_char = buffer.line_start_char(last_line) + buffer.line_len(last_line);
+    if end_char - start_char <= MAX_HIGHLIGHT_CHARS {
+        let everything = buffer.char_to_byte(start_char)..buffer.char_to_byte(end_char);
+        return Some(vec![everything]);
+    }
+    Some(
+        (base..=last_line)
+            .map(|line| {
+                let first = buffer.line_start_char(line);
+                let len = buffer.line_len(line);
+                let (from, to) = columns.and_then(|c| c.get(&line)).copied().unwrap_or((scroll_col, scroll_col + MAX_ROW_CHARS));
+                let (from, to) = (first + from.min(len), first + to.min(len));
+                buffer.char_to_byte(from)..buffer.char_to_byte(to)
+            })
+            .filter(|range| !range.is_empty())
+            .collect(),
+    )
 }
 
 /// Remaps `highlights` (document-wide byte ranges against the buffer's
@@ -5209,6 +5329,41 @@ pub struct App {
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
     code_folds: HashMap<BufferId, HashSet<usize>>,
+    /// Buffers whose wrap was turned on or off (`view.toggle_wrap`),
+    /// whatever the default for them is.
+    wrap_overrides: HashMap<BufferId, bool>,
+    /// Wrapped lines' rows, found once for the text as it is.
+    break_cache: std::cell::RefCell<row_scroll::BreakCache>,
+    /// Rows above lines that aren't text, by buffer and line: what a code
+    /// lens will put there. A wrapped pane lays them out.
+    virtual_rows: HashMap<BufferId, std::collections::BTreeMap<usize, Vec<String>>>,
+    /// Where each buffer's semantic tokens come from (its server and its
+    /// path as servers know it), worked out when it's synced, so drawing
+    /// it looks at nothing on disk.
+    semantic_of: HashMap<BufferId, semantic::SemanticTarget>,
+    /// Each buffer's lens servers and its path as they know it, worked
+    /// out when it's synced.
+    lens_of: code_lens::LensOf,
+    /// Each buffer's rows of lenses, by line: what a click on one runs.
+    lens_rows: HashMap<BufferId, std::collections::BTreeMap<usize, fenix_lsp::code_lens::LensRow<code_lens::LensTag>>>,
+    /// Fenix's own "Run test" lenses, by buffer, as of an edit count.
+    own_lenses: HashMap<BufferId, (u64, Vec<lsp_types::CodeLens>)>,
+    /// The lens under the pointer: its buffer, its row's line, its columns.
+    lens_hover: Option<(fenix_window::WindowId, usize, std::ops::Range<usize>)>,
+    /// A test's seam: every pane that could wrap goes by rows (at
+    /// `rows::UNBOUNDED` when it doesn't wrap), with or without rows
+    /// above its lines, so the row path can be checked against the
+    /// line path it stands in for.
+    force_row_path: bool,
+    /// The grammar's comments and strings (bytes) in what was last drawn
+    /// of each buffer with semantic tokens: where none is laid.
+    semantic_protected: HashMap<BufferId, Vec<std::ops::Range<usize>>>,
+    /// The focused buffer's decorations as moves by row see them, and the
+    /// `decorations_rev` they were copied at.
+    screen_decorations: Option<(BufferId, u64, std::sync::Arc<Vec<crate::decorations::Decoration>>)>,
+    /// The columns of text each pane had room for at the last frame:
+    /// what its lines wrap at.
+    pane_text_cols: HashMap<fenix_window::WindowId, usize>,
     /// Each buffer's fold level (`zm`, `zr`): folds this deep or more are
     /// closed. None: every one open.
     fold_levels: HashMap<BufferId, usize>,
@@ -5329,9 +5484,6 @@ pub struct App {
     indent_steps: std::cell::RefCell<HashMap<BufferId, (u64, Option<usize>)>>,
     /// Open side-by-side diffs (`SPC g v`) -- see `side_by_side`.
     side_by_sides: Vec<side_by_side::SideBySide>,
-    /// While a folded or side-by-side pane's overlays are worked out:
-    /// the buffer line `render_base_line` stands for (see its comment).
-    render_base_override: std::cell::Cell<Option<usize>>,
     merge_session: Option<MergeSession>,
     compose: Option<ComposeSession>,
     /// Each file-backed buffer's file as Fenix last saw it. Absent for a
@@ -6194,6 +6346,18 @@ impl App {
             chrome_git: None,
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
+            wrap_overrides: HashMap::new(),
+            break_cache: std::cell::RefCell::new(HashMap::new()),
+            virtual_rows: HashMap::new(),
+            semantic_of: HashMap::new(),
+            lens_of: HashMap::new(),
+            lens_rows: HashMap::new(),
+            lens_hover: None,
+            own_lenses: HashMap::new(),
+            force_row_path: false,
+            semantic_protected: HashMap::new(),
+            screen_decorations: None,
+            pane_text_cols: HashMap::new(),
             fold_levels: HashMap::new(),
             notifications: crate::notify::Center::new(),
             toast_rects: Vec::new(),
@@ -6227,7 +6391,6 @@ impl App {
             ref_view_names: HashMap::new(),
             indent_steps: std::cell::RefCell::new(HashMap::new()),
             side_by_sides: Vec::new(),
-            render_base_override: std::cell::Cell::new(None),
             merge_session: None,
             compose: None,
             disk_state,
@@ -7128,12 +7291,15 @@ impl App {
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
         let edit_count = self.open().buffer.edit_count();
         let text = self.open().buffer.text();
-        self.sync_lsp_for(&path, &text, edit_count);
+        let buffer = self.focused_buffer_id();
+        self.sync_lsp_for(&path, &text, edit_count, Some(buffer));
     }
 
     /// Starts `path`'s language servers if they aren't running, and tells
     /// those that are its text, if `edit_count` says that's changed.
-    fn sync_lsp_for(&mut self, path: &Path, text: &str, edit_count: u64) {
+    /// `buffer`: the buffer it's shown in, whose semantic tokens are
+    /// asked for; none for an agent's look at a file.
+    fn sync_lsp_for(&mut self, path: &Path, text: &str, edit_count: u64, buffer: Option<BufferId>) {
         // Language servers for a remote project run on its machine, which
         // isn't done yet: none are started here for its files.
         if fenix_vfs::is_remote(path) {
@@ -7164,9 +7330,40 @@ impl App {
         // own keys) needs the same normalized form, or two spellings of
         // the same file stop matching each other.
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path.clone()));
+        // A buffer's semantic tokens from one of them, if they're wanted:
+        // which, and the path, kept for drawing it.
+        let asked = match buffer.filter(|&b| self.semantic_wanted(b)) {
+            Some(b) => self.semantic_server(&path).map(|key| (b, key)),
+            None => None,
+        };
+        match (&asked, buffer) {
+            (Some((b, key)), _) => {
+                self.semantic_of.insert(*b, semantic::SemanticTarget { key: key.clone(), path: canonical.clone() });
+            }
+            (None, Some(b)) => {
+                self.semantic_of.remove(&b);
+            }
+            (None, None) => {}
+        }
+        // A buffer's lenses from every one of them that offers them.
+        let lensed = self.lens_targets(buffer, &path, &canonical);
         for (key, language_id, by_pattern) in self.lsp_targets(&path) {
+            let semantic = match (&asked, buffer) {
+                (Some((b, asked)), _) if *asked == key => semantic::SemanticSync::Ask(*b),
+                (_, Some(_)) => semantic::SemanticSync::Drop,
+                (_, None) => semantic::SemanticSync::Follow,
+            };
+            let lens = match &lensed {
+                Some((b, keys)) if keys.contains(&key) => semantic::SemanticSync::Ask(*b),
+                Some(_) => semantic::SemanticSync::Drop,
+                None => semantic::SemanticSync::Follow,
+            };
             let Some(session) = self.lsp_sessions.get_mut(&key) else { continue };
-            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count);
+            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count, semantic, lens);
+        }
+        // Moved with the edit, or let go: laid out again.
+        if let Some(buffer) = buffer {
+            self.lay_out_lenses(buffer);
         }
     }
 
@@ -7256,7 +7453,7 @@ impl App {
         let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
         self.lsp_sessions.insert(key.clone(), LspSession {
             generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
-            open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         self.send_lsp_initialize(key, cwd);
     }
@@ -7393,7 +7590,7 @@ impl App {
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
                 self.lsp_sessions.insert(key.clone(), LspSession {
                     generation, client, name, languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
-                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
                 });
                 self.send_lsp_initialize(key, cwd);
             }
@@ -7410,13 +7607,14 @@ impl App {
     /// later reconnect (once one exists) can re-send just this without
     /// re-spawning the process.
     fn send_lsp_initialize(&mut self, key: LspKey, cwd: &Path) {
+        let (semantic, lens) = (self.semantic_highlighting_on(), self.code_lens_on());
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
             #[allow(deprecated)] // still set alongside workspace_folders for servers that only look at this
             root_uri: root_uri.clone(),
-            capabilities: crate::lsp::client_capabilities(),
+            capabilities: crate::lsp::client_capabilities(semantic, lens),
             workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
             ..Default::default()
         };
@@ -7454,6 +7652,12 @@ impl App {
                 // registration, a refresh) are accepted; everything else
                 // is refused with "method not found" rather than left
                 // unanswered.
+                if method == "workspace/semanticTokens/refresh" {
+                    self.refresh_semantic_tokens(&key);
+                }
+                if method == "workspace/codeLens/refresh" {
+                    self.refresh_lenses(&key);
+                }
                 if let Some(session) = self.lsp_sessions.get_mut(&key) {
                     let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
                     // What it says of every open document, asked again.
@@ -7487,6 +7691,8 @@ impl App {
             PendingLspRequest::ProjectSymbols { generation } => self.project_symbols_answered(key, generation, result.map_err(|e| e.message)),
             PendingLspRequest::Initialize => match result {
                 Ok(value) => {
+                    let mut value = value;
+                    fenix_lsp::semantic::normalize_initialize_result(&mut value);
                     let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
                     if let Some(session) = self.lsp_sessions.get_mut(&key) {
                         session.capabilities = capabilities;
@@ -7602,6 +7808,14 @@ impl App {
                 self.lsp_workspace_names.insert(key, (asked, std::sync::Arc::new(names)));
                 if changed {
                     self.wake_caret();
+                }
+            }
+            PendingLspRequest::SemanticTokens { path, edit_count, how, request } => self.semantic_tokens_answered(&key, path, edit_count, how, request, result),
+            PendingLspRequest::CodeLens { path, edit_count, request } => self.lenses_answered(&key, path, edit_count, request, result),
+            PendingLspRequest::CodeLensResolve { path, generation, index } => self.lens_resolved(&key, path, generation, index, result),
+            PendingLspRequest::LensCommand { title } => {
+                if let Err(e) = result {
+                    self.set_error(format!("{title} failed: {}", e.message));
                 }
             }
             PendingLspRequest::PullDiagnostics { path } => {
@@ -12994,6 +13208,7 @@ impl App {
             // lines the file no longer has.
             if state.scroll_line > line {
                 state.scroll_line = 0;
+                state.scroll_row = 0;
                 state.rendered_scroll = 0.0;
             }
         }
@@ -14780,6 +14995,12 @@ impl App {
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
             }
+            Some(ActivePicker::Lenses(state)) => {
+                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                self.run_lens(&pick);
+            }
             Some(ActivePicker::SwitchWorkspace(state)) => {
                 let Some(idx) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -16446,6 +16667,12 @@ impl App {
 
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         let _profile = crate::profile::Scope::new("route_keypress");
+        // What a move by row goes by: the focused pane's rows now, for a
+        // key typed and for each a macro or `.` plays (which may have
+        // gone to another pane); and the cells the last key's moves by
+        // row kept.
+        self.sync_screen_rows();
+        self.vim.begin_key();
         // Everything but the chords reads keys as it always has, without
         // Shift (see `KeyPress::legacy`).
         // Standard keys in a listing: F2 renames and Delete deletes, as
@@ -16705,6 +16932,23 @@ impl App {
                 (None, _) => 20,
             };
             let down = keypress == KeyPress::named(FenixNamedKey::PageDown);
+            // A pane by rows: by its rows, a pane less one. One that
+            // doesn't wrap (lens rows above its lines) counts them, as
+            // Vim's rows don't.
+            let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+            if self.row_cols(pane, id).is_some() {
+                let rows = self.pane_text_rows(pane).unwrap_or(page_size).saturating_sub(1).max(1) as isize;
+                if self.page_by_rows(pane, id, if down { rows } else { -rows }) {
+                    self.wake_caret();
+                    return;
+                }
+                if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+                    if self.vim.move_rows(&mut ob.buffer, &mut state.cursor, if down { rows } else { -rows }) {
+                        self.wake_caret();
+                        return;
+                    }
+                }
+            }
             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
             buffer.move_page(cursor, page_size, down);
             self.wake_caret();
@@ -17563,6 +17807,10 @@ impl App {
         if jumped {
             self.jump_view = None;
         }
+        // A wrapped pane follows by rows, and snaps.
+        if self.follow_cursor_by_rows(pane, buffer_id, visible_lines, jumped) {
+            return;
+        }
         let target = scroll_for_cursor(scroll_line, line, visible_lines, total, jumped);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
@@ -17595,6 +17843,9 @@ impl App {
     /// A pane without the focus scrolled to its cursor, centred when out of
     /// view, as a jump in the focused pane is.
     fn reveal_cursor(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, visible_lines: usize) {
+        if self.follow_cursor_by_rows(pane, buffer_id, visible_lines, true) {
+            return;
+        }
         let Some(ob) = self.buffers.get(buffer_id) else { return };
         let document_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
         let display = self.pane_display_lines(pane, buffer_id);
@@ -17659,20 +17910,11 @@ impl App {
         }
     }
 
-    /// The focused pane's line rendering starts from -- `rendered_scroll`
-    /// rounded down. Content, caret, hl-line, selection, and pulse all
-    /// anchor their row math to this (not `scroll_line`, which is only
+    /// The focused pane's display line rendering starts from --
+    /// `rendered_scroll` rounded down (not `scroll_line`, which is only
     /// the *target* `rendered_scroll` is easing toward).
-    ///
-    /// In a pane whose rows aren't its lines one for one -- a scope
-    /// folded, or a side-by-side's filler rows -- the overlays (selection,
-    /// search matches, brackets) are worked out against a buffer line set
-    /// in `render_base_override` and then moved to the rows those lines
-    /// are on.
+    #[cfg(test)]
     fn render_base_line(&self) -> usize {
-        if let Some(line) = self.render_base_override.get() {
-            return line;
-        }
         self.pane_state(self.focused_pane_id()).rendered_scroll.floor().max(0.0) as usize
     }
 
@@ -17854,6 +18096,7 @@ impl App {
                 Some(picker @ ActivePicker::FindFile(_)) => ("FINDFILE", picker_len(picker)),
                 Some(picker @ (ActivePicker::BufferTodos(_) | ActivePicker::ProjectTodos(_))) => ("TODOS", picker_len(picker)),
                 Some(picker @ ActivePicker::Problems(_)) => ("PROBLEMS", picker_len(picker)),
+                Some(picker @ ActivePicker::Lenses(_)) => ("LENSES", picker_len(picker)),
                 Some(picker @ ActivePicker::ProjectSymbols(_)) => ("SYMBOLS", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchProject(_)) => ("SWPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::SwitchBuffer(_)) => ("SWBUF", picker_len(picker)),
@@ -18398,108 +18641,140 @@ impl App {
         for r in 0..rows {
             let buffer_line = render_base_line + r;
             let has_line = buffer_line < visual_lines;
-            if let Some(pad) = dashboard_pad {
-                let n = pad.get(buffer_line).copied().unwrap_or(0);
-                if n > 0 {
-                    spans.push((" ".repeat(n), theme.fg));
-                }
-            } else if gutter_chars > 0 {
-                let blame = self.blame_width(ob);
-                if blame > 0 {
-                    spans.push(self.blame_cell(ob, buffer_line, blame));
-                }
-                let numbers = gutter_chars - blame;
-                if numbers > 0 {
-                    let marker_cells = usize::from(fold_marks.is_some());
-                    let gutter = if has_line {
-                        let n = match self.line_number_mode {
-                            LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
-                            _ => buffer_line + 1,
-                        };
-                        format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
-                    } else {
-                        format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
-                    };
-                    let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
-                    spans.push((gutter, color));
-                    if let Some((starts, closed)) = &fold_marks {
-                        let marker = match (has_line && starts.contains_key(&buffer_line), closed.contains(&buffer_line)) {
-                            (true, true) => "▸",
-                            (true, false) => "▾",
-                            _ => " ",
-                        };
-                        let marker_color = if closed.contains(&buffer_line) { rgba_to_glyphon(theme.caret) } else { theme.gutter_fg };
-                        spans.push((marker.to_string(), marker_color));
-                    }
-                    if has_line {
-                        spans.push((" ".to_string(), color));
-                    }
-                }
-            } else if !has_line && ob.kind != BufferKind::Prompt {
-                // A prompt's rows past what was written are just the box.
-                spans.push(("~".to_string(), theme.gutter_fg));
-            }
+            self.push_gutter(ob, buffer_line, has_line, gutter_chars, dashboard_pad, cursor_line, fold_marks.as_ref(), &mut spans);
             if has_line {
-                let start = ob.buffer.line_start_char(buffer_line);
-                let len = ob.buffer.line_len(buffer_line);
-                let line_text = ob.buffer.text_range(start, start + len);
-                if let Some(layout) = decorated.get(&buffer_line) {
-                    let display = &layout.display;
-                    let line_byte_start = ob.buffer.char_to_byte(start);
-                    let line_byte_end = ob.buffer.char_to_byte(start + len);
-                    let remapped = remap_highlights_for_display(&ob.buffer, start, &layout.col_map, display, line_byte_start, line_byte_end, syntax_highlights);
-                    let theme = self.theme;
-                    let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
-                    let (sliced, skipped_bytes) = skip_chars(display, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
-                    spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &ranges, theme.fg));
-                } else if line_text.contains('\t') {
-                    let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
-                    let (sliced, skipped_bytes) = skip_chars(&display, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
-                    if syntax_highlights.is_empty() {
-                        spans.push((sliced.to_string(), theme.fg));
-                    } else {
-                        let line_byte_start = ob.buffer.char_to_byte(start);
-                        let line_byte_end = ob.buffer.char_to_byte(start + len);
-                        let remapped = remap_highlights_for_display(
-                            &ob.buffer,
-                            start,
-                            &col_map,
-                            &display,
-                            line_byte_start,
-                            line_byte_end,
-                            syntax_highlights,
-                        );
-                        // `skipped_bytes`/`display.len()` here are local
-                        // to `display` (0-based), matching `remapped`'s
-                        // own coordinate space -- not the real buffer's
-                        // byte offsets, unlike the plain branch below.
-                        spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &remapped, theme.fg));
-                    }
-                } else {
-                    let (sliced, skipped_bytes) = skip_chars(&line_text, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
-                    if syntax_highlights.is_empty() {
-                        spans.push((sliced.to_string(), theme.fg));
-                    } else {
-                        let line_byte_start = ob.buffer.char_to_byte(start) + skipped_bytes;
-                        let line_byte_end = line_byte_start + sliced.len();
-                        spans.extend(split_line_by_highlights(
-                            sliced,
-                            line_byte_start,
-                            line_byte_end,
-                            syntax_highlights,
-                            theme.fg,
-                        ));
-                    }
-                }
+                self.push_line_text(ob, buffer_line, scroll_col..scroll_col.saturating_add(MAX_ROW_CHARS), syntax_highlights, tab_stops, decorated, &mut spans);
             }
             if r + 1 < rows {
                 spans.push(("\n".to_string(), theme.fg));
             }
         }
         spans
+    }
+
+    /// The start of a content row: `dashboard_pad`'s pad, or the gutter
+    /// -- `buffer_line`'s blame, number (`~` past the end, `has_line`
+    /// false) and fold marker -- or, with no gutter, `~` past the end.
+    #[allow(clippy::too_many_arguments)]
+    fn push_gutter(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        has_line: bool,
+        gutter_chars: usize,
+        dashboard_pad: Option<&[usize]>,
+        cursor_line: usize,
+        fold_marks: Option<&(HashMap<usize, usize>, HashSet<usize>)>,
+        spans: &mut Vec<(String, glyphon::Color)>,
+    ) {
+        let theme = self.theme;
+        if let Some(pad) = dashboard_pad {
+            let n = pad.get(buffer_line).copied().unwrap_or(0);
+            if n > 0 {
+                spans.push((" ".repeat(n), theme.fg));
+            }
+        } else if gutter_chars > 0 {
+            let blame = self.blame_width(ob);
+            if blame > 0 {
+                spans.push(self.blame_cell(ob, buffer_line, blame));
+            }
+            let numbers = gutter_chars - blame;
+            if numbers > 0 {
+                let marker_cells = usize::from(fold_marks.is_some());
+                let gutter = if has_line {
+                    let n = match self.line_number_mode {
+                        LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
+                        _ => buffer_line + 1,
+                    };
+                    format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
+                } else {
+                    format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
+                };
+                let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
+                spans.push((gutter, color));
+                if let Some((starts, closed)) = fold_marks {
+                    let marker = match (has_line && starts.contains_key(&buffer_line), closed.contains(&buffer_line)) {
+                        (true, true) => "▸",
+                        (true, false) => "▾",
+                        _ => " ",
+                    };
+                    let marker_color = if closed.contains(&buffer_line) { rgba_to_glyphon(theme.caret) } else { theme.gutter_fg };
+                    spans.push((marker.to_string(), marker_color));
+                }
+                if has_line {
+                    spans.push((" ".to_string(), color));
+                }
+            }
+        } else if !has_line && ob.kind != BufferKind::Prompt {
+            // A prompt's rows past what was written are just the box.
+            spans.push(("~".to_string(), theme.gutter_fg));
+        }
+    }
+
+    /// Visual columns `cols` of `buffer_line` as drawn -- tabs expanded,
+    /// the decorations in `decorated` laid out -- in its syntax's colours.
+    #[allow(clippy::too_many_arguments)]
+    fn push_line_text(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        cols: std::ops::Range<usize>,
+        syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
+        tab_stops: &TabStops,
+        decorated: &HashMap<usize, crate::decorations::LineLayout>,
+        spans: &mut Vec<(String, glyphon::Color)>,
+    ) {
+        let drawn = self.drawn_line(ob, buffer_line, syntax_highlights, tab_stops, decorated);
+        let (sliced, from) = skip_chars(&drawn.text, cols.start);
+        let to = from + keep_chars(sliced, cols.end.saturating_sub(cols.start)).len();
+        self.push_drawn(&drawn, from..to, spans);
+    }
+
+    /// `buffer_line` as drawn, once for all the rows it's on: its text
+    /// with tabs expanded and decorations laid out, and the colours of
+    /// its bytes.
+    pub(super) fn drawn_line<'a>(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        syntax_highlights: &'a [(std::ops::Range<usize>, glyphon::Color)],
+        tab_stops: &TabStops,
+        decorated: &HashMap<usize, crate::decorations::LineLayout>,
+    ) -> DrawnLine<'a> {
+        let theme = self.theme;
+        let start = ob.buffer.line_start_char(buffer_line);
+        let len = ob.buffer.line_len(buffer_line);
+        let line_byte_start = ob.buffer.char_to_byte(start);
+        let line_byte_end = ob.buffer.char_to_byte(start + len);
+        if let Some(layout) = decorated.get(&buffer_line) {
+            let display = &layout.display;
+            let remapped = remap_highlights_for_display(&ob.buffer, start, &layout.col_map, display, line_byte_start, line_byte_end, syntax_highlights);
+            let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
+            return DrawnLine { text: display.clone(), ranges: std::borrow::Cow::Owned(ranges), base: 0 };
+        }
+        let line_text = ob.buffer.text_range(start, start + len);
+        if line_text.contains('\t') {
+            let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
+            // Local to `display` (0-based), as `remapped` is -- not the
+            // real buffer's byte offsets, unlike a line without a tab.
+            let ranges = if syntax_highlights.is_empty() {
+                Vec::new()
+            } else {
+                remap_highlights_for_display(&ob.buffer, start, &col_map, &display, line_byte_start, line_byte_end, syntax_highlights)
+            };
+            return DrawnLine { text: display, ranges: std::borrow::Cow::Owned(ranges), base: 0 };
+        }
+        DrawnLine { text: line_text, ranges: std::borrow::Cow::Borrowed(syntax_highlights), base: line_byte_start }
+    }
+
+    /// Bytes `bytes` of a line as drawn, in their colours.
+    pub(super) fn push_drawn(&self, drawn: &DrawnLine, bytes: std::ops::Range<usize>, spans: &mut Vec<(String, glyphon::Color)>) {
+        let sliced = &drawn.text[bytes.clone()];
+        if drawn.ranges.is_empty() {
+            spans.push((sliced.to_string(), self.theme.fg));
+        } else {
+            spans.extend(split_line_by_highlights(sliced, drawn.base + bytes.start, drawn.base + bytes.end, &drawn.ranges, self.theme.fg));
+        }
     }
 
     /// Drains buffer `id`'s edits since the last frame, feeds them through
@@ -18533,6 +18808,23 @@ impl App {
         rows: usize,
         scroll_col: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        self.syntax_highlights_in_columns(id, render_base_line, rows, scroll_col, None, false)
+    }
+
+    /// `syntax_highlights_from_column`, with the columns of each line a
+    /// wrapped pane's rows show (`columns`, by line: from, to) in place of
+    /// the sideways scroll's for a very long line. `viewport`: what a pane
+    /// shows, drawn (not a header or a line looked up on its own) -- what
+    /// its underlines are worked out against.
+    fn syntax_highlights_in_columns(
+        &mut self,
+        id: BufferId,
+        render_base_line: usize,
+        rows: usize,
+        scroll_col: usize,
+        columns: Option<&HashMap<usize, (usize, usize)>>,
+        viewport: bool,
+    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
 
@@ -18542,6 +18834,9 @@ impl App {
         let known_commands = self.known_commands(id);
 
         self.todo_spans.remove(&id);
+        // Whether a language server's tokens are laid over the grammar's:
+        // nothing's spent on them when not.
+        let semantic = self.semantic_to_draw(id);
         let Some(ob) = self.buffers.get_mut(id) else { return Vec::new() };
         let deltas = ob.buffer.drain_edits();
 
@@ -18576,7 +18871,18 @@ impl App {
             return conflict_ranges;
         }
 
-        let Some(syntax) = &mut ob.syntax else { return Vec::new() };
+        let Some(syntax) = &mut ob.syntax else {
+            // No grammar: a language server's tokens are all the colour
+            // there is.
+            if !semantic {
+                return Vec::new();
+            }
+            return match highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns) {
+                Some(windows) => self.with_semantic_tokens(id, Vec::new(), &windows, &[]),
+                None => Vec::new(),
+            };
+        };
+        let windows = highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns);
 
         let edits: Vec<fenix_syntax::RawEdit> = deltas
             .into_iter()
@@ -18585,30 +18891,10 @@ impl App {
         let source = ob.buffer.text();
         syntax.apply_edits(&source, &edits);
 
-        let visual_lines = ob.buffer.visual_line_count();
-        if render_base_line >= visual_lines {
-            return Vec::new();
-        }
-        let last_line = (render_base_line + rows).min(visual_lines) - 1;
-        let start_char = ob.buffer.line_start_char(render_base_line);
-        let end_char = ob.buffer.line_start_char(last_line) + ob.buffer.line_len(last_line);
-        let everything = ob.buffer.char_to_byte(start_char)..ob.buffer.char_to_byte(end_char);
-        let byte_ranges: Vec<std::ops::Range<usize>> = if end_char - start_char <= MAX_HIGHLIGHT_CHARS {
-            vec![everything]
-        } else {
-            (render_base_line..=last_line)
-                .map(|line| {
-                    let first = ob.buffer.line_start_char(line);
-                    let len = ob.buffer.line_len(line);
-                    let from = first + scroll_col.min(len);
-                    let to = first + (scroll_col + MAX_ROW_CHARS).min(len);
-                    ob.buffer.char_to_byte(from)..ob.buffer.char_to_byte(to)
-                })
-                .filter(|range| !range.is_empty())
-                .collect()
-        };
-
+        let Some(byte_ranges) = windows else { return Vec::new() };
         let syntax = &*syntax;
+        // Kept for a language server's tokens, when there are some to lay.
+        let windows = if semantic { byte_ranges.clone() } else { Vec::new() };
         let highlights: Vec<(std::ops::Range<usize>, &str)> = byte_ranges
             .into_iter()
             .flat_map(|window| {
@@ -18634,11 +18920,27 @@ impl App {
             .iter()
             .filter_map(|(range, name)| fenix_syntax::TodoKind::from_capture_name(name).map(|kind| (range.clone(), kind)))
             .collect();
+        // What the grammar says is a comment or a string: a language
+        // server's tokens aren't laid there.
+        let protected: Vec<std::ops::Range<usize>> = if semantic {
+            highlights.iter().filter(|(_, name)| matches!(name.split('.').next(), Some("comment" | "string" | "spell"))).map(|(range, _)| range.clone()).collect()
+        } else {
+            Vec::new()
+        };
         let colored = highlights.into_iter().map(|(range, name)| (range, theme.syntax_color(name))).collect();
         if !todos.is_empty() {
             self.todo_spans.insert(id, todos);
         }
-        colored
+        if !semantic {
+            return colored;
+        }
+        let laid = self.with_semantic_tokens(id, colored, &windows, &protected);
+        // Kept for the underlines drawn over this pane's text, right after
+        // (`polish_pane`): none where a token's colour isn't laid either.
+        if viewport {
+            self.semantic_protected.insert(id, protected);
+        }
+        laid
     }
 
     /// For a Tcl buffer, the words its `function` capture may color as
@@ -18714,23 +19016,23 @@ impl App {
         }
     }
 
-    /// Per-visible-line (view_row, col_start, col_end) segments of the
-    /// active Visual-mode selection, for highlighting. Empty outside Visual
+    /// The (line, col_start, col_end) segments of the active Visual-mode
+    /// selection on `lines`, for highlighting. Empty outside Visual
     /// mode. Shape depends on `visual_kind()`: Char is a single charwise
     /// span, Line highlights whole lines regardless of column, Block is a
     /// column-range rectangle across lines (clamped per ragged line, like
     /// the Block operators themselves).
-    fn visual_selection_segments(&self, visible_lines: usize) -> Segments {
+    fn visual_selection_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         if self.snippet_is_valid() {
             if let Some(range) = self.snippet.as_ref().and_then(|s| s.session.selection()) {
-                return self.range_to_segments(range, visible_lines);
+                return self.range_to_segments(range, lines);
             }
         }
         if self.vim.mode() != Mode::Visual {
             return Vec::new();
         }
         let anchor = self.vim.visual_anchor();
-        let last_visible = (self.render_base_line() + visible_lines).min(self.open().buffer.line_count());
+        let (first_visible, last_visible) = (lines.start, lines.end.min(self.open().buffer.line_count()));
         let mut segments = Vec::new();
 
         match self.vim.visual_kind() {
@@ -18747,14 +19049,14 @@ impl App {
                     (cursor_idx, anchor + 1)
                 };
                 let hi = hi.min(self.open().buffer.len_chars());
-                segments = self.range_to_segments(lo..hi, visible_lines);
+                segments = self.range_to_segments(lo..hi, lines);
             }
             VisualKind::Line => {
                 let (line_lo, line_hi) = self.anchor_cursor_line_range(anchor);
-                for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
+                for line in first_visible.max(line_lo)..last_visible.min(line_hi + 1) {
                     // at least 1 col wide so an empty line still shows a sliver
                     let width = self.open().buffer.line_len(line).max(1);
-                    segments.push((line - self.render_base_line(), 0, width));
+                    segments.push((line, 0, width));
                 }
             }
             VisualKind::Block => {
@@ -18767,12 +19069,12 @@ impl App {
                 } else {
                     (cursor_col, anchor_col + 1)
                 };
-                for line in self.render_base_line().max(line_lo)..last_visible.min(line_hi + 1) {
+                for line in first_visible.max(line_lo)..last_visible.min(line_hi + 1) {
                     let len = self.open().buffer.line_len(line);
                     let seg_start = col_lo.min(len);
                     let seg_end = col_hi.min(len);
                     if seg_start < seg_end {
-                        segments.push((line - self.render_base_line(), seg_start, seg_end));
+                        segments.push((line, seg_start, seg_end));
                     }
                 }
             }
@@ -18788,20 +19090,27 @@ impl App {
         if anchor_line <= cursor_line { (anchor_line, cursor_line) } else { (cursor_line, anchor_line) }
     }
 
-    /// Per-visible-line (view_row, col_start, col_end) segments a plain
-    /// char range covers -- shared by Char-kind Visual selection and the
+    /// The (line, col_start, col_end) segments a plain char range covers
+    /// on `lines` -- shared by Char-kind Visual selection and the
     /// yank/paste pulse, which are both "highlight this contiguous span"
-    /// even though they come from different sources.
-    fn range_to_segments(&self, range: std::ops::Range<usize>, visible_lines: usize) -> Segments {
-        let last_visible = (self.render_base_line() + visible_lines).min(self.open().buffer.line_count());
+    /// even though they come from different sources. Only the lines the
+    /// range is on are looked at.
+    fn range_to_segments(&self, range: std::ops::Range<usize>, lines: std::ops::Range<usize>) -> LineSegments {
+        let buffer = &self.open().buffer;
+        let len = buffer.len_chars();
         let mut segments = Vec::new();
-        for line in self.render_base_line()..last_visible {
-            let line_start = self.open().buffer.line_start_char(line);
-            let line_end = line_start + self.open().buffer.line_len(line);
+        if range.start >= range.end {
+            return segments;
+        }
+        let first = buffer.rope().char_to_line(range.start.min(len)).max(lines.start);
+        let last = (buffer.rope().char_to_line(range.end.min(len)) + 1).min(lines.end).min(buffer.line_count());
+        for line in first..last {
+            let line_start = buffer.line_start_char(line);
+            let line_end = line_start + buffer.line_len(line);
             let seg_start = range.start.max(line_start);
             let seg_end = range.end.min(line_end);
             if seg_start < seg_end {
-                segments.push((line - self.render_base_line(), seg_start - line_start, seg_end - line_start));
+                segments.push((line, seg_start - line_start, seg_end - line_start));
             }
         }
         segments
@@ -18813,29 +19122,38 @@ impl App {
     /// bracket at all). Reuses `range_to_segments` for the "char range
     /// -> view segments" conversion, called once per bracket rather
     /// than over a combined range since the two are rarely adjacent.
-    fn bracket_match_segments(&self, visible_lines: usize) -> Segments {
+    fn bracket_match_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         let cursor_idx = self.cursor().char_idx;
         let Some(match_idx) = fenix_vim::find_matching_bracket(&self.open().buffer, cursor_idx) else {
             return Vec::new();
         };
-        let mut segments = self.range_to_segments(cursor_idx..cursor_idx + 1, visible_lines);
-        segments.extend(self.range_to_segments(match_idx..match_idx + 1, visible_lines));
+        let mut segments = self.range_to_segments(cursor_idx..cursor_idx + 1, lines.clone());
+        segments.extend(self.range_to_segments(match_idx..match_idx + 1, lines));
         segments
     }
 
     /// `hlsearch`'s persistent match-highlight segments -- every
-    /// occurrence of the last confirmed search pattern within the
-    /// visible range, empty whenever `VimState::hlsearch_active` is
+    /// occurrence of the last confirmed search pattern on `lines`,
+    /// empty whenever `VimState::hlsearch_active` is
     /// false. Converts the visible line range to a byte range (`Buffer::
     /// char_to_byte` at each line boundary) for `VimState::hlsearch_
     /// matches`, then each match's byte range back to view segments via
     /// `range_to_segments`, the same "windowed, computed fresh each
     /// frame" discipline `bracket_match_segments`/`syntax_highlights_
     /// for_visible_range` already use.
-    fn hlsearch_segments(&self, visible_lines: usize) -> Segments {
+    #[cfg(test)]
+    fn hlsearch_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
+        let mut segments = self.search_match_segments(lines.clone());
+        segments.extend(self.substitute_segments(lines));
+        segments
+    }
+
+    /// `hlsearch_segments`' search matches alone: what a frame asks of
+    /// each run of lines shown.
+    fn search_match_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         let buffer = &self.open().buffer;
-        let last_visible = (self.render_base_line() + visible_lines).min(buffer.line_count());
-        let start_char = buffer.line_start_char(self.render_base_line());
+        let last_visible = lines.end.min(buffer.line_count());
+        let start_char = buffer.line_start_char(lines.start.min(last_visible));
         let end_char = if last_visible < buffer.line_count() {
             buffer.line_start_char(last_visible)
         } else {
@@ -18843,21 +19161,31 @@ impl App {
         };
         let byte_range = buffer.char_to_byte(start_char)..buffer.char_to_byte(end_char);
 
-        let mut segments = Segments::new();
+        let mut segments = LineSegments::new();
         for m in self.vim.hlsearch_matches(buffer, byte_range) {
             let start = buffer.byte_to_char(m.start);
             let end = buffer.byte_to_char(m.end);
-            segments.extend(self.range_to_segments(start..end, visible_lines));
+            segments.extend(self.range_to_segments(start..end, lines.clone()));
         }
-        // What a `:s` being typed would replace, and the match its `c`
-        // flag is asking about.
+        segments
+    }
+
+    /// What a `:s` being typed would replace on `lines`, and the match
+    /// its `c` flag is asking about: previewed once a frame, the command's
+    /// whole range at a time.
+    fn substitute_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
+        let buffer = &self.open().buffer;
+        let mut segments = LineSegments::new();
+        let last_visible = lines.end.min(buffer.line_count());
+        let start_char = buffer.line_start_char(lines.start.min(last_visible));
+        let end_char = if last_visible < buffer.line_count() { buffer.line_start_char(last_visible) } else { buffer.len_chars() };
         if let Some(Ok(preview)) = self.vim.substitute_preview(buffer, &self.cursor()) {
             for m in preview.matches.into_iter().filter(|m| m.end >= start_char && m.start <= end_char) {
-                segments.extend(self.range_to_segments(m, visible_lines));
+                segments.extend(self.range_to_segments(m, lines.clone()));
             }
         }
         if let Some(m) = self.vim.substitute_confirm_match() {
-            segments.extend(self.range_to_segments(m, visible_lines));
+            segments.extend(self.range_to_segments(m, lines));
         }
         segments
     }
@@ -18888,33 +19216,21 @@ impl App {
         Some((current, starts.len()))
     }
 
-    /// The focused pane's caret position for this frame: normally
-    /// `hl_row`/the real cursor's column, but during `Mode::Search`
-    /// previews where the in-progress query would jump to instead
+    /// The focused pane's caret position for this frame, as (line,
+    /// col): normally the real cursor's (`line`, `col`), but during
+    /// `Mode::Search` where the in-progress query would jump to instead
     /// (incsearch) -- the real `Cursor`/`last_search` are untouched
     /// until Enter confirms (see `VimState::preview_match`'s own doc
-    /// comment). The preview is only shown when it falls inside the
-    /// currently-fetched `[render_base_line, render_base_line +
-    /// pane_visible_lines]` window; a match outside it shows no caret
-    /// this frame rather than auto-scrolling to reveal it (a disclosed
+    /// comment). A preview on a line not shown draws no caret this
+    /// frame rather than auto-scrolling to reveal it (a disclosed
     /// simplification -- real incsearch also pans the viewport).
-    fn focused_caret(
-        &self,
-        hl_row: Option<usize>,
-        col: usize,
-        render_base_line: usize,
-        pane_visible_lines: usize,
-    ) -> Option<(usize, usize)> {
+    fn focused_caret(&self, line: usize, col: usize) -> Option<(usize, usize)> {
         if self.vim.mode() != Mode::Search {
-            return hl_row.map(|row| (row, col));
+            return Some((line, col));
         }
-        self.vim.preview_match(&self.open().buffer, &self.cursor()).and_then(|idx| {
+        self.vim.preview_match(&self.open().buffer, &self.cursor()).map(|idx| {
             let preview_cursor = Cursor { char_idx: idx, sticky_col: 0 };
-            let (preview_line, preview_col) = self.open().buffer.line_col(&preview_cursor);
-            preview_line
-                .checked_sub(render_base_line)
-                .filter(|&row| row <= pane_visible_lines)
-                .map(|row| (row, preview_col))
+            self.open().buffer.line_col(&preview_cursor)
         })
     }
 
@@ -18922,14 +19238,14 @@ impl App {
     /// `None` when there isn't one. Fades quickly at first then lingers
     /// faintly, via the same ease-out curve as the caret (inverted: pulses
     /// start bright and fade, blink fades in toward its target instead).
-    fn pulse_overlay(&self, visible_lines: usize) -> Option<(Segments, f32)> {
+    fn pulse_overlay(&self, lines: std::ops::Range<usize>) -> Option<(LineSegments, f32)> {
         let pulse = self.pulse.as_ref()?;
         let t = Instant::now().duration_since(pulse.started).as_secs_f32() / self.motion().pulse_d.as_secs_f32().max(1e-3);
         let alpha = PULSE_PEAK_ALPHA * (1.0 - ease_out_cubic(t));
         if alpha <= 0.0 {
             return None;
         }
-        Some((self.range_to_segments(pulse.range.clone(), visible_lines), alpha))
+        Some((self.range_to_segments(pulse.range.clone(), lines), alpha))
     }
 
     /// Whichever prompt/confirmation `active_prompt_text` says is
@@ -19638,6 +19954,10 @@ impl App {
         let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else { return };
         let content_rect = pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane));
         let visible_lines = text::lines_that_fit(content_rect.h, line_height);
+        // A wrapped pane: the cursor's row, not its line's first.
+        if self.scroll_rows_to_cursor(pane, buffer_id, target, visible_lines) {
+            return;
+        }
 
         let scroll_line = match target {
             VimScrollTarget::Top => line,
@@ -19661,14 +19981,23 @@ impl App {
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
         let geometry = self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top);
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        // A lens under the pointer: drawn as the one a click runs.
+        let over = hit_test(&geometry, pos).and_then(|t| match t {
+            ScrollTarget::Pane(p) => geometry.panes.iter().find(|(id, _)| *id == p).copied(),
+            _ => None,
+        });
+        if self.hover_lens(over, pos) {
+            self.request_redraw_all();
+        }
         let icon = if self.sidebar_drag || self.on_sidebar_edge(pos) {
             winit::window::CursorIcon::ColResize
         } else if let Some(icon) = self.divider_icon(&geometry, pos) {
             icon
         } else if self.tab_drag.is_some() {
             winit::window::CursorIcon::Grabbing
-        } else if self.term_hover.is_some() {
-            // Ctrl over a terminal's link: a click follows it.
+        } else if self.term_hover.is_some() || self.lens_hover.is_some() {
+            // Ctrl over a terminal's link, or over a code lens: a click
+            // follows it.
             winit::window::CursorIcon::Pointer
         } else {
             cursor_icon_for(&geometry, pos, line_height)
@@ -19875,8 +20204,12 @@ impl App {
     fn scroll_unfocused_pane(&mut self, pane: fenix_window::WindowId, lines: isize, rect_h: f32, line_height: f32) {
         let Some(&buffer_id) = self.windows().content(pane) else { return };
         if self.buffers.get(buffer_id).is_none() { return; }
-        let total = self.pane_display_lines(pane, buffer_id).len();
         let visible = text::lines_that_fit(rect_h, line_height);
+        // A wrapped pane: by rows.
+        if self.scroll_by_rows(pane, buffer_id, -lines, visible) {
+            return;
+        }
+        let total = self.pane_display_lines(pane, buffer_id).len();
         let max_scroll = total.saturating_sub(visible);
         let state = self.pane_state_mut(pane);
         state.scroll_line = state.scroll_line.saturating_add_signed(-lines).min(max_scroll);
@@ -19972,7 +20305,20 @@ impl App {
                         state.session.scroll(lines);
                     }
                 } else if pane == self.focused_pane_id() {
-                    self.scroll_focused_pane(lines);
+                    // A wrapped pane's view goes by rows, the cursor only
+                    // as far as keeps it in view. One by rows only for the
+                    // rows above its lines (a code lens's) moves its cursor
+                    // by lines, as 1.5 did, and the view follows.
+                    let wrapped = self.main_view == MainView::Editor
+                        && self.wrap_cols(pane, self.focused_buffer_id()).is_some()
+                        && geometry.panes.iter().find(|(id, _)| *id == pane).is_some_and(|(_, rect)| {
+                            let visible = text::lines_that_fit(pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height);
+                            let buffer = self.focused_buffer_id();
+                            self.scroll_focused_by_rows(pane, buffer, -lines, visible)
+                        });
+                    if !wrapped {
+                        self.scroll_focused_pane(lines);
+                    }
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
                     // Match `redraw`'s own chrome shrink for this pane so
                     // `max_scroll` agrees with what's actually visible.
@@ -20025,6 +20371,9 @@ impl App {
         self.agents_dock_sync();
         // The extensions' decorations, moved with the edits since.
         self.shift_code_decorations();
+        // A closed buffer's wrap, turned, goes with it.
+        let buffers = &self.buffers;
+        self.wrap_overrides.retain(|id, _| buffers.get(*id).is_some());
         // And theirs by rule, from a file's first frame.
         self.apply_decoration_rules();
         // An extension's grammar that didn't load, or its query, said once.
@@ -20061,6 +20410,8 @@ impl App {
         // buffer, its edits or the servers have moved since the last, as
         // the sync itself copies the text and looks at the disk (#74).
         self.sync_lsp_if_changed();
+        self.ask_due_semantic_tokens();
+        self.ask_due_lenses();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -20536,18 +20887,29 @@ impl App {
             if !is_focused && self.reveal_panes.remove(&pane) {
                 self.reveal_cursor(pane, buffer_id, pane_visible_lines);
             }
+            // The columns of text it has room for, which its lines wrap at
+            // if they do; a wrapped pane never scrolls sideways.
+            // Recomputes `gutter_chars`/`gutter_px` redundantly rather
+            // than reordering the real computation below (`gutter_px`
+            // there also folds in dashboard centering, which doesn't
+            // apply here) -- cheap, and keeps this already-large
+            // function's existing flow untouched.
+            let visible_cols = {
+                let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
+                text::cols_that_fit(rect.w - gutter_chars as f32 * char_width, char_width)
+            };
+            self.set_pane_text_cols(pane, visible_cols);
+            let wrap = if is_dashboard { None } else { self.wrap_cols(pane, buffer_id) };
+            // By rows: wrapped, or with rows that aren't text (a code
+            // lens's) at `UNBOUNDED`, scrolled sideways as any other.
+            let by_rows = if is_dashboard { None } else { self.row_cols(pane, buffer_id) };
+            if wrap.is_some() && self.pane_state(pane).scroll_col != 0 {
+                self.pane_state_mut(pane).scroll_col = 0;
+            }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
-                // Recomputes `gutter_chars`/`gutter_px` redundantly rather
-                // than reordering the real computation below (`gutter_px`
-                // there also folds in dashboard centering, which doesn't
-                // apply here) -- cheap, and keeps this already-large
-                // function's existing flow untouched.
-                let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
-                let gutter_px = gutter_chars as f32 * char_width;
-                let visible_cols = text::cols_that_fit(rect.w - gutter_px, char_width);
-                if !is_dashboard {
+                if !is_dashboard && wrap.is_none() {
                     self.ensure_cursor_visible_horizontally(visible_cols);
                 }
             }
@@ -20562,7 +20924,7 @@ impl App {
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
             // Sideways scrolling eases a column at a time.
-            let shown_scroll_col = if is_dashboard { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
+            let shown_scroll_col = if is_dashboard || wrap.is_some() { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
@@ -20571,12 +20933,19 @@ impl App {
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
             let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
-            let render_frac = rendered_scroll - rendered_scroll.floor();
+            // A wrapped pane's scroll snaps a row at a time.
+            let render_frac = if by_rows.is_some() { 0.0 } else { rendered_scroll - rendered_scroll.floor() };
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
             // the cursor's own row in the per-line pad table.
             let (line, col) =
                 self.buffers.get(buffer_id).map(|ob| ob.buffer.line_col(&pane_state.cursor)).unwrap_or((0, 0));
+            // What is on each row -- the one translation between a place
+            // in the text and a cell in the pane, for everything drawn over
+            // the text below -- with each line's columns (tabs,
+            // decorations) and the indent guides.
+            let mut layout = self.frame_layout(pane, buffer_id, &display_lines, render_base_line, pane_state.scroll_row, pane_visible_lines + 1, shown_scroll_col, line, is_dashboard);
+            let row_map = &layout.map;
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
             let gutter_px = gutter_chars as f32 * char_width;
@@ -20587,81 +20956,50 @@ impl App {
             // keeps `~` off the rows past its last line.
             let dashboard_pad: Option<Vec<usize>> = is_dashboard.then(Vec::new);
             // Filler rows (`side_by_side::FILLER`) have no line to highlight.
-            let shown_lines: Vec<usize> = visible_document_lines.iter().take(pane_visible_lines + 1).copied().filter(|&l| l != side_by_side::FILLER).collect();
+            let shown_lines: Vec<usize> = row_map.text_lines().collect();
             // What it shows, for the extensions that ask (`view-changed`).
             if let (Some(&first), Some(&last), false) = (shown_lines.first(), shown_lines.get(pane_visible_lines.saturating_sub(1)).or(shown_lines.last()), is_page || is_dashboard) {
                 self.wasm.views_drawn.push((buffer_id, pane.number() as u64, first as u32, last as u32));
             }
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
-            let syntax_highlights = self.syntax_highlights_from_column(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col);
-            let tab_stops = self.tab_stops_for(buffer_id);
-            // Char-column -> visual-column map for every visible row
-            // whose line actually contains a `\t` -- absent (not an
-            // identity `Vec`) for every other row, so caret/selection
-            // math below falls back to the raw char column unchanged.
-            // Recomputed independently of `content_spans`'s own tab
-            // expansion (a small amount of duplicated line-text reading,
-            // paid only by tab-containing lines) so `content_spans`'s
-            // signature/return type -- and its several existing direct
-            // test call sites -- didn't need to change shape just to
-            // additionally hand back this map.
-            let mut col_maps: HashMap<usize, Vec<usize>> = HashMap::new();
-            // Indentation guides (row, column) pairs -- computed in this
-            // same loop since it already fetches/tab-expands every
-            // visible row's raw text for `col_maps`, and this needs
-            // exactly that same (display-column) text to count each
-            // row's own leading whitespace correctly on a tab-indented
-            // file.
-            let mut indent_guides: Vec<(usize, usize)> = Vec::new();
-            // The file's own step (three spaces a level is three), not the
-            // setting's alone: a guide on every column otherwise, or none.
-            let indent_width = self.guide_indent_width(buffer_id);
-            // The extensions' decorations of it, laid out line by line: the
-            // text drawn and the columns it moves (`col_maps`), by line.
-            let decorations = if is_dashboard { Vec::new() } else { self.code_decorations(buffer_id) };
-            let mut decorated: HashMap<usize, crate::decorations::LineLayout> = HashMap::new();
-            let mut decoration_rows: Vec<(usize, crate::decorations::LineLayout)> = Vec::new();
-            if let Some(ob) = self.buffers.get(buffer_id) {
-                let visual_lines = ob.buffer.visual_line_count();
-                for r in 0..=pane_visible_lines {
-                    let Some(&buffer_line) = visible_document_lines.get(r) else { continue };
-                    if buffer_line >= visual_lines {
-                        continue;
-                    }
-                    let start = ob.buffer.line_start_char(buffer_line);
-                    let len = ob.buffer.line_len(buffer_line);
-                    let line_text = ob.buffer.text_range(start, start + len);
-                    let here: Vec<&crate::decorations::Decoration> = decorations.iter().copied().filter(|d| d.start <= start + len && d.end >= start).collect();
-                    if !here.is_empty() {
-                        let layout = crate::decorations::layout_line(&line_text, start, &here, &tab_stops, buffer_line == line);
-                        col_maps.insert(r, layout.col_map.clone());
-                        decoration_rows.push((r, layout.clone()));
-                        decorated.insert(buffer_line, layout);
-                    }
-                    let leading_columns = if decorated.contains_key(&buffer_line) {
-                        line_text.chars().take_while(|&c| c == ' ').count()
-                    } else if line_text.contains('\t') {
-                        let (display, col_map) = tabstops::expand_line(&line_text, &tab_stops);
-                        col_maps.insert(r, col_map);
-                        display.chars().take_while(|&c| c == ' ').count()
-                    } else {
-                        line_text.chars().take_while(|&c| c == ' ').count()
-                    };
-                    // Home's leading spaces are layout, not indentation.
-                    if !is_dashboard {
-                        indent_guides.extend(indent_guide_columns(leading_columns, indent_width).map(|col| (r, col)));
-                    }
+            // Its lines shown, for semantic tokens asked by range and the
+            // lenses resolved: worked out only when either wants them.
+            let (semantic, lensed) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id));
+            if semantic || lensed {
+                let runs = row_map.runs();
+                if semantic {
+                    self.note_semantic_view(buffer_id, pane, &runs);
+                }
+                if lensed {
+                    self.note_lens_view(buffer_id, &runs);
                 }
             }
+            // A wrapped pane: the columns its rows show of each line.
+            let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
+                let mut columns: HashMap<usize, (usize, usize)> = HashMap::new();
+                for line in row_map.text_lines() {
+                    if let Some(window) = rows::shown_char_columns(row_map, line, layout.col_maps.get(&line)) {
+                        columns.insert(line, window);
+                    }
+                }
+                columns
+            });
+            let syntax_highlights = self.syntax_highlights_in_columns(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col, row_columns.as_ref(), true);
+            let tab_stops = self.tab_stops_for(buffer_id);
             let content_spans = match self.buffers.get(buffer_id) {
+                // A pane by rows is drawn by its rows.
+                Some(ob) if by_rows.is_some() => self.row_content_spans(
+                    ob, row_map, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
+                    line, &tab_stops, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &layout.decorated,
+                ),
                 Some(ob) if folds_active => self.folded_content_spans(
                     ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
-                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &decorated,
+                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &layout.decorated,
                 ),
                 Some(ob) => self.content_spans_decorated(
                     ob, render_base_line, pane_visible_lines + 1, gutter_chars, dashboard_pad.as_deref(),
-                    &syntax_highlights, line, &tab_stops, shown_scroll_col, &decorated,
+                    &syntax_highlights, line, &tab_stops, shown_scroll_col, &layout.decorated,
                 ),
                 None => Vec::new(),
             };
@@ -20674,131 +21012,56 @@ impl App {
             // part of the transition (it hasn't panned into view yet) --
             // `None` means "don't draw the hl-line/caret this frame," not
             // a bug.
-            let hl_row = visible_document_lines.iter().position(|&row| row == line).filter(|&row| row <= pane_visible_lines);
+            // The row the cursor is on, of its line's.
+            let hl_row = layout.locate(line, col).map(|(row, _)| row);
 
-            // Char column -> visual column, via this row's `col_maps`
-            // entry when it has one (a line with a tab), else unchanged
-            // -- applied here, once, to every kind of column-bearing
-            // value (selection/pulse/bracket/hlsearch segments, the
-            // caret) rather than at the final pixel-rect-building loop
-            // further down, so that loop's `col_start as f32 *
-            // char_width` math needs no changes at all: by the time
-            // anything lands in `PaneRender`, its columns are already
-            // real visual columns. Also subtracts `scroll_col` here, for
-            // the same reason -- `content_spans` already sliced away the
-            // first `scroll_col` visual columns of each row's *rendered
-            // text*, so every column-bearing value referring to a
-            // position in that same text needs the same offset removed
-            // to stay aligned with what's actually on screen.
-            // `saturating_sub` rather than a bounds check: a
-            // selection/highlight starting before the current scroll
-            // position clamps to column 0 (still drawn, just from the
-            // pane's left edge) instead of underflowing.
-            let remap_col = |row: usize, col: usize| -> usize {
-                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(shown_scroll_col)
-            };
-            let remap_segments = |segments: Segments| -> Segments {
-                segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
-            };
-            // Standard keys' extra cursors, and their selections.
-            let (extra_carets, extra_selections): (Vec<(usize, usize)>, Segments) = if is_focused && !folds_active {
-                let buffer = &self.open().buffer;
-                let mut segs = Segments::new();
-                let mut carets = Vec::new();
-                for c in self.extra_carets() {
-                    let (l, col) = buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 });
-                    if let Some(row) = l.checked_sub(render_base_line).filter(|&r| r <= pane_visible_lines) {
-                        carets.push((row, remap_col(row, col)));
-                    }
-                    if let Some(a) = c.anchor {
-                        segs.extend(remap_segments(self.range_to_segments(a.min(c.at)..a.max(c.at), pane_visible_lines + 1)));
-                    }
-                }
-                (carets, segs)
-            } else {
-                (Vec::new(), Segments::new())
-            };
-            let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused && !folds_active {
-                (
-                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)).into_iter().chain(extra_selections).collect(),
-                    self.pulse_overlay(pane_visible_lines + 1).map(|(segs, a)| (remap_segments(segs), a)),
-                    remap_segments(self.bracket_match_segments(pane_visible_lines + 1)),
-                    remap_segments(self.hlsearch_segments(pane_visible_lines + 1)),
-                    self.focused_caret(hl_row, col, render_base_line, pane_visible_lines).map(|(row, col)| (row, remap_col(row, col))),
-                )
-            } else if is_focused {
-                // Rows aren't lines one for one here: work the overlays
-                // out from the first line shown, then move each to the
-                // row its line is on.
-                let (first, last) = (shown_lines.first().copied(), shown_lines.last().copied());
-                match (first, last) {
-                    (Some(first), Some(last)) => {
-                        let span = last - first + 1;
-                        let to_rows = |segments: Segments| -> Segments {
-                            segments
-                                .into_iter()
-                                .filter_map(|(r, s, e)| {
-                                    let row = visible_document_lines.iter().position(|&l| l == first + r)?;
-                                    (row <= pane_visible_lines).then_some((row, s, e))
-                                })
-                                .collect()
-                        };
-                        self.render_base_override.set(Some(first));
-                        let overlays = (
-                            remap_segments(to_rows(self.visual_selection_segments(span))),
-                            self.pulse_overlay(span).map(|(segs, a)| (remap_segments(to_rows(segs)), a)),
-                            remap_segments(to_rows(self.bracket_match_segments(span))),
-                            remap_segments(to_rows(self.hlsearch_segments(span))),
-                            hl_row.map(|row| (row, remap_col(row, col))),
-                        );
-                        self.render_base_override.set(None);
-                        overlays
-                    }
-                    _ => (Segments::new(), None, Segments::new(), Segments::new(), hl_row.map(|row| (row, remap_col(row, col)))),
-                }
-            } else {
-                (Segments::new(), None, Segments::new(), Segments::new(), None)
-            };
+            let (vcol, locate, to_rows) = (|l, c| layout.vcol(l, c), |l, c| layout.locate(l, c), |segs| layout.to_rows(segs));
+            let shown_span = row_map.span();
+            let FocusedOverlays { extra_carets, selection: selection_segments, pulse: pulse_overlay, brackets: bracket_match_segments, hlsearch: hlsearch_segments, caret } =
+                if is_focused { self.focused_overlays(&layout, line, col) } else { FocusedOverlays::default() };
 
             // A soft tint behind each TODO-style keyword, in its own
             // kind's color, so they stand out while scrolling past --
             // the glyphs alone are easy to lose in a comment-colored
             // line.
-            let (side_tints, side_words) = self.side_by_side_tints(pane, &visible_document_lines[..visible_document_lines.len().min(pane_visible_lines + 1)]);
+            let (side_tints, side_words) = self.side_by_side_tints(pane, &row_map.lines_by_row());
             let mut todo_bg_segments: Vec<(usize, usize, usize, [f32; 4])> = match (self.todo_spans.get(&buffer_id), self.buffers.get(buffer_id)) {
                 (Some(spans), Some(ob)) => spans
                     .iter()
-                    .filter_map(|(range, kind)| {
+                    .flat_map(|(range, kind)| {
                         let start = ob.buffer.byte_to_char(range.start);
                         let len = ob.buffer.byte_to_char(range.end) - start;
                         let (line, col) = ob.buffer.line_col(&Cursor { char_idx: start, sticky_col: 0 });
-                        let row = visible_document_lines.iter().position(|&l| l == line).filter(|&r| r <= pane_visible_lines)?;
                         let [r, g, b, _] = glyphon_to_rgba(theme.todo_color(*kind));
-                        Some((row, remap_col(row, col), remap_col(row, col + len), [r, g, b, 0.18]))
+                        to_rows(vec![(line, col, col + len)]).into_iter().map(move |(row, s, e)| (row, s, e, [r, g, b, 0.18]))
                     })
                     .collect(),
                 _ => Vec::new(),
             };
-            todo_bg_segments.extend(side_words.into_iter().map(|(row, s, e, color)| (row, remap_col(row, s), remap_col(row, e), color)));
+            todo_bg_segments.extend(side_words.into_iter().filter_map(|(row, s, e, color)| {
+                let line = row_map.row(row).filter(|r| r.kind == rows::RowKind::Text)?.line;
+                Some(to_rows(vec![(line, s, e)]).into_iter().map(move |(row, s, e)| (row, s, e, color)))
+            }).flatten());
             // The decorations' swatches and tints behind the text, their
             // underlines under it -- already in visual columns.
             let mut decoration_underlines = Vec::new();
             let mut decoration_strikes = Vec::new();
             let mut decoration_chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>)> = Vec::new();
-            for (row, layout) in &decoration_rows {
-                for (cols, mark) in &layout.marks {
-                    let (a, b) = (cols.start.saturating_sub(shown_scroll_col), cols.end.saturating_sub(shown_scroll_col));
-                    if a >= b {
-                        continue;
-                    }
-                    match mark {
-                        crate::decorations::Mark::Swatch((r, g, b2)) => todo_bg_segments.push((*row, a, b, [*r as f32 / 255.0, *g as f32 / 255.0, *b2 as f32 / 255.0, 1.0])),
-                        crate::decorations::Mark::Tint(shade) => todo_bg_segments.push((*row, a, b, pages::shade_color(theme, *shade))),
-                        crate::decorations::Mark::Underline(role) => decoration_underlines.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
-                        crate::decorations::Mark::Strike(role) => decoration_strikes.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
-                        crate::decorations::Mark::Chip(role) => {
-                            let [r, g, b2, _] = glyphon_to_rgba(pages::role_color(theme, *role));
-                            decoration_chips.push((*row, a, b, [r, g, b2, 0.13], None));
+            for (line, decorated) in &layout.decoration_rows {
+                for (cols, mark) in &decorated.marks {
+                    for (row, a, b) in row_map.segments(*line, cols.clone()) {
+                        if a >= b {
+                            continue;
+                        }
+                        match mark {
+                            crate::decorations::Mark::Swatch((r, g, b2)) => todo_bg_segments.push((row, a, b, [*r as f32 / 255.0, *g as f32 / 255.0, *b2 as f32 / 255.0, 1.0])),
+                            crate::decorations::Mark::Tint(shade) => todo_bg_segments.push((row, a, b, pages::shade_color(theme, *shade))),
+                            crate::decorations::Mark::Underline(role) => decoration_underlines.push((row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
+                            crate::decorations::Mark::Strike(role) => decoration_strikes.push((row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
+                            crate::decorations::Mark::Chip(role) => {
+                                let [r, g, b2, _] = glyphon_to_rgba(pages::role_color(theme, *role));
+                                decoration_chips.push((row, a, b, [r, g, b2, 0.13], None));
+                            }
                         }
                     }
                 }
@@ -20829,10 +21092,7 @@ impl App {
                 .map(|marks| {
                     marks
                         .iter()
-                        .filter_map(|mark| {
-                            let row = visible_document_lines.iter().position(|&line| line == mark.line.saturating_sub(1))?;
-                            (row <= pane_visible_lines).then_some((row, mark.kind))
-                        })
+                        .filter_map(|mark| Some((row_map.first_row(mark.line.saturating_sub(1))?, mark.kind)))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -20846,12 +21106,15 @@ impl App {
 
             // The debugger's breakpoints and stop beside the rows in view;
             // the stopped row tinted across the pane.
-            let debug_marks = self.debug_marks(buffer_id, visible_document_lines, pane_visible_lines);
-            let trail_marks = self.debug_trail_marks(buffer_id, visible_document_lines, pane_visible_lines);
+            let gutter_lines = row_map.gutter_lines();
+            let debug_marks = self.debug_marks(buffer_id, &gutter_lines, pane_visible_lines);
+            let trail_marks = self.debug_trail_marks(buffer_id, &gutter_lines, pane_visible_lines);
             let mut row_tints = side_tints;
             if let Some(&(row, _)) = debug_marks.iter().find(|(_, m)| matches!(m, debug_host::DebugMark::Stop | debug_host::DebugMark::StopOnBreakpoint(_))) {
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_modified);
-                row_tints.push((row, [r, g, b, 0.14]));
+                // Every row of the stopped line; the mark is on its first.
+                let stopped = row_map.row(row).map_or(row..row + 1, |shown| row_map.rows_of(shown.line));
+                row_tints.extend(stopped.map(|row| (row, [r, g, b, 0.14])));
             }
 
             let (home_segments, mut home_overlay) =
@@ -20862,42 +21125,60 @@ impl App {
                 } else {
                     Default::default()
                 };
-            let mut extra = motion_host::PaneExtras { buffer: Some(buffer_id), base_line: render_base_line, scroll_col: shown_scroll_col, underlines: decoration_underlines, strikes: decoration_strikes, grid: is_page, ..Default::default() };
+            let mut extra = motion_host::PaneExtras {
+                buffer: Some(buffer_id),
+                base_line: render_base_line,
+                scroll_col: shown_scroll_col,
+                rows: (!is_dashboard).then(|| layout.map.clone()),
+                underlines: decoration_underlines,
+                strikes: decoration_strikes,
+                grid: is_page,
+                ..Default::default()
+            };
             // A code pane's polish: problems, brackets, selection
             // whitespace, the overview ruler, sticky scroll.
             if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
-                let tab_rows: HashSet<usize> = col_maps.keys().copied().collect();
+                let tab_lines: HashSet<usize> = layout.col_maps.keys().copied().collect();
                 let pane_caret_ats: Vec<usize> = self.pane_carets(pane, buffer_id).iter().map(|c| c.at).collect();
                 let view = polish::PaneView {
                     buffer: buffer_id,
-                    lines: visible_document_lines,
+                    map: row_map,
                     rows: pane_visible_lines + 1,
+                    wrapped: by_rows.is_some(),
                     gutter_chars,
                     scroll_col: shown_scroll_col,
                     rendered_scroll,
                     cursor_line: line,
-                    tab_rows: &tab_rows,
+                    tab_lines: &tab_lines,
                     selection: &selection_segments,
-                    remap_col: &remap_col,
+                    vcol: &vcol,
                     carets: &pane_caret_ats,
                     pane,
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;
+                extra.underlines.extend(polished.underlines);
                 extra.ruler = polished.ruler;
-                if !folds_active {
+                // Off in a wrapped pane, for now.
+                if !folds_active && by_rows.is_none() {
                     extra.sticky = self.sticky_rows(buffer_id, render_base_line, hl_row, gutter_chars, &tab_stops, line);
                 }
             }
-            if let Some(flash) = self.beacon_row(buffer_id, visible_document_lines, pane_visible_lines, now) {
+            if let Some(flash) = self.beacon_row(buffer_id, &gutter_lines, pane_visible_lines, now) {
                 extra.row_flashes.push(flash);
             }
-            if is_focused && !folds_active {
-                let (added, seams) = self.change_overlays(buffer_id, pane_visible_lines + 1, now);
+            if is_focused {
+                let (added, seams) = self.change_overlays(buffer_id, shown_span.clone(), now);
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_staged);
-                extra.cell_flashes = added.into_iter().map(|(row, s, e, a)| (row, remap_col(row, s), remap_col(row, e), [r, g, b, 0.35 * a])).collect();
+                extra.cell_flashes = added.into_iter().flat_map(|(line, s, e, a)| to_rows(vec![(line, s, e)]).into_iter().map(move |(row, s, e)| (row, s, e, [r, g, b, 0.35 * a]))).collect();
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_conflicted);
-                extra.seams = seams.into_iter().map(|(row, col, lines, a)| (row, if lines { 0 } else { remap_col(row, col) }, lines, [r, g, b, 0.9 * a])).collect();
+                extra.seams = seams
+                    .into_iter()
+                    .filter_map(|(line, col, lines, a)| {
+                        let (row, x) = if lines { (row_map.first_row(line)?, 0) } else { locate(line, col)? };
+                        Some((row, x, lines, [r, g, b, 0.9 * a]))
+                    })
+                    .collect();
             }
             if let Some((first, count, shown)) = self.reveal_cover(motion_host::RevealTarget::Buffer(buffer_id), now) {
                 if first + count > render_base_line {
@@ -20936,7 +21217,7 @@ impl App {
                 gutter_marks,
                 debug_marks,
                 trail_marks,
-                indent_guides,
+                indent_guides: std::mem::take(&mut layout.indent_guides),
                 row_accents,
                 home: {
                     home_overlay.chips.extend(decoration_chips.into_iter().map(|(r, a, b, f, o)| (r, a, b, f, o, false)));
@@ -21930,6 +22211,7 @@ impl App {
                     scroll_col: p.extra.scroll_col,
                     rows: text::lines_that_fit(p.rect.h, line_height),
                     focused: p.pane == focused_pane,
+                    map: p.extra.rows.clone(),
                 })
                 .collect(),
             caret: caret_px,
@@ -22909,6 +23191,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             needs_redraw = true;
         }
 
+        // Semantic tokens due to be asked for (typing paused, an ask that
+        // timed out): asked now, not on whatever frame comes next.
+        self.ask_due_semantic_tokens();
+        self.ask_due_lenses();
+
         // Keep redrawing at animation cadence only while something is
         // actually transitioning (blink fade or an active pulse); once
         // everything settles, fall back to the long, efficient wait for
@@ -23348,6 +23635,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    // A view of one run of lines is a list of one range.
+    #![allow(clippy::single_range_in_vec_init)]
     use super::*;
 
     /// The layout the git dashboard's accordion asks for has to be the
@@ -24657,13 +24946,13 @@ index 0000000..1111111 100644
             app.test_vim_key(KeyPress::char('l'));
         }
         // anchor 0, cursor now at 4 ("hello"[0..5))
-        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 5)]);
+        assert_eq!(app.visual_selection_segments(0..10), vec![(0, 0, 5)]);
     }
 
     #[test]
     fn visual_selection_segments_empty_outside_visual_mode() {
         let app = App::with_file(None);
-        assert!(app.visual_selection_segments(10).is_empty());
+        assert!(app.visual_selection_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24671,7 +24960,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
         app.test_set_cursor(Cursor::at_start()); // on the opening '('
-        assert_eq!(app.bracket_match_segments(10), vec![(0, 0, 1), (0, 6, 7)]);
+        assert_eq!(app.bracket_match_segments(0..10), vec![(0, 0, 1), (0, 6, 7)]);
     }
 
     #[test]
@@ -24679,7 +24968,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
         app.test_set_cursor(Cursor { char_idx: 6, sticky_col: 6 }); // on the ')'
-        assert_eq!(app.bracket_match_segments(10), vec![(0, 6, 7), (0, 0, 1)]);
+        assert_eq!(app.bracket_match_segments(0..10), vec![(0, 6, 7), (0, 0, 1)]);
     }
 
     #[test]
@@ -24687,7 +24976,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello)");
         app.test_set_cursor(Cursor { char_idx: 3, sticky_col: 3 }); // on 'l'
-        assert!(app.bracket_match_segments(10).is_empty());
+        assert!(app.bracket_match_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24695,7 +24984,7 @@ index 0000000..1111111 100644
         let mut app = App::with_file(None);
         app.test_insert_str("(hello");
         app.test_set_cursor(Cursor::at_start());
-        assert!(app.bracket_match_segments(10).is_empty());
+        assert!(app.bracket_match_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24708,14 +24997,14 @@ index 0000000..1111111 100644
         }
         app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
 
-        assert_eq!(app.hlsearch_segments(10), vec![(0, 0, 3), (0, 8, 11), (0, 16, 19)]);
+        assert_eq!(app.hlsearch_segments(0..10), vec![(0, 0, 3), (0, 8, 11), (0, 16, 19)]);
     }
 
     #[test]
     fn hlsearch_segments_is_empty_before_any_search_is_confirmed() {
         let mut app = App::with_file(None);
         app.test_insert_str("foo bar foo");
-        assert!(app.hlsearch_segments(10).is_empty());
+        assert!(app.hlsearch_segments(0..10).is_empty());
     }
 
     #[test]
@@ -24727,14 +25016,14 @@ index 0000000..1111111 100644
             app.test_vim_key(KeyPress::char(ch));
         }
         app.test_vim_key(KeyPress::named(FenixNamedKey::Enter));
-        assert!(!app.hlsearch_segments(10).is_empty());
+        assert!(!app.hlsearch_segments(0..10).is_empty());
 
         app.test_vim_key(KeyPress::char('x')); // a real edit, in Normal mode
-        assert!(!app.hlsearch_segments(10).is_empty(), "kept, as in Vim");
+        assert!(!app.hlsearch_segments(0..10).is_empty(), "kept, as in Vim");
         // `x` took the second match's `f`: one is left.
         assert_eq!(app.search_count(), Some((1, 1)), "[1/1] in the modeline");
         app.test_vim_key(KeyPress::named(FenixNamedKey::Escape));
-        assert!(app.hlsearch_segments(10).is_empty());
+        assert!(app.hlsearch_segments(0..10).is_empty());
         assert_eq!(app.search_count(), None);
     }
 
@@ -24747,7 +25036,7 @@ index 0000000..1111111 100644
             app.test_vim_key(KeyPress::char(ch));
         }
         // The second "foo" starts at char 8, still line 0 -- row 0, col 8.
-        assert_eq!(app.focused_caret(None, 0, 0, 10), Some((0, 8)));
+        assert_eq!(app.focused_caret(0, 0), Some((0, 8)));
         assert_eq!(app.test_cursor().char_idx, 0, "the real cursor must not move during preview");
     }
 
@@ -24755,7 +25044,7 @@ index 0000000..1111111 100644
     fn focused_caret_falls_back_to_hl_row_outside_search_mode() {
         let mut app = App::with_file(None);
         app.test_insert_str("hello");
-        assert_eq!(app.focused_caret(Some(0), 3, 0, 10), Some((0, 3)));
+        assert_eq!(app.focused_caret(0, 3), Some((0, 3)));
     }
 
     #[test]
@@ -24816,7 +25105,7 @@ index 0000000..1111111 100644
         }
         app.test_set_cursor(Cursor { char_idx: 5, sticky_col: 1 }); // column 1 of "two"
         app.test_vim_key(KeyPress::char('V'));
-        assert_eq!(app.visual_selection_segments(10), vec![(1, 0, 3)]);
+        assert_eq!(app.visual_selection_segments(0..10), vec![(1, 0, 3)]);
     }
 
     #[test]
@@ -24830,7 +25119,7 @@ index 0000000..1111111 100644
         for ch in ['j', 'j', 'l'] {
             app.test_vim_key(KeyPress::char(ch));
         }
-        assert_eq!(app.visual_selection_segments(10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
+        assert_eq!(app.visual_selection_segments(0..10), vec![(0, 0, 2), (1, 0, 2), (2, 0, 2)]);
     }
 
     #[test]
@@ -24905,7 +25194,7 @@ index 0000000..1111111 100644
     #[test]
     fn no_pulse_by_default() {
         let app = App::with_file(None);
-        assert!(app.pulse_overlay(10).is_none());
+        assert!(app.pulse_overlay(0..10).is_none());
     }
 
     #[test]
@@ -24915,7 +25204,7 @@ index 0000000..1111111 100644
             app.test_insert(ch);
         }
         app.pulse = Some(Pulse { range: 0..5, started: Instant::now() });
-        let (segments, alpha) = app.pulse_overlay(10).expect("pulse should be active");
+        let (segments, alpha) = app.pulse_overlay(0..10).expect("pulse should be active");
         assert_eq!(segments, vec![(0, 0, 5)]);
         assert!(alpha > 0.0 && alpha <= PULSE_PEAK_ALPHA);
     }
@@ -24927,7 +25216,7 @@ index 0000000..1111111 100644
             app.test_insert(ch);
         }
         app.pulse = Some(Pulse { range: 0..5, started: Instant::now() - PULSE_DURATION * 2 });
-        assert!(app.pulse_overlay(10).is_none());
+        assert!(app.pulse_overlay(0..10).is_none());
     }
 
     // App::handle_key itself needs a real winit KeyEvent/ActiveEventLoop,
@@ -24950,7 +25239,7 @@ index 0000000..1111111 100644
         let event = app.test_vim_key(KeyPress::char('w'));
         let fenix_vim::VimEvent::Pulse(range) = event else { panic!("expected a Pulse event from yw") };
         app.pulse = Some(Pulse { range, started: Instant::now() });
-        assert!(app.pulse_overlay(10).is_some());
+        assert!(app.pulse_overlay(0..10).is_some());
     }
 
     #[test]
@@ -32743,7 +33032,7 @@ configure_board stm32
         let started = Instant::now();
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "typescript-language-server".into(), languages: vec!["typescript".into()], root: key.root.clone(), reader: None,
-            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         assert!(app.background_jobs().iter().any(|j| j == "starting typescript-language-server"));
         // Not yet: when it's due is said.
@@ -36112,7 +36401,7 @@ name = \"orbit\"
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let mut session = LspSession {
             generation: tool_sessions::generation(), client, name: "pyright-langserver".into(), languages: vec!["python".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         };
         push_python_environment(&mut session);
         app.lsp_sessions.insert(key.clone(), session);
@@ -36145,7 +36434,7 @@ name = \"orbit\"
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         key
     }
@@ -36426,7 +36715,7 @@ name = \"orbit\"
         }
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client: sink_client(&key.root), name: name.into(), languages: languages.iter().map(|l| l.to_string()).collect(),
-            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         key
     }
@@ -36459,6 +36748,1347 @@ name = \"orbit\"
             capabilities(serde_json::json!({"textDocumentSync": 1, "hoverProvider": true, "definitionProvider": true, "completionProvider": {"triggerCharacters": ["-"]}, "documentFormattingProvider": true})));
         app.sync_lsp_for_focused_buffer();
         (dir, app, path, primary, extra)
+    }
+
+    fn semantic_capabilities() -> lsp_types::ServerCapabilities {
+        capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function", "macro"], "tokenModifiers": []}, "full": true}}))
+    }
+
+    /// `fn main() { let x = 1; }` with a server offering semantic tokens.
+    fn semantic_fixture(name: &str) -> (TempDir, App, PathBuf, LspKey) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() { let x = 1; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], semantic_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        (dir, app, path, key)
+    }
+
+    /// `main` a function and `x` a macro (drawn in the macro colour,
+    /// where the grammar says variable).
+    const MAIN_AND_X: [u32; 10] = [0, 3, 4, 0, 0, 0, 13, 1, 1, 0];
+
+    /// The colour a macro token is drawn in.
+    fn macro_colour(app: &App) -> glyphon::Color {
+        app.theme.syntax_macro
+    }
+
+    fn colour_at(app: &mut App, byte: usize) -> Option<glyphon::Color> {
+        let id = app.focused_buffer_id();
+        app.syntax_highlights_for_visible_range(id, 0, 1).into_iter().find(|(r, _)| r.contains(&byte)).map(|(_, c)| c)
+    }
+
+    #[test]
+    fn semantic_tokens_are_asked_on_open_and_laid_over_the_grammar_s_colours() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_open");
+        let grammar = colour_at(&mut app, 16);
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { edit_count: 0, .. }), "{pending:?}");
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        let (function, macro_) = (app.theme.syntax_function, app.theme.syntax_macro);
+        assert_ne!(grammar, Some(macro_), "the grammar calls `x` something else");
+        assert_eq!(colour_at(&mut app, 16), Some(macro_), "`x` as the server says");
+        assert_eq!(colour_at(&mut app, 3), Some(function), "`main` a function");
+        assert_eq!(colour_at(&mut app, 0), Some(app.theme.syntax_keyword), "`fn` the grammar's still");
+    }
+
+    #[test]
+    fn semantic_tokens_move_with_an_edit_until_the_next_answer_and_a_stale_answer_is_let_go() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_shift");
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        let macro_ = app.theme.syntax_macro;
+        // Two chars typed at the start: `x` moves with them, and no ask
+        // is sent until typing pauses.
+        app.test_insert_str("  ");
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(colour_at(&mut app, 18), Some(macro_));
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "not while typing");
+        // Once it's due: asked; an edit before the answer makes it stale.
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { edit_count, .. } if edit_count == app.open().buffer.edit_count()));
+        app.test_insert_str(" ");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, id, serde_json::json!({"data": [0, 0, 2, 0, 0]}));
+        assert_eq!(colour_at(&mut app, 19), Some(macro_), "the moved tokens stand, not the stale answer");
+        assert!(app.lsp_sessions[&key].semantic[&canonical].due.is_some(), "asked again");
+    }
+
+    fn answer_error(app: &mut App, key: &LspKey, id: i64, code: i64) {
+        let generation = app.lsp_sessions[key].generation;
+        let error = fenix_lsp::ResponseError { code, message: "no".into(), data: None };
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Response { id, result: Err(error) });
+    }
+
+    #[test]
+    fn semantic_tokens_aren_t_drawn_on_a_file_closed_changed_on_disk_and_opened_again() {
+        let (dir, mut app, path, key) = semantic_fixture("semantic_reopen");
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        let other = dir.write("notes.txt", "notes\n");
+        app.test_open_path(&other);
+        app.test_open_path(&path);
+        app.kill_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].semantic.is_empty(), "let go with its buffer");
+        // Changed on disk meanwhile, and opened again: the server is told
+        // the new text, and the old tokens aren't laid over it.
+        let new = "static LONG_NAME_HERE: u8 = 0;\n";
+        std::fs::write(&path, new).unwrap();
+        app.test_open_path(&path);
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(app.lsp_sessions[&key].synced_text[&canonical], new, "a didChange, though the edit count is 0 again");
+        assert!(app.drawn_tokens(app.focused_buffer_id()).is_none());
+        assert_ne!(colour_at(&mut app, 16), Some(macro_colour(&app)));
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::SemanticTokens { .. }), "asked afresh");
+    }
+
+    #[test]
+    fn a_semantic_ask_due_wakes_the_loop_and_one_unanswered_is_cancelled_and_asked_once_more() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_wake");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        // Due a moment ago, with nothing else to draw: the loop wakes at
+        // once, and the wake asks.
+        let past = Instant::now() - Duration::from_millis(5);
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(past);
+        assert!(app.motion_next_wake(Instant::now()).is_some_and(|t| t <= Instant::now()), "woken for");
+        app.ask_due_semantic_tokens();
+        let (first, _) = only_pending(&app, &key);
+        // Unanswered past the timeout: cancelled, asked once more.
+        let late = Instant::now() - semantic::SEMANTIC_TIMEOUT - Duration::from_millis(1);
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().asked = Some((first, late));
+        assert!(app.semantic_wake().is_some_and(|t| t <= Instant::now()), "woken to time it out");
+        app.ask_due_semantic_tokens();
+        let (second, _) = only_pending(&app, &key);
+        assert_ne!(first, second);
+        // That one too: not again until an edit.
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().asked = Some((second, late));
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty());
+        assert_eq!(app.semantic_wake(), None);
+        app.test_insert_str(" ");
+        app.sync_lsp_for_focused_buffer();
+        assert!(app.semantic_wake().is_some(), "an edit asks again");
+        // Cancelled by the server: asked again after the pause.
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(past);
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer_error(&mut app, &key, id, -32800);
+        assert!(app.lsp_sessions[&key].semantic[&canonical].due.is_some(), "RequestCancelled is asked again");
+    }
+
+    #[test]
+    fn semantic_asks_follow_an_agent_s_sync_a_late_refresh_and_only_the_ask_that_s_out() {
+        let (_dir, mut app, path, key) = semantic_fixture("semantic_round3");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        app.ask_due_semantic_tokens();
+        let (first, _) = only_pending(&app, &key);
+        // A refresh while the ask is out: kept, and asked once it's answered.
+        app.refresh_semantic_tokens(&key);
+        let _ = colour_at(&mut app, 0);
+        assert!(app.lsp_sessions[&key].semantic[&canonical].stale, "kept while an ask is out");
+        answer(&mut app, &key, first, serde_json::json!({"data": MAIN_AND_X}));
+        let _ = colour_at(&mut app, 0);
+        app.ask_due_semantic_tokens();
+        let (second, _) = only_pending(&app, &key);
+        // An answer to an ask that isn't out any more: let go.
+        answer(&mut app, &key, first, serde_json::json!({"data": []}));
+        assert!(app.lsp_sessions[&key].semantic[&canonical].asking.is_some(), "the second still out");
+        answer(&mut app, &key, second, serde_json::json!({"data": MAIN_AND_X}));
+        // An edit an agent's sync sends first: asked again all the same.
+        app.test_insert_str(" ");
+        let (text, count) = (app.open().buffer.text(), app.open().buffer.edit_count());
+        app.sync_lsp_for(&path, &text, count, None);
+        assert!(app.semantic_wake().is_some(), "asked again after the pause");
+        // Refused while modified: asked again later each time, not every 250 ms.
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            app.ask_due_semantic_tokens();
+            let (id, _) = only_pending(&app, &key);
+            let before = Instant::now();
+            answer_error(&mut app, &key, id, -32801);
+            let due = app.lsp_sessions[&key].semantic[&canonical].due.unwrap();
+            waits.push(due.saturating_duration_since(before));
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        }
+        assert!(waits.windows(2).all(|w| w[1] > w[0]), "backing off: {waits:?}");
+    }
+
+    #[test]
+    fn semantic_tokens_are_let_go_when_turned_off_or_the_file_is_renamed() {
+        let (dir, mut app, _path, key) = semantic_fixture("semantic_letgo");
+        assert!(!app.lsp_sessions[&key].semantic.is_empty());
+        app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].semantic.is_empty() && app.semantic_of.is_empty(), "nothing held or asked");
+        app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        let old = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        // Saved under another name: the old path's tokens go.
+        let renamed = dir.path().join("renamed.rs");
+        app.open_mut().buffer.save_as(&renamed).unwrap();
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(!app.lsp_sessions[&key].semantic.contains_key(&old));
+    }
+
+    #[test]
+    fn a_refactor_s_sync_moves_semantic_tokens_and_asks_again() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refactor");
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        // An edit a refactor made, synced as a refactor syncs.
+        app.test_insert_str("  ");
+        let buffer = app.focused_buffer_id();
+        app.sync_refactor_buffers(&[buffer]);
+        assert!(app.drawn_tokens(buffer).is_some(), "moved with the change, still drawn");
+        assert_eq!(colour_at(&mut app, 18), Some(macro_colour(&app)));
+        assert!(app.semantic_wake().is_some(), "and asked again");
+    }
+
+    #[test]
+    fn an_agent_s_look_at_a_file_asks_for_no_semantic_tokens() {
+        let (dir, mut app, _path, key) = semantic_fixture("semantic_agent");
+        let other = dir.write("lib.rs", "pub fn lib() {}\n");
+        app.sync_lsp_for(&other, "pub fn lib() {}\n", 1, None);
+        let canonical = fenix_lsp::normalize(refactor::identity(&other));
+        assert!(app.lsp_sessions[&key].open_documents.contains_key(&canonical), "the server is told of it");
+        assert!(!app.lsp_sessions[&key].semantic.contains_key(&canonical), "but not asked for its tokens");
+    }
+
+    #[test]
+    fn a_buffer_without_a_grammar_takes_its_colours_from_the_server_alone() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_no_grammar");
+        app.open_mut().syntax = None;
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(macro_colour(&app)));
+        assert_eq!(colour_at(&mut app, 3), Some(app.theme.syntax_function));
+    }
+
+    #[test]
+    fn a_mutable_name_inside_a_string_isn_t_underlined_and_no_lines_ask_for_none() {
+        let dir = TempDir::new("semantic_mutable_string");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "let s = \"abc\";\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["variable"], "tokenModifiers": ["mutable"]}, "full": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        // `s` (4) and the `b` inside the string (10), both mutable.
+        answer(&mut app, &key, id, serde_json::json!({"data": [0, 4, 1, 0, 1, 0, 6, 1, 0, 1]}));
+        let buffer = app.focused_buffer_id();
+        // A line looked up on its own doesn't stand for the pane's text...
+        let _ = colour_at(&mut app, 0);
+        assert!(!app.semantic_protected.contains_key(&buffer));
+        // ...the pane's own drawing does.
+        let _ = app.syntax_highlights_in_columns(buffer, 0, 1, 0, None, true);
+        assert_eq!(app.underlined_tokens(buffer, 0..1).into_iter().map(|(_, c, _)| c).collect::<Vec<_>>(), vec![4..5], "not the one in the string");
+        assert!(app.underlined_tokens(buffer, 0..0).is_empty());
+    }
+
+    #[test]
+    fn a_mutable_name_from_semantic_tokens_is_underlined_on_each_row_it_s_drawn_on() {
+        let dir = TempDir::new("semantic_mutable");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "let mut counter_of_things = 0;\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["variable"], "tokenModifiers": ["mutable"]}, "full": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        // `counter_of_things`, chars 8..25, mutable.
+        answer(&mut app, &key, id, serde_json::json!({"data": [0, 8, 17, 0, 1]}));
+        let buffer = app.focused_buffer_id();
+        assert_eq!(app.underlined_tokens(buffer, 0..1).into_iter().map(|(l, c, _)| (l, c)).collect::<Vec<_>>(), vec![(0, 8..25)]);
+        // Wrapped at twelve columns: the name is broken across rows 1
+        // and 2, and underlined on both.
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 12);
+        let layout = app.focused_layout(4);
+        let vcol = |_: usize, c: usize| c;
+        let selection = Segments::default();
+        let tab_lines = HashSet::new();
+        let view = polish::PaneView { buffer, map: &layout.map, rows: 4, wrapped: true, gutter_chars: 0, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 0, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
+        let mut spans = Vec::new();
+        let out = app.polish_pane(&view, &mut spans, Instant::now());
+        let rows: Vec<usize> = out.underlines.iter().map(|&(row, _, _, _)| row).collect();
+        assert_eq!(rows, vec![1, 2], "{:?}", out.underlines);
+    }
+
+    #[test]
+    fn a_semantic_delta_is_asked_on_the_last_answer_and_one_that_doesn_t_fit_asks_the_whole_again() {
+        let dir = TempDir::new("semantic_delta");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() { let x = 1; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function", "macro"], "tokenModifiers": []}, "full": {"delta": true}}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Full, .. }), "the first is whole");
+        answer(&mut app, &key, id, serde_json::json!({"resultId": "1", "data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
+        // Asked again: a delta on "1", turning `x` into a function.
+        app.refresh_semantic_tokens(&key);
+        let _ = colour_at(&mut app, 0);
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Delta, .. }), "{pending:?}");
+        answer(&mut app, &key, id, serde_json::json!({"resultId": "2", "edits": [{"start": 5, "deleteCount": 5, "data": [0, 13, 1, 0, 0]}]}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_function), "the delta applied to what was kept");
+        // A delta leaving part of a token: the whole document asked again.
+        app.refresh_semantic_tokens(&key);
+        let _ = colour_at(&mut app, 0);
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"resultId": "3", "edits": [{"start": 3, "deleteCount": 1, "data": []}]}));
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Full, .. }));
+    }
+
+    #[test]
+    fn a_large_document_s_semantic_tokens_are_asked_for_the_lines_in_view_and_too_large_a_one_not_at_all() {
+        let dir = TempDir::new("semantic_range");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", &"fn main() { let x = 1; }\n".repeat(12_000));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function", "macro"], "tokenModifiers": []}, "full": true, "range": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "nothing in view yet");
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        // A line looked up on its own (sticky scroll's) asks nothing.
+        let _ = app.syntax_highlights_for_visible_range(id, 0, 1);
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "only a pane's view asks");
+        app.note_semantic_view(id, pane, &[0..1]);
+        app.ask_due_semantic_tokens();
+        let (req, pending) = only_pending(&app, &key);
+        assert!(matches!(&pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if *lines == (0..101)), "{pending:?}");
+        answer(&mut app, &key, req, serde_json::json!({"data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
+        // Further down, past what's covered: those lines asked.
+        app.note_semantic_view(id, pane, &[5000..5010]);
+        app.ask_due_semantic_tokens();
+        let (req, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if lines == (4900..5110)));
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro), "the first range's tokens kept beside the second's");
+        // Near the end: no further than the document.
+        app.note_semantic_view(id, pane, &[11_990..12000]);
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if lines == (11_890..12_001)));
+
+        // Sixty thousand lines and a server that answers only for the
+        // whole: not asked.
+        let path = dir.write("big.rs", &"x\n".repeat(60_000));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], semantic_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty());
+        assert_eq!(app.semantic_wake(), None, "and not woken for");
+    }
+
+    /// A large Rust file asked by range, its server answering every ask
+    /// with nothing: `frames` frames of `each`, then how many asks went
+    /// out, and whether it's gone quiet.
+    fn range_frames(name: &str, text: &str, frames: usize, each: &dyn Fn(&mut App)) -> (usize, bool) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", text);
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function"], "tokenModifiers": []}, "full": true, "range": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        let mut asks = 0;
+        for _ in 0..frames {
+            each(&mut app);
+            app.ask_due_semantic_tokens();
+            let pending: Vec<i64> = app.lsp_sessions[&key].pending.keys().copied().collect();
+            for id in pending {
+                asks += 1;
+                answer(&mut app, &key, id, serde_json::json!({"data": []}));
+            }
+        }
+        (asks, app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none())
+    }
+
+    #[test]
+    fn sticky_scroll_and_a_view_far_below_its_header_don_t_take_turns_asking() {
+        let text = format!("mod m {{\n{}}}\n", "    fn f() {}\n".repeat(12_000));
+        let (asks, quiet) = range_frames("semantic_sticky", &text, 12, &|app| {
+            let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+            app.note_semantic_view(id, pane, &[5000..5040]);
+            // Sticky scroll's header line, looked up on its own.
+            let _ = app.syntax_highlights_for_visible_range(id, 0, 1);
+        });
+        assert_eq!((asks, quiet), (1, true));
+    }
+
+    #[test]
+    fn two_views_of_one_large_file_each_asked_once_then_quiet() {
+        let text = "fn f() {}\n".repeat(12_000);
+        let (asks, quiet) = range_frames("semantic_two_views", &text, 12, &|app| {
+            let id = app.focused_buffer_id();
+            if app.windows().windows().len() < 2 {
+                app.run_cmd("window.split_vertical");
+            }
+            let panes = app.windows().windows();
+            app.note_semantic_view(id, panes[0], &[0..40]);
+            app.note_semantic_view(id, panes[1], &[6000..6040]);
+        });
+        assert_eq!((asks, quiet), (2, true));
+    }
+
+    #[test]
+    fn line_breaks_ropey_counts_decide_by_range_the_same_for_asks_and_views() {
+        // Fewer than ten thousand LFs, but form feeds make more lines.
+        let text = format!("{}{}", "fn f() {}\n".repeat(9_990), "\u{c}x\n".repeat(20));
+        let (asks, quiet) = range_frames("semantic_ff", &text, 8, &|app| {
+            let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+            app.note_semantic_view(id, pane, &[0..40]);
+        });
+        assert_eq!((asks, quiet), (1, true));
+    }
+
+    #[test]
+    fn more_views_than_ranges_kept_each_asked_once_then_quiet() {
+        let text = "fn f() {}\n".repeat(40_000);
+        for views in [9usize, 12] {
+            let (asks, quiet) = range_frames(&format!("semantic_views_{views}"), &text, 40, &|app| {
+                let id = app.focused_buffer_id();
+                while app.windows().windows().len() < views {
+                    app.run_cmd("window.split_vertical");
+                }
+                for (i, pane) in app.windows().windows().into_iter().enumerate() {
+                    app.note_semantic_view(id, pane, &[i * 3000..i * 3000 + 40]);
+                }
+            });
+            assert_eq!((asks, quiet), (views, true), "{views} views");
+        }
+    }
+
+    /// A large Rust file with a server answering by range, a view at the
+    /// top: its app, server and document.
+    fn range_fixture(name: &str, lines: usize) -> (TempDir, App, LspKey, PathBuf) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", &"fn f() {}\n".repeat(lines));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function"], "tokenModifiers": []}, "full": true, "range": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        (dir, app, key, canonical)
+    }
+
+    fn asked_lines(app: &App, key: &LspKey) -> Option<(i64, std::ops::Range<usize>)> {
+        app.lsp_sessions[key].pending.iter().find_map(|(id, p)| match p {
+            PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } => Some((*id, lines.clone())),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_refresh_while_a_range_ask_is_out_asks_those_lines_again() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refresh_out", 12_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.note_semantic_view(id, pane, &[0..40]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        let mut asks = 0;
+        for _ in 0..5 {
+            app.note_semantic_view(id, pane, &[0..40]);
+            app.ask_due_semantic_tokens();
+            if let Some((req, _)) = asked_lines(&app, &key) {
+                asks += 1;
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asks, 1, "asked again once, after the refresh");
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].stale);
+    }
+
+    #[test]
+    fn a_view_across_a_fold_asks_for_what_it_shows_no_more() {
+        let (_dir, mut app, key, _canonical) = range_fixture("semantic_fold_view", 37_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        // Lines 0..10 and 30 010..30 040 shown, a fold closed between.
+        app.note_semantic_view(id, pane, &[0..10, 30_010..30_040]);
+        let mut asked = Vec::new();
+        for _ in 0..4 {
+            app.ask_due_semantic_tokens();
+            if let Some((req, lines)) = asked_lines(&app, &key) {
+                asked.push(lines);
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asked, vec![0..110, 29_910..30_140], "each run with its margin");
+        // A view far taller than any pane: no more than one ask's worth
+        // at a time, each from where the last left off, then quiet.
+        app.note_semantic_view(id, pane, &[5_000..15_000]);
+        let mut asked = Vec::new();
+        for _ in 0..12 {
+            app.ask_due_semantic_tokens();
+            if let Some((req, lines)) = asked_lines(&app, &key) {
+                assert!(lines.len() <= 2_000, "{lines:?}");
+                asked.push(lines);
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asked, vec![4_900..6_900, 6_900..8_900, 8_900..10_900, 10_900..12_900, 12_900..14_900, 14_900..15_100]);
+        assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "quiet");
+    }
+
+    #[test]
+    fn a_range_refused_moves_on_to_the_next_view_and_typing_s_pause_holds() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refused_next", 12_000);
+        let id = app.focused_buffer_id();
+        app.run_cmd("window.split_vertical");
+        let panes = app.windows().windows();
+        app.note_semantic_view(id, panes[0], &[0..40]);
+        app.note_semantic_view(id, panes[1], &[6_000..6_040]);
+        app.ask_due_semantic_tokens();
+        let (req, first) = asked_lines(&app, &key).unwrap();
+        answer_error(&mut app, &key, req, -32603);
+        app.ask_due_semantic_tokens();
+        let (req, second) = asked_lines(&app, &key).unwrap();
+        assert_ne!(first, second, "the other view asked");
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        // Typing, then the view moves: still after the pause.
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        let paused = app.lsp_sessions[&key].semantic[&canonical].due.unwrap();
+        app.note_semantic_view(id, panes[0], &[1..41]);
+        assert!(app.lsp_sessions[&key].semantic[&canonical].due.unwrap() >= paused, "not before the pause");
+    }
+
+    #[test]
+    fn ranges_let_go_take_their_tokens_with_them() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_evict", 40_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        for i in 0..12 {
+            let top = i * 3_000;
+            app.note_semantic_view(id, pane, &[top..top + 40]);
+            app.ask_due_semantic_tokens();
+            let (req, _) = asked_lines(&app, &key).unwrap();
+            // One token, on the view's first line.
+            answer(&mut app, &key, req, serde_json::json!({"data": [top, 3, 1, 0, 0]}));
+        }
+        let doc = &app.lsp_sessions[&key].semantic[&canonical];
+        assert!(doc.covered.len() <= 8, "{:?}", doc.covered);
+        assert_eq!(doc.tokens.len(), doc.covered.len(), "a token for each range kept, none for those let go");
+    }
+
+    #[test]
+    fn ranges_let_go_after_an_edit_or_a_refresh_still_take_their_tokens_with_them() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_evict_edit", 70_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        for i in 0..20 {
+            let top = i * 3_000 + 100;
+            app.note_semantic_view(id, pane, &[top..top + 40]);
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+            app.ask_due_semantic_tokens();
+            let (req, _) = asked_lines(&app, &key).unwrap();
+            answer(&mut app, &key, req, serde_json::json!({"data": [top, 3, 1, 0, 0]}));
+            // An edit (on line 0, the lines kept) or a refresh between.
+            if i % 2 == 0 {
+                app.test_insert_str("x");
+                app.sync_lsp_for_focused_buffer();
+            } else {
+                app.refresh_semantic_tokens(&key);
+            }
+        }
+        let doc = &app.lsp_sessions[&key].semantic[&canonical];
+        assert!(doc.held.len() <= 8, "{:?}", doc.held);
+        assert!(doc.tokens.len() <= 8, "tokens for at most 8 ranges, not all 20: {}", doc.tokens.len());
+    }
+
+    #[test]
+    fn a_refresh_marks_only_the_ask_out_however_that_ask_ends() {
+        // Refused as modified: the next ask's lines count as answered.
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refresh_refused", 12_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.note_semantic_view(id, pane, &[0..40]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        answer_error(&mut app, &key, req, -32801);
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].refreshed_while_asking);
+        let mut asks = 0;
+        for _ in 0..5 {
+            // Past any back-off: due now.
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+            app.ask_due_semantic_tokens();
+            if let Some((req, _)) = asked_lines(&app, &key) {
+                asks += 1;
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asks, 1, "asked again once, not twice");
+        // Edited since asked: the same.
+        app.note_semantic_view(id, pane, &[6_000..6_040]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].refreshed_while_asking);
+        // A whole document's ask: cleared when it's answered.
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refresh_full");
+        app.ask_due_semantic_tokens();
+        let (req, _) = only_pending(&app, &key);
+        app.refresh_semantic_tokens(&key);
+        answer(&mut app, &key, req, serde_json::json!({"data": MAIN_AND_X}));
+        assert!(app.lsp_sessions[&key].semantic.values().all(|d| !d.refreshed_while_asking));
+    }
+
+    #[test]
+    fn a_range_refused_isn_t_asked_again_each_frame_it_s_shown() {
+        let dir = TempDir::new("semantic_range_refused");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", &"fn f() {}\n".repeat(12_000));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function"], "tokenModifiers": []}, "full": true, "range": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.note_semantic_view(id, pane, &[0..40]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = only_pending(&app, &key);
+        answer_error(&mut app, &key, req, -32603);
+        for top in [0, 1, 2] {
+            app.note_semantic_view(id, pane, &[top..top + 40]);
+            app.ask_due_semantic_tokens();
+        }
+        assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "tried, until an edit");
+    }
+
+    fn lens_capabilities() -> lsp_types::ServerCapabilities {
+        capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {"resolveProvider": true}}))
+    }
+
+    /// A Rust file with code lens on, and a server offering lenses.
+    fn lens_fixture(name: &str) -> (TempDir, App, PathBuf, LspKey) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() {}\nfn other() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        (dir, app, path, key)
+    }
+
+    fn lens_json(line: u32, title: Option<&str>) -> serde_json::Value {
+        let range = serde_json::json!({"start": {"line": line, "character": 0}, "end": {"line": line, "character": 2}});
+        match title {
+            Some(t) => serde_json::json!({"range": range, "command": {"title": t, "command": "x.run"}}),
+            None => serde_json::json!({"range": range, "data": 7}),
+        }
+    }
+
+    fn lens_rows_of(app: &App) -> Vec<(usize, String)> {
+        app.virtual_rows.get(&app.focused_buffer_id()).map(|rows| rows.iter().map(|(l, t)| (*l, t.join("/"))).collect()).unwrap_or_default()
+    }
+
+    /// A lens fixture whose server runs `x.run` and answers with `lenses`
+    /// for line 0.
+    fn lensed(name: &str, lenses: serde_json::Value) -> (TempDir, App, LspKey) {
+        let (dir, mut app, _path, key) = lens_fixture(name);
+        app.lsp_sessions.get_mut(&key).unwrap().capabilities = Some(capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {}, "executeCommandProvider": {"commands": ["x.run"]}})));
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, lenses);
+        (dir, app, key)
+    }
+
+    fn said_now(app: &App) -> String {
+        app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn spc_c_l_runs_the_one_lens_on_the_line_and_lists_several() {
+        let (_dir, mut app, key) = lensed("lens_run_one", serde_json::json!([lens_json(0, Some("▶ Run"))]));
+        app.run_cmd("code.lens");
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::LensCommand { ref title } if title == "▶ Run"), "sent back to the server");
+        let (_dir, mut app, _key) = lensed("lens_run_several", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        app.run_cmd("code.lens");
+        assert!(matches!(app.active_picker, Some(ActivePicker::Lenses(ref s)) if s.len() == 2), "several to choose from");
+        app.press("Escape");
+        app.press("j");
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "no code lenses on this line");
+    }
+
+    fn titled(title: &str, command: &str) -> serde_json::Value {
+        serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": title, "command": command}})
+    }
+
+    fn answer_lenses_again(app: &mut App, key: &LspKey, lenses: serde_json::Value) {
+        app.refresh_lenses(key);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(app, key, id, lenses);
+    }
+
+    fn lens_commands_sent(app: &App, key: &LspKey) -> Vec<String> {
+        app.lsp_sessions[key].pending.values().filter_map(|p| match p {
+            PendingLspRequest::LensCommand { title } => Some(title.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn the_lens_picked_is_the_one_run_though_the_lenses_were_answered_again() {
+        let caps = |app: &mut App, key: &LspKey| app.lsp_sessions.get_mut(key).unwrap().capabilities = Some(capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {}, "executeCommandProvider": {"commands": ["x.run", "x.debug", "x.delete"]}})));
+        let (_dir, mut app, key) = lensed("lens_pick_moved", serde_json::json!([titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        caps(&mut app, &key);
+        app.run_cmd("code.lens");
+        assert!(matches!(app.active_picker, Some(ActivePicker::Lenses(_))));
+        answer_lenses_again(&mut app, &key, serde_json::json!([titled("Delete all", "x.delete"), titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        app.press("Enter");
+        assert_eq!(lens_commands_sent(&app, &key), vec!["▶ Run".to_string()], "the one shown, found again");
+        // Gone when it's chosen: none run, and it's said.
+        let (_dir, mut app, key) = lensed("lens_pick_gone", serde_json::json!([titled("▶ Run", "x.run"), titled("Debug", "x.debug")]));
+        caps(&mut app, &key);
+        app.run_cmd("code.lens");
+        answer_lenses_again(&mut app, &key, serde_json::json!([titled("Delete all", "x.delete"), titled("Debug", "x.debug")]));
+        app.press("Enter");
+        assert!(lens_commands_sent(&app, &key).is_empty());
+        assert!(said_now(&app).contains("the lenses changed"), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn a_line_whose_lenses_have_no_titles_has_none_to_run() {
+        let (_dir, mut app, _key) = lensed("lens_no_titles", serde_json::json!([titled("\u{200b}", "x.run"), titled("", "x.run")]));
+        app.run_cmd("code.lens");
+        assert!(app.active_picker.is_none(), "no empty picker");
+        assert_eq!(said_now(&app), "no code lenses on this line");
+    }
+
+    #[test]
+    fn a_run_s_folder_must_be_a_real_one_in_the_project_and_the_task_is_the_project_s() {
+        let (dir, mut app, _key) = lensed("lens_run_cwd", serde_json::json!([]));
+        let root = dir.path().to_path_buf();
+        let run = |cwd: &str| serde_json::json!([{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "t", "kind": "cargo", "args": {"cargoArgs": ["--version"], "cwd": cwd}}]}}]);
+        let key = app.lsp_sessions.keys().next().unwrap().clone();
+        // A path that can't be followed, though its name is inside.
+        answer_lenses_again(&mut app, &key, run(&format!("{}/nope/../../..", root.display())));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("isn't a folder in the project"), "{}", said_now(&app));
+        assert!(app.task_session.is_none());
+        // A member crate's folder: run there, as the project's task.
+        std::fs::create_dir_all(root.join("member")).unwrap();
+        answer_lenses_again(&mut app, &key, run(&root.join("member").display().to_string()));
+        app.run_cmd("code.lens");
+        let session = app.task_session.as_ref().expect("started");
+        assert_eq!(session.root, fenix_lsp::normalize(refactor::identity(&root)), "the project's");
+        assert!(session.cwd.ends_with("member"), "{:?}", session.cwd);
+    }
+
+    #[test]
+    fn a_double_click_on_a_lens_runs_it_once_and_its_hover_follows_the_rows() {
+        let (_dir, mut app, key) = lensed("lens_double", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        let pane = app.focused_pane_id();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let (char_width, line_height) = app.cell_size();
+        let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+        let gutter = app.gutter_chars(app.open()) as f32 * char_width;
+        let at = |col: f32| (content.x + text::PAD_LEFT + gutter + (col + 0.5) * char_width, content.y + text::PAD_TOP + line_height * 0.5);
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        app.mouse_release();
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        app.mouse_release();
+        assert_eq!(lens_commands_sent(&app, &key).len(), 1, "once");
+        // Lit, then the lenses go under a pointer that doesn't move.
+        assert!(app.hover_lens(Some((pane, rect)), at(9.0)));
+        assert_eq!(app.lens_hover.as_ref().map(|(p, _, _)| *p), Some(pane), "by pane");
+        answer_lenses_again(&mut app, &key, serde_json::json!([]));
+        assert!(app.lens_hover.is_none(), "not lit over nothing");
+    }
+
+    #[test]
+    fn a_lens_starts_cargo_only_in_a_trusted_project() {
+        let run = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["--version"]}}]}});
+        let (dir, mut app, _key) = lensed("lens_run_trust", serde_json::json!([run]));
+        // The project names a program, and nobody has allowed it yet.
+        dir.write(".fenix/tools.json", r#"{"tasks": {"build": {"executable": "make"}}}"#);
+        let state = TempDir::new("lens_run_trust_state");
+        app.known_projects = fenix_project::KnownProjects::load_or_default(state.path().join("projects.txt"));
+        app.project_trust_begin(Some(state.path().join("trusted-projects.json")));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("only in a trusted project (SPC p y)"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        // Trusted: it runs.
+        app.trust_project_as_written(dir.path());
+        app.run_cmd("code.lens");
+        assert!(app.task_session.is_some(), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn lenses_fenix_runs_itself_or_says_why_not() {
+        let location = serde_json::json!({"uri": "file:///tmp/a.rs", "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 3}}});
+        let refs = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "1 reference", "command": "rust-analyzer.showReferences", "arguments": ["file:///tmp/a.rs", {"line": 0, "character": 0}, [location]]}});
+        let (_dir, mut app, _key) = lensed("lens_refs", serde_json::json!([refs]));
+        app.run_cmd("code.lens");
+        assert_eq!(app.quickfix.len(), 1, "the references listed");
+        let debug = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Debug", "command": "rust-analyzer.debugSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["test"]}}]}});
+        let (_dir, mut app, _key) = lensed("lens_debug", serde_json::json!([debug]));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("can't debug from a lens yet"), "{}", said_now(&app));
+        // A run where the server says, outside the project: not run.
+        let away = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run", "command": "rust-analyzer.runSingle", "arguments": [{"label": "test it", "kind": "cargo", "args": {"cargoArgs": ["test"], "cwd": "/"}}]}});
+        let (_dir, mut app, _key) = lensed("lens_run_away", serde_json::json!([away]));
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("isn't a folder in the project"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        // Fenix's own command in a server's lens: not run.
+        let own = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "▶ Run test", "command": "fenix.runTest", "arguments": ["/elsewhere/t.rs", 1]}});
+        let (_dir, mut app, _key) = lensed("lens_run_own_from_server", serde_json::json!([own]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run ▶ Run test (fenix.runTest)");
+        assert!(app.task_session.is_none());
+        let other = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Peek", "command": "editor.peek"}});
+        let (_dir, mut app, _key) = lensed("lens_unknown", serde_json::json!([other]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run Peek (editor.peek)");
+    }
+
+    #[test]
+    fn a_click_on_a_lens_title_runs_it_and_the_pointer_over_one_lights_it() {
+        let (_dir, mut app, key) = lensed("lens_click", serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, Some("Debug"))]));
+        let pane = app.focused_pane_id();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let (char_width, line_height) = app.cell_size();
+        let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+        let gutter = app.gutter_chars(app.open()) as f32 * char_width;
+        // Scrolled up to line 0's lenses (they came above the top line,
+        // out of view): row 0, "▶ Run | Debug", "Debug" from column 8.
+        app.pane_state_mut(pane).scroll_row = 0;
+        let at = |col: f32| (content.x + text::PAD_LEFT + gutter + (col + 0.5) * char_width, content.y + text::PAD_TOP + line_height * 0.5);
+        assert!(app.hover_lens(Some((pane, rect)), at(9.0)));
+        assert_eq!(app.lens_hover.as_ref().map(|(_, line, cols)| (*line, cols.clone())), Some((0, 8..13)));
+        assert!(!app.hover_lens(Some((pane, rect)), at(10.0)), "the same one");
+        let layout = app.focused_layout(3);
+        let ob = app.open();
+        let spans = app.row_content_spans(ob, &layout.map, 3, app.gutter_chars(ob), &[], 0, &app.tab_stops_for(app.focused_buffer_id()), &HashSet::new(), &layout.decorated);
+        assert!(spans.iter().any(|(t, c)| t == "Debug" && *c == app.theme.fg), "drawn in the text's colour: {spans:?}");
+        assert!(spans.iter().any(|(t, c)| t.contains("▶ Run") && *c == app.theme.gutter_fg));
+        assert!(app.hover_lens(Some((pane, rect)), at(6.0)), "the separator: none");
+        assert!(app.lens_hover.is_none());
+        app.handle_click_at(at(1.0), 800.0, 600.0);
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::LensCommand { ref title } if title == "▶ Run"));
+        assert_eq!(app.line_col(), (0, 0), "the cursor stays");
+        // A pane too narrow for both: "▶ Run …" drawn, and "Debug", not
+        // drawn, isn't there to click.
+        app.set_pane_text_cols(pane, 12);
+        let layout = app.focused_layout(3);
+        let rows::RowKind::Virtual(i) = layout.map.row(0).unwrap().kind else { panic!("a lens row") };
+        assert_eq!(layout.map.virtual_text(i), "▶ Run …");
+        app.hover_lens(Some((pane, rect)), at(9.0));
+        assert!(app.lens_hover.is_none(), "cut off");
+        app.hover_lens(Some((pane, rect)), at(1.0));
+        assert_eq!(app.lens_hover.as_ref().map(|(_, _, cols)| cols.clone()), Some(0..5));
+    }
+
+    #[test]
+    fn fenix_s_own_run_test_lenses_go_over_tests_no_server_offers_to_run() {
+        let dir = TempDir::new("lens_own");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        let path = dir.write("test_ledger.py", "def helper():\n    pass\n\ndef test_totals():\n    assert 1 == 1\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app), vec![(3, "▶ Run test".to_string())], "with no language server at all");
+        // Run from its line: as SPC p r there.
+        app.press_all("3 j");
+        app.run_cmd("code.lens");
+        let session = app.task_session.as_ref().expect("Task Output opened");
+        assert!(app.buffers.get(session.buffer).unwrap().buffer.text().starts_with("$ pytest test_ledger.py::test_totals"));
+        // Off on their own: gone in the next frame.
+        app.config.set_value("lsp.code_lens_tests", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+    }
+
+    #[test]
+    fn fenix_s_own_run_test_lens_runs_only_in_a_trusted_project() {
+        let dir = TempDir::new("lens_own_trust");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        dir.write(".fenix/tools.json", r#"{"tasks": {"build": {"executable": "make"}}}"#);
+        let path = dir.write("test_ledger.py", "def test_totals():\n    assert 1 == 1\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let state = TempDir::new("lens_own_trust_state");
+        app.known_projects = fenix_project::KnownProjects::load_or_default(state.path().join("projects.txt"));
+        app.project_trust_begin(Some(state.path().join("trusted-projects.json")));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app), vec![(0, "▶ Run test".to_string())]);
+        app.run_cmd("code.lens");
+        assert!(said_now(&app).contains("only in a trusted project (SPC p y)"), "{}", said_now(&app));
+        assert!(app.task_session.is_none(), "nothing started");
+        app.trust_project_as_written(dir.path());
+        app.run_cmd("code.lens");
+        assert!(app.task_session.is_some(), "{}", said_now(&app));
+    }
+
+    #[test]
+    fn a_server_s_run_lens_stands_in_for_fenix_s_own() {
+        let dir = TempDir::new("lens_own_server");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "#[test]\nfn adds() {}\n\n#[test]\nfn takes() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        let run = serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "▶ Run Test", "command": "rust-analyzer.runSingle"}});
+        answer(&mut app, &key, id, serde_json::json!([run]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "▶ Run Test".to_string()), (4, "▶ Run test".to_string())], "the server's where it has one, Fenix's where it hasn't");
+    }
+
+    /// What lenses cost on a large file (`--release -- --ignored
+    /// --nocapture`): 20 000 lines, a test and a server lens every four.
+    #[test]
+    #[ignore]
+    fn measure_lenses_on_a_large_file() {
+        let dir = TempDir::new("lens_measure");
+        dir.write(".fenix/project.ini", "");
+        let text: String = (0..5_000).map(|i| format!("#[test]\nfn t{i}() {{\n    x();\n}}\n")).collect();
+        let path = dir.write("main.rs", &text);
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        let started = Instant::now();
+        app.sync_lsp_for_focused_buffer();
+        let first = started.elapsed();
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        let lenses: Vec<serde_json::Value> = (0..5_000).map(|i| lens_json(i * 5 + 1, Some("3 references"))).collect();
+        let started = Instant::now();
+        answer(&mut app, &key, id, serde_json::Value::Array(lenses));
+        let answered = started.elapsed();
+        app.test_insert_str("// x\n");
+        let started = Instant::now();
+        app.sync_lsp_for_focused_buffer();
+        let edited = started.elapsed();
+        let started = Instant::now();
+        let _ = app.focused_layout(60);
+        let laid = started.elapsed();
+        println!("open with own lenses {first:?}; 5000 server lenses laid out {answered:?}; an edit's sync {edited:?}; a frame's 60 rows {laid:?}; rows {}", app.virtual_rows[&app.focused_buffer_id()].len());
+        // The same lenses unresolved, answered twice: the second carries
+        // the first's titles over by place.
+        let unresolved: Vec<serde_json::Value> = (0..5_000).map(|i| lens_json(i * 4 + 1, None)).collect();
+        app.refresh_lenses(&key);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..60]);
+        for _ in 0..2 {
+            app.lsp_sessions.get_mut(&key).unwrap().lenses.values_mut().for_each(|d| d.due = Some(Instant::now()));
+            app.sync_lsp_for_focused_buffer();
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            let started = Instant::now();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+            println!("5000 unresolved lenses answered (titles carried) {:?}", started.elapsed());
+        }
+        // A Python class of 5 000 tests: Fenix's own found.
+        let text = format!("class TestBig:\n{}", (0..5_000).map(|i| format!("    def test_{i}(self):\n        x()\n\n\n")).collect::<String>());
+        let path = dir.write("test_big.py", &text);
+        let started = Instant::now();
+        let found = fenix_tasks::test_lines(&path, &text, dir.path());
+        println!("a Python class of 5000 tests, 20 000 lines: {} found in {:?}", found.len(), started.elapsed());
+    }
+
+    #[test]
+    fn code_lens_is_off_by_default_and_asks_nothing() {
+        let (_dir, mut app, _path, key) = semantic_fixture("lens_off_default");
+        app.lsp_sessions.get_mut(&key).unwrap().capabilities = Some(lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_lenses();
+        assert!(!app.lsp_sessions[&key].pending.values().any(|p| matches!(p, PendingLspRequest::CodeLens { .. })));
+        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().code_lens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(false, true).text_document.unwrap().code_lens.is_some());
+    }
+
+    #[test]
+    fn lenses_are_asked_laid_out_above_their_lines_and_resolved_in_view() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_ask");
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, None), lens_json(1, Some("1 reference"))]));
+        assert_eq!(lens_rows_of(&app), vec![(0, "▶ Run | …".to_string()), (1, "1 reference".to_string())]);
+        let pane = app.focused_pane_id();
+        assert_eq!(app.row_cols(pane, app.focused_buffer_id()), Some(rows::UNBOUNDED), "the pane goes by rows");
+        // In view: the one without a command resolved.
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let (rid, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::CodeLensResolve { index: 1, .. }), "{pending:?}");
+        answer(&mut app, &key, rid, lens_json(0, Some("Debug")));
+        assert_eq!(lens_rows_of(&app)[0].1, "▶ Run | Debug");
+        // A line added above: the rows move with it at once.
+        app.test_insert_str("// a\n");
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [1, 2]);
+        assert!(app.lens_wake().is_some(), "asked again after the pause");
+    }
+
+    #[test]
+    fn two_servers_lenses_share_a_row_and_one_stopping_takes_its_own_away() {
+        let dir = TempDir::new("lens_two");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let primary = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        let extra = install_server(&mut app, &path, LspServer::Additional("kiln".into()), "kiln", &["rust"], lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_lenses();
+        let (a, _) = only_pending(&app, &primary);
+        let (b, _) = only_pending(&app, &extra);
+        answer(&mut app, &extra, b, serde_json::json!([lens_json(0, Some("kiln"))]));
+        answer(&mut app, &primary, a, serde_json::json!([lens_json(0, Some("ra"))]));
+        assert_eq!(lens_rows_of(&app), vec![(0, "ra | kiln".to_string())], "the primary's first");
+        app.stop_lsp_session(&extra);
+        app.ask_due_lenses();
+        assert_eq!(lens_rows_of(&app), vec![(0, "ra".to_string())]);
+        // Turned off: every row goes, the pane back to a row a line.
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+        assert_eq!(app.row_cols(app.focused_pane_id(), app.focused_buffer_id()), None);
+    }
+
+    #[test]
+    fn a_stale_lens_answer_is_let_go_and_a_refresh_asks_as_it_s_drawn() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_stale");
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("old"))]));
+        assert!(lens_rows_of(&app).is_empty(), "of other text");
+        let generation = app.lsp_sessions[&key].generation;
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(3), method: "workspace/codeLens/refresh".into(), params: serde_json::Value::Null });
+        let buffer = app.focused_buffer_id();
+        // Due now, the stale answer having been let go; then drawn.
+        let canonical = app.lens_of[&buffer].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = None;
+        app.ask_due_lenses();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "not until drawn");
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::CodeLens { .. }));
+    }
+
+    /// `lens_fixture` with one lens answered on each of `lines`, none
+    /// resolved: its app, path, server and the document's canonical path.
+    fn lens_answered(name: &str, text: &str, lines: &[u32]) -> (TempDir, App, PathBuf, LspKey, PathBuf) {
+        let (dir, mut app, path, key) = lens_fixture(name);
+        app.test_insert_str(text);
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::Value::Array(lines.iter().map(|&l| lens_json(l, None)).collect()));
+        (dir, app, path, key, canonical)
+    }
+
+    fn resolves_out(app: &App, key: &LspKey) -> Vec<i64> {
+        app.lsp_sessions[key].pending.iter().filter(|(_, p)| matches!(p, PendingLspRequest::CodeLensResolve { .. })).map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn a_resolve_that_comes_to_nothing_isn_t_sent_again_until_the_next_answer() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_resolve_once", "a\nb\nc\n", &[0, 1, 2]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        assert_eq!(out.len(), 3);
+        // An error, null, and a lens still without a command.
+        answer_error(&mut app, &key, out[0], -32603);
+        answer(&mut app, &key, out[1], serde_json::Value::Null);
+        answer(&mut app, &key, out[2], lens_json(2, None));
+        for _ in 0..50 {
+            app.note_lens_view(buffer, &[0..5]);
+            app.ask_due_lenses();
+        }
+        assert!(resolves_out(&app, &key).is_empty(), "tried, whatever came back");
+        // A resolve left unanswered: cancelled after the timeout, tried.
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().tried.clear();
+        app.note_lens_view(buffer, &[0..1]);
+        assert_eq!(resolves_out(&app, &key).len(), 1);
+        assert!(app.lens_wake().is_some(), "woken for its timeout");
+        let doc = app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap();
+        for (_, at) in doc.resolving.values_mut() {
+            *at -= Duration::from_secs(11);
+        }
+        app.ask_due_lenses();
+        assert!(resolves_out(&app, &key).is_empty());
+        app.note_lens_view(buffer, &[0..1]);
+        assert!(resolves_out(&app, &key).is_empty(), "not again until the next answer");
+    }
+
+    #[test]
+    fn no_more_than_sixteen_resolves_are_out_from_a_server() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_cap", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..10, 20..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16, "still sixteen");
+        // Not those in a fold: only the runs shown.
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_fold", "a\nb\nc\nd\n", &[0, 1, 2, 3]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..1, 3..4]);
+        let asked: Vec<usize> = app.lsp_sessions[&key].pending.values().filter_map(|p| match p {
+            PendingLspRequest::CodeLensResolve { index, .. } => Some(*index),
+            _ => None,
+        }).collect();
+        assert_eq!(asked.iter().copied().collect::<std::collections::BTreeSet<_>>(), [0, 3].into());
+    }
+
+    #[test]
+    fn resolves_of_an_answer_let_go_are_cancelled_so_no_more_than_sixteen_are_ever_out() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_superseded", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        let unresolved: Vec<serde_json::Value> = (0..40).map(|l| lens_json(l, None)).collect();
+        for _ in 0..4 {
+            app.note_lens_view(buffer, &[0..40]);
+            assert!(resolves_out(&app, &key).len() <= 16, "{}", resolves_out(&app, &key).len());
+            // Asked again (a refresh) and answered; the resolves never are.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..40]);
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+        }
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+    }
+
+    #[test]
+    fn a_carried_title_whose_resolve_comes_to_nothing_isn_t_shown_to_be_run() {
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_carry_fails", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "carried");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::Value::Null);
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())], "nothing to click, its row kept");
+    }
+
+    #[test]
+    fn a_resolved_title_stays_on_show_through_the_next_answer_until_it_s_resolved_again() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_carry", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())]);
+        // Asked again (a refresh): the same lens, unresolved.
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let (id, _) = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, p)| (*id, p.clone())).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "not back to …");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        assert_eq!(out.len(), 1, "resolved again all the same");
+        // Resolved to an empty title: its row stays, so the text doesn't move.
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "", "command": "x.run"}}));
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())]);
+        let _ = canonical;
+    }
+
+    #[test]
+    fn a_timeout_after_a_good_answer_is_asked_once_more_again() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_timeout_again", "a\n", &[0]);
+        let back = |app: &mut App| {
+            let doc = app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap();
+            if let Some((_, at)) = doc.asked.as_mut() {
+                *at -= Duration::from_secs(11);
+            }
+        };
+        let asks = |app: &App| app.lsp_sessions[&key].pending.values().filter(|p| matches!(p, PendingLspRequest::CodeLens { .. })).count();
+        let buffer = app.focused_buffer_id();
+        for round in 0..2 {
+            // Asked (a refresh, drawn), timed out: asked once more.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..1]);
+            app.ask_due_lenses();
+            assert_eq!(asks(&app), 1, "round {round}");
+            back(&mut app);
+            app.ask_due_lenses();
+            app.ask_due_lenses();
+            assert_eq!(asks(&app), 1, "round {round}: asked once more");
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("ok"))]));
+        }
+    }
+
+    #[test]
+    fn refusals_are_asked_again_a_few_times_then_not_until_an_edit() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_refusals");
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        let mut asked = 0;
+        for _ in 0..12 {
+            app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due.iter_mut().for_each(|d| *d = Instant::now());
+            app.ask_due_lenses();
+            if let Some(id) = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id) {
+                asked += 1;
+                answer_error(&mut app, &key, id, -32801);
+            }
+        }
+        assert_eq!(asked, code_lens::MAX_REFUSALS as usize);
+        assert!(app.lens_wake().is_none(), "quiet");
+        // The semantic side the same.
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refusals");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        let mut asked = 0;
+        for _ in 0..12 {
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due.iter_mut().for_each(|d| *d = Instant::now());
+            app.ask_due_semantic_tokens();
+            if let Some(id) = app.lsp_sessions[&key].pending.keys().next().copied() {
+                asked += 1;
+                answer_error(&mut app, &key, id, -32801);
+            }
+        }
+        assert_eq!(asked, code_lens::MAX_REFUSALS as usize);
+        assert!(app.semantic_wake().is_none());
+    }
+
+    #[test]
+    fn lenses_follow_an_agent_s_edit_go_with_their_language_left_out_and_with_their_buffer() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_follow", "a\nb\n", &[1]);
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [1]);
+        // An agent's edit, a line above: laid out again in the next frame.
+        let session = app.lsp_sessions.get_mut(&key).unwrap();
+        let (count, version) = session.open_documents[&canonical];
+        let text = format!("x\n{}", session.synced_text[&canonical]);
+        record_lsp_sync(session, &canonical, &text, count + 1, version + 1, semantic::SemanticSync::Follow, semantic::SemanticSync::Follow);
+        app.ask_due_lenses();
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [2]);
+        // Its language left out: the rows go at once.
+        app.config.set_value("lsp.code_lens_off", Some(fenix_config::Value::List(vec!["Rust".into()])));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+        // Closed: nothing kept for it.
+        let (_dir, mut app, _path, _key, _canonical) = lens_answered("lens_close", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        assert!(app.virtual_rows.contains_key(&buffer));
+        app.buffers.close(buffer);
+        app.ask_due_lenses();
+        assert!(!app.virtual_rows.contains_key(&buffer) && !app.lens_rows.contains_key(&buffer));
+    }
+
+    #[test]
+    fn a_lens_row_is_cut_to_the_pane_and_its_indent_kept_in_view() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_fit");
+        app.test_insert_str(&format!("{}fn deep() {{}}\n", " ".repeat(60)));
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("12 references")), lens_json(0, Some("3 implementations")), lens_json(0, Some(&"y".repeat(5000)))]));
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 40);
+        let map = app.focused_layout(4).map;
+        let row = map.row(0).unwrap();
+        assert!(matches!(row.kind, rows::RowKind::Virtual(_)));
+        let rows::RowKind::Virtual(i) = row.kind else { unreachable!() };
+        let lead = rows::virtual_row_lead(app.open(), 0, &app.tab_stops_for(app.focused_buffer_id()), 40);
+        assert_eq!(lead, 20, "half the pane at most");
+        assert_eq!(map.virtual_text(i), "12 references …", "whole titles that fit, then …");
+    }
+
+    #[test]
+    fn semantic_tokens_are_neither_asked_nor_drawn_with_the_setting_off_or_the_language_left_out() {
+        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(true, false).text_document.unwrap().semantic_tokens.is_some());
+        for (key, value) in [("lsp.semantic_highlighting", fenix_config::Value::Bool(false)), ("lsp.semantic_highlighting_off", fenix_config::Value::List(vec!["Rust".into()]))] {
+            let (_dir, mut app, _path, server) = semantic_fixture("semantic_off");
+            let grammar = colour_at(&mut app, 16);
+            app.ask_due_semantic_tokens();
+            let (id, _) = only_pending(&app, &server);
+            answer(&mut app, &server, id, serde_json::json!({"data": MAIN_AND_X}));
+            app.config.set_value(key, Some(value));
+            assert_eq!(colour_at(&mut app, 16), grammar, "{key}: the grammar's alone");
+            // And after an edit, nothing kept or asked.
+            app.test_insert_str(" ");
+            app.sync_lsp_for_focused_buffer();
+            assert!(app.lsp_sessions[&server].semantic.is_empty(), "{key}");
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_come_from_the_first_server_offering_them_and_a_refresh_asks_again() {
+        let dir = TempDir::new("semantic_two");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() { let x = 1; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let primary = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], capabilities(serde_json::json!({"textDocumentSync": 2})));
+        let extra = install_server(&mut app, &path, LspServer::Additional("kiln".into()), "kiln", &["rust"], semantic_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&primary].pending.is_empty(), "it offers none");
+        let (id, _) = only_pending(&app, &extra);
+        answer(&mut app, &extra, id, serde_json::json!({"data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
+        // Its refresh: asked again.
+        let generation = app.lsp_sessions[&extra].generation;
+        app.apply_lsp_event(extra.clone(), generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(7), method: "workspace/semanticTokens/refresh".into(), params: serde_json::Value::Null });
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&extra].pending.is_empty(), "not until it's drawn");
+        let _ = colour_at(&mut app, 16);
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &extra).1, PendingLspRequest::SemanticTokens { .. }));
+        // Both offering them: the first only.
+        app.lsp_sessions.get_mut(&primary).unwrap().capabilities = Some(semantic_capabilities());
+        assert_eq!(app.semantic_server(&path), Some(primary));
     }
 
     #[test]
@@ -36988,7 +38618,7 @@ FIVE
 ").unwrap();
         app.reload_buffers_changed_on_disk();
         assert_eq!(app.vim.mode(), Mode::Normal);
-        assert!(app.visual_selection_segments(10).is_empty());
+        assert!(app.visual_selection_segments(0..10).is_empty());
     }
 
     #[test]

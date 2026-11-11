@@ -552,7 +552,7 @@ impl App {
                     let scroll_line = pane.scroll_line.min(buffer.visual_line_count().saturating_sub(1));
                     pane_states.insert(id, PaneState {
                         cursor: Cursor { char_idx: pane.cursor.min(buffer.len_chars()), sticky_col: pane.sticky_col.min(1_000_000) },
-                        scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
+                        scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000), scroll_row: 0,
                     });
                 }
                 workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: workspace.agent_thread.map(fenix_acp::hub::ThreadId) });
@@ -914,7 +914,7 @@ mod tests {
         let original_panes = tree.windows();
         let mut workspace = Workspace::new("Writing".into(), tree, Cursor::at_start());
         for pane in &original_panes {
-            workspace.pane_states.insert(*pane, PaneState { cursor: Cursor { char_idx: 8, sticky_col: 2 }, scroll_line: 1, rendered_scroll: 1.0, scroll_col: 3 });
+            workspace.pane_states.insert(*pane, PaneState { cursor: Cursor { char_idx: 8, sticky_col: 2 }, scroll_line: 1, rendered_scroll: 1.0, scroll_col: 3, scroll_row: 0 });
         }
         app.workspaces.workspaces = vec![workspace];
         let frame = app.test_add_frame(id);

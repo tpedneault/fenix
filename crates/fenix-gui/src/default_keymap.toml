@@ -140,6 +140,11 @@ label = "line numbers"
 command = "view.cycle_line_numbers"
 
 [[leader]]
+keys = "SPC t w"
+label = "wrap long lines"
+command = "view.toggle_wrap"
+
+[[leader]]
 keys = "SPC t p"
 label = "pick theme"
 command = "view.pick_theme"
@@ -842,6 +847,11 @@ command = "code.undo_refactor"
 keys = "SPC c i"
 label = "implementations (LSP)"
 command = "code.implementations"
+
+[[leader]]
+keys = "SPC c l"
+label = "code lens on this line"
+command = "code.lens"
 
 [[leader]]
 keys = "SPC c h"
@@ -1618,6 +1628,12 @@ when = "text"
 [[keys]]
 keys = "C-/"
 command = "code.toggle_comment"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-z"
+command = "view.toggle_wrap"
 scheme = "standard"
 when = "text"
 

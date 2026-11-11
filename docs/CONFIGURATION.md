@@ -189,6 +189,11 @@ variable = "#c0caf5"
 operator = "#89ddff"
 punctuation = "#89ddff"
 attribute = "#e0af68"
+# What only a language server tells apart (lsp.semantic_highlighting);
+# left out: type's, variable's and function's colours.
+# interface = "#e0af68"   # an interface or trait
+# parameter = "#ff9e64"   # a function's parameter
+# macro = "#89ddff"       # a macro
 
 [explorer]
 folder = "#7aa2f7"
@@ -458,6 +463,9 @@ when it's out of date).
 | **Editor** | | | |
 | `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts; Fenix always indents with spaces. *A project can set it.* |
 | `editor.tab_width` | 1–16 | 8 | Columns a tab character already in a file takes up. *A project can set it.* |
+| `editor.wrap` | true / false | off | A line wider than its pane goes on under itself, at the pane's width; SPC t w (Alt+Z with standard keys) turns it on or off for one buffer until it's closed or Fenix restarts. Not tables, diffs, Git pages, terminals or a side by side. |
+| `editor.wrap_languages` | a list | markdown, text | Languages whose lines wrap whatever Wrap long lines says (markdown; text for .txt and .text files). |
+| `editor.nowrap_languages` | a list | none | Languages whose lines never wrap unless SPC t w says so: over Wrap long lines and the list of those that do. |
 | `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
@@ -543,6 +551,11 @@ when it's out of date).
 | `diagnostics.inline` | all / errors / off | all | Problems from language servers are underlined in the text, with a dot in the gutter. SPC t d cycles it. |
 | `diagnostics.message` | cursor / all / off | cursor | Which lines show their problem's message at the end: the cursor's line, every line, or none. |
 | `diagnostics.delay_ms` | 0–5000 | 400 | Milliseconds after you stop typing in Insert before new problems are drawn. |
+| `lsp.semantic_highlighting` | true / false | on | Code is coloured by what its language server knows (a parameter apart from a local, a macro apart from a function), over the grammar's colours, where the server offers it. Applies to servers started after it's changed (SPC q r). |
+| `lsp.semantic_highlighting_off` | a list | none | Languages whose files keep the grammar's colours alone, whatever Colours from language servers says. |
+| `lsp.code_lens` | true / false | off | What a language server offers for a function or test, on a row of its own above it (Run, Debug, 3 references), dimmed. Off for now: while a file has lenses its pane snaps rather than easing, and sticky scroll is off. Turned off, every lens goes in the next frame. Turned on, each file is asked at its next sync; a server started while it was off learns that Fenix takes its refreshes only once it's restarted (SPC q r). |
+| `lsp.code_lens_off` | a list | none | Languages whose files show no code lenses, whatever Code lens says. |
+| `lsp.code_lens_tests` | true / false | on | With Code lens on: a ▶ Run test lens over each test Fenix can run alone (a Rust #[test], a pytest test, a Go TestXxx) where the language server offers none, with or without a language server; it runs only in a trusted project. So with Code lens on, a file of tests goes by rows (it snaps, and sticky scroll is off) though no server offers lenses. |
 | `lsp.servers` | language = command | – | A language server to run for a language, as the command line that starts it. |
 | `debug.trail_stops` | 1–10000 | 200 | How many of a debug session's stops the Ember Trail keeps, oldest first to go. Kept in memory only. |
 | **Git** | | | |

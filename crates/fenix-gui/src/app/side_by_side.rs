@@ -14,7 +14,7 @@ use super::*;
 use fenix_diff::{Alignment, BlockKind, Side};
 
 /// A filler row in a pane's display lines: no buffer line, blank space.
-pub(crate) const FILLER: usize = usize::MAX;
+pub(crate) const FILLER: usize = super::rows::NO_LINE;
 
 /// `lines` (a pane's display lines, folds applied) with filler rows
 /// inserted: `fillers` is (before which buffer line, how many). A filler
@@ -103,6 +103,11 @@ impl App {
     fn side_by_side_at(&self, pane: fenix_window::WindowId) -> Option<&SideBySide> {
         let here = self.workspaces.active_index();
         self.side_by_sides.iter().find(|s| s.workspace == here && s.side_of(pane).is_some())
+    }
+
+    /// Whether `pane` is one side of a side by side.
+    pub(super) fn is_side_by_side_pane(&self, pane: fenix_window::WindowId) -> bool {
+        self.side_by_side_at(pane).is_some()
     }
 
     /// A pane's display lines: its buffer's lines with folds applied,
@@ -497,6 +502,21 @@ mod tests {
 
     fn live_text(app: &App) -> String {
         app.buffers.get(app.side_by_sides[0].live_buffer).unwrap().buffer.text()
+    }
+
+    #[test]
+    fn a_side_by_side_never_wraps_and_turning_wrap_says_why() {
+        let (_repo, mut app) = opened("wrap_sbs", |app| {
+            app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+        });
+        let s = &app.side_by_sides[0];
+        let (live, buffer) = (s.live_pane, s.live_buffer);
+        assert!(app.buffer_wraps(buffer), "the setting says wrap");
+        assert_eq!(app.wrap_cols(live, buffer), None, "but not beside a ref");
+        app.windows_mut().focus(live);
+        app.run_cmd("view.toggle_wrap");
+        let said = app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+        assert_eq!(said, "Lines don't wrap in a side by side");
     }
 
     #[test]

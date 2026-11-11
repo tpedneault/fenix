@@ -175,6 +175,8 @@ pub(crate) struct GeoPane {
     pub scroll_col: usize,
     pub rows: usize,
     pub focused: bool,
+    /// A code pane's rows as drawn: where a line and column are.
+    pub map: Option<super::rows::RowMap>,
 }
 
 /// Where things were on screen in the last frame.
@@ -257,6 +259,14 @@ impl Geometry {
             Anchor::Text((id, line, col)) => {
                 let pane = self.pane(id)?;
                 let (line, col) = (line as usize, col as usize);
+                // A code pane's: through its rows (a fold, a wrapped line).
+                if let Some(map) = &pane.map {
+                    let (row, x) = map.locate(line, col)?;
+                    if row >= pane.rows || col < pane.scroll_col {
+                        return None;
+                    }
+                    return Some((pane.text_x + (x as f32 + place.x) * cw, pane.text_y + (row as f32 + place.y) * lh));
+                }
                 if line < pane.base_line || line >= pane.base_line + pane.rows || col < pane.scroll_col {
                     return None;
                 }
@@ -558,7 +568,7 @@ mod tests {
             cell: (10.0, 20.0),
             window: (800.0, 600.0),
             modeline_top: 580.0,
-            panes: vec![GeoPane { id: 7, rect: fenix_window::Rect { x: 0.0, y: 40.0, w: 800.0, h: 540.0 }, text_x: 50.0, text_y: 44.0, base_line: 10, scroll_col: 0, rows: 20, focused: true }],
+            panes: vec![GeoPane { id: 7, rect: fenix_window::Rect { x: 0.0, y: 40.0, w: 800.0, h: 540.0 }, text_x: 50.0, text_y: 44.0, base_line: 10, scroll_col: 0, rows: 20, focused: true, map: None }],
             caret: Some((90.0, 104.0)),
         }
     }

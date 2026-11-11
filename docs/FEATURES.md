@@ -121,6 +121,22 @@ its extension. The rest is built into Fenix.
   Vim. Folds come from the syntax tree (a grammar's `folds.scm`), or from
   the indentation in a file with none; they're kept with the session.
   `editor.fold_markers` turns the column off.
+- **Soft wrap**: a line wider than its pane goes on under itself, broken
+  after the last word that fits (inside a word only when the word alone
+  is wider), at the pane's real width, so a resize or a split wraps again;
+  each row keeps its last column for the cursor, so a line exactly as wide
+  as the pane takes two rows. A continuation row keeps the line's indent
+  (at most half the pane); the line number, gutter marks and fold marker
+  are on its first row, a problem's message and a fold's `⋯ N lines` at
+  the end of its last. `SPC t w` (`Alt+Z` with standard keys) turns it on
+  or off for the buffer in front, until it's closed or Fenix restarts (it
+  isn't kept with the session); `editor.wrap` is the default, Markdown,
+  `.txt` and `.text` files wrap whatever it says (`editor.wrap_languages`,
+  `editor.nowrap_languages`), and an agent's prompt wraps by default. `gj` /
+  `gk` move by screen rows, as `↑` / `↓` do with standard keys and in
+  Insert, where `End` stops first after the row's last word (or on its
+  last char, when the row ends inside a word). Tables, diffs, Git pages, terminals, pages, Home and a side by
+  side never wrap.
 - **Code screenshots** (`SPC c s`): the Visual selection's lines, or the
   whole file (500 lines at most), as a picture in the theme's syntax
   colours and your font, drawn on the CPU: a window with rounded corners,
@@ -167,6 +183,43 @@ its extension. The rest is built into Fenix.
   between a syntax capture and the glyph it becomes, several of them
   shared by every other language's own highlighting, for a purely
   cosmetic gain on one language -- more risk than the result was worth.
+- **Colours from language servers** (semantic highlighting,
+  `lsp.semantic_highlighting`, on): where a file's language server
+  offers semantic tokens, code is coloured by what it knows, over the
+  grammar's colours. That tells apart a parameter from a local, a macro
+  from a function, an interface or trait from a type, and a constant
+  from a variable; a mutable name is underlined. The grammar colours a
+  file at once and the server's colours land on top when they arrive.
+  While you type, the colours move with the edit until the server
+  answers again, about a quarter of a second after you pause. Comments
+  and strings keep the grammar's colours, except where the server marks
+  code it has left out (an inactive `#if`), which greys as a comment.
+  - Only the first of a file's servers that offers tokens is asked.
+  - A file over 10 000 lines or 1 MiB is asked only for the lines in
+    view, when its server answers that way. A file over 50 000 lines
+    whose server can't answer for a range gets no server colours.
+  - Themes may name `syntax.interface`, `syntax.parameter` and
+    `syntax.macro`; every built-in theme does.
+  - `lsp.semantic_highlighting_off` lists languages that keep the
+    grammar's colours alone.
+- **Code lens** (`lsp.code_lens`, off for now): what a file's language
+  servers offer for a function, a test or a type, on a dimmed row of its
+  own above it ("▶ Run | Debug", "3 references"). A click on one runs
+  it, and `SPC c l` runs the cursor line's, or lists them to choose from.
+  - Each runs as the server says: a command the server runs, the
+    references list, or rust-analyzer's `cargo` run in Task Output.
+  - Fenix says plainly when it can't run one; debugging from a lens
+    isn't there yet.
+  - Fenix offers its own "▶ Run test" over a Rust `#[test]`, a pytest
+    test or a Go `TestXxx` where the server gives no run lens, with or
+    without a language server (`lsp.code_lens_tests`), run as `SPC p r`
+    runs it, in a trusted project. So with code lens on, a file of tests
+    snaps a row at a time without sticky scroll, as any file with lenses
+    does.
+  - Lenses move with your edits and are refreshed after you pause.
+  - `lsp.code_lens_off` lists languages that show none.
+  - While a file has lenses, its pane snaps a row at a time rather than
+    easing, and sticky scroll is off.
 - **Bracket pairs by colour** (`appearance.rainbow_brackets`, off
   unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
   it's nested, a pair the same colour. They're the code's own brackets,

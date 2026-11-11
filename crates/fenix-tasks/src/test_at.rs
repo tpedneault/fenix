@@ -30,6 +30,23 @@ pub fn test_at(path: &Path, text: &str, line: usize, root: &Path) -> Result<Task
     }
 }
 
+/// The lines (0-based) of `text` (the file at `path`, of the project at
+/// `root`) that declare a test `test_at` can run alone: where Fenix's own
+/// "Run test" lens goes.
+pub fn test_lines(path: &Path, text: &str, root: &Path) -> Vec<usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let python: std::collections::HashSet<usize> = if extension == "py" { python_test_lines(&lines).into_iter().collect() } else { Default::default() };
+    (0..lines.len())
+        .filter(|&i| match extension {
+            "rs" => rust_fn_name(lines[i]).is_some() && rust_is_test(&lines, i),
+            "py" => python.contains(&i),
+            "go" => lines[i].starts_with("func Test") && go_test(path, &lines, i, root).is_ok(),
+            _ => false,
+        })
+        .collect()
+}
+
 fn no_test(path: &Path, at: usize) -> String {
     format!("line {} of {} isn't in a test", at + 1, file_name(path))
 }
@@ -251,6 +268,37 @@ fn python_def(line: &str, keyword: &str) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// The lines `python_test` takes for a test of its own (a `def` or a
+/// `class`), found in one pass: the blocks around each line kept as it
+/// goes, as `python_test` finds them walking up -- each line indented
+/// less than everything after it.
+fn python_test_lines(lines: &[&str]) -> Vec<usize> {
+    let mut around: Vec<(usize, Option<(bool, String)>)> = Vec::new();
+    let mut found = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent = indent_of(line);
+        while around.last().is_some_and(|(at, _)| *at >= indent) {
+            around.pop();
+        }
+        let declares = python_def(line, "def").map(|n| (false, n)).or_else(|| python_def(line, "class").map(|n| (true, n)));
+        around.push((indent, declares.clone()));
+        if declares.is_none() {
+            continue;
+        }
+        // Outermost first: its classes, and its outermost `def` alone (a
+        // function inside another runs as the outer one).
+        let mut def_seen = false;
+        let all_tests = around.iter().filter_map(|(_, d)| d.as_ref()).filter(|(is_class, _)| *is_class || !std::mem::replace(&mut def_seen, true)).all(|(is_class, name)| if *is_class { name.starts_with("Test") } else { name.starts_with("test") });
+        if all_tests {
+            found.push(i);
+        }
+    }
+    found
+}
+
 fn python_test(path: &Path, lines: &[&str], at: usize, root: &Path) -> Result<TaskDef, String> {
     // The `def`s and `class`es the line is in, innermost first: walking
     // up, each line indented less than everything since is the block
@@ -326,6 +374,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn python_test_lines_are_those_python_test_takes_found_in_one_pass() {
+        let py = "import x\n\nclass TestA:\n    def test_one(self):\n        def inner():\n            pass\n    def helper(self):\n        pass\n\n    # a comment\n    async def test_two(self):\n        pass\n\nif True:\n    def test_cond():\n        pass\n\ndef test_top():\n    def test_inner():\n        pass\n\nclass Other:\n    def test_x(self):\n        pass\n    class TestNested:\n        def test_y(self):\n            pass\n";
+        let lines: Vec<&str> = py.lines().collect();
+        let walked: Vec<usize> = (0..lines.len())
+            .filter(|&i| (python_def(lines[i], "def").is_some() || python_def(lines[i], "class").is_some()) && python_test(Path::new("/p/t.py"), &lines, i, Path::new("/p")).is_ok())
+            .collect();
+        assert_eq!(python_test_lines(&lines), walked);
+        assert!(!walked.is_empty());
+    }
+
+    #[test]
+    fn a_file_s_test_lines_are_those_declaring_one() {
+        let rust = "fn helper() {}\n\n#[test]\nfn adds() {}\n\n#[cfg(test)]\nmod tests {\n    #[tokio::test]\n    async fn waits() {}\n}\n";
+        assert_eq!(test_lines(Path::new("/p/src/lib.rs"), rust, Path::new("/p")), [3, 8]);
+        let py = "def helper():\n    pass\n\ndef test_adds():\n    pass\n\nclass TestThings:\n    def test_one(self):\n        pass\n";
+        assert_eq!(test_lines(Path::new("/p/test_x.py"), py, Path::new("/p")), [3, 6, 7]);
+        let go = "package x\n\nfunc Add() {}\n\nfunc TestAdd(t *testing.T) {}\n";
+        assert_eq!(test_lines(Path::new("/p/x_test.go"), go, Path::new("/p")), [4]);
+        assert!(test_lines(Path::new("/p/a.txt"), "x", Path::new("/p")).is_empty());
     }
 
     const LIB: &str = r#"pub fn add(a: i32, b: i32) -> i32 {

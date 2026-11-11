@@ -240,6 +240,7 @@ impl App {
             .iter()
             .enumerate()
             .take(rows + 1)
+            .filter(|(_, &line)| line != super::rows::NO_LINE)
             .filter_map(|(row, line)| heat.get(&(line + 1)).map(|&(w, this)| (row, if this { [er, eg, eb, w] } else { [mr, mg, mb, w] })))
             .collect()
     }

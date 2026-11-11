@@ -341,6 +341,9 @@ pub(crate) struct WasmHost {
     /// Their decorations of buffers (`decorations-set`), by buffer and
     /// whose.
     pub(crate) decorations: HashMap<BufferId, Vec<(String, Vec<crate::decorations::Decoration>)>>,
+    /// Bumped whenever `decorations` changes: what a copy of them is
+    /// known fresh by.
+    pub(crate) decorations_rev: u64,
     /// Their rules for decorating files (`decoration-rules-set`), by
     /// whose; and, by buffer, what was last applied: its edit count, and
     /// the rules' `rules_given` then.
@@ -843,6 +846,7 @@ impl App {
         wasm.stale.remove(ext);
         wasm.scratches.retain(|_, s| s.ext != ext);
         let by_rule = rules_key(ext);
+        wasm.decorations_rev += 1;
         for sets in wasm.decorations.values_mut() {
             sets.retain(|(e, _)| e != ext && *e != by_rule);
         }
@@ -1464,6 +1468,7 @@ impl App {
         // again as it starts.
         self.wasm.scratches.retain(|_, s| s.ext != ext);
         let by_rule = rules_key(ext);
+        self.wasm.decorations_rev += 1;
         for sets in self.wasm.decorations.values_mut() {
             sets.retain(|(e, _)| e != ext && *e != by_rule);
         }
@@ -2019,6 +2024,7 @@ impl App {
         let Some(ob) = self.buffers.get_mut(buffer) else { return };
         ob.buffer.track_anchors();
         let edits = ob.buffer.take_anchor_edits();
+        self.wasm.decorations_rev += 1;
         let sets = self.wasm.decorations.entry(buffer).or_default();
         for (_, set) in sets.iter_mut() {
             crate::decorations::shift(set, &edits);
@@ -2029,6 +2035,7 @@ impl App {
             sets.push((ext.to_string(), new));
         }
         if sets.is_empty() {
+            self.wasm.decorations_rev += 1;
             self.wasm.decorations.remove(&buffer);
         }
         self.request_window_redraw();
@@ -2260,14 +2267,26 @@ impl App {
     /// a closed buffer's gone.
     pub(crate) fn shift_code_decorations(&mut self) {
         let buffers = &mut self.buffers;
+        // Moved only when there were edits, or a buffer went: then the
+        // copies moves by row keep are stale (`decorations_rev`).
+        let mut changed = false;
         self.wasm.decorations.retain(|id, sets| {
-            let Some(ob) = buffers.get_mut(*id) else { return false };
+            let Some(ob) = buffers.get_mut(*id) else {
+                changed = true;
+                return false;
+            };
             let edits = ob.buffer.take_anchor_edits();
+            if !edits.is_empty() && !sets.is_empty() {
+                changed = true;
+            }
             for (_, set) in sets.iter_mut() {
                 crate::decorations::shift(set, &edits);
             }
             true
         });
+        if changed {
+            self.wasm.decorations_rev += 1;
+        }
     }
 
     /// The extensions' rules for decorating files, applied to each buffer on
@@ -2287,6 +2306,7 @@ impl App {
             self.wasm.ruled.insert(id, (count, given));
             let path = ob.buffer.path().filter(|_| ob.kind.tracks_unsaved_changes() && !self.wasm.sealed.contains(&id)).map(Path::to_path_buf);
             let small = ob.buffer.len_chars() <= MAX_RULED;
+            self.wasm.decorations_rev += 1;
             let sets = self.wasm.decorations.entry(id).or_default();
             for (ext, rules) in &self.wasm.rules {
                 let key = rules_key(ext);
@@ -2305,6 +2325,7 @@ impl App {
             // Those of rules taken away.
             sets.retain(|(e, _)| !e.ends_with(":#rules") || self.wasm.rules.contains_key(e.trim_end_matches(":#rules")));
             if sets.is_empty() {
+                self.wasm.decorations_rev += 1;
                 self.wasm.decorations.remove(&id);
             }
         }
@@ -2325,11 +2346,14 @@ impl App {
         let Some(window) = self.windows().windows().into_iter().find(|w| w.number() as u64 == pane.id) else { return false };
         let Some(&buffer) = self.windows().content(window) else { return false };
         let Some(sets) = self.wasm.decorations.get(&buffer).filter(|sets| sets.iter().any(|(_, set)| set.iter().any(|d| d.id.is_some()))) else { return false };
-        let display = self.pane_display_lines(window, buffer);
-        let base = display.iter().position(|&l| l >= pane.base_line).unwrap_or(0);
+        // On the rows it was drawn with: `base_line` is the display row at
+        // the pane's top, `scroll_col` the sideways scroll.
         let row = ((pos.1 - pane.text_y) / lh).floor() as usize;
-        let col = ((pos.0 - pane.text_x) / cw).floor() as usize + pane.scroll_col;
-        let Some(&line) = display.get(base + row) else { return false };
+        let map = match &pane.map {
+            Some(map) => map.clone(),
+            None => self.pane_rows(window, buffer, pane.base_line, self.pane_state(window).scroll_row, row + 1),
+        };
+        let Some((line, col)) = map.at(row, ((pos.0 - pane.text_x) / cw).floor() as usize) else { return false };
         let Some(ob) = self.buffers.get(buffer) else { return false };
         if line >= ob.buffer.line_count() {
             return false;
@@ -5654,7 +5678,7 @@ pub(crate) mod tests {
         app.wasm.layers.geometry = super::super::layers::Geometry {
             cell: (10.0, 20.0),
             window: (400.0, 400.0),
-            panes: vec![super::super::layers::GeoPane { id: window.number() as u64, rect, text_x: 0.0, text_y: 0.0, base_line: 0, scroll_col: 0, rows: 20, focused: true }],
+            panes: vec![super::super::layers::GeoPane { id: window.number() as u64, rect, text_x: 0.0, text_y: 0.0, base_line: 0, scroll_col: 0, rows: 20, focused: true, map: None }],
             ..Default::default()
         };
         assert!(!app.decoration_click((45.0, 5.0)), "on the text beside it");
@@ -5747,7 +5771,7 @@ pub(crate) mod tests {
         let (client, _) = fenix_lsp::LspClient::connect(from_server, to_server);
         app.lsp_sessions.insert(key.clone(), super::super::LspSession {
             generation: 1, client, name: "server".into(), languages: vec!["javascript".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(serde_json::from_value(caps).unwrap()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(serde_json::from_value(caps).unwrap()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         std::io::BufReader::new(from_fenix)
     }

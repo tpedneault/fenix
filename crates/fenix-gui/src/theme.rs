@@ -151,6 +151,12 @@ pub struct Theme {
     pub syntax_operator: glyphon::Color,
     pub syntax_punctuation: glyphon::Color,
     pub syntax_attribute: glyphon::Color,
+    /// What only a language server tells apart (semantic tokens): an
+    /// interface or trait, a parameter, a macro. A theme that doesn't
+    /// name them has the type's, the variable's and the function's.
+    pub syntax_interface: glyphon::Color,
+    pub syntax_parameter: glyphon::Color,
+    pub syntax_macro: glyphon::Color,
 
     /// File explorer: icon tint. Two-tone for v1 -- folders get their own
     /// accent since they're usually the most useful thing to spot at a
@@ -174,6 +180,26 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// A semantic token's colour, by its slot.
+    pub fn semantic_color(&self, slot: fenix_lsp::semantic::Slot) -> glyphon::Color {
+        use fenix_lsp::semantic::Slot;
+        match slot {
+            Slot::Type => self.syntax_type,
+            Slot::Interface => self.syntax_interface,
+            Slot::Parameter => self.syntax_parameter,
+            Slot::Variable => self.syntax_variable,
+            Slot::Constant => self.syntax_constant,
+            Slot::Function => self.syntax_function,
+            Slot::Macro => self.syntax_macro,
+            Slot::Keyword => self.syntax_keyword,
+            Slot::Comment => self.syntax_comment,
+            Slot::String => self.syntax_string,
+            Slot::Number => self.syntax_number,
+            Slot::Operator => self.syntax_operator,
+            Slot::Attribute => self.syntax_attribute,
+        }
+    }
+
     /// Resolves a tree-sitter capture name (e.g. `"function.method"`,
     /// `"constant.builtin"`) to a color, falling back to whichever
     /// `syntax_*` field its first `.`-segment names -- the same
@@ -443,6 +469,12 @@ struct Syntax {
     operator: ColorSpec,
     punctuation: ColorSpec,
     attribute: ColorSpec,
+    #[serde(default)]
+    interface: Option<ColorSpec>,
+    #[serde(default)]
+    parameter: Option<ColorSpec>,
+    #[serde(default, rename = "macro")]
+    macro_: Option<ColorSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -747,6 +779,9 @@ pub fn parse(text: &str) -> Result<Theme, String> {
         syntax_operator: f.syntax.operator.text("syntax.operator")?,
         syntax_punctuation: f.syntax.punctuation.text("syntax.punctuation")?,
         syntax_attribute: f.syntax.attribute.text("syntax.attribute")?,
+        syntax_interface: f.syntax.interface.as_ref().map(|c| c.text("syntax.interface")).transpose()?.unwrap_or(f.syntax.ty.text("syntax.type")?),
+        syntax_parameter: f.syntax.parameter.as_ref().map(|c| c.text("syntax.parameter")).transpose()?.unwrap_or(f.syntax.variable.text("syntax.variable")?),
+        syntax_macro: f.syntax.macro_.as_ref().map(|c| c.text("syntax.macro")).transpose()?.unwrap_or(f.syntax.function.text("syntax.function")?),
         icon_folder: f.explorer.folder.text("explorer.folder")?,
         icon_file: f.explorer.file.text("explorer.file")?,
         git_modified: f.git.modified.text("git.modified")?,
@@ -1120,6 +1155,46 @@ mod tests {
 
     fn named(name: &str) -> &'static Theme {
         by_name(name).unwrap_or_else(|| panic!("{name} ships"))
+    }
+
+    #[test]
+    fn every_built_in_theme_tells_apart_what_only_a_language_server_knows() {
+        for t in all() {
+            let new = [("parameter", t.syntax_parameter), ("interface", t.syntax_interface), ("macro", t.syntax_macro)];
+            let others = [
+                ("variable", t.syntax_variable),
+                ("constant", t.syntax_constant),
+                ("type", t.syntax_type),
+                ("function", t.syntax_function),
+                ("keyword", t.syntax_keyword),
+                ("string", t.syntax_string),
+                ("comment", t.syntax_comment),
+                ("text", t.fg),
+            ];
+            // Apart by at least 0.15 in RGB, each channel 0 to 1.
+            let distance = |a: glyphon::Color, b: glyphon::Color| {
+                let d = |x: u8, y: u8| (x as f32 - y as f32) / 255.0;
+                (d(a.r(), b.r()).powi(2) + d(a.g(), b.g()).powi(2) + d(a.b(), b.b()).powi(2)).sqrt()
+            };
+            for (i, (name, colour)) in new.iter().enumerate() {
+                for (other, c) in others.iter().chain(&new[i + 1..]) {
+                    let apart = distance(*colour, *c);
+                    assert!(apart >= 0.15, "{}: {name} only {apart:.3} from {other}", t.name);
+                }
+                let contrast = contrast_of(t.bg, rgba_of(*colour));
+                assert!(contrast >= 4.0, "{}: {name} at {contrast:.2}:1", t.name);
+            }
+            use fenix_lsp::semantic::Slot;
+            assert_eq!(t.semantic_color(Slot::Parameter), t.syntax_parameter);
+            assert_eq!(t.semantic_color(Slot::Type), t.syntax_type);
+        }
+    }
+
+    #[test]
+    fn a_theme_without_the_language_server_colours_falls_back_to_the_grammar_s() {
+        let text: String = include_str!("../themes/one-dark.toml").lines().filter(|l| !l.starts_with("interface =") && !l.starts_with("parameter =") && !l.starts_with("macro =")).map(|l| format!("{l}\n")).collect();
+        let t = parse(&text).unwrap();
+        assert_eq!((t.syntax_interface, t.syntax_parameter, t.syntax_macro), (t.syntax_type, t.syntax_variable, t.syntax_function));
     }
 
     #[test]

@@ -45,6 +45,7 @@ extension's keys come with it.
 | `Ctrl+/` | Comment or uncomment the line, or the selection's lines |
 | `Alt+↑` / `Alt+↓` | Move the line (or the selected lines) up / down |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | Copy it above / below |
+| `Alt+Z` | Wrap long lines in the buffer, or stop (as `SPC t w`) |
 | `Ctrl+G` | Go to a line |
 | `Ctrl+Shift+K` | Delete the line, or the selected lines (not to the clipboard) |
 | `Ctrl+Enter` / `Ctrl+Shift+Enter` | A new line below / above, indented, wherever the cursor is on the line |
@@ -191,6 +192,7 @@ keys'; the palette has the commands).
 | `SPC q q` | Quit |
 | `SPC q r` | Restart where you are (windows, files, unsaved text): extensions installed or switched on since start are loaded |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
+| `SPC t w` | Wrap long lines in the buffer, or stop (`editor.wrap`) |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
@@ -427,6 +429,7 @@ keys'; the palette has the commands).
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
 | `SPC c i` | Where the trait, interface or method under the cursor is implemented: jumped to, or listed when there are several (LSP) |
+| `SPC c l` | The code lenses on the cursor's line (Run, Debug, 3 references): the one there is run, or several listed to choose from. A click on a lens runs it too. Needs `lsp.code_lens` on (LSP). Standard keys have no chord for it: the palette's "Run a code lens on the cursor's line", or a click |
 | `SPC c h` | Who calls the function under the cursor, listed as `gr` lists references (LSP call hierarchy) |
 | `SPC c a` | Choose a code action and preview its edits (LSP) |
 | `SPC c f` | Indent region -- reindent the active Visual selection structurally, or (with an attached language server) reformat the whole document (LSP) |
@@ -501,6 +504,16 @@ keys'; the palette has the commands).
 
 The arrow keys are `h`, `j`, `k` and `l` wherever a motion is taken: with a
 count, extending a selection, after an operator (`d<Down>`).
+
+Where a buffer's long lines wrap (`SPC t w`), `j` and `k` still go a line
+at a time and `gj` / `gk` (or `g↓` / `g↑`) go a screen row, keeping the
+column on screen, with a count, in Visual and after an operator (`dgj`,
+charwise). With standard keys and in Insert, `↑` / `↓` go by screen
+rows; `Home` and `End` go to the row's start or end first, then the
+line's (`End` stops after the row's last word, or on its last char when
+the row ends inside a word); `PageUp` / `PageDown` go a pane of rows; the
+wheel scrolls by rows. Adding a cursor above or
+below (`Ctrl+Alt+↑/↓`) still goes by lines.
 
 ## The mouse
 

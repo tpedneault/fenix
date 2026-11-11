@@ -96,7 +96,7 @@ impl App {
         (0..self.frames.len()).filter_map(|f| self.frame_window(f)).any(|w| w.has_focus())
     }
 
-    fn request_redraw_all(&self) {
+    pub(super) fn request_redraw_all(&self) {
         for frame in 0..self.frames.len() {
             if let Some(window) = self.frame_window(frame) {
                 window.request_redraw();

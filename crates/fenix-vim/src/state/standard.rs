@@ -243,18 +243,25 @@ impl VimState {
         let to = match mv {
             Move::Left => cursor.char_idx.saturating_sub(1),
             Move::Right => (cursor.char_idx + 1).min(len),
-            Move::Up => {
-                let mut c = *cursor;
-                buffer.move_up(&mut c);
-                *cursor = c;
+            // By the pane's rows, where its lines wrap.
+            Move::Up | Move::Down => {
+                let delta = if mv == Move::Up { -1 } else { 1 };
+                buffer.break_undo_run();
+                if !self.move_by_row(buffer, cursor, delta) {
+                    let mut c = *cursor;
+                    if mv == Move::Up {
+                        buffer.move_up(&mut c);
+                    } else {
+                        buffer.move_down(&mut c);
+                    }
+                    *cursor = c;
+                }
                 return;
             }
-            Move::Down => {
-                let mut c = *cursor;
-                buffer.move_down(&mut c);
-                *cursor = c;
-                return;
-            }
+            // A wrapped line's row's start first, past its first row.
+            Move::Home if let Some(at) = self.row_home(buffer, cursor.char_idx) => at,
+            // And its row's end, before its last.
+            Move::End if let Some(at) = self.row_end(buffer, cursor.char_idx) => at,
             Move::Home => {
                 // The line's first character that isn't a space, then its
                 // very start.

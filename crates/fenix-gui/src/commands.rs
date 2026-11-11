@@ -104,6 +104,7 @@ impl CommandRegistry {
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
         registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
+        registry.register("view.toggle_wrap", "Wrap long lines in the current buffer, or stop", |ctx| ctx.app.toggle_wrap());
         registry.register(
             "explorer.jump",
             "Open a full-buffer directory listing at the current file's directory",
@@ -308,6 +309,7 @@ impl CommandRegistry {
         registry.register("code.goto_definition", "Go to where the name under the cursor is defined (gd)", |ctx| ctx.app.request_goto_definition());
         registry.register("nav.follow_link", "Open the file named under the cursor -- spec.pdf#page=3, src/a.rs:12 (gf)", |ctx| ctx.app.follow_link_under_cursor());
         registry.register("code.references", "List where the name under the cursor is used (gr)", |ctx| ctx.app.request_references());
+        registry.register("code.lens", "Run a code lens on the cursor's line (Run, Debug, 3 references)", |ctx| ctx.app.code_lens_at_cursor());
         registry.register("code.toggle_comment", "Comment or uncomment the cursor's line, or the selection's lines (gcc, gc)", |ctx| ctx.app.cmd_toggle_comment());
         registry.register("edit.copy", "Copy the selection, or the cursor's line, to the clipboard", |ctx| ctx.app.cmd_copy());
         registry.register("edit.cut", "Cut the selection, or the cursor's line, to the clipboard", |ctx| ctx.app.cmd_cut());

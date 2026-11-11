@@ -20,6 +20,10 @@ use fenix_config::{settings, Category, Kind, Problem, Secret, Setting, Value};
 use crate::page::{CardLook, Chip};
 use crate::page::{edit_line, fit, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role};
 
+/// List settings whose default is itself a list, not none: they open
+/// with it to edit, and emptied they're an empty list, not the default.
+const LISTED_DEFAULTS: &[&str] = &["editor.wrap_languages"];
+
 /// Whose settings the page is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -475,6 +479,8 @@ impl SettingsPage {
             (Kind::Secret(_), _) => String::new(),
             (Kind::List, Some(Value::List(l))) => l.join(", "),
             (_, Some(v)) => v.show(),
+            // A list whose default is a list: as it is, to edit from.
+            (Kind::List, None) if LISTED_DEFAULTS.contains(&s.key) => s.default.to_string(),
             (_, None) => String::new(),
         };
         self.edit = Some(Edit::Inline { key: s.key, text });
@@ -822,9 +828,17 @@ impl SettingsPage {
                     return Action::SetSecret { secret, token: Some(text).filter(|t| !t.trim().is_empty()) };
                 }
                 if text.trim().is_empty() {
+                    // Emptied, a list with a default of its own is empty;
+                    // another list is unset, which is empty too.
+                    if LISTED_DEFAULTS.contains(&k) {
+                        return self.set(k, Some(Value::List(Vec::new())));
+                    }
                     return self.set(k, None);
                 }
                 match s.kind.parse(&text) {
+                    // As the default says, and nothing to override: unset,
+                    // so a later default isn't pinned.
+                    Ok(v) if is_default(s, &v) && !self.snap.inherited.contains_key(k) => self.set(k, None),
                     Ok(v) => self.set(k, Some(v)),
                     Err(why) => {
                         // Stays open with the reason, to be put right.
@@ -896,6 +910,8 @@ fn shown(page: &SettingsPage, s: &Setting) -> (String, Role) {
         };
     }
     match (page.snap.here.get(s.key), page.snap.inherited.get(s.key)) {
+        // A list emptied over a default of its own.
+        (Some(Value::List(l)), _) if l.is_empty() => ("none".into(), Role::Text),
         (Some(v), _) => (v.show(), Role::Text),
         (None, Some(v)) => (v.show(), Role::Muted),
         (None, None) if s.default.is_empty() => ("not set".into(), Role::Muted),
@@ -940,6 +956,11 @@ fn is_default(s: &Setting, v: &Value) -> bool {
         Value::Int(n) => s.default.parse::<i64>() == Ok(*n),
         Value::Float(f) => s.default.parse::<f64>().is_ok_and(|d| d == *f),
         Value::Text(t) => t == s.default,
+        // The default's items, in its order.
+        Value::List(l) => {
+            let default: Vec<&str> = s.default.split(',').map(str::trim).filter(|d| !d.is_empty()).collect();
+            l.iter().map(|i| i.trim()).eq(default)
+        }
         _ => false,
     }
 }
@@ -1337,6 +1358,38 @@ mod tests {
 
     fn page() -> SettingsPage {
         SettingsPage::new(Scope::You, snap())
+    }
+
+    /// The languages that wrap open as they are by default, so taking one
+    /// off leaves the other; emptied, the list is empty, not the default.
+    #[test]
+    fn the_languages_that_wrap_open_with_their_default_and_empty_is_none() {
+        let mut p = page();
+        goto(&mut p, "editor.wrap_languages");
+        p.key(Key::Enter);
+        assert_eq!(p.typed().cloned().as_deref(), Some("markdown, text"));
+        for _ in 0.."text".len() + 2 {
+            p.key(Key::Backspace);
+        }
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: Some(Value::List(vec!["markdown".into()])) });
+        p.key(Key::Enter);
+        while p.typed().is_some_and(|t| !t.is_empty()) {
+            p.key(Key::Backspace);
+        }
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: Some(Value::List(Vec::new())) });
+    }
+
+    /// Opened and closed unchanged, the default isn't pinned; emptied, the
+    /// row says so.
+    #[test]
+    fn the_languages_that_wrap_saved_as_the_default_stay_unset_and_empty_reads_none() {
+        let mut p = page();
+        goto(&mut p, "editor.wrap_languages");
+        p.key(Key::Enter);
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: None });
+        let s = fenix_config::setting("editor.wrap_languages").unwrap();
+        p.snap.here.insert("editor.wrap_languages", Value::List(Vec::new()));
+        assert_eq!(shown(&p, s), ("none".to_string(), Role::Text));
     }
 
     fn goto(p: &mut SettingsPage, key: &str) {

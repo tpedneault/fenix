@@ -39,6 +39,11 @@ pub enum Motion {
     ParagraphForward,
     /// `{`: the previous blank line, or the start of the buffer.
     ParagraphBackward,
+    /// `gj`: a screen row down -- in a pane whose lines wrap, the line's
+    /// next row; without wrap, the next line.
+    ScreenDown,
+    /// `gk`: a screen row up.
+    ScreenUp,
 }
 
 /// Whether composing this motion with an operator includes the char it
@@ -100,8 +105,8 @@ pub fn target(buffer: &Buffer, cursor: &Cursor, motion: Motion, iskeyword_extra:
                 cursor.char_idx
             }
         }
-        Motion::Up => vertical(buffer, cursor, -1),
-        Motion::Down => vertical(buffer, cursor, 1),
+        Motion::Up | Motion::ScreenUp => vertical(buffer, cursor, -1),
+        Motion::Down | Motion::ScreenDown => vertical(buffer, cursor, 1),
         Motion::WordForward => word_forward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),
         Motion::WordBackward => word_backward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),
         Motion::WordEndForward => word_end_forward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),

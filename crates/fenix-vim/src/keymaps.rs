@@ -233,6 +233,10 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('^')], "first non-blank", wrap(Motion::LineFirstNonBlank));
     trie.insert(&[KeyPress::char('$')], "line end", wrap(Motion::LineEnd));
     trie.insert(&[KeyPress::char('g'), KeyPress::char('g')], "buffer top", wrap(Motion::BufferTop));
+    trie.insert(&[KeyPress::char('g'), KeyPress::char('j')], "screen row down", wrap(Motion::ScreenDown));
+    trie.insert(&[KeyPress::char('g'), KeyPress::char('k')], "screen row up", wrap(Motion::ScreenUp));
+    trie.insert(&[KeyPress::char('g'), KeyPress::named(NamedKey::Down)], "screen row down", wrap(Motion::ScreenDown));
+    trie.insert(&[KeyPress::char('g'), KeyPress::named(NamedKey::Up)], "screen row up", wrap(Motion::ScreenUp));
     trie.insert(&[KeyPress::char('G')], "buffer bottom", wrap(Motion::BufferBottom));
     trie.insert(&[KeyPress::char('%')], "matching bracket", wrap(Motion::MatchingBracket));
     trie.insert(&[KeyPress::char('{')], "paragraph back", wrap(Motion::ParagraphBackward));

@@ -1160,7 +1160,9 @@ mod tests {
         }
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[[vnc.hosts]]") && text.contains("[lsp.servers]") && !text.contains("port = 5900"), "a port at its default isn't written:\n{text}");
-        assert!(!text.contains("[lsp]") && !text.contains("[vnc]\n"), "no empty parent headers:\n{text}");
+        // `[lsp]` has settings of its own (semantic highlighting), so only
+        // `[vnc]` is a parent with none.
+        assert!(!text.contains("[vnc]\n"), "no empty parent headers:\n{text}");
         assert!(text.contains("[editor]\nindent_width = 2"), "a table with settings has its header:\n{text}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

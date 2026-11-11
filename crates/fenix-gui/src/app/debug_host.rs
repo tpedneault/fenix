@@ -446,8 +446,8 @@ impl App {
     }
 
     /// The gutter's debug marks for `buffer` in a pane showing the 0-based
-    /// document lines `lines` from its first row, `rows` of them: each
-    /// `(row, mark)`. Nothing for a buffer without a file, or when there's
+    /// document lines `lines` from its first row (`rows::NO_LINE` on a
+    /// row of none), `rows` of them: each `(row, mark)`. Nothing for a buffer without a file, or when there's
     /// nothing to show.
     pub(super) fn debug_marks(&self, buffer: BufferId, lines: &[usize], rows: usize) -> Vec<(usize, DebugMark)> {
         let stop = self.debug_stop_location();
@@ -459,6 +459,10 @@ impl App {
         let stop_line = stop.filter(|(p, _)| same_file(p, &path)).map(|(_, line)| line);
         let mut marks = Vec::new();
         for (row, &line) in lines.iter().enumerate().take(rows + 1) {
+            // A row of no line, or a line's second.
+            if line == super::rows::NO_LINE {
+                continue;
+            }
             let one_based = line + 1;
             let mark = match (stop_line == Some(one_based), breakpoints.get(&one_based)) {
                 (true, Some(look)) => DebugMark::StopOnBreakpoint(*look),
@@ -519,11 +523,13 @@ impl App {
         }
         for (id, decorations) in found {
             stale.retain(|s| *s != id);
+            self.wasm.decorations_rev += 1;
             let sets = self.wasm.decorations.entry(id).or_default();
             sets.retain(|(who, _)| who != DEBUG_DECORATIONS);
             sets.push((DEBUG_DECORATIONS.to_string(), decorations));
         }
         for id in stale {
+            self.wasm.decorations_rev += 1;
             if let Some(sets) = self.wasm.decorations.get_mut(&id) {
                 sets.retain(|(who, _)| who != DEBUG_DECORATIONS);
             }

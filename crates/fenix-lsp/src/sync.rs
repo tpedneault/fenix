@@ -32,10 +32,19 @@ pub fn change_event(old: Option<&str>, new: &str, incremental: bool) -> TextDocu
     }
 }
 
-fn ranged_change(old: &str, new: &str) -> TextDocumentContentChangeEvent {
+/// The one replaced range turning `old` into `new`, in chars:
+/// `(start, old_end, new_end)` -- `old[start..old_end]` became
+/// `new[start..new_end]`. Never splits a `\r\n`. What a ranged
+/// `didChange` says, and what anything kept by position (semantic
+/// tokens) is moved through.
+pub fn changed_span(old: &str, new: &str) -> (usize, usize, usize) {
     let old_chars: Vec<char> = old.chars().collect();
     let new_chars: Vec<char> = new.chars().collect();
-    let mut prefix = old_chars.iter().zip(&new_chars).take_while(|(a, b)| a == b).count();
+    span_of(&old_chars, &new_chars)
+}
+
+fn span_of(old_chars: &[char], new_chars: &[char]) -> (usize, usize, usize) {
+    let mut prefix = old_chars.iter().zip(new_chars).take_while(|(a, b)| a == b).count();
     let max_suffix = old_chars.len().min(new_chars.len()) - prefix;
     let mut suffix = old_chars.iter().rev().zip(new_chars.iter().rev()).take(max_suffix).take_while(|(a, b)| a == b).count();
 
@@ -48,12 +57,19 @@ fn ranged_change(old: &str, new: &str) -> TextDocumentContentChangeEvent {
     if suffix > 0 && old_chars[old_chars.len() - suffix] == '\n' && old_chars.len() - suffix > prefix && old_chars[old_chars.len() - suffix - 1] == '\r' {
         suffix -= 1;
     }
+    (prefix, old_chars.len() - suffix, new_chars.len() - suffix)
+}
+
+fn ranged_change(old: &str, new: &str) -> TextDocumentContentChangeEvent {
+    let old_chars: Vec<char> = old.chars().collect();
+    let new_chars: Vec<char> = new.chars().collect();
+    let (start, old_end, new_end) = span_of(&old_chars, &new_chars);
 
     let rope = ropey::Rope::from_str(old);
-    let start = crate::char_offset_to_position(&rope, prefix);
-    let end = crate::char_offset_to_position(&rope, old_chars.len() - suffix);
-    let text: String = new_chars[prefix..new_chars.len() - suffix].iter().collect();
-    TextDocumentContentChangeEvent { range: Some(lsp_types::Range { start, end }), range_length: None, text }
+    let start_position = crate::char_offset_to_position(&rope, start);
+    let end = crate::char_offset_to_position(&rope, old_end);
+    let text: String = new_chars[start..new_end].iter().collect();
+    TextDocumentContentChangeEvent { range: Some(lsp_types::Range { start: start_position, end }), range_length: None, text }
 }
 
 #[cfg(test)]

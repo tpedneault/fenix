@@ -63,6 +63,9 @@ variable = "#9cdcfe"
 operator = "#c0c0c0"
 punctuation = "#b8b8b8"
 attribute = "#9cdcfe"
+interface = "#d7ba7b"
+parameter = "#b5cea8"
+macro = "#c586c0"
 
 [explorer]
 folder = "#dcb67a"
