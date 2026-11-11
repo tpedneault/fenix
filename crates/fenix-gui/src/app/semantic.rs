@@ -62,6 +62,9 @@ pub(super) struct SemanticDoc {
     /// cancellations): doubled each time, back to the pause after an
     /// edit or an answer.
     retry: Duration,
+    /// Refusals in a row since the last edit, answer or refresh: past
+    /// `code_lens::MAX_REFUSALS`, not asked again until one of those.
+    refusals: u32,
     /// The server said its tokens changed (a refresh) while this wasn't
     /// drawn: asked once it is.
     pub(super) stale: bool,
@@ -110,6 +113,7 @@ impl SemanticDoc {
             timed_out: false,
             due: None,
             retry: SEMANTIC_PAUSE,
+            refusals: 0,
             stale: false,
             result_id: None,
             data: Vec::new(),
@@ -264,6 +268,7 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
             }
             doc.timed_out = false;
             doc.retry = SEMANTIC_PAUSE;
+            doc.refusals = 0;
             // The lines answered are of other text now: asked again as
             // they're shown.
             doc.covered.clear();
@@ -492,6 +497,7 @@ impl App {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         for doc in session.semantic.values_mut() {
             doc.stale = true;
+            doc.refusals = 0;
             doc.covered.clear();
             doc.refreshed_while_asking = doc.asking.is_some();
         }
@@ -535,10 +541,13 @@ impl App {
                 }
             },
             // RequestCancelled, ContentModified, ServerCancelled: asked
-            // again later, each time later still.
+            // again later, each time later still, a few times.
             Err(e) if (-32802..=-32800).contains(&e.code) => {
-                doc.due = Some(now + doc.retry);
-                doc.retry = (doc.retry * 2).min(SEMANTIC_MAX_RETRY);
+                doc.refusals += 1;
+                if doc.refusals < super::code_lens::MAX_REFUSALS {
+                    doc.due = Some(now + doc.retry);
+                    doc.retry = (doc.retry * 2).min(SEMANTIC_MAX_RETRY);
+                }
                 return;
             }
             // A delta it can't give (it's let the last answer go): the
@@ -602,6 +611,7 @@ impl App {
         }
         doc.stamp = Some(edit_count);
         doc.retry = SEMANTIC_PAUSE;
+        doc.refusals = 0;
         self.request_redraw_all();
     }
 

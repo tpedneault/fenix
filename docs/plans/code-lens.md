@@ -308,3 +308,62 @@ lenses are off by default until stage 6.
     there moves no cursor and scrolls nothing.
   - PageUp and PageDown in an unwrapped pane with lens rows go by rows,
     lens rows counted (`page_by_rows`), as in a wrapped pane.
+
+### Stage 3
+
+- **Settings.** `lsp.code_lens` (off) and `lsp.code_lens_off` (none).
+  `client_capabilities(semantic, lens)` advertises `codeLens` and its
+  refresh only when lenses are on.
+- **Where the code is.** `app/code_lens.rs` follows the semantic
+  module's final shape:
+  - a `LensDoc` per server and document, belonging to its buffer;
+  - asked only by a buffer's own sync, never by an agent's;
+  - asked on open and 500 ms after typing pauses;
+  - a 10 s timeout with `$/cancelRequest`, asked once more;
+  - back-off on cancelled or modified, from 500 ms to 4 s;
+  - an answer counts only if it's the current ask, and one for text
+    since edited is let go;
+  - a refresh asks each document when it's next drawn.
+- **Every server that offers lenses is asked** (`lens_servers`), and
+  their lenses share a row, in the order the servers are.
+  `App::lens_of` keeps each buffer's servers and path from its sync.
+- **Edits.** Every change sent moves the lenses by line
+  (`code_lens::after_sync`), and the rows are laid out again at once.
+- **Resolve.** When a pane draws lines (`note_lens_view`), lenses there
+  with no command are resolved, up to 16 at a time per server. An
+  answer from before the last full answer is let go (`generation`).
+- **Layout.** `lay_out_lenses` builds the rows with
+  `fenix_lsp::code_lens::rows` and hands their texts to
+  `set_virtual_rows` (which keeps the top text row in place), keeping
+  the `LensRow`s by line for stage 4's clicks.
+  - A server stopping takes its lenses with it.
+  - The setting going off takes every row away, and those panes are on
+    the line path again.
+- **Moved to stage 4:** the hover colour, which belongs with the click
+  it shows.
+- **After review.**
+  - A resolve is tried once a lens per answer, whatever comes back (an
+    error, null, still no command); resolves out 10 s are cancelled and
+    count as tried. The 16 out at once are per server, over all its
+    documents, as planned.
+  - A full answer keeps on show what the last answer's lens in the same
+    place (range and data) said, until the new one's resolve lands, so
+    titles don't blink to `…`. A line with a lens keeps its row whatever
+    its title (an empty one shows nothing).
+  - A good answer clears the timeout, so a later timeout is asked once
+    more again. Refusals (cancelled, modified) are asked again 5 times,
+    then not until an edit, an answer or a refresh; semantic tokens the
+    same.
+  - Lenses moved by an agent's edit are laid out again in the next
+    frame; a closed buffer's rows go; `lsp.code_lens_off` applies at
+    once; edits with no lenses held skip the line count.
+  - Resolves look only at the runs a pane shows (none in a closed fold),
+    the lenses kept in line order and found by search.
+  - A lens row is cut to the pane's real width by whole titles
+    (`LensRow::fit`), wrapped or not, and its indent is at most half the
+    pane, so it stays in view.
+  - Resolves out when their answer is let go (a new answer, the
+    document dropped, the setting off) are cancelled, so no more than 16
+    are ever out. A lens whose resolve comes to nothing shows no title,
+    its row kept, so there's nothing to click. The last answer's titles
+    are found by place and data in a map, not a scan per lens.

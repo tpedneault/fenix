@@ -62,6 +62,9 @@ pub(crate) struct RowMap {
     width: Option<usize>,
     /// What the `Virtual` rows draw, by their number.
     virtuals: Vec<String>,
+    /// The columns of text the pane has room for, when they're known:
+    /// what a `Virtual` row is cut to, its lead with it.
+    view_cols: Option<usize>,
 }
 
 impl RowMap {
@@ -91,7 +94,7 @@ impl RowMap {
             }
         }
         debug_assert!(firsts.windows(2).all(|w| w[0].0 < w[1].0), "a pane's lines go down in order");
-        RowMap { rows, scroll_col, firsts, width: None, virtuals: Vec::new() }
+        RowMap { rows, scroll_col, firsts, width: None, virtuals: Vec::new(), view_cols: None }
     }
 
     /// What `RowKind::Virtual(i)` rows draw: `texts[i]`.
@@ -118,6 +121,12 @@ impl RowMap {
     /// The columns a row has, when the lines wrap.
     pub(crate) fn width(&self) -> Option<usize> {
         self.width
+    }
+
+    /// The columns of text the pane has room for: its own, or else the
+    /// width its lines wrap at.
+    pub(crate) fn view_cols(&self) -> usize {
+        self.view_cols.or(self.width).unwrap_or(usize::MAX)
     }
 
     /// The first visual column shown: the pane's sideways scroll.
@@ -255,6 +264,15 @@ pub(super) fn shown_char_columns(map: &RowMap, line: usize, col_map: Option<&Vec
     Some((char_of(a.cols.start), char_of(b.cols.end).saturating_add(1)))
 }
 
+/// How far in a row above `line` that isn't text (a code lens's) is
+/// drawn: the line's indent in display columns, a tab as wide as it's
+/// drawn, at most half of `cols` (the pane's columns of text), so a row
+/// that isn't scrolled sideways stays in view under a deep indent.
+pub(super) fn virtual_row_lead(ob: &super::OpenBuffer, line: usize, tab_stops: &super::TabStops, cols: usize) -> usize {
+    let leading: String = ob.buffer.rope().line(line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    tabstops::expand_line(&leading, tab_stops).0.chars().count().min(cols / 2)
+}
+
 /// A pane's text as a frame lays it out: its rows, and the lines whose
 /// columns aren't one a char (a tab, a decoration).
 pub(super) struct PaneLayout {
@@ -312,9 +330,23 @@ pub(super) struct RowsWanted<'a> {
     pub scroll_col: usize,
     /// The columns the lines wrap at, if they do.
     pub wrap: Option<usize>,
+    /// The columns of text the pane has room for, when known.
+    pub view_cols: Option<usize>,
 }
 
 impl App {
+    /// What a row above `buffer`'s `line` that isn't text draws of `text`,
+    /// in a pane `cols` columns of text wide: after its lead, as much as
+    /// fits short of the last column -- a code lens row cut by whole
+    /// titles (`LensRow::fit`), so what's clicked is what's drawn.
+    pub(super) fn virtual_row_shown(&self, ob: &super::OpenBuffer, buffer: BufferId, line: usize, text: &str, tab_stops: &super::TabStops, cols: usize) -> String {
+        let room = cols.saturating_sub(1).saturating_sub(virtual_row_lead(ob, line, tab_stops, cols));
+        match self.lens_rows.get(&buffer).and_then(|rows| rows.get(&line)).filter(|row| row.text == text) {
+            Some(row) => row.fit(room).text,
+            None => text.chars().take(room).collect(),
+        }
+    }
+
     /// The rows above `buffer`'s `line` that aren't text (a code lens's,
     /// one each): laid out in a wrapped pane, which scrolling, a click and
     /// the caret step over.
@@ -532,6 +564,7 @@ impl App {
             count,
             scroll_col: if wrapped { 0 } else { scroll_col },
             wrap,
+            view_cols: if wrapped { wrap } else { Some(self.pane_text_cols.get(&pane).copied().unwrap_or(80)) },
         };
         self.pane_layout(buffer, want, cursor_line, dashboard)
     }
@@ -596,7 +629,7 @@ impl App {
                             break;
                         }
                         rows.push(Row { line, kind: RowKind::Virtual(virtuals.len() as u32), cols: 0..0, indent: 0, first: false, last: false });
-                        virtuals.push(text.clone());
+                        virtuals.push(self.virtual_row_shown(ob, buffer, line, text, &tab_stops, want.view_cols.unwrap_or(width)));
                     }
                     let skip = skip.saturating_sub(above.len());
                     let (breaks, whole) = crate::wrap::break_line_rows(display, width, indent, skip.saturating_add(want.count.saturating_sub(rows.len())));
@@ -625,6 +658,7 @@ impl App {
             }
         }
         layout.map = RowMap::from_rows(rows, want.scroll_col).with_virtuals(virtuals);
+        layout.map.view_cols = want.view_cols;
         if let Some(width) = want.wrap {
             layout.map = layout.map.wrapped_at(width);
         }
@@ -661,13 +695,9 @@ impl App {
                 Some(row) if row.kind == RowKind::Filler => spans.push((" ".repeat(gutter_chars), theme.gutter_fg)),
                 // A row above its line that isn't its text: as its indent.
                 Some(row) if let RowKind::Virtual(i) = row.kind => {
-                    // Its line's leading whitespace in display columns: a
-                    // tab as wide as it's drawn.
-                    let leading: String = ob.buffer.rope().line(row.line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-                    let lead = tabstops::expand_line(&leading, tab_stops).0.chars().count();
-                    let width = map.width().unwrap_or(usize::MAX);
-                    let text: String = format!("{}{}", " ".repeat(lead.min(width / 2)), map.virtual_text(i)).chars().take(width.saturating_sub(1)).collect();
-                    spans.push((format!("{}{text}", " ".repeat(gutter_chars)), theme.gutter_fg));
+                    // Cut to the pane when it was laid out.
+                    let lead = virtual_row_lead(ob, row.line, tab_stops, map.view_cols());
+                    spans.push((format!("{}{}", " ".repeat(gutter_chars + lead), map.virtual_text(i)), theme.gutter_fg));
                 }
                 Some(row) if row.kind == RowKind::Text && row.line < visual_lines => {
                     if row.first {

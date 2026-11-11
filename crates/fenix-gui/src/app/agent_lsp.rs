@@ -533,7 +533,7 @@ mod tests {
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(file).unwrap());
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical.clone(), (0, version + 1))]), synced_text: HashMap::from([(canonical, text.to_string())]), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical.clone(), (0, version + 1))]), synced_text: HashMap::from([(canonical, text.to_string())]), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
     }
 

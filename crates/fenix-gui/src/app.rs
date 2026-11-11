@@ -28,6 +28,7 @@ mod side_by_side;
 mod rows;
 mod row_scroll;
 mod semantic;
+mod code_lens;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -1233,6 +1234,8 @@ struct LspSession {
     /// Each document's semantic tokens, from the one server of its asked
     /// for them (`App::semantic_server`).
     semantic: HashMap<PathBuf, semantic::SemanticDoc>,
+    /// Each document's code lenses from this server.
+    lenses: HashMap<PathBuf, code_lens::LensDoc>,
 }
 
 /// Why `SPC u u` can't debug a `language` file: no adapter from the
@@ -1325,7 +1328,8 @@ fn push_python_environment(session: &mut LspSession) {
 /// The edit count alone doesn't say the server has the text: a buffer
 /// opened again starts its count afresh, over a file that may have
 /// changed on disk meanwhile. So the text is compared as well.
-fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &str, by_pattern: bool, text: &str, edit_count: u64, semantic: semantic::SemanticSync) {
+#[allow(clippy::too_many_arguments)]
+fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &str, by_pattern: bool, text: &str, edit_count: u64, semantic: semantic::SemanticSync, lens: semantic::SemanticSync) {
     if session.capabilities.is_none() {
         return;
     }
@@ -1340,7 +1344,7 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
         None => {
             let params = lsp_types::DidOpenTextDocumentParams { text_document: lsp_types::TextDocumentItem { uri, language_id, version: 0, text: text.to_string() } };
             if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
-                record_lsp_sync(session, canonical, text, edit_count, 1, semantic);
+                record_lsp_sync(session, canonical, text, edit_count, 1, semantic, lens);
                 pull_lsp_diagnostics(session, canonical);
             }
         }
@@ -1352,7 +1356,7 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
                 content_changes: vec![change],
             };
             if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
-                record_lsp_sync(session, canonical, text, edit_count, next_version + 1, semantic);
+                record_lsp_sync(session, canonical, text, edit_count, next_version + 1, semantic, lens);
                 pull_lsp_diagnostics(session, canonical);
             }
         }
@@ -1370,6 +1374,15 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
             if redo {
                 semantic::after_sync(session, canonical, None, text, edit_count, semantic);
             }
+            let held = session.lenses.get(canonical).map(|d| d.buffer);
+            let redo = match lens {
+                semantic::SemanticSync::Ask(buffer) => held != Some(buffer),
+                semantic::SemanticSync::Drop => held.is_some(),
+                semantic::SemanticSync::Follow => false,
+            };
+            if redo {
+                code_lens::after_sync(session, canonical, None, text, lens);
+            }
         }
     }
 }
@@ -1379,11 +1392,13 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
 /// one place that's recorded, so what's held by position (semantic
 /// tokens) always moves with it -- every writer of `synced_text` and
 /// `open_documents` comes through here.
-fn record_lsp_sync(session: &mut LspSession, canonical: &Path, text: &str, edit_count: u64, next_version: i32, semantic: semantic::SemanticSync) {
+fn record_lsp_sync(session: &mut LspSession, canonical: &Path, text: &str, edit_count: u64, next_version: i32, semantic: semantic::SemanticSync, lens: semantic::SemanticSync) {
     let old_count = session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version)).map(|(count, _)| count);
     let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
     let change = old.as_deref().zip(old_count);
     semantic::after_sync(session, canonical, change, text, edit_count, semantic);
+    // Code lenses, which move by line, likewise.
+    code_lens::after_sync(session, canonical, old.as_deref(), text, lens);
 }
 
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
@@ -1410,6 +1425,11 @@ enum PendingLspRequest {
     /// at `edit_count`: the whole of it, a delta or a range (`how`), by
     /// request `request`.
     SemanticTokens { path: PathBuf, edit_count: u64, how: semantic::SemanticAsk, request: i64 },
+    /// `textDocument/codeLens` for `path` (canonical) as it was at
+    /// `edit_count`, by request `request`.
+    CodeLens { path: PathBuf, edit_count: u64, request: i64 },
+    /// `codeLens/resolve` for lens `index` of `path`'s answer `generation`.
+    CodeLensResolve { path: PathBuf, generation: u64, index: usize },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -5308,6 +5328,11 @@ pub struct App {
     /// path as servers know it), worked out when it's synced, so drawing
     /// it looks at nothing on disk.
     semantic_of: HashMap<BufferId, semantic::SemanticTarget>,
+    /// Each buffer's lens servers and its path as they know it, worked
+    /// out when it's synced.
+    lens_of: code_lens::LensOf,
+    /// Each buffer's rows of lenses, by line: what a click on one runs.
+    lens_rows: HashMap<BufferId, std::collections::BTreeMap<usize, fenix_lsp::code_lens::LensRow<code_lens::LensTag>>>,
     /// A test's seam: every pane that could wrap goes by rows (at
     /// `rows::UNBOUNDED` when it doesn't wrap), with or without rows
     /// above its lines, so the row path can be checked against the
@@ -6308,6 +6333,8 @@ impl App {
             break_cache: std::cell::RefCell::new(HashMap::new()),
             virtual_rows: HashMap::new(),
             semantic_of: HashMap::new(),
+            lens_of: HashMap::new(),
+            lens_rows: HashMap::new(),
             force_row_path: false,
             semantic_protected: HashMap::new(),
             screen_decorations: None,
@@ -7299,14 +7326,25 @@ impl App {
             }
             (None, None) => {}
         }
+        // A buffer's lenses from every one of them that offers them.
+        let lensed = self.lens_targets(buffer, &path, &canonical);
         for (key, language_id, by_pattern) in self.lsp_targets(&path) {
             let semantic = match (&asked, buffer) {
                 (Some((b, asked)), _) if *asked == key => semantic::SemanticSync::Ask(*b),
                 (_, Some(_)) => semantic::SemanticSync::Drop,
                 (_, None) => semantic::SemanticSync::Follow,
             };
+            let lens = match &lensed {
+                Some((b, keys)) if keys.contains(&key) => semantic::SemanticSync::Ask(*b),
+                Some(_) => semantic::SemanticSync::Drop,
+                None => semantic::SemanticSync::Follow,
+            };
             let Some(session) = self.lsp_sessions.get_mut(&key) else { continue };
-            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count, semantic);
+            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count, semantic, lens);
+        }
+        // Moved with the edit, or let go: laid out again.
+        if let Some(buffer) = buffer {
+            self.lay_out_lenses(buffer);
         }
     }
 
@@ -7396,7 +7434,7 @@ impl App {
         let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
         self.lsp_sessions.insert(key.clone(), LspSession {
             generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
-            open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+            open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         self.send_lsp_initialize(key, cwd);
     }
@@ -7533,7 +7571,7 @@ impl App {
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
                 self.lsp_sessions.insert(key.clone(), LspSession {
                     generation, client, name, languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
-                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
                 });
                 self.send_lsp_initialize(key, cwd);
             }
@@ -7550,14 +7588,14 @@ impl App {
     /// later reconnect (once one exists) can re-send just this without
     /// re-spawning the process.
     fn send_lsp_initialize(&mut self, key: LspKey, cwd: &Path) {
-        let semantic = self.semantic_highlighting_on();
+        let (semantic, lens) = (self.semantic_highlighting_on(), self.code_lens_on());
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
             #[allow(deprecated)] // still set alongside workspace_folders for servers that only look at this
             root_uri: root_uri.clone(),
-            capabilities: crate::lsp::client_capabilities(semantic),
+            capabilities: crate::lsp::client_capabilities(semantic, lens),
             workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
             ..Default::default()
         };
@@ -7597,6 +7635,9 @@ impl App {
                 // unanswered.
                 if method == "workspace/semanticTokens/refresh" {
                     self.refresh_semantic_tokens(&key);
+                }
+                if method == "workspace/codeLens/refresh" {
+                    self.refresh_lenses(&key);
                 }
                 if let Some(session) = self.lsp_sessions.get_mut(&key) {
                     let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
@@ -7751,6 +7792,8 @@ impl App {
                 }
             }
             PendingLspRequest::SemanticTokens { path, edit_count, how, request } => self.semantic_tokens_answered(&key, path, edit_count, how, request, result),
+            PendingLspRequest::CodeLens { path, edit_count, request } => self.lenses_answered(&key, path, edit_count, request, result),
+            PendingLspRequest::CodeLensResolve { path, generation, index } => self.lens_resolved(&key, path, generation, index, result),
             PendingLspRequest::PullDiagnostics { path } => {
                 let name = self.lsp_server_name(&key);
                 let read = result.map_err(|e| (e.code, e.data)).and_then(|value| fenix_lsp::pull::report(value).map_err(|_| (0, None)));
@@ -20328,6 +20371,7 @@ impl App {
         // the sync itself copies the text and looks at the disk (#74).
         self.sync_lsp_if_changed();
         self.ask_due_semantic_tokens();
+        self.ask_due_lenses();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -20879,9 +20923,17 @@ impl App {
             }
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
-            // This pane's own view, for a document asked by range.
-            if self.semantic_of.contains_key(&buffer_id) {
-                self.note_semantic_view(buffer_id, pane, &row_map.runs());
+            // Its lines shown, for semantic tokens asked by range and the
+            // lenses resolved: worked out only when either wants them.
+            let (semantic, lensed) = (self.semantic_of.contains_key(&buffer_id), self.lens_of.contains_key(&buffer_id));
+            if semantic || lensed {
+                let runs = row_map.runs();
+                if semantic {
+                    self.note_semantic_view(buffer_id, pane, &runs);
+                }
+                if lensed {
+                    self.note_lens_view(buffer_id, &runs);
+                }
             }
             // A wrapped pane: the columns its rows show of each line.
             let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
@@ -23102,6 +23154,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // Semantic tokens due to be asked for (typing paused, an ask that
         // timed out): asked now, not on whatever frame comes next.
         self.ask_due_semantic_tokens();
+        self.ask_due_lenses();
 
         // Keep redrawing at animation cadence only while something is
         // actually transitioning (blink fade or an active pulse); once
@@ -32939,7 +32992,7 @@ configure_board stm32
         let started = Instant::now();
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "typescript-language-server".into(), languages: vec!["typescript".into()], root: key.root.clone(), reader: None,
-            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         assert!(app.background_jobs().iter().any(|j| j == "starting typescript-language-server"));
         // Not yet: when it's due is said.
@@ -36308,7 +36361,7 @@ name = \"orbit\"
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let mut session = LspSession {
             generation: tool_sessions::generation(), client, name: "pyright-langserver".into(), languages: vec!["python".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         };
         push_python_environment(&mut session);
         app.lsp_sessions.insert(key.clone(), session);
@@ -36341,7 +36394,7 @@ name = \"orbit\"
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         key
     }
@@ -36622,7 +36675,7 @@ name = \"orbit\"
         }
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client: sink_client(&key.root), name: name.into(), languages: languages.iter().map(|l| l.to_string()).collect(),
-            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
+            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(), lenses: HashMap::new(),
         });
         key
     }
@@ -37295,10 +37348,354 @@ name = \"orbit\"
         assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "tried, until an edit");
     }
 
+    fn lens_capabilities() -> lsp_types::ServerCapabilities {
+        capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {"resolveProvider": true}}))
+    }
+
+    /// A Rust file with code lens on, and a server offering lenses.
+    fn lens_fixture(name: &str) -> (TempDir, App, PathBuf, LspKey) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() {}\nfn other() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        (dir, app, path, key)
+    }
+
+    fn lens_json(line: u32, title: Option<&str>) -> serde_json::Value {
+        let range = serde_json::json!({"start": {"line": line, "character": 0}, "end": {"line": line, "character": 2}});
+        match title {
+            Some(t) => serde_json::json!({"range": range, "command": {"title": t, "command": "x.run"}}),
+            None => serde_json::json!({"range": range, "data": 7}),
+        }
+    }
+
+    fn lens_rows_of(app: &App) -> Vec<(usize, String)> {
+        app.virtual_rows.get(&app.focused_buffer_id()).map(|rows| rows.iter().map(|(l, t)| (*l, t.join("/"))).collect()).unwrap_or_default()
+    }
+
+    #[test]
+    fn code_lens_is_off_by_default_and_asks_nothing() {
+        let (_dir, mut app, _path, key) = semantic_fixture("lens_off_default");
+        app.lsp_sessions.get_mut(&key).unwrap().capabilities = Some(lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_lenses();
+        assert!(!app.lsp_sessions[&key].pending.values().any(|p| matches!(p, PendingLspRequest::CodeLens { .. })));
+        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().code_lens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(false, true).text_document.unwrap().code_lens.is_some());
+    }
+
+    #[test]
+    fn lenses_are_asked_laid_out_above_their_lines_and_resolved_in_view() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_ask");
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("▶ Run")), lens_json(0, None), lens_json(1, Some("1 reference"))]));
+        assert_eq!(lens_rows_of(&app), vec![(0, "▶ Run | …".to_string()), (1, "1 reference".to_string())]);
+        let pane = app.focused_pane_id();
+        assert_eq!(app.row_cols(pane, app.focused_buffer_id()), Some(rows::UNBOUNDED), "the pane goes by rows");
+        // In view: the one without a command resolved.
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let (rid, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::CodeLensResolve { index: 1, .. }), "{pending:?}");
+        answer(&mut app, &key, rid, lens_json(0, Some("Debug")));
+        assert_eq!(lens_rows_of(&app)[0].1, "▶ Run | Debug");
+        // A line added above: the rows move with it at once.
+        app.test_insert_str("// a\n");
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [1, 2]);
+        assert!(app.lens_wake().is_some(), "asked again after the pause");
+    }
+
+    #[test]
+    fn two_servers_lenses_share_a_row_and_one_stopping_takes_its_own_away() {
+        let dir = TempDir::new("lens_two");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() {}\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(true)));
+        let primary = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], lens_capabilities());
+        let extra = install_server(&mut app, &path, LspServer::Additional("kiln".into()), "kiln", &["rust"], lens_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_lenses();
+        let (a, _) = only_pending(&app, &primary);
+        let (b, _) = only_pending(&app, &extra);
+        answer(&mut app, &extra, b, serde_json::json!([lens_json(0, Some("kiln"))]));
+        answer(&mut app, &primary, a, serde_json::json!([lens_json(0, Some("ra"))]));
+        assert_eq!(lens_rows_of(&app), vec![(0, "ra | kiln".to_string())], "the primary's first");
+        app.stop_lsp_session(&extra);
+        app.ask_due_lenses();
+        assert_eq!(lens_rows_of(&app), vec![(0, "ra".to_string())]);
+        // Turned off: every row goes, the pane back to a row a line.
+        app.config.set_value("lsp.code_lens", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+        assert_eq!(app.row_cols(app.focused_pane_id(), app.focused_buffer_id()), None);
+    }
+
+    #[test]
+    fn a_stale_lens_answer_is_let_go_and_a_refresh_asks_as_it_s_drawn() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_stale");
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("old"))]));
+        assert!(lens_rows_of(&app).is_empty(), "of other text");
+        let generation = app.lsp_sessions[&key].generation;
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(3), method: "workspace/codeLens/refresh".into(), params: serde_json::Value::Null });
+        let buffer = app.focused_buffer_id();
+        // Due now, the stale answer having been let go; then drawn.
+        let canonical = app.lens_of[&buffer].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = None;
+        app.ask_due_lenses();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "not until drawn");
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::CodeLens { .. }));
+    }
+
+    /// `lens_fixture` with one lens answered on each of `lines`, none
+    /// resolved: its app, path, server and the document's canonical path.
+    fn lens_answered(name: &str, text: &str, lines: &[u32]) -> (TempDir, App, PathBuf, LspKey, PathBuf) {
+        let (dir, mut app, path, key) = lens_fixture(name);
+        app.test_insert_str(text);
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::Value::Array(lines.iter().map(|&l| lens_json(l, None)).collect()));
+        (dir, app, path, key, canonical)
+    }
+
+    fn resolves_out(app: &App, key: &LspKey) -> Vec<i64> {
+        app.lsp_sessions[key].pending.iter().filter(|(_, p)| matches!(p, PendingLspRequest::CodeLensResolve { .. })).map(|(id, _)| *id).collect()
+    }
+
+    #[test]
+    fn a_resolve_that_comes_to_nothing_isn_t_sent_again_until_the_next_answer() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_resolve_once", "a\nb\nc\n", &[0, 1, 2]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        assert_eq!(out.len(), 3);
+        // An error, null, and a lens still without a command.
+        answer_error(&mut app, &key, out[0], -32603);
+        answer(&mut app, &key, out[1], serde_json::Value::Null);
+        answer(&mut app, &key, out[2], lens_json(2, None));
+        for _ in 0..50 {
+            app.note_lens_view(buffer, &[0..5]);
+            app.ask_due_lenses();
+        }
+        assert!(resolves_out(&app, &key).is_empty(), "tried, whatever came back");
+        // A resolve left unanswered: cancelled after the timeout, tried.
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().tried.clear();
+        app.note_lens_view(buffer, &[0..1]);
+        assert_eq!(resolves_out(&app, &key).len(), 1);
+        assert!(app.lens_wake().is_some(), "woken for its timeout");
+        let doc = app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap();
+        for (_, at) in doc.resolving.values_mut() {
+            *at -= Duration::from_secs(11);
+        }
+        app.ask_due_lenses();
+        assert!(resolves_out(&app, &key).is_empty());
+        app.note_lens_view(buffer, &[0..1]);
+        assert!(resolves_out(&app, &key).is_empty(), "not again until the next answer");
+    }
+
+    #[test]
+    fn no_more_than_sixteen_resolves_are_out_from_a_server() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_cap", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..10, 20..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16, "still sixteen");
+        // Not those in a fold: only the runs shown.
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_fold", "a\nb\nc\nd\n", &[0, 1, 2, 3]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..1, 3..4]);
+        let asked: Vec<usize> = app.lsp_sessions[&key].pending.values().filter_map(|p| match p {
+            PendingLspRequest::CodeLensResolve { index, .. } => Some(*index),
+            _ => None,
+        }).collect();
+        assert_eq!(asked.iter().copied().collect::<std::collections::BTreeSet<_>>(), [0, 3].into());
+    }
+
+    #[test]
+    fn resolves_of_an_answer_let_go_are_cancelled_so_no_more_than_sixteen_are_ever_out() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_superseded", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        let unresolved: Vec<serde_json::Value> = (0..40).map(|l| lens_json(l, None)).collect();
+        for _ in 0..4 {
+            app.note_lens_view(buffer, &[0..40]);
+            assert!(resolves_out(&app, &key).len() <= 16, "{}", resolves_out(&app, &key).len());
+            // Asked again (a refresh) and answered; the resolves never are.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..40]);
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+        }
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+    }
+
+    #[test]
+    fn a_carried_title_whose_resolve_comes_to_nothing_isn_t_shown_to_be_run() {
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_carry_fails", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "carried");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::Value::Null);
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())], "nothing to click, its row kept");
+    }
+
+    #[test]
+    fn a_resolved_title_stays_on_show_through_the_next_answer_until_it_s_resolved_again() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_carry", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())]);
+        // Asked again (a refresh): the same lens, unresolved.
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let (id, _) = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, p)| (*id, p.clone())).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "not back to …");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        assert_eq!(out.len(), 1, "resolved again all the same");
+        // Resolved to an empty title: its row stays, so the text doesn't move.
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "", "command": "x.run"}}));
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())]);
+        let _ = canonical;
+    }
+
+    #[test]
+    fn a_timeout_after_a_good_answer_is_asked_once_more_again() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_timeout_again", "a\n", &[0]);
+        let back = |app: &mut App| {
+            let doc = app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap();
+            if let Some((_, at)) = doc.asked.as_mut() {
+                *at -= Duration::from_secs(11);
+            }
+        };
+        let asks = |app: &App| app.lsp_sessions[&key].pending.values().filter(|p| matches!(p, PendingLspRequest::CodeLens { .. })).count();
+        let buffer = app.focused_buffer_id();
+        for round in 0..2 {
+            // Asked (a refresh, drawn), timed out: asked once more.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..1]);
+            app.ask_due_lenses();
+            assert_eq!(asks(&app), 1, "round {round}");
+            back(&mut app);
+            app.ask_due_lenses();
+            app.ask_due_lenses();
+            assert_eq!(asks(&app), 1, "round {round}: asked once more");
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("ok"))]));
+        }
+    }
+
+    #[test]
+    fn refusals_are_asked_again_a_few_times_then_not_until_an_edit() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_refusals");
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        let mut asked = 0;
+        for _ in 0..12 {
+            app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due.iter_mut().for_each(|d| *d = Instant::now());
+            app.ask_due_lenses();
+            if let Some(id) = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id) {
+                asked += 1;
+                answer_error(&mut app, &key, id, -32801);
+            }
+        }
+        assert_eq!(asked, code_lens::MAX_REFUSALS as usize);
+        assert!(app.lens_wake().is_none(), "quiet");
+        // The semantic side the same.
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refusals");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        let mut asked = 0;
+        for _ in 0..12 {
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due.iter_mut().for_each(|d| *d = Instant::now());
+            app.ask_due_semantic_tokens();
+            if let Some(id) = app.lsp_sessions[&key].pending.keys().next().copied() {
+                asked += 1;
+                answer_error(&mut app, &key, id, -32801);
+            }
+        }
+        assert_eq!(asked, code_lens::MAX_REFUSALS as usize);
+        assert!(app.semantic_wake().is_none());
+    }
+
+    #[test]
+    fn lenses_follow_an_agent_s_edit_go_with_their_language_left_out_and_with_their_buffer() {
+        let (_dir, mut app, _path, key, canonical) = lens_answered("lens_follow", "a\nb\n", &[1]);
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [1]);
+        // An agent's edit, a line above: laid out again in the next frame.
+        let session = app.lsp_sessions.get_mut(&key).unwrap();
+        let (count, version) = session.open_documents[&canonical];
+        let text = format!("x\n{}", session.synced_text[&canonical]);
+        record_lsp_sync(session, &canonical, &text, count + 1, version + 1, semantic::SemanticSync::Follow, semantic::SemanticSync::Follow);
+        app.ask_due_lenses();
+        assert_eq!(lens_rows_of(&app).iter().map(|(l, _)| *l).collect::<Vec<_>>(), [2]);
+        // Its language left out: the rows go at once.
+        app.config.set_value("lsp.code_lens_off", Some(fenix_config::Value::List(vec!["Rust".into()])));
+        app.ask_due_lenses();
+        assert!(lens_rows_of(&app).is_empty());
+        // Closed: nothing kept for it.
+        let (_dir, mut app, _path, _key, _canonical) = lens_answered("lens_close", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        assert!(app.virtual_rows.contains_key(&buffer));
+        app.buffers.close(buffer);
+        app.ask_due_lenses();
+        assert!(!app.virtual_rows.contains_key(&buffer) && !app.lens_rows.contains_key(&buffer));
+    }
+
+    #[test]
+    fn a_lens_row_is_cut_to_the_pane_and_its_indent_kept_in_view() {
+        let (_dir, mut app, _path, key) = lens_fixture("lens_fit");
+        app.test_insert_str(&format!("{}fn deep() {{}}\n", " ".repeat(60)));
+        app.sync_lsp_for_focused_buffer();
+        let canonical = app.lens_of[&app.focused_buffer_id()].1.clone();
+        app.lsp_sessions.get_mut(&key).unwrap().lenses.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_lenses();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!([lens_json(0, Some("12 references")), lens_json(0, Some("3 implementations")), lens_json(0, Some(&"y".repeat(5000)))]));
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 40);
+        let map = app.focused_layout(4).map;
+        let row = map.row(0).unwrap();
+        assert!(matches!(row.kind, rows::RowKind::Virtual(_)));
+        let rows::RowKind::Virtual(i) = row.kind else { unreachable!() };
+        let lead = rows::virtual_row_lead(app.open(), 0, &app.tab_stops_for(app.focused_buffer_id()), 40);
+        assert_eq!(lead, 20, "half the pane at most");
+        assert_eq!(map.virtual_text(i), "12 references …", "whole titles that fit, then …");
+    }
+
     #[test]
     fn semantic_tokens_are_neither_asked_nor_drawn_with_the_setting_off_or_the_language_left_out() {
-        assert!(crate::lsp::client_capabilities(false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
-        assert!(crate::lsp::client_capabilities(true).text_document.unwrap().semantic_tokens.is_some());
+        assert!(crate::lsp::client_capabilities(false, false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(true, false).text_document.unwrap().semantic_tokens.is_some());
         for (key, value) in [("lsp.semantic_highlighting", fenix_config::Value::Bool(false)), ("lsp.semantic_highlighting_off", fenix_config::Value::List(vec!["Rust".into()]))] {
             let (_dir, mut app, _path, server) = semantic_fixture("semantic_off");
             let grammar = colour_at(&mut app, 16);

@@ -840,6 +840,10 @@ impl App {
         if let Some(due) = self.semantic_wake() {
             at(due);
         }
+        // Code lenses likewise.
+        if let Some(due) = self.lens_wake() {
+            at(due);
+        }
         // An extension's layer, while something on it moves.
         if let Some(due) = self.layers_next_wake(now) {
             at(due);

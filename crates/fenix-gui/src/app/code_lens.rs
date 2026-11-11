@@ -23,8 +23,12 @@ pub(super) const LENS_PAUSE: Duration = Duration::from_millis(500);
 const LENS_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest wait before asking again after a refusal.
 const LENS_MAX_RETRY: Duration = Duration::from_secs(4);
-/// How many resolves a server may have out at once.
+/// How many resolves a server may have out at once, over all its
+/// documents.
 const MAX_RESOLVING: usize = 16;
+/// How many refusals in a row (cancelled, modified) are asked again
+/// after: past that, nothing more until an edit or a refresh.
+pub(super) const MAX_REFUSALS: u32 = 5;
 
 /// One document's lenses from one server (`LspSession::lenses`).
 #[derive(Debug)]
@@ -40,15 +44,70 @@ pub(super) struct LensDoc {
     timed_out: bool,
     pub due: Option<Instant>,
     retry: Duration,
+    /// Refusals in a row since the last edit, answer or refresh.
+    refusals: u32,
     /// The server said its lenses changed while this wasn't drawn.
     stale: bool,
-    /// The lenses (by index) a resolve is out for.
-    resolving: HashSet<usize>,
+    /// The lenses (by index) a resolve is out for: by which request,
+    /// since when.
+    pub(super) resolving: HashMap<usize, (i64, Instant)>,
+    /// The lenses (by index) resolved, or tried, since the last answer:
+    /// not asked again, whatever came back, until the next.
+    pub(super) tried: HashSet<usize>,
+    /// What the last answer's lens in the same place said, for a lens of
+    /// this one not resolved yet: shown until its own resolve lands.
+    carried: HashMap<usize, lsp_types::Command>,
+    /// Moved by an edit not this buffer's own (an agent's): laid out
+    /// again in the next frame.
+    moved: bool,
 }
 
 impl LensDoc {
     fn new(buffer: BufferId) -> Self {
-        LensDoc { buffer, lenses: Vec::new(), generation: 0, asked: None, timed_out: false, due: None, retry: LENS_PAUSE, stale: false, resolving: HashSet::new() }
+        LensDoc {
+            buffer,
+            lenses: Vec::new(),
+            generation: 0,
+            asked: None,
+            timed_out: false,
+            due: None,
+            retry: LENS_PAUSE,
+            refusals: 0,
+            stale: false,
+            resolving: HashMap::new(),
+            tried: HashSet::new(),
+            carried: HashMap::new(),
+            moved: false,
+        }
+    }
+
+    /// The lenses as they're shown: one not resolved yet with what the
+    /// last answer's in its place said, while it's carried; one whose
+    /// resolve came to nothing with no title, so nothing to click.
+    fn shown(&self) -> impl Iterator<Item = (usize, std::borrow::Cow<'_, lsp_types::CodeLens>)> {
+        self.lenses.iter().enumerate().map(|(i, lens)| {
+            let with = |command: lsp_types::Command| std::borrow::Cow::Owned(lsp_types::CodeLens { command: Some(command), ..lens.clone() });
+            match (lens.command.is_none(), self.tried.contains(&i), self.carried.get(&i)) {
+                (true, true, _) => (i, with(lsp_types::Command { title: String::new(), command: String::new(), arguments: None })),
+                (true, false, Some(command)) => (i, with(command.clone())),
+                _ => (i, std::borrow::Cow::Borrowed(lens)),
+            }
+        })
+    }
+
+    /// The resolves out let go: cancelled at the server and forgotten.
+    fn cancel_resolves(&mut self, client: &fenix_lsp::LspClient, pending: &mut HashMap<i64, PendingLspRequest>) {
+        for (_, (id, _)) in self.resolving.drain() {
+            let _ = client.notify::<lsp_types::notification::Cancel>(lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id as i32) });
+            pending.remove(&id);
+        }
+    }
+}
+
+/// `session`'s lenses of `canonical` let go, with any resolves out.
+fn drop_doc(session: &mut LspSession, canonical: &Path) {
+    if let Some(mut doc) = session.lenses.remove(canonical) {
+        doc.cancel_resolves(&session.client, &mut session.pending);
     }
 }
 
@@ -66,7 +125,7 @@ pub(super) fn offers(session: &LspSession) -> bool {
 pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Option<&str>, new: &str, sync: LensSync) {
     let buffer = match sync {
         LensSync::Drop => {
-            session.lenses.remove(canonical);
+            drop_doc(session, canonical);
             return;
         }
         LensSync::Follow => None,
@@ -85,9 +144,14 @@ pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Opt
     }
     match change {
         Some(old) => {
-            lens::shift_lines(&mut doc.lenses, lens::changed_lines(old, new));
+            // Several passes over the text: only when there's a lens to move.
+            if !doc.lenses.is_empty() {
+                lens::shift_lines(&mut doc.lenses, lens::changed_lines(old, new));
+                doc.moved |= buffer.is_none();
+            }
             doc.timed_out = false;
             doc.retry = LENS_PAUSE;
+            doc.refusals = 0;
             doc.due = Some(if newly_shown { now } else { now + LENS_PAUSE });
         }
         None if buffer.is_some() => doc.due = Some(now),
@@ -115,11 +179,22 @@ fn ask(session: &mut LspSession, canonical: &Path, now: Instant) {
 }
 
 /// An ask out longer than `LENS_TIMEOUT`: cancelled, and asked once more;
-/// a second that times out waits for an edit.
+/// a second that times out waits for an edit or a good answer. Resolves
+/// out that long are cancelled too, and count as tried.
 fn time_out(session: &mut LspSession, canonical: &Path, now: Instant) {
     let Some(doc) = session.lenses.get_mut(canonical) else { return };
+    let cancel = |client: &fenix_lsp::LspClient, id: i64| {
+        let _ = client.notify::<lsp_types::notification::Cancel>(lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id as i32) });
+    };
+    let late: Vec<(usize, i64)> = doc.resolving.iter().filter(|(_, (_, at))| now.duration_since(*at) >= LENS_TIMEOUT).map(|(&i, &(id, _))| (i, id)).collect();
+    for (index, id) in late {
+        cancel(&session.client, id);
+        session.pending.remove(&id);
+        doc.resolving.remove(&index);
+        doc.tried.insert(index);
+    }
     let Some((id, _)) = doc.asked.filter(|&(_, at)| now.duration_since(at) >= LENS_TIMEOUT) else { return };
-    let _ = session.client.notify::<lsp_types::notification::Cancel>(lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id as i32) });
+    cancel(&session.client, id);
     session.pending.remove(&id);
     doc.asked = None;
     doc.due = (!doc.timed_out).then_some(now);
@@ -156,7 +231,10 @@ impl App {
             let buffers: Vec<BufferId> = self.lens_of.keys().copied().collect();
             self.lens_of.clear();
             for session in self.lsp_sessions.values_mut() {
-                session.lenses.clear();
+                let paths: Vec<PathBuf> = session.lenses.keys().cloned().collect();
+                for path in paths {
+                    drop_doc(session, &path);
+                }
             }
             for buffer in buffers {
                 self.lay_out_lenses(buffer);
@@ -164,11 +242,25 @@ impl App {
             return;
         }
         let now = Instant::now();
+        // A buffer whose language `lsp.code_lens_off` now leaves out: its
+        // lenses go now, not at its next sync.
+        let left_out: Vec<BufferId> = self.lens_of.keys().copied().filter(|&b| self.buffers.get(b).is_some() && !self.code_lens_wanted(b)).collect();
+        for buffer in left_out {
+            if let Some((keys, path)) = self.lens_of.remove(&buffer) {
+                for key in keys {
+                    if let Some(session) = self.lsp_sessions.get_mut(&key) {
+                        drop_doc(session, &path);
+                    }
+                }
+            }
+            self.lay_out_lenses(buffer);
+        }
         let gone: Vec<BufferId> = self.lens_of.iter().filter(|(b, (keys, _))| self.buffers.get(**b).is_none() || keys.iter().any(|k| !self.lsp_sessions.contains_key(k))).map(|(b, _)| *b).collect();
         for buffer in gone {
             if self.buffers.get(buffer).is_none() {
                 self.lens_of.remove(&buffer);
                 self.lens_rows.remove(&buffer);
+                self.virtual_rows.remove(&buffer);
             } else if let Some((keys, _)) = self.lens_of.get_mut(&buffer) {
                 // A server stopped: its lenses with it, the view kept.
                 let running: Vec<LspKey> = keys.iter().filter(|k| self.lsp_sessions.contains_key(*k)).cloned().collect();
@@ -177,16 +269,28 @@ impl App {
             }
         }
         let of = &self.lens_of;
+        let mut moved = Vec::new();
         for (key, session) in self.lsp_sessions.iter_mut() {
             if session.lenses.is_empty() {
                 continue;
             }
-            session.lenses.retain(|path, d| of.get(&d.buffer).is_some_and(|(keys, p)| p == path && keys.contains(key)));
+            let unwanted: Vec<PathBuf> = session.lenses.iter().filter(|(path, d)| !of.get(&d.buffer).is_some_and(|(keys, p)| p == *path && keys.contains(key))).map(|(path, _)| path.clone()).collect();
+            for path in unwanted {
+                drop_doc(session, &path);
+            }
             let paths: Vec<PathBuf> = session.lenses.keys().cloned().collect();
             for path in paths {
                 time_out(session, &path, now);
                 ask(session, &path, now);
             }
+            // Moved by an agent's edit: laid out again.
+            for doc in session.lenses.values_mut().filter(|d| d.moved) {
+                doc.moved = false;
+                moved.push(doc.buffer);
+            }
+        }
+        for buffer in moved {
+            self.lay_out_lenses(buffer);
         }
     }
 
@@ -195,9 +299,13 @@ impl App {
         self.lsp_sessions
             .values()
             .flat_map(|s| s.lenses.values())
-            .filter_map(|d| match d.asked {
-                Some((_, at)) => Some(at + LENS_TIMEOUT),
-                None => d.due,
+            .filter_map(|d| {
+                let ask = match d.asked {
+                    Some((_, at)) => Some(at + LENS_TIMEOUT),
+                    None => d.due,
+                };
+                let resolve = d.resolving.values().map(|&(_, at)| at + LENS_TIMEOUT).min();
+                ask.into_iter().chain(resolve).min()
             })
             .min()
     }
@@ -208,6 +316,7 @@ impl App {
         let Some(session) = self.lsp_sessions.get_mut(key) else { return };
         for doc in session.lenses.values_mut() {
             doc.stale = true;
+            doc.refusals = 0;
         }
         self.request_redraw_all();
     }
@@ -243,9 +352,13 @@ impl App {
                 Ok(lenses) => lenses.unwrap_or_default(),
                 Err(_) => return,
             },
+            // Asked again later, each time later still, a few times.
             Err(e) if (-32802..=-32800).contains(&e.code) => {
-                doc.due = Some(now + doc.retry);
-                doc.retry = (doc.retry * 2).min(LENS_MAX_RETRY);
+                doc.refusals += 1;
+                if doc.refusals < MAX_REFUSALS {
+                    doc.due = Some(now + doc.retry);
+                    doc.retry = (doc.retry * 2).min(LENS_MAX_RETRY);
+                }
                 return;
             }
             Err(_) => return,
@@ -255,10 +368,31 @@ impl App {
             doc.due = Some(doc.due.unwrap_or(now));
             return;
         }
+        // In line order (the server's order kept on a line), so a view's
+        // lines are found by search.
+        let mut lenses = lenses;
+        lenses.sort_by_key(|l| l.range.start.line);
+        // What the last answer showed in the same place, kept on show for
+        // a lens not resolved yet, so a title doesn't blink to `…`.
+        let place = |l: &lsp_types::CodeLens| (l.range.start.line, l.range.start.character, l.range.end.line, l.range.end.character, l.data.as_ref().map(|d| d.to_string()));
+        let mut said: HashMap<_, lsp_types::Command> = HashMap::new();
+        if lenses.iter().any(|l| l.command.is_none()) {
+            for (j, old) in doc.lenses.iter().enumerate() {
+                if let Some(command) = old.command.clone().or_else(|| doc.carried.get(&j).cloned()) {
+                    said.entry(place(old)).or_insert(command);
+                }
+            }
+        }
+        let carried: HashMap<usize, lsp_types::Command> = lenses.iter().enumerate().filter(|(_, l)| l.command.is_none()).filter_map(|(i, l)| said.get(&place(l)).map(|c| (i, c.clone()))).collect();
         doc.lenses = lenses;
+        doc.carried = carried;
         doc.generation += 1;
-        doc.resolving.clear();
+        // Resolves of the last answer's lenses: cancelled, not left out.
+        doc.cancel_resolves(&session.client, &mut session.pending);
+        doc.tried.clear();
         doc.retry = LENS_PAUSE;
+        doc.refusals = 0;
+        doc.timed_out = false;
         let buffer = doc.buffer;
         self.lay_out_lenses(buffer);
     }
@@ -270,44 +404,58 @@ impl App {
         if doc.generation != generation {
             return;
         }
+        // Tried, whatever it says: not asked again until the next answer.
         doc.resolving.remove(&index);
-        let Some(resolved) = result.ok().and_then(|v| serde_json::from_value::<lsp_types::CodeLens>(v).ok()) else { return };
+        doc.tried.insert(index);
+        let resolved = result.ok().and_then(|v| serde_json::from_value::<lsp_types::CodeLens>(v).ok()).and_then(|l| l.command);
         let Some(lens) = doc.lenses.get_mut(index) else { return };
-        lens.command = resolved.command;
+        // Its own title now, or (none came) none: nothing to run.
+        lens.command = resolved;
+        doc.carried.remove(&index);
         let buffer = doc.buffer;
         self.lay_out_lenses(buffer);
     }
 
-    /// Drawing `rows` lines of buffer `id` from line `base`: a refresh it
-    /// missed asked for now, and its lenses in those lines that came
-    /// without a command resolved.
-    pub(super) fn note_lens_view(&mut self, id: BufferId, base: usize, rows: usize) {
-        let Some((keys, path)) = self.lens_of.get(&id).cloned() else { return };
-        let lines = base..base + rows;
+    /// A pane drawing `runs` of buffer `id`'s lines (each a run shown
+    /// together, a closed fold between two): a refresh it missed asked
+    /// for now, and its lenses on those lines that came without a
+    /// command resolved, each once an answer, no more than
+    /// `MAX_RESOLVING` out at once from a server.
+    pub(super) fn note_lens_view(&mut self, id: BufferId, runs: &[std::ops::Range<usize>]) {
+        let Some((keys, path)) = self.lens_of.get(&id) else { return };
         for key in keys {
-            let Some(session) = self.lsp_sessions.get_mut(&key) else { continue };
-            let resolves = session.capabilities.as_ref().and_then(lens::provider).is_some_and(|p| p.resolve);
-            let Some(doc) = session.lenses.get_mut(&path) else { continue };
+            let Some(session) = self.lsp_sessions.get_mut(key) else { continue };
+            let Some(doc) = session.lenses.get_mut(path) else { continue };
             if doc.stale && doc.asked.is_none() {
                 doc.stale = false;
                 doc.due = Some(Instant::now());
             }
-            if !resolves {
+            if doc.lenses.is_empty() || !session.capabilities.as_ref().and_then(lens::provider).is_some_and(|p| p.resolve) {
                 continue;
             }
-            let wanted: Vec<usize> = doc
-                .lenses
-                .iter()
-                .enumerate()
-                .filter(|(i, l)| l.command.is_none() && lines.contains(&(l.range.start.line as usize)) && !doc.resolving.contains(i))
-                .map(|(i, _)| i)
-                .take(MAX_RESOLVING.saturating_sub(doc.resolving.len()))
-                .collect();
+            let out: usize = session.lenses.values().map(|d| d.resolving.len()).sum();
+            let Some(doc) = session.lenses.get_mut(path) else { continue };
+            let mut room = MAX_RESOLVING.saturating_sub(out);
+            let mut wanted = Vec::new();
+            for run in runs {
+                // In line order: the first on the run's first line, by search.
+                let first = doc.lenses.partition_point(|l| (l.range.start.line as usize) < run.start);
+                for (i, l) in doc.lenses.iter().enumerate().skip(first) {
+                    if room == 0 || l.range.start.line as usize >= run.end {
+                        break;
+                    }
+                    if l.command.is_none() && !doc.resolving.contains_key(&i) && !doc.tried.contains(&i) {
+                        wanted.push(i);
+                        room -= 1;
+                    }
+                }
+            }
+            let now = Instant::now();
             for index in wanted {
                 let lens = doc.lenses[index].clone();
-                if let Ok(id) = session.client.request::<lsp_types::request::CodeLensResolve>(lens) {
-                    doc.resolving.insert(index);
-                    session.pending.insert(id, PendingLspRequest::CodeLensResolve { path: path.clone(), generation: doc.generation, index });
+                if let Ok(request) = session.client.request::<lsp_types::request::CodeLensResolve>(lens) {
+                    doc.resolving.insert(index, (request, now));
+                    session.pending.insert(request, PendingLspRequest::CodeLensResolve { path: path.clone(), generation: doc.generation, index });
                 }
             }
         }
@@ -319,12 +467,12 @@ impl App {
     pub(super) fn lay_out_lenses(&mut self, id: BufferId) {
         let mut rows: BTreeMap<usize, LensRow<LensTag>> = BTreeMap::new();
         if let Some((keys, path)) = self.lens_of.get(&id) {
-            let all: Vec<(LensTag, &lsp_types::CodeLens)> = keys
+            let shown: Vec<(LensTag, std::borrow::Cow<lsp_types::CodeLens>)> = keys
                 .iter()
                 .filter_map(|key| self.lsp_sessions.get(key).and_then(|s| s.lenses.get(path)).filter(|d| d.buffer == id).map(|d| (key, d)))
-                .flat_map(|(key, d)| d.lenses.iter().enumerate().map(move |(i, l)| ((key.clone(), i), l)))
+                .flat_map(|(key, d)| d.shown().map(move |(i, l)| ((key.clone(), i), l)))
                 .collect();
-            rows = lens::rows(all);
+            rows = lens::rows(shown.iter().map(|(tag, l)| (tag.clone(), l.as_ref())));
         }
         let texts: BTreeMap<usize, Vec<String>> = rows.iter().map(|(&line, row)| (line, vec![row.text.clone()])).collect();
         if texts.is_empty() {

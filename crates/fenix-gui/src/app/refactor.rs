@@ -372,9 +372,11 @@ impl App {
                 if let Ok(next) = result {
                     // Its tokens move with what was sent, and are asked
                     // again, as after any other sync.
-                    super::record_lsp_sync(session, &canonical, &text, revision, next, super::semantic::SemanticSync::Follow);
+                    super::record_lsp_sync(session, &canonical, &text, revision, next, super::semantic::SemanticSync::Follow, super::semantic::SemanticSync::Follow);
                 }
             }
+            // Its lenses moved with it: laid out again.
+            self.lay_out_lenses(*id);
         }
     }
 }
