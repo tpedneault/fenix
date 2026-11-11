@@ -62,9 +62,16 @@ pub struct ResponseError {
 /// `arduino-language-server` crashes ("unlock of unlocked mutex") when its
 /// `window/workDoneProgress/create` is refused. Anything else gets
 /// "method not found", so a spec-compliant server isn't left waiting.
+/// The refreshes Fenix acts on (semantic tokens, code lens) are answered
+/// the same way, once acted on.
 pub fn server_request_reply(method: &str) -> Result<Value, ResponseError> {
     match method {
-        "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" | "workspace/diagnostic/refresh" => Ok(Value::Null),
+        "window/workDoneProgress/create"
+        | "client/registerCapability"
+        | "client/unregisterCapability"
+        | "workspace/diagnostic/refresh"
+        | "workspace/semanticTokens/refresh"
+        | "workspace/codeLens/refresh" => Ok(Value::Null),
         _ => Err(ResponseError { code: -32601, message: format!("not implemented: {method}"), data: None }),
     }
 }
@@ -72,6 +79,14 @@ pub fn server_request_reply(method: &str) -> Result<Value, ResponseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_refreshes_fenix_acts_on_are_answered_with_null() {
+        for method in ["workspace/semanticTokens/refresh", "workspace/codeLens/refresh", "workspace/diagnostic/refresh"] {
+            assert_eq!(server_request_reply(method), Ok(Value::Null), "{method}");
+        }
+        assert_eq!(server_request_reply("workspace/inlayHint/refresh").unwrap_err().code, -32601);
+    }
 
     #[test]
     fn request_omits_result_and_error() {

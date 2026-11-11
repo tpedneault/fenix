@@ -20862,7 +20862,9 @@ impl App {
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
             // This pane's own view, for a document asked by range.
-            self.note_semantic_view(buffer_id, pane, &row_map.runs());
+            if self.semantic_of.contains_key(&buffer_id) {
+                self.note_semantic_view(buffer_id, pane, &row_map.runs());
+            }
             // A wrapped pane: the columns its rows show of each line.
             let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
                 let mut columns: HashMap<usize, (usize, usize)> = HashMap::new();
@@ -37134,10 +37136,20 @@ name = \"orbit\"
             }
         }
         assert_eq!(asked, vec![0..110, 29_910..30_140], "each run with its margin");
-        // A view far taller than any pane: no more than one ask's worth.
+        // A view far taller than any pane: no more than one ask's worth
+        // at a time, each from where the last left off, then quiet.
         app.note_semantic_view(id, pane, &[5_000..15_000]);
-        app.ask_due_semantic_tokens();
-        assert!(asked_lines(&app, &key).is_some_and(|(_, l)| l.len() <= 2_000));
+        let mut asked = Vec::new();
+        for _ in 0..12 {
+            app.ask_due_semantic_tokens();
+            if let Some((req, lines)) = asked_lines(&app, &key) {
+                assert!(lines.len() <= 2_000, "{lines:?}");
+                asked.push(lines);
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asked, vec![4_900..6_900, 6_900..8_900, 8_900..10_900, 10_900..12_900, 12_900..14_900, 14_900..15_100]);
+        assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "quiet");
     }
 
     #[test]
@@ -37178,6 +37190,70 @@ name = \"orbit\"
         let doc = &app.lsp_sessions[&key].semantic[&canonical];
         assert!(doc.covered.len() <= 8, "{:?}", doc.covered);
         assert_eq!(doc.tokens.len(), doc.covered.len(), "a token for each range kept, none for those let go");
+    }
+
+    #[test]
+    fn ranges_let_go_after_an_edit_or_a_refresh_still_take_their_tokens_with_them() {
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_evict_edit", 70_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        for i in 0..20 {
+            let top = i * 3_000 + 100;
+            app.note_semantic_view(id, pane, &[top..top + 40]);
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+            app.ask_due_semantic_tokens();
+            let (req, _) = asked_lines(&app, &key).unwrap();
+            answer(&mut app, &key, req, serde_json::json!({"data": [top, 3, 1, 0, 0]}));
+            // An edit (on line 0, the lines kept) or a refresh between.
+            if i % 2 == 0 {
+                app.test_insert_str("x");
+                app.sync_lsp_for_focused_buffer();
+            } else {
+                app.refresh_semantic_tokens(&key);
+            }
+        }
+        let doc = &app.lsp_sessions[&key].semantic[&canonical];
+        assert!(doc.held.len() <= 8, "{:?}", doc.held);
+        assert!(doc.tokens.len() <= 8, "tokens for at most 8 ranges, not all 20: {}", doc.tokens.len());
+    }
+
+    #[test]
+    fn a_refresh_marks_only_the_ask_out_however_that_ask_ends() {
+        // Refused as modified: the next ask's lines count as answered.
+        let (_dir, mut app, key, canonical) = range_fixture("semantic_refresh_refused", 12_000);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.note_semantic_view(id, pane, &[0..40]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        answer_error(&mut app, &key, req, -32801);
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].refreshed_while_asking);
+        let mut asks = 0;
+        for _ in 0..5 {
+            // Past any back-off: due now.
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+            app.ask_due_semantic_tokens();
+            if let Some((req, _)) = asked_lines(&app, &key) {
+                asks += 1;
+                answer(&mut app, &key, req, serde_json::json!({"data": []}));
+            }
+        }
+        assert_eq!(asks, 1, "asked again once, not twice");
+        // Edited since asked: the same.
+        app.note_semantic_view(id, pane, &[6_000..6_040]);
+        app.ask_due_semantic_tokens();
+        let (req, _) = asked_lines(&app, &key).unwrap();
+        app.refresh_semantic_tokens(&key);
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, req, serde_json::json!({"data": []}));
+        assert!(!app.lsp_sessions[&key].semantic[&canonical].refreshed_while_asking);
+        // A whole document's ask: cleared when it's answered.
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refresh_full");
+        app.ask_due_semantic_tokens();
+        let (req, _) = only_pending(&app, &key);
+        app.refresh_semantic_tokens(&key);
+        answer(&mut app, &key, req, serde_json::json!({"data": MAIN_AND_X}));
+        assert!(app.lsp_sessions[&key].semantic.values().all(|d| !d.refreshed_while_asking));
     }
 
     #[test]
