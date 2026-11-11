@@ -1340,10 +1340,8 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
         None => {
             let params = lsp_types::DidOpenTextDocumentParams { text_document: lsp_types::TextDocumentItem { uri, language_id, version: 0, text: text.to_string() } };
             if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
-                session.open_documents.insert(canonical.to_path_buf(), (edit_count, 1));
-                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                record_lsp_sync(session, canonical, text, edit_count, 1, semantic);
                 pull_lsp_diagnostics(session, canonical);
-                semantic::after_sync(session, canonical, None, text, edit_count, semantic);
             }
         }
         Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count || session.synced_text.get(canonical).is_none_or(|t| t != text) => {
@@ -1354,10 +1352,8 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
                 content_changes: vec![change],
             };
             if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
-                session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version + 1));
-                let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                record_lsp_sync(session, canonical, text, edit_count, next_version + 1, semantic);
                 pull_lsp_diagnostics(session, canonical);
-                semantic::after_sync(session, canonical, old.as_deref().map(|old| (old, last_synced_edit_count)), text, edit_count, semantic);
             }
         }
         // Already open and already in sync -- the common case, most
@@ -1376,6 +1372,18 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
             }
         }
     }
+}
+
+/// What `session` was just sent of `canonical` (`didOpen` or
+/// `didChange`): its text at `edit_count`, the next version to send. The
+/// one place that's recorded, so what's held by position (semantic
+/// tokens) always moves with it -- every writer of `synced_text` and
+/// `open_documents` comes through here.
+fn record_lsp_sync(session: &mut LspSession, canonical: &Path, text: &str, edit_count: u64, next_version: i32, semantic: semantic::SemanticSync) {
+    let old_count = session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version)).map(|(count, _)| count);
+    let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+    let change = old.as_deref().zip(old_count);
+    semantic::after_sync(session, canonical, change, text, edit_count, semantic);
 }
 
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
@@ -18713,12 +18721,14 @@ impl App {
         rows: usize,
         scroll_col: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
-        self.syntax_highlights_in_columns(id, render_base_line, rows, scroll_col, None)
+        self.syntax_highlights_in_columns(id, render_base_line, rows, scroll_col, None, false)
     }
 
     /// `syntax_highlights_from_column`, with the columns of each line a
     /// wrapped pane's rows show (`columns`, by line: from, to) in place of
-    /// the sideways scroll's for a very long line.
+    /// the sideways scroll's for a very long line. `viewport`: what a pane
+    /// shows, drawn (not a header or a line looked up on its own) -- what
+    /// its underlines are worked out against.
     fn syntax_highlights_in_columns(
         &mut self,
         id: BufferId,
@@ -18726,6 +18736,7 @@ impl App {
         rows: usize,
         scroll_col: usize,
         columns: Option<&HashMap<usize, (usize, usize)>>,
+        viewport: bool,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
@@ -18837,9 +18848,11 @@ impl App {
             return colored;
         }
         let laid = self.with_semantic_tokens(id, colored, &windows, &protected);
-        // Kept for the underlines drawn over this frame's text: none where
-        // a token's colour isn't laid either.
-        self.semantic_protected.insert(id, protected);
+        // Kept for the underlines drawn over this pane's text, right after
+        // (`polish_pane`): none where a token's colour isn't laid either.
+        if viewport {
+            self.semantic_protected.insert(id, protected);
+        }
         laid
     }
 
@@ -20857,7 +20870,7 @@ impl App {
                 }
                 columns
             });
-            let syntax_highlights = self.syntax_highlights_in_columns(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col, row_columns.as_ref());
+            let syntax_highlights = self.syntax_highlights_in_columns(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col, row_columns.as_ref(), true);
             let tab_stops = self.tab_stops_for(buffer_id);
             let content_spans = match self.buffers.get(buffer_id) {
                 // A wrapped pane is drawn by its rows.
@@ -36813,6 +36826,21 @@ name = \"orbit\"
     }
 
     #[test]
+    fn a_refactor_s_sync_moves_semantic_tokens_and_asks_again() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_refactor");
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        // An edit a refactor made, synced as a refactor syncs.
+        app.test_insert_str("  ");
+        let buffer = app.focused_buffer_id();
+        app.sync_refactor_buffers(&[buffer]);
+        assert!(app.drawn_tokens(buffer).is_some(), "moved with the change, still drawn");
+        assert_eq!(colour_at(&mut app, 18), Some(macro_colour(&app)));
+        assert!(app.semantic_wake().is_some(), "and asked again");
+    }
+
+    #[test]
     fn an_agent_s_look_at_a_file_asks_for_no_semantic_tokens() {
         let (dir, mut app, _path, key) = semantic_fixture("semantic_agent");
         let other = dir.write("lib.rs", "pub fn lib() {}\n");
@@ -36846,8 +36874,12 @@ name = \"orbit\"
         let (id, _) = only_pending(&app, &key);
         // `s` (4) and the `b` inside the string (10), both mutable.
         answer(&mut app, &key, id, serde_json::json!({"data": [0, 4, 1, 0, 1, 0, 6, 1, 0, 1]}));
-        let _ = colour_at(&mut app, 0);
         let buffer = app.focused_buffer_id();
+        // A line looked up on its own doesn't stand for the pane's text...
+        let _ = colour_at(&mut app, 0);
+        assert!(!app.semantic_protected.contains_key(&buffer));
+        // ...the pane's own drawing does.
+        let _ = app.syntax_highlights_in_columns(buffer, 0, 1, 0, None, true);
         assert_eq!(app.underlined_tokens(buffer, 0..1).into_iter().map(|(_, c, _)| c).collect::<Vec<_>>(), vec![4..5], "not the one in the string");
         assert!(app.underlined_tokens(buffer, 0..0).is_empty());
     }
