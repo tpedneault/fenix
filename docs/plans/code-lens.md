@@ -362,3 +362,8 @@ lenses are off by default until stage 6.
   - A lens row is cut to the pane's real width by whole titles
     (`LensRow::fit`), wrapped or not, and its indent is at most half the
     pane, so it stays in view.
+  - Resolves out when their answer is let go (a new answer, the
+    document dropped, the setting off) are cancelled, so no more than 16
+    are ever out. A lens whose resolve comes to nothing shows no title,
+    its row kept, so there's nothing to click. The last answer's titles
+    are found by place and data in a map, not a scan per lens.

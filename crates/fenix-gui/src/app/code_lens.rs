@@ -82,12 +82,32 @@ impl LensDoc {
     }
 
     /// The lenses as they're shown: one not resolved yet with what the
-    /// last answer's in its place said, while it's carried.
+    /// last answer's in its place said, while it's carried; one whose
+    /// resolve came to nothing with no title, so nothing to click.
     fn shown(&self) -> impl Iterator<Item = (usize, std::borrow::Cow<'_, lsp_types::CodeLens>)> {
-        self.lenses.iter().enumerate().map(|(i, lens)| match (lens.command.is_none(), self.carried.get(&i)) {
-            (true, Some(command)) => (i, std::borrow::Cow::Owned(lsp_types::CodeLens { command: Some(command.clone()), ..lens.clone() })),
-            _ => (i, std::borrow::Cow::Borrowed(lens)),
+        self.lenses.iter().enumerate().map(|(i, lens)| {
+            let with = |command: lsp_types::Command| std::borrow::Cow::Owned(lsp_types::CodeLens { command: Some(command), ..lens.clone() });
+            match (lens.command.is_none(), self.tried.contains(&i), self.carried.get(&i)) {
+                (true, true, _) => (i, with(lsp_types::Command { title: String::new(), command: String::new(), arguments: None })),
+                (true, false, Some(command)) => (i, with(command.clone())),
+                _ => (i, std::borrow::Cow::Borrowed(lens)),
+            }
         })
+    }
+
+    /// The resolves out let go: cancelled at the server and forgotten.
+    fn cancel_resolves(&mut self, client: &fenix_lsp::LspClient, pending: &mut HashMap<i64, PendingLspRequest>) {
+        for (_, (id, _)) in self.resolving.drain() {
+            let _ = client.notify::<lsp_types::notification::Cancel>(lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id as i32) });
+            pending.remove(&id);
+        }
+    }
+}
+
+/// `session`'s lenses of `canonical` let go, with any resolves out.
+fn drop_doc(session: &mut LspSession, canonical: &Path) {
+    if let Some(mut doc) = session.lenses.remove(canonical) {
+        doc.cancel_resolves(&session.client, &mut session.pending);
     }
 }
 
@@ -105,7 +125,7 @@ pub(super) fn offers(session: &LspSession) -> bool {
 pub(super) fn after_sync(session: &mut LspSession, canonical: &Path, change: Option<&str>, new: &str, sync: LensSync) {
     let buffer = match sync {
         LensSync::Drop => {
-            session.lenses.remove(canonical);
+            drop_doc(session, canonical);
             return;
         }
         LensSync::Follow => None,
@@ -211,7 +231,10 @@ impl App {
             let buffers: Vec<BufferId> = self.lens_of.keys().copied().collect();
             self.lens_of.clear();
             for session in self.lsp_sessions.values_mut() {
-                session.lenses.clear();
+                let paths: Vec<PathBuf> = session.lenses.keys().cloned().collect();
+                for path in paths {
+                    drop_doc(session, &path);
+                }
             }
             for buffer in buffers {
                 self.lay_out_lenses(buffer);
@@ -226,7 +249,7 @@ impl App {
             if let Some((keys, path)) = self.lens_of.remove(&buffer) {
                 for key in keys {
                     if let Some(session) = self.lsp_sessions.get_mut(&key) {
-                        session.lenses.remove(&path);
+                        drop_doc(session, &path);
                     }
                 }
             }
@@ -251,7 +274,10 @@ impl App {
             if session.lenses.is_empty() {
                 continue;
             }
-            session.lenses.retain(|path, d| of.get(&d.buffer).is_some_and(|(keys, p)| p == path && keys.contains(key)));
+            let unwanted: Vec<PathBuf> = session.lenses.iter().filter(|(path, d)| !of.get(&d.buffer).is_some_and(|(keys, p)| p == *path && keys.contains(key))).map(|(path, _)| path.clone()).collect();
+            for path in unwanted {
+                drop_doc(session, &path);
+            }
             let paths: Vec<PathBuf> = session.lenses.keys().cloned().collect();
             for path in paths {
                 time_out(session, &path, now);
@@ -348,17 +374,21 @@ impl App {
         lenses.sort_by_key(|l| l.range.start.line);
         // What the last answer showed in the same place, kept on show for
         // a lens not resolved yet, so a title doesn't blink to `…`.
-        let mut carried = HashMap::new();
-        for (i, new) in lenses.iter().enumerate().filter(|(_, l)| l.command.is_none()) {
-            let old = doc.lenses.iter().enumerate().find(|(_, old)| old.range == new.range && old.data == new.data);
-            if let Some(command) = old.and_then(|(j, old)| old.command.clone().or_else(|| doc.carried.get(&j).cloned())) {
-                carried.insert(i, command);
+        let place = |l: &lsp_types::CodeLens| (l.range.start.line, l.range.start.character, l.range.end.line, l.range.end.character, l.data.as_ref().map(|d| d.to_string()));
+        let mut said: HashMap<_, lsp_types::Command> = HashMap::new();
+        if lenses.iter().any(|l| l.command.is_none()) {
+            for (j, old) in doc.lenses.iter().enumerate() {
+                if let Some(command) = old.command.clone().or_else(|| doc.carried.get(&j).cloned()) {
+                    said.entry(place(old)).or_insert(command);
+                }
             }
         }
+        let carried: HashMap<usize, lsp_types::Command> = lenses.iter().enumerate().filter(|(_, l)| l.command.is_none()).filter_map(|(i, l)| said.get(&place(l)).map(|c| (i, c.clone()))).collect();
         doc.lenses = lenses;
         doc.carried = carried;
         doc.generation += 1;
-        doc.resolving.clear();
+        // Resolves of the last answer's lenses: cancelled, not left out.
+        doc.cancel_resolves(&session.client, &mut session.pending);
         doc.tried.clear();
         doc.retry = LENS_PAUSE;
         doc.refusals = 0;
@@ -379,9 +409,8 @@ impl App {
         doc.tried.insert(index);
         let resolved = result.ok().and_then(|v| serde_json::from_value::<lsp_types::CodeLens>(v).ok()).and_then(|l| l.command);
         let Some(lens) = doc.lenses.get_mut(index) else { return };
-        // Its own title now, or (none came) what was carried stays.
-        let Some(command) = resolved else { return };
-        lens.command = Some(command);
+        // Its own title now, or (none came) none: nothing to run.
+        lens.command = resolved;
         doc.carried.remove(&index);
         let buffer = doc.buffer;
         self.lay_out_lenses(buffer);

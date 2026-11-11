@@ -37528,6 +37528,45 @@ name = \"orbit\"
     }
 
     #[test]
+    fn resolves_of_an_answer_let_go_are_cancelled_so_no_more_than_sixteen_are_ever_out() {
+        let text = "x\n".repeat(40);
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_resolve_superseded", &text, &(0..40).collect::<Vec<u32>>());
+        let buffer = app.focused_buffer_id();
+        let unresolved: Vec<serde_json::Value> = (0..40).map(|l| lens_json(l, None)).collect();
+        for _ in 0..4 {
+            app.note_lens_view(buffer, &[0..40]);
+            assert!(resolves_out(&app, &key).len() <= 16, "{}", resolves_out(&app, &key).len());
+            // Asked again (a refresh) and answered; the resolves never are.
+            app.refresh_lenses(&key);
+            app.note_lens_view(buffer, &[0..40]);
+            app.ask_due_lenses();
+            let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+            answer(&mut app, &key, id, serde_json::Value::Array(unresolved.clone()));
+        }
+        app.note_lens_view(buffer, &[0..40]);
+        assert_eq!(resolves_out(&app, &key).len(), 16);
+    }
+
+    #[test]
+    fn a_carried_title_whose_resolve_comes_to_nothing_isn_t_shown_to_be_run() {
+        let (_dir, mut app, _path, key, _canonical) = lens_answered("lens_carry_fails", "a\nb\n", &[1]);
+        let buffer = app.focused_buffer_id();
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::json!({"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 2}}, "command": {"title": "3 references", "command": "x.run"}}));
+        app.refresh_lenses(&key);
+        app.note_lens_view(buffer, &[0..5]);
+        app.ask_due_lenses();
+        let id = app.lsp_sessions[&key].pending.iter().find(|(_, p)| matches!(p, PendingLspRequest::CodeLens { .. })).map(|(id, _)| *id).unwrap();
+        answer(&mut app, &key, id, serde_json::json!([lens_json(1, None)]));
+        assert_eq!(lens_rows_of(&app), vec![(1, "3 references".to_string())], "carried");
+        app.note_lens_view(buffer, &[0..5]);
+        let out = resolves_out(&app, &key);
+        answer(&mut app, &key, out[0], serde_json::Value::Null);
+        assert_eq!(lens_rows_of(&app), vec![(1, String::new())], "nothing to click, its row kept");
+    }
+
+    #[test]
     fn a_resolved_title_stays_on_show_through_the_next_answer_until_it_s_resolved_again() {
         let (_dir, mut app, _path, key, canonical) = lens_answered("lens_carry", "a\nb\n", &[1]);
         let buffer = app.focused_buffer_id();
