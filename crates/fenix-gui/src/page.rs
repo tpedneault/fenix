@@ -324,6 +324,25 @@ pub fn col_of(cells: Option<&[usize]>, cell: usize) -> usize {
     }
 }
 
+/// Columns `cols` of a line as the cells a box across them takes -- a
+/// tint, a hairline, a card: from where its first column starts, as many
+/// cells as it has columns, or on to the end of the line's text in it
+/// when a wide character takes that further. Text that was fitted to
+/// cells keeps a box to its width; text that wasn't stays inside it.
+pub fn box_cells(cells: Option<&[usize]>, cols: &Range<usize>) -> (usize, usize) {
+    let start = cell_of(cells, cols.start);
+    let text = cells.map_or(0, |c| c.len() - 1);
+    (start, (start + cols.len()).max(cell_of(cells, cols.end.min(text))))
+}
+
+/// The cells a card takes: as `box_cells`, over each of its lines.
+pub fn card_cells(page: &Page, card: &Card) -> (usize, usize) {
+    let lines: Vec<&str> = page.text.lines().skip(card.lines.start).take(card.lines.len()).collect();
+    let start = cell_of(lines.first().and_then(|l| line_cells(l)).as_deref(), card.cols.start);
+    let end = lines.iter().map(|l| box_cells(line_cells(l).as_deref(), &card.cols).1).max().unwrap_or(start + card.cols.len());
+    (start, end.max(start + card.cols.len()))
+}
+
 /// A page being laid out: rows of cells, plus what's drawn over them.
 pub struct Grid {
     lines: Vec<Vec<char>>,
@@ -366,33 +385,63 @@ pub fn home_relative(path: &Path) -> String {
     }
 }
 
-/// Cuts `s` to `max` chars, ending in "…" when it had to.
+/// How many cells `s` takes, a wide character two (`char_cells`).
+pub fn str_cells(s: &str) -> usize {
+    s.chars().map(char_cells).sum()
+}
+
+/// `text` as one row: each run of whitespace -- a newline, a tab, a
+/// `\r` -- one space, and any other control character too. For a title,
+/// a name or an entry that's to be read on a line of its own, before
+/// `fit` cuts it.
+pub fn one_line(text: &str) -> String {
+    text.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
+/// Cuts `s` to `max` cells (a wide character takes two), ending in "…"
+/// when it had to.
 pub fn fit(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if str_cells(s) <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out: String = s.chars().take(max - 1).collect();
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = char_cells(c);
+        if used + w > max - 1 {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
     out.push('…');
     out
 }
 
-/// `s` in at most `max` columns keeping its end, `…` marking what went
+/// `s` in at most `max` cells keeping its end, `…` marking what went
 /// off the front -- for a field being typed, where the end is where the
 /// typing is.
 pub fn fit_tail(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
+    if str_cells(s) <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let mut out = String::from('…');
-    out.extend(s.chars().skip(n - (max - 1)));
-    out
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 0;
+    for c in s.chars().rev() {
+        let w = char_cells(c);
+        if used + w > max - 1 {
+            break;
+        }
+        used += w;
+        kept.push(c);
+    }
+    std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
 /// A path in at most `max` columns, cut in the middle with `…`: its
@@ -595,19 +644,39 @@ pub fn with_caret(text: &str, caret: usize, max: usize) -> String {
     std::iter::once('…').chain(all[start + 1..start + max - 1].iter().copied()).chain(std::iter::once('…')).collect()
 }
 
-/// `text` wrapped at word boundaries to lines of at most `width`; a
-/// word longer than that (a path) is broken wherever it has to be.
+/// `text` broken into pieces of at most `width` cells, wherever it has
+/// to be: a word too long for a line (a path).
+fn chunks(text: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut piece = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = char_cells(c);
+        if used + w > width && !piece.is_empty() {
+            out.push(std::mem::take(&mut piece));
+            used = 0;
+        }
+        used += w;
+        piece.push(c);
+    }
+    if !piece.is_empty() {
+        out.push(piece);
+    }
+    out
+}
+
+/// `text` wrapped at word boundaries to lines of at most `width` cells;
+/// a word longer than that (a path) is broken wherever it has to be.
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut line = String::new();
     let mut words: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        let chars: Vec<char> = word.chars().collect();
-        words.extend(chars.chunks(width).map(|c| c.iter().collect::<String>()));
+    for word in text.split(|c: char| c.is_whitespace() || c.is_control()).filter(|w| !w.is_empty()) {
+        words.extend(chunks(word, width));
     }
     for word in &words {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+        if !line.is_empty() && str_cells(&line) + 1 + str_cells(word) > width {
             lines.push(std::mem::take(&mut line));
         }
         if !line.is_empty() {
@@ -806,39 +875,33 @@ impl Grid {
         self.lines.len()
     }
 
-    /// Writes `text` at (`line`, `col`) without colouring it.
-    fn write(&mut self, line: usize, col: usize, text: &str) {
+    /// Writes `text` at (`line`, `col`) without colouring it. A row is
+    /// one line: a control character (`\n`, `\r`, a tab) is stored as a
+    /// space, one cell for one, so no text can push the rows under it
+    /// off what's drawn for them and the columns worked out still hold.
+    fn write(&mut self, line: usize, col: usize, text: &str) -> usize {
         if self.lines.len() <= line {
             self.lines.resize(line + 1, Vec::new());
         }
         let len = text.chars().count();
         if len == 0 {
-            return;
+            return 0;
         }
         let row = &mut self.lines[line];
         if row.len() < col + len {
             row.resize(col + len, ' ');
         }
         for (i, c) in text.chars().enumerate() {
-            row[col + i] = c;
+            row[col + i] = if c.is_control() { ' ' } else { c };
         }
+        len
     }
 
     /// Writes `text` at (`line`, `col`); returns the column after it.
     pub fn put(&mut self, line: usize, col: usize, text: &str, role: Role) -> usize {
-        let len = text.chars().count();
-        if self.lines.len() <= line {
-            self.lines.resize(line + 1, Vec::new());
-        }
+        let len = self.write(line, col, text);
         if len == 0 {
             return col;
-        }
-        let row = &mut self.lines[line];
-        if row.len() < col + len {
-            row.resize(col + len, ' ');
-        }
-        for (i, c) in text.chars().enumerate() {
-            row[col + i] = c;
         }
         self.spans.push(Span { line, cols: col..col + len, role });
         col + len
@@ -881,6 +944,8 @@ impl Grid {
 
     pub fn finish(self) -> Page {
         let text = self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
+        // What's addressed by row is the line of that number.
+        debug_assert!(self.lines.is_empty() || text.split('\n').count() == self.lines.len(), "a row of the page holds a line break");
         Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images, underlines: self.underlines, cards: self.cards, chips: self.chips, graph: self.graph, ..Page::default() }
     }
 }
@@ -892,7 +957,7 @@ impl Grid {
 pub fn overflow(page: &Page, cols: usize) -> Vec<String> {
     let mut out = Vec::new();
     for (n, line) in page.text.lines().enumerate() {
-        let width = line.trim_end().chars().count();
+        let width = str_cells(line.trim_end());
         if width > cols {
             out.push(format!("line {n} is {width} wide: {:?}", line.trim_end()));
         }
@@ -907,14 +972,24 @@ pub fn overflow(page: &Page, cols: usize) -> Vec<String> {
             out.push(format!("text over text on line {} at {:?} and {:?}: {line:?}", pair[0].line, pair[0].cols, pair[1].cols));
         }
     }
-    for (line, cells, _) in &page.chips {
-        if cells.end > cols {
-            out.push(format!("a chip on line {line} ends at {}", cells.end));
+    // In cells, as they're drawn.
+    let map = |line: usize| page.cells(line);
+    for (line, range, _) in &page.chips {
+        let end = cell_of(map(*line).as_deref(), range.end);
+        if end > cols {
+            out.push(format!("a chip on line {line} ends at {end}"));
         }
     }
     for card in &page.cards {
-        if card.cols.end > cols {
-            out.push(format!("a card on lines {:?} ends at {}", card.lines, card.cols.end));
+        let (_, end) = card_cells(page, card);
+        if end > cols {
+            out.push(format!("a card on lines {:?} ends at {end}", card.lines));
+        }
+    }
+    for (line, range) in page.panels.iter().chain(page.focus.iter()).chain(page.focuses.iter()) {
+        let (_, end) = box_cells(map(*line).as_deref(), range);
+        if end > cols {
+            out.push(format!("a tint on line {line} ends at {end}"));
         }
     }
     out
@@ -938,6 +1013,48 @@ mod tests {
         assert_eq!(col_of(Some(&cells), 9), 7);
         assert_eq!(page.cells(2).unwrap(), [0, 2, 3]);
         assert_eq!((cell_of(None, 3), col_of(None, 3)), (3, 3));
+    }
+
+    /// A row is one line: whatever control character is put or written
+    /// into it is a space, one for one, and the page has as many lines
+    /// as rows.
+    #[test]
+    fn a_row_holds_no_line_break_whatever_it_is_given() {
+        let controls: String = (0u32..0x20).chain(0x7f..0xa0).filter_map(char::from_u32).collect();
+        let mut g = Grid::new();
+        let end = g.put(0, 2, &format!("a{controls}b"), Role::Text);
+        g.write(1, 0, "x\ny\r\nz\t");
+        g.chip(2, 0, "\nk\n", Role::Accent, Chip::Key);
+        let page = g.finish();
+        assert_eq!(page.text.split('\n').count(), 3, "{:?}", page.text);
+        let lines: Vec<&str> = page.text.split('\n').collect();
+        assert_eq!(lines[0], format!("  a{}b", " ".repeat(controls.chars().count())));
+        assert_eq!(end, 2 + controls.chars().count() + 2, "a cell for each character");
+        assert_eq!(lines[1], "x y  z");
+        assert_eq!(page.chips, vec![(2, 0..3, Chip::Key)]);
+        assert!(page.text.chars().all(|c| c == '\n' || !c.is_control()));
+    }
+
+    /// `fit` and `wrap` count cells: a wide character takes two.
+    #[test]
+    fn fit_and_wrap_count_cells() {
+        assert_eq!(fit("日本語です", 6), "日本…");
+        assert_eq!(str_cells(&fit("日本語です", 6)), 5);
+        assert_eq!(fit("日本", 4), "日本");
+        assert_eq!(fit_tail("日本語です", 6), "…です");
+        assert!(wrap(&"日本語 ".repeat(10), 8).iter().all(|l| str_cells(l) <= 8));
+        assert!(wrap(&"😀".repeat(30), 7).iter().all(|l| str_cells(l) <= 7));
+        assert_eq!(one_line("cat <<EOF\n# Plan\r\n\t1. a\u{1b}x"), "cat <<EOF # Plan 1. a x");
+    }
+
+    /// A box across a line with wide characters is as many cells as it has
+    /// columns, or to the end of the text in it.
+    #[test]
+    fn a_box_over_wide_text_keeps_its_width() {
+        let cells = line_cells("  日本 ok").unwrap();
+        assert_eq!(box_cells(Some(&cells), &(0..20)), (0, 20), "text fitted to cells: the box is its columns");
+        assert_eq!(box_cells(Some(&cells), &(0..4)), (0, 6), "text that wasn't: the box holds it");
+        assert_eq!(box_cells(None, &(3..9)), (3, 9));
     }
 
     #[test]

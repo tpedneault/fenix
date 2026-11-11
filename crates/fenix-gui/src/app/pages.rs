@@ -1126,6 +1126,9 @@ impl App {
             let map = lines.get(&line).and_then(|m| m.as_deref());
             (crate::page::cell_of(map, cols.start), crate::page::cell_of(map, cols.end))
         };
+        // A tint, a hairline: as many cells as columns, or to the end of
+        // the text on it when that's further.
+        let boxed = |line: usize, cols: &std::ops::Range<usize>| crate::page::box_cells(lines.get(&line).and_then(|m| m.as_deref()), cols);
         let mut segments = Vec::new();
         let mut overlay = home::HomeOverlay::default();
         let panel = if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline };
@@ -1137,24 +1140,24 @@ impl App {
         }
         for (line, cols) in &state.page.focuses {
             if let Some(row) = visible(*line) {
-                let (a, b) = cells(*line, cols);
+                let (a, b) = boxed(*line, cols);
                 segments.push((row, a, b, theme.hl_line));
             }
         }
         if let Some((line, cols)) = &state.page.focus {
             if let Some(row) = visible(*line) {
-                let (a, b) = cells(*line, cols);
+                let (a, b) = boxed(*line, cols);
                 segments.push((row, a, b, theme.hl_line));
                 overlay.rail = Some((row, a, 1));
             }
         }
         for (line, cols) in &state.page.panels {
             if let Some(row) = visible(*line) {
-                let (a, b) = cells(*line, cols);
+                let (a, b) = boxed(*line, cols);
                 segments.push((row, a, b, panel));
             }
         }
-        overlay.rules = state.page.rules.iter().filter_map(|(line, cols)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b) })).collect();
+        overlay.rules = state.page.rules.iter().filter_map(|(line, cols)| visible(*line).map(|row| { let (a, b) = boxed(*line, cols); (row, a, b) })).collect();
         overlay.underlines = state
             .page
             .underlines
@@ -1177,8 +1180,7 @@ impl App {
             .iter()
             .filter(|c| c.lines.end > first_line && c.lines.start <= first_line + rows)
             .map(|c| {
-                let map = state.page.cells(c.lines.start);
-                let (a, b) = (crate::page::cell_of(map.as_deref(), c.cols.start), crate::page::cell_of(map.as_deref(), c.cols.end));
+                let (a, b) = crate::page::card_cells(&state.page, c);
                 let (fill, outline) = card_colors(theme, c.look);
                 (c.lines.start as isize - first_line as isize, c.lines.len(), a, b, fill, outline, c.look == crate::page::CardLook::Selected)
             })

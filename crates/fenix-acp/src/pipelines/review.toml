@@ -3,7 +3,7 @@ title = "Plan, build, review"
 [[steps]]
 name = "plan"
 mode = "plan"
-prompt = "Plan this change. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches.\n\n{input}"
+prompt = "Plan this change. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches. Give the plan in your answer; don't write it to a file.\n\n{input}"
 passes = "plan"
 gate = true
 

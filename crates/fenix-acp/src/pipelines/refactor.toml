@@ -3,7 +3,7 @@ title = "Plan a refactor, carry it out, review"
 [[steps]]
 name = "plan"
 mode = "plan"
-prompt = "Plan this refactor, keeping behaviour exactly as it is. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches, and say which tests cover them and which are missing.\n\n{input}"
+prompt = "Plan this refactor, keeping behaviour exactly as it is. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches, and say which tests cover them and which are missing. Give the plan in your answer; don't write it to a file.\n\n{input}"
 passes = "plan"
 gate = true
 
