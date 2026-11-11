@@ -20,6 +20,16 @@ tools of a working day into the editor as pages you move between with
 the keyboard: projects, Git, coding agents, a debugger, terminals, and
 whatever else you add from the extension store.
 
+## Who it's for
+
+Developers who want to keep their hands on the keyboard all day, in any
+language, without assembling an editor from plugins first. If you
+already think in `ciw` and `dap`, Fenix speaks that from the first
+keystroke; if you don't, standard keys (Ctrl+C/V, Shift+arrows) work
+too, and `SPC` (or `Ctrl+K`) always shows you what comes next. Git, a
+debugger, language servers, terminals and coding agents are part of the
+editor, set up when you install it.
+
 ## Highlights
 
 - **Real Vim editing**: motions, operators, text objects, counts,
@@ -40,23 +50,100 @@ whatever else you add from the extension store.
 - **A debugger in the code**: breakpoints and the current line in the
   gutter, values written inline, a DEBUG mode with the usual F-keys, and
   a dock for the stack, variables, watches and console (any DAP adapter).
-- **Coding agents**: Claude Code, Codex, Devin, Gemini CLI or any agent
-  that speaks the Agent Client Protocol, in a dock beside your code,
-  every change they make reviewable hunk by hunk.
 - **Git as a daily driver**: a status page, hunk staging, blame, a
   commit graph, side-by-side compare, interactive rebase, conflict
   resolution, worktrees, and undo for Git operations.
-- **Extensions**: sandboxed WebAssembly extensions, installed from the
-  built-in store (`SPC h x`). Code review for GitHub and GitLab, containers,
-  an agenda that syncs with Jira, a notebook with Mermaid diagrams, VNC
-  consoles, a PDF reader, language packs, themes, and specialist tools
-  (Arduino, Tcl, SCOS-2000 MIB, CCSDS) all ship this way.
+- **Coding agents**: Claude Code, Codex, Devin, Gemini CLI or any agent
+  that speaks the Agent Client Protocol, in a dock beside your code,
+  every change they make reviewable hunk by hunk.
 - **Built not to lose work**: staged, atomic saves, crash recovery for
   unsaved buffers, and session restore of windows, splits and cursors.
 - **Learn it inside it**: an interactive tutorial (`SPC h T`) with
   lessons for editing, Fenix's pages, Git, and the extensions you install.
+- **Extensions**: sandboxed WebAssembly extensions, installed from the
+  built-in store (`SPC h x`), each allowed only what its manifest asks
+  for. Language packs, themes, code review for GitHub and GitLab,
+  containers, an agenda that syncs with Jira, a notebook with Mermaid
+  diagrams, VNC consoles and a PDF reader all ship this way.
 
 See [Features](docs/FEATURES.md) for the full tour.
+
+### What extensions can do
+
+Extensions get their own pages, keys, settings and tasks, so a
+specialist workflow can be as at home as Git is. The store has a few
+that show how far that goes: Arduino boards built, uploaded and
+monitored from the editor, Tcl, and tools for spacecraft operations --
+SCOS-2000 MIB databases and CCSDS packets. They're there for the people
+who need them, and as examples of what you can build:
+[Writing extensions](docs/WRITING_EXTENSIONS.md) shows how.
+
+## How Fenix compares
+
+Honest differences, so you can tell whether it's for you:
+
+- **Neovim**: the same editing grammar, but Fenix is a graphical
+  application with Git, a debugger, language servers, a project search
+  page and agents built in and configured from one settings page
+  (`SPC ,`), rather than assembled from plugins and Lua. Extensions run
+  in a WebAssembly sandbox with declared permissions, not with the
+  editor's full access. Neovim runs in a terminal and over plain SSH,
+  has a vast plugin ecosystem, and implements more of Vim: Fenix has
+  [gaps](https://github.com/tpedneault/fenix/issues?q=is%3Aissue+is%3Aopen+label%3Avim)
+  it's closing.
+- **Helix**: both are keyboard-first and work out of the box. Helix uses
+  a selection-first grammar (select, then act); Fenix keeps Vim's
+  verb-then-object grammar, so Vim muscle memory carries over. Fenix
+  adds pages for Git, debugging, agents and an extension store; Helix
+  runs in a terminal and keeps a smaller core.
+- **Zed**: both are native, GPU-rendered and written in Rust, and both
+  run agents over the Agent Client Protocol (Zed started it). In Zed,
+  Vim mode is one keymap among others; Fenix is built around
+  modal editing and the `SPC` leader, and every page -- Git, the
+  debugger, settings, the store -- is driven from the keyboard. Zed has
+  real-time collaboration and runs on macOS; Fenix doesn't yet.
+- **VS Code**: Fenix has much of what you'd install extensions for in VS
+  Code -- Git, a debugger over DAP, language servers, terminals, agents
+  -- in a native window rather than Electron. VS Code's extension
+  ecosystem and remote development are far larger and more mature; if
+  you depend on a specific extension, check the
+  [store](https://github.com/tpedneault/fenix-extensions) first.
+
+## Is Fenix ready for daily use?
+
+For many people, yes -- with eyes open. Fenix is young: 1.0 shipped on
+31 October 2026.
+
+- **Platforms**: Windows 10 and 11 are the primary platform; Linux
+  (x86_64, glibc 2.35 or newer) is supported. CI builds and tests on
+  both. **macOS isn't built or tested yet**, and there's no desktop
+  build for ARM Linux.
+- **Solid**: Vim editing, files and projects, saves and crash recovery,
+  Git, language servers, the debugger, terminals, coding agents and the
+  extension store. Each is covered by the test suite CI runs on every
+  change.
+- **Still in progress**:
+  - Remote projects over SSH are a preview: files, the explorer and
+    finding files work; terminals, Git, search, language servers, tasks,
+    the debugger and agents don't run on a remote project yet
+    ([plan](docs/plans/remote-ssh.md)).
+  - Some Vim motions, operators and Insert-mode keys are missing
+    ([#22](https://github.com/tpedneault/fenix/issues/22),
+    [#23](https://github.com/tpedneault/fenix/issues/23),
+    [#25](https://github.com/tpedneault/fenix/issues/25)).
+  - Accessibility: no screen-reader support yet, right-to-left text
+    doesn't lay out ([#17](https://github.com/tpedneault/fenix/issues/17)),
+    and Unicode text sent by some input tools doesn't arrive
+    ([#37](https://github.com/tpedneault/fenix/issues/37)).
+  - Performance: Fenix redraws while idle
+    ([#74](https://github.com/tpedneault/fenix/issues/74)), and startup
+    slows with many extensions
+    ([#33](https://github.com/tpedneault/fenix/issues/33)).
+- **Your settings and files are safe across upgrades**: within 1.x, an
+  upgrade keeps existing settings, stored data and keys working
+  ([how versions work](docs/RELEASING.md)).
+
+[ROADMAP.md](ROADMAP.md) says what's being worked on next.
 
 ## Install
 
@@ -94,7 +181,14 @@ and what individual extensions need). [Building](docs/BUILDING.md) lists
 them all.
 
 **Platforms:** Windows 10 and 11 are the primary platform. Linux is
-supported, and CI tests on both.
+supported, and CI tests on both. macOS isn't built yet (see
+[Is Fenix ready for daily use?](#is-fenix-ready-for-daily-use)).
+
+**Updates:** Fenix can tell you on Home when a newer release is out
+(`updates.check`, off until you turn it on), and with
+`updates.prereleases` when a pre-release is out too. It never downloads
+anything itself: see [Releasing](docs/RELEASING.md) for what each kind
+of release carries.
 
 ## First steps
 
@@ -140,6 +234,7 @@ tutorial (`SPC h T`) is the quickest way in. A few places to start:
 - [Design records](docs/adr/): why the extension runtime and the agent
   client are built the way they are
 - [Changelog](CHANGELOG.md)
+- [Roadmap](ROADMAP.md) and [how releases work](docs/RELEASING.md)
 
 ## Contributing
 

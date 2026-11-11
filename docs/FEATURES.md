@@ -779,7 +779,8 @@ its extension. The rest is built into Fenix.
   colour comes from the active theme (the brand orange only marks a
   running timer). With `updates.check` on (it's off unless you turn it on),
   a quiet line under the date says when a newer Fenix is out -- looked
-  for once a day; `app.check_for_updates` looks when asked. Nothing is
+  for once a day; `app.check_for_updates` looks when asked. With
+  `updates.prereleases` on, a newer pre-release counts too. Nothing is
   downloaded (see CONFIGURATION.md's Looking for a newer Fenix).
 - **Welcome** (`SPC h w`, and a fresh install's first screen): five
   steps, one at a time -- what Fenix is; how you'd like to edit (Vim keys,
