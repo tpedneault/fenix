@@ -756,6 +756,7 @@ mod tests {
     }
 
     /// Reads a terminal's output until `want` is in it, or it ends.
+    #[cfg(unix)]
     fn read_until(output: &mut TerminalOutput, want: &str) -> String {
         let mut seen = Vec::new();
         let mut buffer = [0u8; 4096];

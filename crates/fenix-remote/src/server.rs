@@ -634,6 +634,7 @@ fn own_group(_: &mut Command) {}
 
 /// How long a terminal's shell has, once hung up, to pass it on to its
 /// jobs and end, before it and its group are killed.
+#[cfg(unix)]
 const HANG_UP: Duration = Duration::from_millis(500);
 
 /// Ends a terminal as closing one does: its shell is hung up on, which
