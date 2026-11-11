@@ -174,6 +174,24 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// A semantic token's colour, by its slot: the three the grammar has
+    /// no word for fall back to the nearest it has.
+    pub fn semantic_color(&self, slot: fenix_lsp::semantic::Slot) -> glyphon::Color {
+        use fenix_lsp::semantic::Slot;
+        match slot {
+            Slot::Type | Slot::Interface => self.syntax_type,
+            Slot::Parameter | Slot::Variable => self.syntax_variable,
+            Slot::Constant => self.syntax_constant,
+            Slot::Function | Slot::Macro => self.syntax_function,
+            Slot::Keyword => self.syntax_keyword,
+            Slot::Comment => self.syntax_comment,
+            Slot::String => self.syntax_string,
+            Slot::Number => self.syntax_number,
+            Slot::Operator => self.syntax_operator,
+            Slot::Attribute => self.syntax_attribute,
+        }
+    }
+
     /// Resolves a tree-sitter capture name (e.g. `"function.method"`,
     /// `"constant.builtin"`) to a color, falling back to whichever
     /// `syntax_*` field its first `.`-segment names -- the same

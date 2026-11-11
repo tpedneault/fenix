@@ -100,7 +100,7 @@ impl App {
     fn agent_lsp_target(&mut self, arguments: &Value, capable: impl Fn(&lsp_types::ServerCapabilities) -> bool, what: &str) -> Result<(LspKey, lsp_types::TextDocumentIdentifier, Option<lsp_types::Position>, PathBuf, String), RpcError> {
         let path = self.control_path(arguments)?;
         let (text, revision) = self.agent_document(&path).map_err(invalid)?;
-        self.sync_lsp_for(&path, &text, revision);
+        self.sync_lsp_for(&path, &text, revision, None);
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
         let keys = self.cached_lsp_keys(&path);
         if keys.is_empty() {
@@ -153,7 +153,7 @@ impl App {
         let open: Vec<PathBuf> = session.open_documents.keys().cloned().collect();
         for path in open {
             let Ok((text, revision)) = self.agent_document(&path) else { continue };
-            self.sync_lsp_for(&path, &text, revision);
+            self.sync_lsp_for(&path, &text, revision, None);
         }
     }
 
@@ -533,7 +533,7 @@ mod tests {
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(file).unwrap());
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical.clone(), (0, version + 1))]), synced_text: HashMap::from([(canonical, text.to_string())]), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical.clone(), (0, version + 1))]), synced_text: HashMap::from([(canonical, text.to_string())]), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
         });
     }
 

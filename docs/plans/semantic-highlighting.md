@@ -1,6 +1,6 @@
 # Plan: semantic highlighting
 
-- **Status:** planned, for the release after 1.5 (issue #105).
+- **Status:** stages 1 and 2 built, for the release after 1.5 (issue #105); see §5.
 - **Scope:** code coloured by what its language server knows
   (`textDocument/semanticTokens`), on top of tree-sitter's colours:
   a parameter apart from a local, a macro apart from a function, an
@@ -302,4 +302,119 @@ These supersede the table and rules above where they differ.
 
 ## 5. As built
 
-To be filled in as the stages land.
+### Stage 1
+
+- `fenix_lsp::semantic`, as planned. Two additions to the type table:
+  `typeAlias` maps to type, and `trait` to interface.
+- `fenix_lsp::changed_span` is factored out of the ranged `didChange`,
+  with the same result.
+
+### Stage 2
+
+- **Settings.** `lsp.semantic_highlighting` (on) and
+  `lsp.semantic_highlighting_off` (none).
+  - `crate::lsp::client_capabilities(semantic)` advertises the
+    capability, and refresh support, only when the setting is on.
+  - Language names in the list are matched without regard to case.
+- **Where the code is.** `app/semantic.rs`:
+  - `SemanticDoc` per server and document (`LspSession::semantic`),
+    holding the tokens, their stamp, an ask that's out and when the next
+    ask is due;
+  - `after_sync`, called by `sync_lsp_document` after each `didOpen`
+    or `didChange`;
+  - `ask_due_semantic_tokens`, run each frame after the LSP sync;
+  - `semantic_wake`, which wakes the loop when the next ask is due;
+  - `semantic_tokens_answered`;
+  - `refresh_semantic_tokens`;
+  - `with_semantic_tokens`, the last step of
+    `syntax_highlights_in_columns`.
+- **Which server is asked.** `semantic_server` picks the first of the
+  path's servers whose capabilities offer `full`. `sync_lsp_for` passes
+  each server whether it's that one:
+  - the chosen server's document gets an ask due;
+  - any other server's tokens for it are let go.
+  A document already in sync is picked up, or let go, when the choice
+  changes. That happens on the next sync, which runs when a server
+  becomes ready or the buffer is edited.
+- **Moving with edits.** On `didChange`, the tokens move through
+  `changed_span(old synced text, new text)`. That's one more char walk
+  of the text, on top of the one the ranged change already does. It
+  runs only when the chosen server holds tokens with the old stamp;
+  otherwise the stamp is cleared, so nothing is drawn until the answer.
+- **Answers.**
+  - An answer for an edit count the server has moved past is thrown
+    away, and the ask is made due again.
+  - `ContentModified` and `ServerCancelled` are asked again after the
+    pause.
+  - Any other error is left until the next edit.
+  - `null` means no tokens.
+- **Drawing.**
+  - The grammar's comments and strings (captures `comment`, `string`
+    and `spell`) are protected.
+  - `lay_over` cuts the grammar's ranges by the tokens, keeping the
+    order and non-overlap that `split_line_by_highlights` and the tab
+    remap need.
+  - Paths are canonicalized once per buffer path (`App::lsp_canonical`),
+    not each frame.
+  - Nothing is looked up while no server holds any tokens.
+- **Changed test.** `fenix-config`'s
+  `every_setting_round_trips_through_the_file` asserted that no `[lsp]`
+  header is ever written. `[lsp]` now has settings of its own, so the
+  empty-header check covers `[vnc]` only.
+- **Revised after review.** These supersede the stage-2 notes above
+  where they differ.
+  - **Only buffers ask.** `sync_lsp_for` takes the buffer shown, which
+    is none for an agent's look at a file. For a buffer it resolves the
+    tokens' server and path once and keeps them in `App::semantic_of`,
+    so drawing touches nothing on disk and copies no legend.
+    `lsp_canonical` is gone. An agent's sync only moves tokens already
+    held (`SemanticSync::Follow`).
+  - **Tokens belong to a buffer.** `SemanticDoc::buffer` records which
+    one, and tokens are drawn only for that buffer at the stamped edit
+    count. A document whose buffer closed is dropped, along with its
+    `semantic_of` entry, on the next frame or wake.
+  - **A reopened buffer is synced.** Before, it started its edit count
+    at 0 again, and the "already in sync" check let a file changed on
+    disk go unsent: the server, diagnostics included, kept the old
+    text. That was a sync bug from before this feature.
+    `sync_lsp_document` now sends a `didChange` whenever the text
+    differs from what was last sent, not only when the edit count
+    moved. A document shown for the first time, or in a new buffer, is
+    asked at once. Fenix still sends no `didClose`; that's unchanged.
+  - **Asks go out from the wake.** `about_to_wait` calls
+    `ask_due_semantic_tokens` (so an ask isn't held for an unrelated
+    frame), and `semantic_wake` returns the due time itself.
+  - **Timeout.** An ask unanswered for 10 s is cancelled with
+    `$/cancelRequest` and asked once more; a second timeout waits for
+    an edit. RequestCancelled (-32800) is retried, like the other two.
+  - **Refresh** marks a server's documents stale. Each is asked when
+    it's next drawn, not all at once.
+  - **Nothing is spent on a buffer with no tokens to draw.**
+    `semantic_to_draw` runs before any window copy or comment-and-string
+    list is built.
+  - **No grammar.** A buffer with no grammar gets the server's tokens
+    over nothing.
+  - **The language checked** is `buffer_language_name`, the same one
+    `editor.wrap_languages` uses.
+  - **Redraw.** An answer redraws every window.
+  - **`lay_over` follows each token's layer.**
+- **Second review.**
+  - An agent's sync that moves held tokens also makes an ask due.
+  - A refresh that comes while an ask is out stays pending until an ask
+    is sent after it.
+  - An answer counts only if its request is the document's current ask;
+    any other is ignored.
+  - Refusals (cancelled, modified) back off from 250 ms, doubling each
+    time up to 4 s.
+  - Documents are dropped when their buffer closes, is renamed or saved
+    under another name, or is asked of another server, and all of them
+    when the setting goes off.
+  - A buffer with no grammar works out its windows only when it has
+    tokens to lay.
+  - **One writer.** Every writer of `synced_text` and `open_documents`
+    goes through `record_lsp_sync`, which moves held tokens through the
+    change sent. There were two: `sync_lsp_document` and a refactor's
+    own sync (`sync_refactor_buffers`), which used to skip it.
+- **Not yet:**
+  - the theme keys and the modifier rules' underline (stage 3);
+  - delta and range (stage 4).
