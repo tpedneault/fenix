@@ -125,6 +125,11 @@ jobs:
           save-if: ${{ github.event_name == 'push' }}
       - name: Filesystem, process, and protocol regressions
         run: ./scripts/ci.ps1 -Suite Reliability
+      # What the nightly workflow decides: whether to build, the version,
+      # the notes; and that the packages' versions sort right.
+      - name: The nightly's decisions
+        shell: bash
+        run: bash scripts/nightly-test.sh
       # Remote projects end to end: the system's ssh, a real sshd in a
       # container, the helper installed and run there.
       - name: Remote projects, against an SSH server

@@ -1,0 +1,192 @@
+name: Build
+
+# Fenix's release files, for the release workflow (release.yml) and the
+# nightly (nightly.yml), so the two build alike: for Windows a zip and an
+# installer (packaging/windows/fenix.iss), for Linux an archive, a .deb
+# and an .rpm (packaging/linux), each with a .sha256. Not run on its own.
+#
+# A release uploads them to its draft as they're built (`release`). The
+# nightly keeps them as this run's artifacts (`release` empty), for its
+# publish job to put on the rolling `nightly` release once both builds
+# are done.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'The version: 1.5.2, or a nightly''s 1.6.0-nightly.20261112'
+        type: string
+        required: true
+      name:
+        description: 'What the files are called before the target: fenix-1.5.2, or fenix-nightly every night'
+        type: string
+        required: true
+      ref:
+        description: 'The commit to build; empty for the run''s own'
+        type: string
+        default: ''
+      release:
+        description: 'The release to upload to (its tag); empty to keep them as artifacts'
+        type: string
+        default: ''
+      stamp:
+        description: 'Stamp the version and commit into the binary (FENIX_VERSION, FENIX_COMMIT)'
+        type: boolean
+        default: false
+      packages-name:
+        description: 'What the .deb and .rpm are called (fenix-nightly); empty for nfpm''s own names'
+        type: string
+        default: ''
+      numeric-version:
+        description: 'The installer''s version resource, numbers alone (1.6.0.0); empty for the version'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  VERSION: ${{ inputs.version }}
+  NAME: ${{ inputs.name }}
+  RELEASE: ${{ inputs.release }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            exe: fenix.exe
+            # The PDF reader extension's companion: it ships with Fenix,
+            # never in an extension's package.
+            companion: fenix-pdfium.exe
+            # What the companion renders with: packaging/fetch-pdfium.sh.
+            pdfium: win
+            pdfium_library: pdfium.dll
+          - name: Linux x64
+            # The oldest supported runner, so the binary runs on any
+            # distribution with glibc 2.35 or newer.
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: fenix
+            companion: fenix-pdfium
+            pdfium: linux
+            pdfium_library: libpdfium.so
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal --target ${{ matrix.target }} --no-self-update
+          rustup override set stable
+      - name: Build
+        run: |
+          # A nightly says what it is: its version and commit, stamped
+          # here and nowhere in the repository.
+          if [ "${{ inputs.stamp }}" = true ]; then
+            export FENIX_VERSION="$VERSION" FENIX_COMMIT="$(git rev-parse HEAD)"
+            echo "Stamping $FENIX_VERSION ($FENIX_COMMIT)"
+          fi
+          cargo build --release --locked -p fenix-gui -p fenix-pdfium --target ${{ matrix.target }}
+      - name: Check what the binary says it is
+        if: inputs.stamp
+        run: |
+          exe="target/${{ matrix.target }}/release/${{ matrix.exe }}"
+          # Windows' fenix.exe says it in a console of its own, which a
+          # pipe can't read: the stamp is looked for in the file there.
+          if [ "$RUNNER_OS" = Windows ]; then
+            grep -aqF "$VERSION" "$exe" && grep -aqF "$(git rev-parse HEAD)" "$exe" || { echo "::error::$exe isn't stamped $VERSION"; exit 1; }
+            exit 0
+          fi
+          said=$("$exe" --version)
+          echo "$said"
+          expected="fenix $VERSION ($(git rev-parse HEAD | cut -c1-12))"
+          if [ "$said" != "$expected" ]; then echo "::error::--version says '$said', not '$expected'"; exit 1; fi
+      # The helpers Fenix copies to a remote machine, for every kind it
+      # supports: static Linux programs, whatever system builds them.
+      - name: Remote helpers
+        run: packaging/build-remote-helpers.sh "target/${{ matrix.target }}/release"
+      - name: PDFium
+        run: packaging/fetch-pdfium.sh ${{ matrix.pdfium }} "target/${{ matrix.target }}/release"
+      - name: Package
+        run: |
+          name="$NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.pdfium_library }}" "$name/"
+          cp -r "target/${{ matrix.target }}/release/licenses" "$name/"
+          cp -r "target/${{ matrix.target }}/release/remote" "$name/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "target/${{ matrix.target }}/release/${{ matrix.companion }}" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY.md "$name/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+            archive="$name.zip"
+          else
+            tar -czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          sha256sum "$archive" > "$archive.sha256"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+          echo "UNPACKED=$name" >> "$GITHUB_ENV"
+      # The installer, beside the zip: packaging/windows/fenix.iss, with
+      # Inno Setup 6 (on the runner's image; else from Chocolatey).
+      - name: Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NUMERIC_VERSION: ${{ inputs.numeric-version }}
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "couldn't install Inno Setup" }
+          }
+          $setupName = "$env:NAME-${{ matrix.target }}-setup"
+          $defines = @("/DAppVersion=$env:VERSION", "/DOutputName=$setupName")
+          if ($env:NUMERIC_VERSION) { $defines += "/DNumericVersion=$env:NUMERIC_VERSION" }
+          & $iscc /Q @defines "/DSourceDir=$PWD\target\${{ matrix.target }}\release" "/DOutputDir=$PWD" packaging\windows\fenix.iss
+          if ($LASTEXITCODE -ne 0) { throw "the installer didn't build" }
+          $setup = "$setupName.exe"
+          if (-not (Test-Path $setup)) { throw "no $setup" }
+          "$((Get-FileHash $setup -Algorithm SHA256).Hash.ToLower())  $setup`n" | Out-File -Encoding ascii -NoNewline "$setup.sha256"
+          "SETUP=$setup" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      # The .deb and .rpm, beside the archive: packaging/linux, with nfpm.
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        env:
+          PACKAGES_NAME: ${{ inputs.packages-name }}
+        run: |
+          packaging/linux/build-packages.sh "$VERSION" "$UNPACKED" dist $PACKAGES_NAME
+          echo "PACKAGES=$(ls dist/*.deb dist/*.rpm dist/*.sha256 | tr '\n' ' ')" >> "$GITHUB_ENV"
+      - name: Upload to the draft
+        if: inputs.release != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE" "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} $PACKAGES --clobber
+      - name: Gather the files
+        if: inputs.release == ''
+        run: |
+          mkdir out
+          cp "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} $PACKAGES out/
+          ls -l out
+      - name: Keep them for publishing
+        if: inputs.release == ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: build-${{ matrix.target }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 3
