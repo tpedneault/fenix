@@ -1434,7 +1434,7 @@ impl VimState {
                     let before = buffer.line_len(line);
                     let mut at = *cursor;
                     if c == 't' {
-                        indent::indent_line(buffer, &mut at, line, self.indent_width);
+                        indent::indent_line_with(buffer, &mut at, line, &self.indent_unit());
                     } else {
                         indent::dedent_line(buffer, &mut at, line, self.indent_width);
                     }
@@ -3258,7 +3258,7 @@ impl VimState {
                 for line in first..=last {
                     // An empty line isn't indented, as in Vim.
                     if op == Operator::Indent && buffer.line_len(line) > 0 {
-                        indent::indent_line(buffer, cursor, line, self.indent_width);
+                        indent::indent_line_with(buffer, cursor, line, &self.indent_unit());
                     } else if op == Operator::Dedent {
                         indent::dedent_line(buffer, cursor, line, self.indent_width);
                     }
