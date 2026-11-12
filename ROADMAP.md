@@ -63,7 +63,7 @@ not started. When something ships it moves to the
 - **Nightly builds** from `master` each night it changed, and minor
   releases every few weeks tagged from a nightly that has been in use
   ([how releases work](docs/RELEASING.md)). Release candidates are
-  dropped. Next: a `fenix-nightly` manifest in the Scoop bucket.
+  dropped. With Scoop, the nightly is `scoop install fenix-nightly`.
 
 ## Later
 

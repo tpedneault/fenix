@@ -81,8 +81,12 @@ under the date.
   newer than your nightly is still offered. Back on `stable` (the
   default), nightlies are never mentioned. Nothing is downloaded or
   installed for you either way.
-- **Scoop and winget** take releases only. The Scoop bucket can carry a
-  separate `fenix-nightly` manifest for those who want it.
+- **With Scoop**, the nightly is its own package in the
+  [bucket](https://github.com/tpedneault/scoop-fenix):
+  `scoop install fenix-nightly`, and `scoop update fenix-nightly` for
+  the newest. It can sit beside `fenix`, which stays on releases; both
+  provide the `fenix` command, and `scoop reset fenix` or
+  `scoop reset fenix-nightly` picks which. winget takes releases only.
 
 A nightly keeps the same promise about your settings and files as the
 release it leads to, but it's had a day's testing, not a few weeks'.
@@ -130,9 +134,14 @@ How the packaging handles a pre-release version:
   in a file name isn't kept by GitHub's downloads.
 - **Scoop and winget** stay on releases: the bucket's `fenix` manifest
   and the winget manifests (`packaging/winget`) should only ever follow
-  `releases/latest` or a `vX.Y.Z` tag, which a nightly never is. A
-  separate `fenix-nightly` manifest in the bucket can follow the
-  `nightly` release, whose files keep their names.
+  `releases/latest` or a `vX.Y.Z` tag, which a nightly never is. The
+  bucket's separate `fenix-nightly` manifest follows the `nightly`
+  release: its files keep their names, so the bucket's workflow reads
+  the version from the record at the end of the release's notes
+  (`<!-- fenix-nightly version=... commit=... -->`, which
+  `scripts/nightly.sh notes` writes) and the hash from the zip's
+  `.sha256`. Changing that record, the zip's name or the folder inside
+  it means changing that manifest too.
 
 ### Cutting a release
 

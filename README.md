@@ -174,7 +174,8 @@ changed, on the
 that don't change (`fenix-nightly-x86_64-pc-windows-msvc-setup.exe`,
 `fenix-nightly_amd64.deb`, ...). It installs over a release, and the
 next release installs over it. `fenix --version` says which nightly it
-is and its commit. [Releasing](docs/RELEASING.md#for-users-running-the-nightly)
+is and its commit. With Scoop, it's `scoop install fenix-nightly`, from
+the same bucket. [Releasing](docs/RELEASING.md#for-users-running-the-nightly)
 has the rest.
 
 **From source**, with a recent stable [Rust](https://rustup.rs) toolchain:

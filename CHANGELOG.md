@@ -13,7 +13,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   move), versioned `1.6.0-nightly.YYYYMMDD` -- the Windows installer and
   zip, the Linux archive, `.deb` and `.rpm`, under names that are the
   same every night. It installs over a release, and the next release
-  over it. Nothing is built on a night `master` didn't change.
+  over it. Nothing is built on a night `master` didn't change. With
+  Scoop, it's `scoop install fenix-nightly`, from the same bucket as
+  `fenix`.
 - `updates.channel`, `stable` by default: `nightly` has Home say when a
   newer nightly is out, as well as a newer release. On `stable`,
   nightlies are never mentioned.
