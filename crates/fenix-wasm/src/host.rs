@@ -1309,7 +1309,10 @@ impl State {
         let path = path.replace('\\', "/");
         let under = |root: &Path, rest: &str| -> Option<PathBuf> {
             let rest = rest.trim_start_matches('/');
-            let path = (!rest.split('/').any(|part| part == "..")).then(|| root.join(rest))?;
+            // A part at a time: this machine's separators throughout
+            // (`C:\p\target\bin`, never `C:\p\target/bin`).
+            let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty() && *part != ".").collect();
+            let path = (!parts.contains(&"..")).then(|| parts.iter().fold(root.to_path_buf(), |path, part| path.join(part)))?;
             contained(root, &path).is_ok().then_some(path)
         };
         if let Some(rest) = path.strip_prefix("/data") {

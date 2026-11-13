@@ -88,6 +88,11 @@ const EXIT_WAIT: Duration = Duration::from_secs(2);
 /// 10,000 records of 10 KiB each can't fill a guest's memory.
 pub(crate) const ASK_BYTES: usize = test_limits::MAX_ANSWER;
 
+/// The test explorer's own commands: what `tests.enabled` off hides
+/// (`App::command_hidden`), and nothing else -- an extension's own
+/// `tests.coverage` stays offered.
+pub(crate) const COMMANDS: &[&str] = &["tests.open", "tests.run_here", "tests.run_file", "tests.run_all", "tests.run_failed", "tests.run_last", "tests.debug_here", "tests.stop", "tests.output"];
+
 // What's plain: records, paths, lines, command lines.
 
 fn model_kind(kind: TestKind) -> fenix_tests::Kind {

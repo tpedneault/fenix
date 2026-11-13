@@ -57,9 +57,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   have them, their output in *Test output* (`tests.output`), from its
   page (`SPC T T`), `SPC T` and the file: a mark in the gutter beside
   each test, a click running it, a failure's message after its line and
-  as a problem, *Run test* and *Show in Tests* on the right click.
-  Debugging a test, and `SPC p r` through the explorer, aren't there yet.
-  Off, nothing changes.
+  as a problem, *Run test*, *Debug test* and *Show in Tests* on the right
+  click. `SPC T d` (`d` on the page) debugs a test: its provider's launch
+  starts at once, after a build when it asks for one (its output in *Test
+  output*); it isn't remembered as the project's last launch. `SPC p r`
+  and the lenses through the explorer aren't there yet. Off, nothing of
+  it is offered -- not on the leader, the keys' page, `SPC h k`, the
+  palette nor `fenix/commands` -- and keys of yours under `SPC T` stay
+  yours.
 
 - A file whose built-in language server isn't installed (rust-analyzer,
   pyright, clangd, gopls, ...) brings a notice with the command that
@@ -131,6 +136,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With Git blame shown beside a file (`SPC g B`), a problem on a line
+  colours that line's number, as without blame; it coloured the blame's
+  text before it.
 - Extensions install and run on a pre-release build of Fenix, which
   counts as the release it leads to for an extension's `engine.fenix`
   range.

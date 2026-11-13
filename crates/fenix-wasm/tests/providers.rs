@@ -220,7 +220,7 @@ fn a_provider_scans_plans_reads_and_launches() {
     assert_eq!(build.steps[0].command.clone().unwrap().0 .1, ["--build", "tests/a.fake::build_it"]);
     assert_eq!(reports(p.call(Call::TestsRead { provider: "provider".into(), run: 11, step: 0, lines: vec![line("BUILT /data/bin/it")] }).0), []);
     let Ok(Launching::Launch(config)) = launch_in(&mut p, 11, it()) else { panic!() };
-    assert_eq!((config.program, config.args), (Some(path(&p.data().join("bin/it"))), vec!["tests/a.fake::build_it".to_string(), "--exact".into()]), "its own path as Fenix's");
+    assert_eq!((config.program, config.args), (Some(path(&p.data().join("bin").join("it"))), vec!["tests/a.fake::build_it".to_string(), "--exact".into()]), "its own path as Fenix's");
     let Ok(Launching::BuildFirst(_)) = launch_in(&mut p, 12, it()) else { panic!() };
     let Ok(Launching::BuildFirst(_)) = launch_in(&mut p, 12, it()) else { panic!("no binary said: another build, which Fenix refuses") };
 }

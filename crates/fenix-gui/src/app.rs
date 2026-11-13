@@ -2161,7 +2161,11 @@ impl App {
         for k in fed {
             step = Some(matcher.feed(*k));
         }
+        // A key of a feature that's off is as unbound as one that isn't
+        // there (`command_hidden`, `leader_hidden`).
+        let off = !local && fed.len() > 1 && self.leader_hidden(&fed[..fed.len() - 1], fed[fed.len() - 1]);
         match step {
+            Some(fenix_keymap::Step::Matched(_)) | Some(fenix_keymap::Step::Pending(_)) if off => self.set_message(format!("{text} isn't bound")),
             Some(fenix_keymap::Step::Matched(id)) => {
                 let what = self.describe_command(id);
                 let yours = keymap::user_keys().iter().any(|u| u.keys == text);
@@ -20367,8 +20371,10 @@ impl App {
                         if self.fold_marker_click(id, row, col) {
                             return;
                         }
-                        // A test's mark: it runs (§9.1).
-                        if self.tests_mark_click(id, row, col) {
+                        // A test's mark: it runs (§9.1) -- a click on its own
+                        // cell only, never left of the text's padding, where
+                        // the Git bar and a breakpoint's square are.
+                        if pos.0 - content.x >= text::PAD_LEFT && self.tests_mark_click(id, row, col) {
                             return;
                         }
                     }

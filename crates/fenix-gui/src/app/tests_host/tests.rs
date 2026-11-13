@@ -1692,6 +1692,8 @@ fn a_test_built_first_is_debugged_with_what_its_build_said() {
     assert_eq!(p.said(), "already building build_ok -- SPC T k lets it go");
     let launch = p.launched(&launches);
     assert_eq!(p.state("slow.py::slow"), State::Passed, "the run going went first");
+    // As a string: a provider's `/project/...` comes with this machine's
+    // separators throughout, as a path written here would.
     assert_eq!(launch["program"], serde_json::json!(p.root.join("target").join("fake-bin")), "{launch}");
     assert_eq!(launch["cwd"].as_str().map(Path::new), Some(p.root.as_path()), "/project is the project");
     assert_eq!(launch["args"], serde_json::json!(["ok.py::build_ok", "--exact"]));
@@ -1800,4 +1802,98 @@ fn a_provider_with_no_tests_launch_is_said_once_and_not_asked_again() {
     p.until("a run", |p| p.model().last_run().is_some());
     assert_eq!(p.state("a.py::build_x"), State::Passed);
     assert_eq!(p.app.extension_output_text().matches("its tests aren't offered to debug").count(), 1, "said once");
+}
+
+// Off is off, and leaves what isn't the explorer's (the review of steps
+// 4 to 6, M1 and S1).
+
+/// With the explorer off, what decides whether `SPC T` and its keys are
+/// there is what's bound under it in the leader's trie: the explorer's
+/// keys alone, it's off; a key of yours or an extension's under it keeps
+/// the group, yours runs, and the explorer's keys there stay off (each
+/// of them, and the group's count). Not one key per command: a key of
+/// yours that runs a command bound elsewhere too (`SPC :`) counts.
+#[test]
+fn off_spc_t_is_decided_by_whats_bound_under_it_and_yours_stay() {
+    let mut app = App::with_file(None);
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let (spc, t) = (KeyPress::char(' '), KeyPress::char('T'));
+    let fenix: Vec<(Vec<KeyPress>, &&'static str)> = crate::keymap::leader_trie().bindings();
+    assert!(app.leader_hidden_with(&fenix, &[spc], t), "the explorer's keys alone: off");
+    let yours: &'static &'static str = Box::leak(Box::new("commands.palette"));
+    let mut with_yours = fenix.clone();
+    with_yours.push((vec![spc, t, KeyPress::char('z')], yours));
+    for _ in 0..20 {
+        assert!(!app.leader_hidden_with(&with_yours, &[spc], t), "yours keeps SPC T, every time");
+    }
+    assert!(!app.leader_hidden_with(&with_yours, &[spc, t], KeyPress::char('z')), "and runs");
+    assert!(app.leader_hidden_with(&with_yours, &[spc, t], KeyPress::char('t')), "the explorer's stay off");
+    let mut m = crate::keymap::leader_trie().matcher();
+    m.feed(spc);
+    let mut hints = m.pending_hints();
+    let explorer = hints.iter().find(|h| h.key == t).expect("SPC T in Fenix's leader").count;
+    assert_eq!(explorer, super::COMMANDS.len());
+    hints.iter_mut().filter(|h| h.key == t).for_each(|h| h.count += 1);
+    let offered = app.leader_offered_with(&with_yours, &[spc], hints);
+    assert_eq!(offered.iter().find(|h| h.key == t).map(|h| h.count), Some(1), "the group counts yours alone");
+    let hint = |c: char| fenix_keymap::Hint { key: KeyPress::char(c), label: "x", group: false, count: 0, section: None };
+    let under = vec![hint('t'), hint('z')];
+    let offered: Vec<KeyPress> = app.leader_offered_with(&with_yours, &[spc, t], under).into_iter().map(|h| h.key).collect();
+    assert_eq!(offered, [KeyPress::char('z')], "which-key under SPC T shows yours alone");
+    // On: nothing is hidden.
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    assert!(!app.leader_hidden_with(&fenix, &[spc], t));
+}
+
+/// Off, the explorer is in none of the places that offer commands or
+/// keys: the keys' page, `SPC h k`, `fenix/commands` (and, as before, the
+/// palette, `SPC h b`, which-key). Only its own commands are: another
+/// `tests.*` is someone else's.
+#[test]
+fn off_the_explorer_is_offered_nowhere() {
+    let mut app = App::with_file(None);
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let sheet = app.keys_sheet_text();
+    assert!(!sheet.contains("`SPC T`") && !sheet.contains("| tests ("), "the keys' page:\n{sheet}");
+    app.describe_key_start();
+    for key in ["SPC", "T"] {
+        app.press(key);
+    }
+    let said = app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+    assert_eq!(said, "SPC T isn't bound", "SPC h k");
+    let listed = crate::app::control_host::control_commands(&app);
+    assert!(!listed.commands.iter().any(|c| c.id.starts_with("tests.")), "fenix/commands");
+    assert!(!app.command_hidden("tests.coverage"), "an extension's own tests.* isn't the explorer's");
+    for id in super::COMMANDS {
+        assert!(app.command_hidden(id));
+        assert!(app.commands().get(id).is_some(), "{id} is a command of Fenix's");
+    }
+    let registered: Vec<String> = app.commands().iter().map(|c| c.id.to_string()).filter(|id| id.starts_with("tests.")).collect();
+    assert_eq!(registered.len(), super::COMMANDS.len(), "every one of the explorer's commands is in COMMANDS: {registered:?}");
+
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    assert!(app.keys_sheet_text().contains("tests ("));
+    assert!(crate::app::control_host::control_commands(&app).commands.iter().any(|c| c.id == "tests.debug_here"));
+}
+
+/// A click runs a test only on its mark's own cell: one left of the
+/// text's padding -- on the Git bar, where a breakpoint's square is --
+/// puts the cursor there as before (the review of steps 4 to 6, S5).
+#[test]
+fn only_a_click_on_the_marks_own_cell_runs_its_test() {
+    let (mut app, root, _dir) = served(12, &[("a.fake::bad", 4)]);
+    let asked = |app: &App| app.tests.projects[&root].model.summary().running.is_some() || app.tests.projects[&root].model.last_run().is_some() || !app.tests.projects[&root].ended_runs.is_empty();
+    let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+    let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+    let pane = app.focused_pane_id();
+    let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
+    let line_height = app.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+    let char_width = app.text.as_ref().map(|t| t.char_width()).unwrap_or(text::CHAR_WIDTH);
+    let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+    let y = content.y + text::PAD_TOP + line_height * 4.5;
+    app.handle_click_at((content.x + 2.0, y), 800.0, 600.0);
+    assert!(!asked(&app), "the Git bar's place runs nothing");
+    assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 4, "the cursor goes there, as before");
+    app.handle_click_at((content.x + text::PAD_LEFT + char_width * 0.5, y), 800.0, 600.0);
+    assert!(asked(&app), "the mark's cell runs it");
 }

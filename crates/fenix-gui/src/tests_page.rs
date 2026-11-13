@@ -309,10 +309,22 @@ impl TestsPage {
     pub fn refresh(&mut self, model: &Model) {
         let key = RowsKey { revision: model.revision(), tab: self.tab, filter: self.filter.text.clone(), folds: self.folds };
         if self.rows_key.as_ref() != Some(&key) {
+            // What's shown open because it held a failure is remembered
+            // as opened: it stays open once the failure passes, so the
+            // row you're on doesn't vanish under you (the review of steps
+            // 4 to 6, S3). `zM`, `zR` and closing it by hand still do.
+            let started = std::cell::RefCell::new(Vec::new());
             let rows = {
-                let open = |item: Item| self.is_open(model, item);
+                let open = |item: Item| {
+                    let open = self.is_open(model, item);
+                    if open && self.folding == Folding::Failures && !self.opened.contains(&item) {
+                        started.borrow_mut().push(item);
+                    }
+                    open
+                };
                 model.rows(&RowQuery { tab: self.tab, filter: &self.filter.text, open: &open })
             };
+            self.opened.extend(started.into_inner());
             self.rows = rows;
             self.rows_key = Some(key);
         }

@@ -673,6 +673,34 @@ y = zed
         assert_eq!(rows[1], "y = zed + ");
     }
 
+    /// With the blame shown, a problem's colour goes on the line number,
+    /// not on the blame before it (a fix of 1.6, beside the test column's
+    /// cell, which sits between them when it's there).
+    #[test]
+    fn with_the_blame_shown_a_problems_colour_is_on_the_line_number() {
+        let mut app = with_problem("x = 1\ny = zed\n", 1, 4, 7);
+        app.line_number_mode = LineNumberMode::Absolute;
+        let path = app.open().buffer.path().unwrap().to_path_buf();
+        app.test_blame(&path, 2);
+        let grey = glyphon::Color::rgb(9, 9, 9);
+        let mut spans = join_rows(vec![
+            vec![("0000000 Tess ".to_string(), grey, false), (" 1 ".to_string(), grey, false), ("x = 1".to_string(), grey, false)],
+            vec![("0000001 Tess ".to_string(), grey, false), (" 2 ".to_string(), grey, false), ("y = zed".to_string(), grey, false)],
+        ]);
+        let buffer = app.focused_buffer_id();
+        let lines = vec![0, 1];
+        let map = super::super::rows::RowMap::lines(&lines, 0);
+        let (tab_lines, selection) = (HashSet::new(), Segments::new());
+        let vcol = |_line: usize, col: usize| col;
+        let pane = app.focused_pane_id();
+        let view = PaneView { buffer, map: &map, rows: 2, wrapped: false, gutter_chars: 16, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 0, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
+        app.polish_pane(&view, &mut spans, Instant::now());
+        let colour = |text: &str| spans.iter().find(|s| s.0 == text).map(|s| s.1);
+        assert_eq!(colour(" 2 "), Some(app.severity_color(Severity::Error)), "the number: {spans:?}");
+        assert_eq!(colour("0000001 Tess "), Some(grey), "not the blame");
+        assert_eq!(colour(" 1 "), Some(grey), "a line without one");
+    }
+
     #[test]
     fn inline_problems_can_be_turned_off() {
         let mut app = with_problem("x = 1

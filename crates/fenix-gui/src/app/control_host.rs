@@ -405,13 +405,16 @@ impl App {
     }
 }
 
-/// `fenix/commands`: every command in the registry, in its order, with
+/// `fenix/commands`: every command in the registry that's offered (none
+/// of a feature that's off), in its order, with
 /// the keys that run it (`App::key_for`) and whether it may run from outside.
 pub(crate) fn control_commands(app: &App) -> CommandsResult {
     CommandsResult {
         commands: app
             .commands()
             .iter()
+            // What's off isn't offered (`command_hidden`).
+            .filter(|c| !app.command_hidden(c.id.as_ref()))
             .map(|c| CommandInfo {
                 id: c.id.to_string(),
                 description: c.description.to_string(),

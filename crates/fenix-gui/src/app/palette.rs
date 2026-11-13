@@ -962,21 +962,72 @@ impl App {
     }
 
     /// Whether command `id` belongs to a feature that's off, and so isn't
-    /// offered at all -- not in the palette, the leader, nor `SPC h b`:
-    /// the test explorer's while `tests.enabled` is off. It still answers,
-    /// to say it's off.
+    /// offered at all -- not in the palette, the leader, `SPC h b`, `SPC h
+    /// k`, the keys' page nor `fenix/commands`: the test explorer's own
+    /// (`tests_host::COMMANDS`, not any `tests.*` an extension names)
+    /// while `tests.enabled` is off. It still answers, to say it's off.
+    /// The one rule every place that offers commands or keys asks.
     pub(super) fn command_hidden(&self, id: &str) -> bool {
-        id.starts_with("tests.") && !self.tests_enabled()
+        super::tests_host::COMMANDS.contains(&id) && !self.tests_enabled()
     }
 
-    /// Whether the leader key `next`, after `path`, goes into a group
-    /// that's off: `SPC T` with the test explorer off -- unless keys of
-    /// your own are under it (keybindings.toml), which stay yours.
+    /// Of the leader's keys under `prefix` (`SPC T`), how many are bound
+    /// and how many of those run a hidden command, as the leader's trie
+    /// has them now -- yours and the extensions' keys too. Worked out
+    /// only while something is hidden.
+    fn leader_hidden_counts(&self, bindings: &[(Vec<fenix_keymap::KeyPress>, &&'static str)], prefix: &[fenix_keymap::KeyPress]) -> (usize, usize) {
+        let under = bindings.iter().filter(|(seq, _)| seq.starts_with(prefix));
+        under.fold((0, 0), |(hidden, all), (_, id)| (hidden + usize::from(self.command_hidden(id)), all + 1))
+    }
+
+    /// Whether the leader key `next`, after `path`, is off: everything
+    /// bound from there runs a hidden command (`SPC T` and its keys with
+    /// the test explorer off). A key of anyone else's under it -- yours
+    /// in keybindings.toml, an extension's -- keeps it, and stays theirs.
     pub(super) fn leader_hidden(&self, path: &[fenix_keymap::KeyPress], next: fenix_keymap::KeyPress) -> bool {
-        if next != fenix_keymap::KeyPress::char('T') || path != [fenix_keymap::KeyPress::char(' ')] || self.tests_enabled() {
+        if self.tests_enabled() {
             return false;
         }
-        !self.places().iter().any(|(id, (keys, _, _))| !id.starts_with("tests.") && (keys == "SPC T" || keys.starts_with("SPC T ")))
+        self.leader_hidden_with(&crate::keymap::leader_trie().bindings(), path, next)
+    }
+
+    /// `leader_hidden`, over the leader's `bindings`.
+    pub(super) fn leader_hidden_with(&self, bindings: &[(Vec<fenix_keymap::KeyPress>, &&'static str)], path: &[fenix_keymap::KeyPress], next: fenix_keymap::KeyPress) -> bool {
+        if self.tests_enabled() {
+            return false;
+        }
+        let mut prefix = path.to_vec();
+        prefix.push(next);
+        let (hidden, all) = self.leader_hidden_counts(bindings, &prefix);
+        all > 0 && hidden == all
+    }
+
+    /// The leader's `hints` after `path` as they're offered: those that are
+    /// off left out, and a group's count only what's offered under it.
+    pub(super) fn leader_offered(&self, path: &[fenix_keymap::KeyPress], hints: Vec<fenix_keymap::Hint>) -> Vec<fenix_keymap::Hint> {
+        if self.tests_enabled() {
+            return hints;
+        }
+        self.leader_offered_with(&crate::keymap::leader_trie().bindings(), path, hints)
+    }
+
+    /// `leader_offered`, over the leader's `bindings`.
+    pub(super) fn leader_offered_with(&self, bindings: &[(Vec<fenix_keymap::KeyPress>, &&'static str)], path: &[fenix_keymap::KeyPress], hints: Vec<fenix_keymap::Hint>) -> Vec<fenix_keymap::Hint> {
+        hints
+            .into_iter()
+            .filter_map(|mut hint| {
+                let mut prefix = path.to_vec();
+                prefix.push(hint.key);
+                let (hidden, all) = self.leader_hidden_counts(bindings, &prefix);
+                if all > 0 && hidden == all {
+                    return None;
+                }
+                if hint.group {
+                    hint.count = hint.count.saturating_sub(hidden);
+                }
+                Some(hint)
+            })
+            .collect()
     }
 
     /// Why command `id` can't run here, when that's plain without asking

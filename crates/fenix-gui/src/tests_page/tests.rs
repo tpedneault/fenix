@@ -413,3 +413,18 @@ fn a_build_to_debug_a_test_is_said_as_one() {
         assert!(l[rows - 1].contains("d debug"), "{}", l[rows - 1]);
     }
 }
+
+/// A group shown open because it held a failure stays open once the
+/// failure passes: the test you're on doesn't vanish under you (the
+/// review of steps 4 to 6, S3).
+#[test]
+fn a_group_opened_for_a_failure_stays_open_when_it_passes() {
+    let mut m = after_a_run();
+    let mut p = page();
+    lay_out(&mut p, &m, 100, 30);
+    focus_on(&mut p, &m, "case_negative");
+    run(&mut m, Selection::Nodes(vec![fenix_tests::TestKey::new(&rust(), NEG)]), |_| vec![Report::Ended(Ended::new(NEG, Outcome::Passed))]);
+    let out = lay_out(&mut p, &m, 100, 30);
+    assert_eq!(label(&p, &m), "case_negative", "still on it:\n{}", out.text);
+    assert!(lines(&out).iter().any(|l| l.contains("› case_negative") && l.contains('✓')), "its row, passed:\n{}", out.text);
+}
