@@ -167,12 +167,27 @@ impl App {
             "syntax_query" => answer(reply, self.agent_syntax_query(&arguments)),
             // -- tasks --
             "run_task" => self.agent_run_task(arguments, reply),
+            // The test explorer's (step 7), with `tests.enabled` on.
+            "tests" => answer(reply, self.tests_agent_tests(&arguments)),
+            "test_failures" => answer(reply, self.tests_agent_failures(&arguments)),
+            "run_tests" => self.tests_agent_run(&arguments, reply),
             "run_test" => {
-                let started = (|| {
+                let place = (|| {
                     let path = self.agent_path(&arguments)?;
                     let line = arguments.get("line").and_then(Value::as_u64).filter(|l| *l > 0).ok_or_else(|| invalid("line: which line, from 1"))? as usize;
-                    self.run_test_at(&path, line).map_err(invalid)
+                    Ok::<_, RpcError>((path, line))
                 })();
+                let (path, line) = match place {
+                    Ok(place) => place,
+                    Err(e) => {
+                        answer(reply, Err(e));
+                        return Ok(());
+                    }
+                };
+                // Through the explorer where a provider serves the file,
+                // answered with the test's result; else as it always was.
+                let Err(reply) = self.tests_agent_run_test(&path, line, &arguments, reply) else { return Ok(()) };
+                let started = self.run_test_at(&path, line).map_err(invalid);
                 match started {
                     Ok(name) => {
                         let secs = arguments.get("timeout").and_then(Value::as_u64).unwrap_or(TASK_WAIT.as_secs()).clamp(1, 3600);

@@ -759,6 +759,9 @@ pub(crate) struct ProjectTests {
     /// head says of the last one: building it, why it didn't build.
     pub(crate) debug: Option<debug::Debugging>,
     debug_said: Option<(String, crate::page::Role)>,
+    /// The run of tests extensions were last told started (`task-started`,
+    /// step 7): told once, and its end after it.
+    told_started: Option<RunId>,
     /// How each run ended, in tests.
     #[cfg(test)]
     pub(crate) ended_runs: Vec<fenix_tests::RunEnd>,
@@ -837,6 +840,17 @@ pub(crate) struct TestsHost {
     views: HashMap<PathBuf, crate::tests_page::TestsPage>,
     /// A tests page has been opened: what turning the explorer off closes.
     page_shown: bool,
+    /// What `SPC p r` last ran through the explorer, by the project as
+    /// `SPC p T` keys it (step 7, `doors`).
+    pub(crate) last_door: HashMap<PathBuf, doors::LastDoor>,
+    /// Agents waiting for a run of tests, or a test to debug, to end
+    /// (step 7, `agents`).
+    pub(crate) run_waits: Vec<agents::RunWait>,
+    pub(crate) debug_waits: Vec<agents::DebugWait>,
+    /// What extensions were told of test runs, in tests: `started <name>`,
+    /// `ended <ok>`.
+    #[cfg(test)]
+    pub(crate) told: Vec<String>,
     #[cfg(test)]
     pub(crate) program_for: Option<ProgramFor>,
     /// What the page's `y` copied, in tests (no clipboard there).
@@ -1002,6 +1016,7 @@ impl App {
                 write_due: false,
                 debug: None,
                 debug_said: None,
+                told_started: None,
                 #[cfg(test)]
                 ended_runs: Vec::new(),
             };
@@ -1360,8 +1375,9 @@ impl App {
         // told `stopped` (the pump drives a run still open while off).
         let going: Vec<PathBuf> = self.tests.projects.iter().filter(|(_, p)| (p.run.is_some() || p.step.is_some()) && !p.model.summary().running.is_some_and(|r| r.stopping)).map(|(r, _)| r.clone()).collect();
         for root in going {
-            self.tests_stop_in(&root, "the test explorer was turned off (tests.enabled)");
+            let _ = self.tests_stop_in(&root, "the test explorer was turned off (tests.enabled)");
         }
+        let debugging: Vec<PathBuf> = self.tests.projects.iter().filter(|(_, p)| p.debug.is_some()).map(|(r, _)| r.clone()).collect();
         for project in self.tests.projects.values_mut() {
             project.walk = None;
             project.walks.clear();
@@ -1371,6 +1387,11 @@ impl App {
             }
             project.debug_said = None;
         }
+        // An agent waiting for one hears it went.
+        for root in debugging {
+            self.tests_debug_done(&root, Err("the test explorer was turned off (tests.enabled)".into()));
+        }
+        self.tests.last_door.clear();
     }
 
     /// The extensions that came up since last looked: their providers in
@@ -1699,12 +1720,17 @@ impl App {
         }
         project.run = Some((run, now_ms));
         project.timed_out = false;
-        let what = match project.model.summary().running {
+        let running = project.model.summary().running;
+        let tests = running.as_ref().is_some_and(|p| p.tests);
+        let what = match running {
             Some(p) if p.tests => "tests".to_string(),
             Some(p) if p.build => format!("a build to debug {}", project.debug.as_ref().filter(|d| d.run == run).map_or("a test", |d| d.label.as_str())),
             _ => "a listing".to_string(),
         };
         self.tests_output_reset(root, &format!("-- {what}, run {} --\n", run.0));
+        if tests {
+            self.tests_door_started(root, run);
+        }
     }
 
     /// Starts step `step` of `provider`'s plan, or finds why it can't
@@ -1804,6 +1830,9 @@ impl App {
         // deadline, or has no such export. Its provider stopped, as after
         // a trap (§6.4); one with no exports isn't asked again.
         let reply = match result {
+            // Its guest has no such export: typed (fenix-wasm's
+            // `MissingExport`), not told by its words.
+            Ok(Reply::Missing(missing)) => return self.tests_export_missing(ext, &root, &what, &missing),
             Ok(reply) => reply,
             Err(why) => return self.tests_call_failed(ext, &root, &what, &why),
         };
@@ -1865,27 +1894,40 @@ impl App {
         }
     }
 
-    /// A call to `ext` that failed (`why`).
+    /// A call to `ext` its guest has no export for (`missing`): the
+    /// extension is no test provider until Fenix restarts or it's
+    /// reinstalled -- or, for `tests-launch` alone, its tests aren't
+    /// offered to debug (step 6).
+    fn tests_export_missing(&mut self, ext: &str, root: &Path, what: &CallFor, missing: &fenix_wasm::host::MissingExport) {
+        let why = missing.to_string();
+        if let CallFor::Launch { run, .. } = what {
+            if self.tests.no_launch.insert(ext.to_string()) {
+                self.note_code_output(ext, format!("tests: {why}; its tests aren't offered to debug"));
+                // Its lenses' *Debug* goes (step 7).
+                self.tests_lenses_due(None);
+            }
+            return self.tests_launch_failed(root, *run, &why);
+        }
+        if self.tests.no_tests.insert(ext.to_string()) {
+            self.note_code_output(ext, format!("tests: {why}; its test providers aren't offered"));
+        }
+        let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
+        for root in roots {
+            self.tests_provider_stopped(&root, ext, &why);
+            let project = self.tests.projects.get_mut(&root).expect("a project");
+            for provider in project.providers.iter().filter(|p| p.id.extension == ext) {
+                project.model.remove_provider(&provider.id);
+            }
+            project.providers.retain(|p| p.id.extension != ext);
+        }
+    }
+
+    /// A call to `ext` that failed (`why`): a trap, a deadline, a stopped
+    /// extension.
     fn tests_call_failed(&mut self, ext: &str, root: &Path, what: &CallFor, why: &str) {
         // Debugging alone: the provider's runs aren't touched (step 6).
         if let CallFor::Launch { run, .. } = what {
-            return self.tests_launch_failed(ext, root, *run, why);
-        }
-        let no_exports = why.contains("it has no tests-") || why.contains("isn't API 1.6's");
-        if no_exports {
-            if self.tests.no_tests.insert(ext.to_string()) {
-                self.note_code_output(ext, format!("tests: {why}; its test providers aren't offered"));
-            }
-            let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
-            for root in roots {
-                self.tests_provider_stopped(&root, ext, why);
-                let project = self.tests.projects.get_mut(&root).expect("a project");
-                for provider in project.providers.iter().filter(|p| p.id.extension == ext) {
-                    project.model.remove_provider(&provider.id);
-                }
-                project.providers.retain(|p| p.id.extension != ext);
-            }
-            return;
+            return self.tests_launch_failed(root, *run, why);
         }
         // A scan that failed changes nothing; the extension's stop, if it
         // stopped, comes as its own event.
@@ -1959,16 +2001,30 @@ impl App {
         }
     }
 
-    /// Stops the run in the project at `root`, `why`.
-    fn tests_stop_in(&mut self, root: &Path, why: &str) -> bool {
+    /// Stops the run in the project at `root`, `why`: whether a run was
+    /// going, and the test whose debug, waiting behind it or for its
+    /// provider's answer, was let go too.
+    fn tests_stop_in(&mut self, root: &Path, why: &str) -> (bool, Option<String>) {
         // A debug waiting its turn, or its provider's answer, goes too.
         let let_go = self.tests_debug_let_go(root, why);
-        let Some(project) = self.tests.projects.get_mut(root) else { return let_go };
-        let stopped = project.model.stop(why) || let_go;
+        let Some(project) = self.tests.projects.get_mut(root) else { return (false, let_go) };
+        let stopped = project.model.stop(why);
         Self::tests_halt(project, fenix_tests::StepEnd::Stopped);
         project.save_run = None;
         self.tests_pump();
-        stopped
+        (stopped, let_go)
+    }
+
+    /// `SPC T k`, `x`: the run stopped and a debug let go, one key for two,
+    /// both said (step 6's review).
+    pub(in crate::app) fn tests_stop_said(&mut self, root: &Path) {
+        let said = match self.tests_stop_in(root, "stopped") {
+            (true, Some(label)) => format!("stopping the test run, and the debug of {label} waiting behind it"),
+            (true, None) => "stopping the test run".to_string(),
+            (false, Some(label)) => format!("not debugging {label}: let go before it started"),
+            (false, None) => "no test run to stop".to_string(),
+        };
+        self.set_message(said);
     }
 
     /// A run ended: *Test output* says how, and the results are kept.
@@ -1998,6 +2054,11 @@ impl App {
         }
         if self.config.bool_value("tests.keep_results") != Some(false) {
             self.tests_write_results(root);
+        }
+        // A run of tests (a listing is none): `last_task`, `task-ended`,
+        // the notification, the agents waiting (step 7).
+        if let fenix_tests::RunKind::Tests(_) = end.kind {
+            self.tests_door_ended(root, &end);
         }
     }
 
@@ -2096,8 +2157,10 @@ impl App {
         Some((root, rel))
     }
 
-    /// Asks the project at `root` to run `selections`, as one request.
-    fn tests_request(&mut self, root: &Path, selections: Vec<Selection>, what: &str) {
+    /// Asks the project at `root` to run `selections`, as one request:
+    /// what came of it, or why nothing will run (said on the modeline
+    /// too), for a door or an agent to act on (step 7).
+    pub(in crate::app) fn tests_request(&mut self, root: &Path, selections: Vec<Selection>, what: &str) -> Result<fenix_tests::Requested, String> {
         let project = self.tests_project(root);
         let mut answer = fenix_tests::Requested::Nothing;
         for selection in selections {
@@ -2106,13 +2169,19 @@ impl App {
                 answer = said;
             }
         }
-        match answer {
-            fenix_tests::Requested::Nothing => self.set_error(format!("no tests to run: {what}")),
-            fenix_tests::Requested::AlreadyGoing => self.set_message(format!("{what}: already running")),
-            fenix_tests::Requested::Waits | fenix_tests::Requested::Joined => self.set_message(format!("{what}: waits for the run going")),
-            _ => self.set_message(format!("running {what}")),
-        }
+        let said = match answer {
+            fenix_tests::Requested::Nothing => {
+                let why = format!("no tests to run: {what}");
+                self.set_error(why.clone());
+                return Err(why);
+            }
+            fenix_tests::Requested::AlreadyGoing => format!("{what}: already running"),
+            fenix_tests::Requested::Waits | fenix_tests::Requested::Joined => format!("{what}: waits for the run going"),
+            _ => format!("running {what}"),
+        };
+        self.set_message(said);
         self.tests_pump();
+        Ok(answer)
     }
 
     /// `tests.run_here`: the test the cursor is in (§9.4).
@@ -2121,29 +2190,28 @@ impl App {
         let line = self.open().buffer.line_col(&self.cursor()).0 as u32;
         let model = &self.tests.projects[&root].model;
         let Some(key) = model.test_at(&rel, line).and_then(|id| model.node(id)).map(|n| n.key()) else {
-            let name = Path::new(&rel).file_name().map_or(rel.clone(), |n| n.to_string_lossy().into_owned());
-            return self.set_error(format!("line {} of {name} isn't in a test -- tests.run_file runs this file's", line + 1));
+            return self.set_error(doors::not_in_a_test(&rel, line));
         };
         let what = key.id.clone();
-        self.tests_request(&root, vec![Selection::Nodes(vec![key])], &what);
+        let _ = self.tests_request(&root, vec![Selection::Nodes(vec![key])], &what);
     }
 
     /// `tests.run_file`: this file's tests.
     pub(crate) fn tests_run_file(&mut self) {
         let Some((root, rel)) = self.tests_here() else { return };
-        self.tests_request(&root, vec![Selection::File(rel.clone())], &rel);
+        let _ = self.tests_request(&root, vec![Selection::File(rel.clone())], &rel);
     }
 
     /// `tests.run_all`.
     pub(crate) fn tests_run_all(&mut self) {
         let Some((root, _)) = self.tests_here() else { return };
-        self.tests_request(&root, vec![Selection::All], "all the tests");
+        let _ = self.tests_request(&root, vec![Selection::All], "all the tests");
     }
 
     /// `tests.run_failed`: those whose last result failed or errored.
     pub(crate) fn tests_run_failed(&mut self) {
         let Some((root, _)) = self.tests_here() else { return };
-        self.tests_request(&root, vec![Selection::Failed], "the failed");
+        let _ = self.tests_request(&root, vec![Selection::Failed], "the failed");
     }
 
     /// `tests.run_last`: the last run again.
@@ -2152,17 +2220,13 @@ impl App {
         let Some(last) = self.tests.projects[&root].model.last_selection().map(<[Selection]>::to_vec) else {
             return self.set_error("no test run yet in this project");
         };
-        self.tests_request(&root, last, "the last run");
+        let _ = self.tests_request(&root, last, "the last run");
     }
 
     /// `tests.stop`: the run going in this project.
     pub(crate) fn tests_stop(&mut self) {
         let Some((root, _)) = self.tests_here() else { return };
-        if self.tests_stop_in(&root, "stopped") {
-            self.set_message("stopping the test run");
-        } else {
-            self.set_message("no test run to stop");
-        }
+        self.tests_stop_said(&root);
     }
 
     /// `tests.output`: the project's *Test output*, beside its tests page
@@ -2175,7 +2239,8 @@ impl App {
 
     /// `selection` run in the project at `root` in place of the run going
     /// (§4: "by a run that replaces it"), whose step is stopped at once.
-    #[cfg_attr(not(test), allow(dead_code))] // the doors' (step 7)
+    /// (No door replaces: each asks as `SPC T t` does, its run waiting.)
+    #[cfg(test)]
     pub(crate) fn tests_replace(&mut self, root: &Path, selection: Selection) -> fenix_tests::Requested {
         if !self.tests_enabled() {
             return fenix_tests::Requested::Nothing;
@@ -2263,7 +2328,10 @@ fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>, cap: us
     rx
 }
 
+mod agents;
 mod debug;
+mod doors;
+pub(in crate::app) use doors::Door;
 mod file;
 pub(in crate::app) use file::TestCells;
 mod page;

@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    code, method, AgentCaller, Call, CaptureParams, NotifyParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
+    code, method, AgentCaller, Call, CaptureParams, NotifyParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError, TestsParams, TestsRunParams,
     CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
 };
 
@@ -239,6 +239,21 @@ impl Session<'_> {
             method::SELECTION => Call::Selection,
             method::TASKS => Call::Tasks,
             method::TASKS_RUN => Call::TasksRun(params),
+            method::TESTS => Call::Tests(params_of(params)?),
+            method::TESTS_FAILURES => {
+                let failures: TestsParams = params_of(params)?;
+                if failures.state.is_some() {
+                    return Err(RpcError::invalid_params("fenix/tests.failures takes path alone: its state is failed or errored"));
+                }
+                Call::TestsFailures(failures)
+            }
+            method::TESTS_RUN => {
+                let run: TestsRunParams = params_of(params)?;
+                if run.is_empty() {
+                    return Err(RpcError::invalid_params("say what to run: tests, path, failed or all"));
+                }
+                Call::TestsRun(run)
+            }
             method::AGENT_COMMAND => Call::AgentCommand(params),
             method::BUFFER_READ => Call::BufferRead(params),
             method::LSP => Call::Lsp(params),

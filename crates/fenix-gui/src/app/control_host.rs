@@ -203,6 +203,8 @@ impl App {
                 let tasks = self.tasks_for(&root).map_err(RpcError::internal)?;
                 Ok(json!({ "root": root.to_string_lossy(), "tasks": tasks.iter().map(|t| json!({ "name": t.name, "command": t.command, "args": t.args })).collect::<Vec<_>>() }))
             }
+            // The test explorer's (step 7, `tests_host::agents`).
+            call @ (Call::Tests(_) | Call::TestsFailures(_) | Call::TestsRun(_)) => self.tests_control(call),
             Call::TasksRun(params) => {
                 self.control_writes_allowed()?;
                 let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("name: which task"))?;

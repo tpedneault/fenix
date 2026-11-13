@@ -194,10 +194,14 @@ pub const TOOLS: &[Tool] = &[
     Tool { name: "tasks", toolset: "tasks", class: Class::Read, description: "The project's tasks (build, test, lint...), by name.", schema: none },
     Tool { name: "run_task", toolset: "tasks", class: Class::Run, description: "Runs a project task in Fenix's task pane, where the user sees it, and (unless wait is false) answers when it ends: success, problems found, tests, the end of its output.", schema: || json!({ "type": "object", "properties": { "name": { "type": "string" }, "wait": { "type": "boolean" }, "timeout": { "type": "integer", "description": "Seconds" } }, "required": ["name"] }) },
     Tool { name: "run_test", toolset: "tasks", class: Class::Run, description: "Runs the test at a line (Rust, pytest, Go) in Fenix's task pane and answers when it ends, as run_task does.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" }, "timeout": { "type": "integer" } }, "required": ["path", "line"] }) },
+    Tool { name: "tests", toolset: "tasks", class: Class::Read, description: "The project's tests as Fenix's test explorer has them: provider, id, path, line, state, durationMs, stale. path, state (failed, errored, passed, skipped, not_run) and filter (words) narrow it. At most 500, saying how many more.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "state": { "type": "string" }, "filter": { "type": "string" } } }) },
+    Tool { name: "test_failures", toolset: "tasks", class: Class::Read, description: "The failed and errored tests (in path, if given) as their last runs left them: provider, id, place, message, and the failure's text (4 KiB each).", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" } } }) },
+    Tool { name: "run_tests", toolset: "tasks", class: Class::Run, description: "Runs tests through Fenix's test explorer -- tests ([{provider, id}]), a path's, the failed (failed: true) or all (all: true) -- and answers when the run ends: its counts and failures.", schema: || json!({ "type": "object", "properties": { "tests": { "type": "array", "items": { "type": "object", "properties": { "provider": { "type": "string" }, "id": { "type": "string" } } } }, "path": { "type": "string" }, "failed": { "type": "boolean" }, "all": { "type": "boolean" }, "timeout": { "type": "integer" } } }) },
     Tool { name: "task_output", toolset: "tasks", class: Class::Read, description: "The last task's output, or startLine to endLine of it.", schema: || json!({ "type": "object", "properties": { "startLine": { "type": "integer" }, "endLine": { "type": "integer" } } }) },
     // debug
     Tool { name: "debug_state", toolset: "debug", class: Class::Read, description: "Where the debugger is stopped: the stack, the selected frame's variables, watches, the program's latest output.", schema: none },
     Tool { name: "debug_evaluate", toolset: "debug", class: Class::Run, description: "Evaluates an expression where the debugger is stopped. It may run code in the program.", schema: || json!({ "type": "object", "properties": { "expression": { "type": "string" } }, "required": ["expression"] }) },
+    Tool { name: "debug_test", toolset: "debug", class: Class::Run, description: "Debugs the test at a line (path, line from 1) through Fenix's test explorer, built first if its provider says so, and answers at the first stop, as debug_start does.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" } }, "required": ["path", "line"] }) },
     Tool { name: "debug_launches", toolset: "debug", class: Class::Read, description: "The launches there are for a program's language (path: a file of it; else the file in front): \"project\" for the project's own.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" } } }) },
     Tool { name: "debug_start", toolset: "debug", class: Class::Run, description: "Starts debugging (launch, from debug_launches; path, a file of the program) and answers at the first stop, or when it ends.", schema: || json!({ "type": "object", "properties": { "launch": { "type": "string" }, "path": { "type": "string" } } }) },
     Tool { name: "breakpoints", toolset: "debug", class: Class::Read, description: "Every breakpoint, with its condition, hit count, log message, and whether it's off.", schema: none },
@@ -211,6 +215,14 @@ pub const TOOLS: &[Tool] = &[
     // commands
     Tool { name: "run_command", toolset: "commands", class: Class::Run, description: "Runs a Fenix command by its id.", schema: || json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }) },
 ];
+
+/// The test explorer's tools (plan `test-explorer.md` §10.3): offered only
+/// with `tests.enabled` on; off, Fenix has no such tools, as in 1.5.
+pub const TESTS_TOOLS: &[&str] = &["tests", "test_failures", "run_tests", "debug_test"];
+
+/// `run_test`'s description with the test explorer on: the same tool,
+/// through the explorer where a test provider serves the file.
+pub const RUN_TEST_EXPLORER: &str = "Runs the test at a line and answers when it ends: through Fenix's test explorer, with its result, where a test provider serves the file; else (Rust, pytest, Go) in the task pane, as run_task does.";
 
 #[cfg(test)]
 fn toolset(name: &str) -> Option<&'static Toolset> {
@@ -443,5 +455,33 @@ mod tests {
         let tools: Vec<Value> = TOOLS.iter().filter(|t| on.contains(t.toolset)).map(listed).collect();
         let bytes = list_bytes(&tools);
         assert!(bytes <= BUDGET, "the default tool list is {bytes} bytes, over the {BUDGET}-byte budget: put a tool in a toolset that's off by default, or say less");
+        // With the test explorer on: its tools, and run_test's longer line
+        // (the larger list of the two).
+        let explorer: Vec<Value> = TOOLS
+            .iter()
+            .filter(|t| on.contains(t.toolset))
+            .map(|t| if t.name == "run_test" { json!({ "name": t.name, "description": RUN_TEST_EXPLORER, "inputSchema": (t.schema)() }) } else { listed(t) })
+            .collect();
+        let with = list_bytes(&explorer);
+        let without: Vec<Value> = tools.into_iter().filter(|t| !TESTS_TOOLS.contains(&t["name"].as_str().unwrap_or_default())).collect();
+        assert!(with <= BUDGET, "with the test explorer on, the default tool list is {with} bytes, over the {BUDGET}-byte budget");
+        assert!(list_bytes(&without) < with, "the explorer's tools are in the default list (tasks)");
+        // With the debugger too, debug_test among them.
+        let debugging = offered(Facts { lsp: true, git: true, tasks: true, debug: true }, &[], &BTreeSet::new(), &BTreeSet::new(), &[]);
+        assert!(debugging.contains("debug") && TOOLS.iter().any(|t| t.name == "debug_test" && t.toolset == "debug"));
+    }
+
+    #[test]
+    fn the_test_explorers_tools_say_little_and_run_tools_are_asked_about() {
+        assert!(RUN_TEST_EXPLORER.len() <= 300);
+        for name in TESTS_TOOLS {
+            let tool = TOOLS.iter().find(|t| t.name == *name).unwrap_or_else(|| panic!("{name}"));
+            assert!(tool.description.len() <= 300, "{name}");
+            let rule = decide(&rules(&[], &[]), tool.name, tool.toolset, tool.class);
+            match *name {
+                "run_tests" | "debug_test" => assert_eq!((tool.class, rule), (Class::Run, Rule::Ask), "{name}"),
+                _ => assert_eq!((tool.class, rule), (Class::Read, Rule::Allow), "{name}"),
+            }
+        }
     }
 }

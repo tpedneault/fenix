@@ -223,6 +223,9 @@ pub enum Action {
     /// One of Fenix's own lenses: run the test at this line (1-based) of
     /// this file.
     RunTest { path: String, line: usize },
+    /// One of Fenix's own lenses over a test its test explorer has: debug
+    /// the test at this line (1-based) of this file.
+    DebugTest { path: String, line: usize },
     /// Not one Fenix can run.
     Unknown { title: String, command: String },
     /// Not resolved yet: nothing to run.
@@ -241,16 +244,21 @@ pub struct CargoRunnable {
 /// Fenix's own command: running the test at a line.
 pub const RUN_TEST: &str = "fenix.runTest";
 
+/// Fenix's own command: debugging the test at a line (the test
+/// explorer's).
+pub const DEBUG_TEST: &str = "fenix.debugTest";
+
 /// What running `lens` does, for a server that runs `executes` itself.
 pub fn action(lens: &lsp_types::CodeLens, executes: impl Fn(&str) -> bool) -> Action {
     let Some(command) = &lens.command else { return Action::Unresolved };
     let arguments = command.arguments.clone().unwrap_or_default();
     match command.command.as_str() {
-        RUN_TEST => {
+        own @ (RUN_TEST | DEBUG_TEST) => {
             let path = arguments.first().and_then(|v| v.as_str()).map(str::to_string);
             let line = arguments.get(1).and_then(|v| v.as_u64()).map(|l| l as usize);
             match (path, line) {
-                (Some(path), Some(line)) => Action::RunTest { path, line },
+                (Some(path), Some(line)) if own == RUN_TEST => Action::RunTest { path, line },
+                (Some(path), Some(line)) => Action::DebugTest { path, line },
                 _ => unknown(command),
             }
         }
@@ -468,5 +476,8 @@ mod tests {
     fn fenix_s_own_lens_runs_a_test_at_its_line() {
         let l = lens(4, Some("▶ Run test"), RUN_TEST, Some(vec![serde_json::json!("/p/a.rs"), serde_json::json!(5)]));
         assert_eq!(action(&l, |_| false), Action::RunTest { path: "/p/a.rs".into(), line: 5 });
+        let d = lens(4, Some("Debug"), DEBUG_TEST, Some(vec![serde_json::json!("/p/a.rs"), serde_json::json!(5)]));
+        assert_eq!(action(&d, |_| false), Action::DebugTest { path: "/p/a.rs".into(), line: 5 });
+        assert!(matches!(action(&lens(4, Some("Debug"), DEBUG_TEST, None), |_| false), Action::Unknown { .. }), "no place: not one");
     }
 }

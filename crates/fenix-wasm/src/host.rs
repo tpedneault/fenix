@@ -583,6 +583,42 @@ pub enum Reply {
     Reports(Vec<TestReport>),
     /// How to debug a test (`tests-launch`, 1.6), or why it can't.
     Launched(Result<Launching, String>),
+    /// A test provider's call (`tests-*`, 1.6) its guest has no export to
+    /// answer, typed so Fenix needn't read the words: built before 1.6,
+    /// or with an export of another type.
+    Missing(MissingExport),
+}
+
+/// Why a guest can't answer a test provider's call (`Reply::Missing`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingExport {
+    /// The export: `tests-scan`, `tests-launch`, ...
+    pub export: String,
+    /// It has one of that name, of another type (built on a draft of 1.6,
+    /// or by hand); else it has none (built before 1.6).
+    pub other_type: bool,
+}
+
+impl MissingExport {
+    fn none(export: &str) -> Self {
+        MissingExport { export: export.to_string(), other_type: false }
+    }
+
+    fn other_type(export: &str) -> Self {
+        MissingExport { export: export.to_string(), other_type: true }
+    }
+}
+
+impl std::fmt::Display for MissingExport {
+    /// What's said of it: on its calls, and its output page.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let export = &self.export;
+        if self.other_type {
+            write!(f, "its {export} isn't API 1.6's (another type: built on a draft of 1.6?): rebuild it on the 1.6 crate")
+        } else {
+            write!(f, "it has no {export}: it was built for an extension API before 1.6, which has no test providers")
+        }
+    }
 }
 
 /// A test provider's plan as Fenix would run it (`tests-plan`, a
@@ -742,7 +778,7 @@ struct Optional {
 /// An export that answers, when the guest has it with its type; else
 /// what its call answers: that the guest has no such export, or has one
 /// of another type.
-type Export<Params, Answer> = Result<wasmtime::component::TypedFunc<Params, (Answer,)>, String>;
+type Export<Params, Answer> = Result<wasmtime::component::TypedFunc<Params, (Answer,)>, MissingExport>;
 
 /// Export `name` of `instance` with the type 1.6 gives it, or why not:
 /// a guest built before 1.6 has none; one built on a draft of 1.6 (or
@@ -755,8 +791,8 @@ where
 {
     match instance.get_typed_func::<Params, (Answer,)>(&mut *store, name) {
         Ok(f) => Ok(f),
-        Err(_) if instance.get_func(&mut *store, name).is_some() => Err(wrong_export(name)),
-        Err(_) => Err(no_export(name)),
+        Err(_) if instance.get_func(&mut *store, name).is_some() => Err(MissingExport::other_type(name)),
+        Err(_) => Err(MissingExport::none(name)),
     }
 }
 
@@ -776,21 +812,9 @@ impl Optional {
 
     /// Why it can't be a test provider, when it can't: it scans and plans
     /// (1.6), or this says why not, its scan's first.
-    fn why_no_tests(&self) -> Option<&str> {
-        self.tests_scan.as_ref().err().or(self.tests_plan.as_ref().err()).map(String::as_str)
+    fn why_no_tests(&self) -> Option<&MissingExport> {
+        self.tests_scan.as_ref().err().or(self.tests_plan.as_ref().err())
     }
-}
-
-/// What a guest built before 1.6 answers a test provider's call: it has
-/// no such export.
-fn no_export(export: &str) -> String {
-    format!("it has no {export}: it was built for an extension API before 1.6, which has no test providers")
-}
-
-/// What a guest whose export has another type than 1.6's answers: built
-/// on a draft of 1.6, or by hand.
-fn wrong_export(export: &str) -> String {
-    format!("its {export} isn't API 1.6's (another type: built on a draft of 1.6?): rebuild it on the 1.6 crate")
 }
 
 /// Reads a secret, for `host.secret`; Fenix's keychain behind it.
@@ -3973,7 +3997,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let optional = Optional::of(&mut store, &instance);
         if let (false, Some(why)) = (store.data().spec.test_providers.is_empty(), optional.why_no_tests()) {
             let names = store.data().spec.test_providers.join(", ");
-            let said = if why.contains("isn't API 1.6's") { format!("its manifest names test providers ({names}), but {why}: they aren't offered") } else { format!("its manifest names test providers ({names}), but it has no tests-scan and tests-plan (it was built for an extension API before 1.6): they aren't offered") };
+            let said = if why.other_type { format!("its manifest names test providers ({names}), but {why}: they aren't offered") } else { format!("its manifest names test providers ({names}), but it has no tests-scan and tests-plan (it was built for an extension API before 1.6): they aren't offered") };
             sink(Event::Said(Source::Log(Level::Warn), said));
         }
         ext.call_activate(&mut store)?.map_err(|e| wasmtime::format_err!("{e}"))?;
@@ -4115,11 +4139,11 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                     store.data_mut().say_cuts(cuts);
                     Ok(Reply::Scanned(found))
                 }),
-                Err(why) => Ok(Err(why.clone())),
+                Err(missing) => Ok(Ok(Reply::Missing(missing.clone()))),
             },
             Call::TestsPlan { provider, run, ask } => match &optional.tests_plan {
                 Ok(f) => f.call(&mut *store, (provider, run, ask)).map(|(plan,)| Ok(Reply::Planned(plan.map(|p| store.data_mut().planned(p)).map_err(test_limits::error)))),
-                Err(why) => Ok(Err(why.clone())),
+                Err(missing) => Ok(Ok(Reply::Missing(missing.clone()))),
             },
             Call::TestsRead { provider, run, step, lines } => match &optional.tests_read {
                 Ok(f) => f.call(&mut *store, (provider, run, step, lines)).map(|(reports,)| {
@@ -4127,7 +4151,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                     store.data_mut().say_cuts(cuts);
                     Ok(Reply::Reports(reports))
                 }),
-                Err(why) => Ok(Err(why.clone())),
+                Err(missing) => Ok(Ok(Reply::Missing(missing.clone()))),
             },
             Call::TestsStepEnded { provider, run, step, end } => match &optional.tests_step_ended {
                 Ok(f) => f.call(&mut *store, (provider, run, step, end)).map(|(reports,)| {
@@ -4135,7 +4159,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                     store.data_mut().say_cuts(cuts);
                     Ok(Reply::Reports(reports))
                 }),
-                Err(why) => Ok(Err(why.clone())),
+                Err(missing) => Ok(Ok(Reply::Missing(missing.clone()))),
             },
             Call::TestsLaunch { provider, run, test } => match &optional.tests_launch {
                 Ok(f) => f.call(&mut *store, (provider, run, test)).map(|(launch,)| {
@@ -4149,7 +4173,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                     });
                     Ok(Reply::Launched(launched))
                 }),
-                Err(why) => Ok(Err(why.clone())),
+                Err(missing) => Ok(Ok(Reply::Missing(missing.clone()))),
             },
         };
         drop(calling);
@@ -4267,10 +4291,11 @@ mod tests {
         store.set_epoch_deadline(u64::MAX);
         let instance = wasmtime::component::Linker::new(&engine).instantiate(&mut store, &component).unwrap();
         let scan: Export<(String, String, String), Vec<FoundTest>> = export(&mut store, &instance, "tests-scan");
-        assert_eq!(scan.err(), Some(wrong_export("tests-scan")));
+        assert_eq!(scan.err(), Some(MissingExport::other_type("tests-scan")));
         let plan: Export<(String, u64, TestAsk), Result<TestPlan, String>> = export(&mut store, &instance, "tests-plan");
-        assert_eq!(plan.err(), Some(no_export("tests-plan")));
-        assert!(wrong_export("tests-scan").contains("isn't API 1.6's"));
+        assert_eq!(plan.err(), Some(MissingExport::none("tests-plan")));
+        assert!(MissingExport::other_type("tests-scan").to_string().contains("isn't API 1.6's"));
+        assert!(MissingExport::none("tests-plan").to_string().starts_with("it has no tests-plan: it was built for an extension API before 1.6"));
     }
 
     /// A server on this machine that answers one request with `body`.

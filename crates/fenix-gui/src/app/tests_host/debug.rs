@@ -79,43 +79,49 @@ impl App {
             let name = Path::new(&rel).file_name().map_or(rel.clone(), |n| n.to_string_lossy().into_owned());
             return self.set_error(format!("line {} of {name} isn't in a test", line + 1));
         };
-        self.tests_debug(&root, node, None);
+        let _ = self.tests_debug(&root, node, None);
     }
 
     /// Debugs test `node` of the project at `root`, from tests page `page`
-    /// or the file: its provider asked how (§11).
-    pub(in crate::app) fn tests_debug(&mut self, root: &Path, node: fenix_tests::NodeId, page: Option<BufferId>) {
+    /// or the file: its provider asked how (§11). The run it's asked as,
+    /// or why it isn't (said on the modeline too), for a door or an agent
+    /// to act on (step 7); how it ends comes to `tests_debug_done`.
+    pub(in crate::app) fn tests_debug(&mut self, root: &Path, node: fenix_tests::NodeId, page: Option<BufferId>) -> Result<RunId, String> {
+        let refused = |app: &mut App, why: String| {
+            app.set_error(why.clone());
+            Err(why)
+        };
         if !self.tests_enabled() {
-            return self.set_error("the test explorer is off (tests.enabled)");
+            return refused(self, "the test explorer is off (tests.enabled)".into());
         }
         if fenix_vfs::is_remote(root) {
-            return self.set_error("debugging a test isn't available on a remote project yet");
+            return refused(self, "debugging a test isn't available on a remote project yet".into());
         }
         let project = self.tests_project(root);
-        let Some(n) = project.model.node(node) else { return };
+        let Some(n) = project.model.node(node) else { return refused(self, "that test is gone from its provider's tests".into()) };
         let label = crate::tests_page::clean(&n.found().label);
         if !n.found().kind.is_test() {
-            return self.set_error(format!("{label} isn't a test or a case: only one test is debugged at a time"));
+            return refused(self, format!("{label} isn't a test or a case: only one test is debugged at a time"));
         }
         // §19, finding 2: a cut id with no `data` can't be named to it.
         if !n.can_be_named() {
-            return self.set_error(format!("{label} can't be debugged: its id is over 1 KiB and its provider's data for it isn't kept"));
+            return refused(self, format!("{label} can't be debugged: its id is over 1 KiB and its provider's data for it isn't kept"));
         }
         let key = n.key();
         // As Fenix has it, its path `/project/<path>` (§19, finding 2).
         let found = api_found(n.given_back());
         if let Some(busy) = project.debug.as_ref().map(|b| format!("already {} {} -- SPC T k lets it go", if b.building { "building" } else { "asking how to debug" }, b.label)) {
-            return self.set_error(busy);
+            return refused(self, busy);
         }
         if self.debug_session.as_ref().is_some_and(|s| !s.ended) {
-            return self.set_error("a debug session is already running: stop it first");
+            return refused(self, "a debug session is already running: stop it first".into());
         }
         let ext = Self::tests_ext(&key.provider);
         if self.tests.no_launch.contains(&ext) {
-            return self.set_error(format!("{label} can't be debugged: {} has no tests-launch (said on its output page)", key.provider.provider));
+            return refused(self, format!("{label} can't be debugged: {} has no tests-launch (said on its output page)", key.provider.provider));
         }
         if let Reach::No(why) = self.tests_reach(&ext, root, true) {
-            return self.set_error(format!("{label} can't be debugged now: {why}"));
+            return refused(self, format!("{label} can't be debugged now: {why}"));
         }
         let project = self.tests.projects.get_mut(root).expect("a project");
         let run = project.model.run_id();
@@ -125,6 +131,7 @@ impl App {
         project.debug = Some(Debugging { run, provider: key.provider.clone(), id: key.id.clone(), node, label: label.clone(), page, asking: Some(token), second: false, steps: None, building: false, step_end: None });
         project.debug_said = None;
         self.set_message(format!("asking {} how to debug {label}", key.provider.provider));
+        Ok(run)
     }
 
     /// `tests-launch`'s answer for run `run` of the project at `root`.
@@ -136,7 +143,7 @@ impl App {
         debugging.asking = None;
         if !enabled {
             project.debug = None;
-            return;
+            return self.tests_debug_done(root, Err("the test explorer is off (tests.enabled)".into()));
         }
         match launched {
             Ok(Launching::Launch(config)) => {
@@ -180,12 +187,9 @@ impl App {
 
     /// A `tests-launch` call that failed: a trap or a deadline (the
     /// extension's stop comes as its own event), or an extension with no
-    /// such export, which isn't asked again.
-    pub(super) fn tests_launch_failed(&mut self, ext: &str, root: &Path, run: RunId, why: &str) {
+    /// such export (`tests_export_missing`), which isn't asked again.
+    pub(super) fn tests_launch_failed(&mut self, root: &Path, run: RunId, why: &str) {
         let label = self.tests.projects.get_mut(root).and_then(|p| p.debug.take_if(|d| d.run == run)).map(|d| d.label);
-        if (why.contains("it has no tests-launch") || why.contains("isn't API 1.6's")) && self.tests.no_launch.insert(ext.to_string()) {
-            self.note_code_output(ext, format!("tests: {why}; its tests aren't offered to debug"));
-        }
         if let Some(label) = label {
             self.tests_debug_ended(root, format!("{label} can't be debugged: {}", crate::tests_page::clean(why)));
         }
@@ -232,8 +236,8 @@ impl App {
             project.debug = None;
             let said = format!("{why} · o shows it");
             project.debug_said = Some((said.clone(), crate::page::Role::Bad));
-            self.set_error(said);
-            return;
+            self.set_error(said.clone());
+            return self.tests_debug_done(root, Err(said));
         }
         // Built: asked again, once, with the same run (§11).
         let (provider, node) = (debugging.provider.clone(), debugging.node);
@@ -279,6 +283,9 @@ impl App {
         }
         self.set_message(format!("debugging {}", debugging.label));
         self.debug_start_from(template);
+        // Started, or why not as `debug_start_from` said it.
+        let started = if self.debug_session.as_ref().is_some_and(|s| !s.ended) { Ok(()) } else { Err(self.modeline_pieces().1) };
+        self.tests_debug_done(root, started);
     }
 
     /// The debug asked for ended without a session: `why`, on the
@@ -287,22 +294,31 @@ impl App {
         if let Some(project) = self.tests.projects.get_mut(root) {
             project.debug_said = Some((why.clone(), crate::page::Role::Bad));
         }
-        self.set_error(why);
+        self.set_error(why.clone());
+        self.tests_debug_done(root, Err(why));
+    }
+
+    /// A debug of the project at `root` ended: its session started, or
+    /// why none did. An agent waiting for it hears (`debug_test`).
+    pub(super) fn tests_debug_done(&mut self, root: &Path, outcome: Result<(), String>) {
+        self.tests_agents_debug_done(root, outcome);
     }
 
     /// A stop (`SPC T k`, `x`): a debug waiting for its provider's answer
     /// or for its build's turn is let go (a build under way is stopped as
-    /// the run going, and ends so). Whether one was.
-    pub(super) fn tests_debug_let_go(&mut self, root: &Path, why: &str) -> bool {
-        let Some(project) = self.tests.projects.get_mut(root) else { return false };
+    /// the run going, and ends so). The test let go, if one was.
+    pub(super) fn tests_debug_let_go(&mut self, root: &Path, why: &str) -> Option<String> {
+        let project = self.tests.projects.get_mut(root)?;
         let going = project.model.summary().running.is_some_and(|r| project.debug.as_ref().is_some_and(|d| d.run == r.run));
         if going || project.debug.is_none() {
-            return false;
+            return None;
         }
         let debugging = project.debug.take().expect("one");
         project.model.drop_build();
-        project.debug_said = Some((format!("{} isn't debugged: {why}", debugging.label), crate::page::Role::Muted));
-        true
+        let said = format!("{} isn't debugged: {why}", debugging.label);
+        project.debug_said = Some((said.clone(), crate::page::Role::Muted));
+        self.tests_debug_done(root, Err(said));
+        Some(debugging.label)
     }
 
     /// The providers of `ext` stopped in the project at `root`: a debug of

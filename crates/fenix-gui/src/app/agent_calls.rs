@@ -153,7 +153,8 @@ impl App {
         let root = self.integration_root();
         let lsp = self.lsp_sessions.keys().any(|k| k.root.starts_with(&root) || root.starts_with(&k.root));
         let git = root.ancestors().any(|dir| dir.join(".git").exists());
-        let tasks = self.tasks_for(&root).is_ok_and(|t| !t.is_empty());
+        // Tasks, or (the test explorer on) a test provider for it (§10.3).
+        let tasks = self.tasks_for(&root).is_ok_and(|t| !t.is_empty()) || self.tests_project_has_providers(&root);
         let launches = self.project_tools(&root).is_ok_and(|t| !t.launch.is_empty());
         Facts { lsp, git, tasks, debug: self.debug_session.is_some() || launches }
     }
@@ -174,7 +175,20 @@ impl App {
 
     /// Every tool there is: Fenix's, then the extensions'.
     pub(super) fn agent_known_tools(&self) -> Vec<KnownTool> {
-        let mut tools: Vec<KnownTool> = agent_tools::TOOLS.iter().map(|t| KnownTool { name: t.name.into(), toolset: t.toolset.into(), class: t.class, extension: None, listed: agent_tools::listed(t) }).collect();
+        // The test explorer's tools only with it on; run_test then says it
+        // goes through it (step 7). Off, the list is 1.5's.
+        let explorer = self.tests_enabled();
+        let mut tools: Vec<KnownTool> = agent_tools::TOOLS
+            .iter()
+            .filter(|t| explorer || !agent_tools::TESTS_TOOLS.contains(&t.name))
+            .map(|t| {
+                let mut listed = agent_tools::listed(t);
+                if explorer && t.name == "run_test" {
+                    listed["description"] = json!(agent_tools::RUN_TEST_EXPLORER);
+                }
+                KnownTool { name: t.name.into(), toolset: t.toolset.into(), class: t.class, extension: None, listed }
+            })
+            .collect();
         for tool in self.control_tools()["tools"].as_array().into_iter().flatten() {
             let name = tool["name"].as_str().unwrap_or_default().to_string();
             let class = tool.get("class").and_then(Value::as_str).and_then(Class::parse).unwrap_or(if tool["writes"].as_bool() == Some(true) { Class::Run } else { Class::Read });
@@ -301,6 +315,7 @@ impl App {
             self.agent_calls.seen = seen;
         }
         self.agent_task_waits_tick(now);
+        let tests = self.tests_agent_waits_tick(now);
         self.agent_lsp_tick(now);
         self.agent_debug_tick(now);
         let looked = self.agent_subscriptions_tick(now);
@@ -313,7 +328,7 @@ impl App {
                 true
             }
         });
-        self.agent_calls.waiters.iter().map(|w| w.until).chain(self.agent_calls.task_waits.iter().map(|w| w.until)).chain(self.agent_lsp_next()).chain(self.agent_debug_next()).chain(looked).min()
+        self.agent_calls.waiters.iter().map(|w| w.until).chain(self.agent_calls.task_waits.iter().map(|w| w.until)).chain(self.agent_lsp_next()).chain(self.agent_debug_next()).chain(looked).chain(tests).min()
     }
 
     /// The tool list may be different now (an extension came or went, a

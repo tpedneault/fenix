@@ -331,8 +331,10 @@ fn a_guest_built_before_1_6_has_no_provider_and_says_so() {
         Call::TestsLaunch { provider: "provider".into(), run: 1, test: test("x", TestKind::Test, None) },
     ];
     for (call, export) in calls.into_iter().zip(["tests-scan", "tests-plan", "tests-read", "tests-step-ended", "tests-launch"]) {
-        let err = p.call(call).0.unwrap_err();
-        assert!(err.starts_with(&format!("it has no {export}: it was built for an extension API before 1.6")), "{err}");
+        // Typed: Fenix reads which export, not the words.
+        let Ok(Reply::Missing(missing)) = p.call(call).0 else { panic!("{export}: not a missing export") };
+        assert_eq!((missing.export.as_str(), missing.other_type), (export, false));
+        assert!(missing.to_string().starts_with(&format!("it has no {export}: it was built for an extension API before 1.6")), "{missing}");
     }
     assert_eq!(p.call(Call::RunCommand("keys.say".into())).0, Ok(Reply::Done), "and runs as it did");
 }

@@ -25,6 +25,6 @@ pub use endpoint::{BindError, Endpoint, Listener, Stream};
 pub use protocol::{
     AgendaTask, AgendaTimer, AgentCaller, Call, CaptureParams, CaptureResult, CaptureTarget, ClockInParams,
     CommandInfo, CommandsResult, NotifyAction, NotifyParams, OpenParams, OpenPath, RpcError, RunCommandParams, StateResult,
-    TaskStatus, TasksParams, TasksResult,
+    TaskStatus, TasksParams, TasksResult, TestRef, TestsParams, TestsRunParams,
 };
 pub use server::{serve, ServerInfo};
