@@ -2428,3 +2428,140 @@ and a fold marker look together is for the nightly.
 node) and `SPC T d`; step 7's lenses can take a file's tests from
 `model.in_file` as the marks do, and the `fenix:#tests` problems are
 what `test_failures` can read back.
+
+### Step 6, debugging a test
+
+**Where it is.** `crates/fenix-gui/src/app/tests_host/debug.rs`: the
+command (`tests_debug_here`), the ask (`tests_debug`), the answers
+(`tests_launched`, `tests_launch_failed`), the build's steps put under
+way (`tests_debug_plan`) and its end (`tests_built`), the session started
+(`tests_debug_start`), a stop (`tests_debug_let_go`) and a provider
+stopping (`tests_debug_provider_stopped`). Per project, `ProjectTests`
+holds the test being got ready (`Debugging`: its run, provider, node,
+the page it was asked from, the call out, whether this is the second
+ask, the build's steps until its first step, how a step of it ended)
+and what the page's head says of it. Its hooks in `tests_host.rs`:
+`CallFor::Launch`, its reply and failure, the build's header and end
+in *Test output*, a build's end handed on before results are written,
+the stop, a provider stopped, the explorer off. Elsewhere: `tests_open_test`
+in `page.rs` (`Enter`'s jump, which the debug shares), `PageAction::Debug`,
+`d debug` on the key strip, *Debug test* (`MenuAction::DebugTest`) after
+*Run test*, `tests.debug_here` in `commands.rs`, `SPC T d` in
+`default_keymap.toml`, `Template::test` in `dap.rs` and its one use in
+`debug_start_from`. In `fenix-tests`: `Model::drop_build` and
+`Progress::build` (the page's head says "building to debug…", not
+"listing…"). The provider guest's launches learnt a build and a second
+ask (below).
+
+**The rules, where, and their tests** (in `tests_host/tests.rs` unless
+said):
+
+| Rule | Where | Test |
+|---|---|---|
+| `tests.debug_here`, `SPC T d`, `d` on the page (on the key strip), *Debug test* after *Run test* | `commands.rs`, `default_keymap.toml`, `tests_page.rs`, `mouse.rs` | `a_test_is_debugged_from_the_launch_its_provider_gives` (`d`, the strip); `a_marks_state_colour_and_the_right_clicks_items` (the menu's order); `spc_t_is_the_test_explorers_and_clashes_with_nothing` and `fenix_s_keymap_binds_nothing_twice` (`keymap.rs`); `a_build_to_debug_a_test_is_said_as_one` (`tests_page/tests.rs`, both sizes) |
+| A run id drawn before the first ask (`Model::run_id`); the node given back as Fenix has it, `/project/<path>`; one `can_be_named` refuses isn't asked | `tests_debug` | the launch-now test (its `args` carry the run); the build test (the build ran as that run) |
+| `launch`: started at once through `debug_start_from`, as an extension's launch (`Template::from_config`), no picker of launches, not remembered as the project's last | `tests_debug_start`, `Template::test` | `a_test_is_debugged_from_the_launch_its_provider_gives`: the adapter's `launch` has the program and `${data}` as Fenix's paths, the attributes with the test's `data`, no `debugServer`; `debug_last_launch` empty |
+| `build-first`: run as the launch's run (`request_build`), in *Test output*, read by the provider; asked again with the same run only when it built | `tests_launched`, `tests_debug_plan`, `tests_built` | `a_test_built_first_is_debugged_with_what_its_build_said`: the build's `RunEnd` has the launch's run and `build_ok`, *Test output* has `-- a build to debug build_ok, run N --`, its command and `-- built --`; the provider launches the binary its build's `BUILT` line named only on that run's second ask |
+| The paths in the launch | the worker's `checked_launch` (step 2): `program` and `cwd` as `/project/...` or `/data/...` are this machine's, as a step's folder is; `args`, `env` get `${data}` and `${tools}` | the build test: `/project/target/fake-bin` and `/project` came to the adapter as the project's; `providers.rs` (`fenix-wasm`) for `/data/...` |
+| A build that fails: no session; the modeline and the page's head say the first `broken`'s message, else the step's end, `· o shows it` | `tests_built`, `Debugging::step_ended`, `tests_page_notes` | `a_build_that_fails_says_why_and_starts_nothing`: `bad.py didn't build: mismatched types · o shows it` on both; `build_exits didn't build: its build exited 3 · o shows it` |
+| A second `build-first` is a refusal | `tests_launched` | the same test: `build_twice can't be debugged: provider asked to build it twice` |
+| A provider that refuses: its error said, nothing stopped | `tests_launched` | the launch-now test: the refusal said, and the provider runs the file's tests after |
+| A stop during the build: its tree killed, no session | `tests_stop_in` → the model's stop; `tests_built` | `a_stop_during_a_debugs_build_starts_nothing`: the `child` gone within ten seconds, `build_slow isn't debugged: its build was stopped (stopped)` |
+| A second debug while one is being got ready: refused, saying which | `tests_debug` | the build test: `already building build_ok -- SPC T k lets it go` |
+| A run already going: the build waits for it, and goes before a run waiting | the model (`request_build`) | the build test (the run going ends passed first, then the build); `a_build_waits_for_the_run_going_and_can_be_let_go` (`fenix-tests`) |
+| No `tests-launch` export: said once on the extension's output page, not asked again; its tests stay and run | `tests_launch_failed`, `TestsHost::no_launch` | `a_provider_with_no_tests_launch_is_said_once_and_not_asked_again` (the worker's answer handed to the host: see below) |
+| A `Reply::Launched` is the launch's answer, never a failed call | `tests_apply_reply` (`CallFor::Launch`) | every test above |
+| `tests.enabled` off: no command, key, menu item or page; a build going is stopped, a debug waiting let go, an answer that comes after ignored | `tests_here`, `command_hidden`, `tests_off`, `tests_launched` | `a_stop_during_a_debugs_build_starts_nothing` (off mid-build: stopped, its child gone, then the command says the explorer is off, is hidden, no menu item) |
+
+**Where the plan was silent, or read so:**
+
+- **Which file is focused** (§11.1, "opens the test's file at its line"):
+  from the page, the test's file at its line beside the page, as `Enter`;
+  from the file (`SPC T d`, the menu) the cursor stays where it is when
+  the focused file is the test's, so the session starts from the file you
+  were in. The file is opened when the launch comes, not when it's asked:
+  `debug_start_from` takes the adapter from the focused buffer's language
+  then, whatever was focused while the build ran. A test with no file or
+  line known starts from what's focused.
+- **One at a time per project.** A second debug while one is asked, waits
+  for its build or builds is refused, naming the first and that `SPC T k`
+  lets it go. One while a debug session runs is refused before anything is
+  asked or built: `debug_start_from` would refuse it after the build.
+- **A stop** (`SPC T k`, `x`) stops the build when it's the run going; a
+  debug still waiting for its provider's answer, or for its build's turn
+  behind another run, is let go too (`Model::drop_build`), so a stop
+  doesn't leave a build to start a moment later. The answer of a debug
+  let go is ignored.
+- **A run already going**: the plan's rule (§8.1) and the model's: the
+  build waits, saying so (`its build waits for the run going`), and goes
+  before a run waiting. A test run asked while a build goes waits for it,
+  as for any run.
+- **Trust**: debugging is asked for with a key or a click, so it runs as
+  a run does (§12): a `build-first` plan and a `preLaunchTask` run in a
+  project that isn't trusted. Nothing of it runs on its own.
+- **No `tests-launch` export**: a component may lack that one export
+  alone (the five are optional one by one). Step 3's rule for "it has no
+  tests-..." would have taken the extension's providers away; for
+  `tests-launch` it only stops debugging its tests (`no_launch`, until
+  Fenix restarts or the extension is reinstalled), said once on its output
+  page, and its tests still run. A call that fails otherwise (a trap, a
+  deadline) is said, and stops nothing of its own: the extension's stop
+  comes as its own event, as for a scan.
+- **A provider stopping** (a trap in a build's call, its extension started
+  again) lets the debug go, said, with its build if it waited.
+- **What a build's run leaves**: no results, nothing written to the results
+  file, not the page's last run (the model's `last` is a test run's).
+  *Test output* is begun again for it, as for any run, with `-- a build to
+  debug <test>, run N --` and `-- built --` or `-- didn't build --` at its
+  end. The page's head says "building to debug…" while it goes, and its
+  note line what's happening, then why it didn't build until the next
+  debug.
+- **The narrow key strip** (80 columns) lost `/ filter` for `d debug`: the
+  tabs' line says "/ to filter" at that size too.
+- **A launch that isn't a template** (`Template::from_config` refuses its
+  attributes) is said as the provider's refusal is. A `${pickProcess}` or
+  a launch variable with several choices still gets its picker, and the
+  launch picked is still not remembered (`Template::test` goes with it).
+
+**The provider guest**, rebuilt here: `wasm32-wasip2` is installed with
+Rust 1.100.0 (`build.ps1` names 1.98.0, which isn't; the build is the
+script's `cargo build --release --target wasm32-wasip2`, its target in
+the shared target folder). Its launches: a test with `data` now, as
+before; a case and, new, a test whose name starts `build` after a build
+(`fake-test-runner --build ID`), whose `BUILT path` line the reader keeps
+per run; asked again with that run, it launches that binary, `[id,
+"--exact"]` in `/project`; with no such line, it asks to build again.
+`/project/fake-debug.json`, when there, is merged into a launch's
+attributes, which is how the app tests give a launch the `debugServer`
+of their adapter. `providers.rs` checks the second ask and its run.
+
+**The adapter** in the app tests is one listening on a port, as a
+launch's `debugServer` names one (`fake_adapter`, the shape of the
+recorded exchanges and of `app.rs`' child-session test): it answers
+`initialize`, hands on `launch`'s arguments, sends `initialized` and
+answers the rest. So the session is started and its launch seen, as
+Fenix sends it; no real adapter ran, and no stop at a breakpoint in a
+test was seen.
+
+**Not tested with the guest**: a component with no `tests-launch` alone.
+The crate's `export!` gives all five, so the worker's answer for one
+without it ("it has no tests-launch: ...", tested in `fenix-wasm` with
+`keys.wasm`) is handed to the host's reply as it would come
+(`a_provider_with_no_tests_launch_is_said_once_and_not_asked_again`).
+A build's timeout is the run's (step 3's test of it), not tested again
+here.
+
+**Noticed, not changed**: starting a debug session moves an empty
+`.fenix/project.ini` into `.fenix/settings.toml` and, the file being
+empty, leaves neither: a project marked only by that file isn't one
+after. The app tests here keep a `settings.toml`; it's the settings'
+migration's (`settings_host.rs`), not the explorer's.
+
+**For step 7**: `debug_test` (the `debug` toolset) can call
+`tests_debug(root, node, None)` after `test_at` for its `path` and
+`line`, and answer at the first stop as `debug_start` does; what it needs
+back is `ProjectTests::debug` going to `None` with `debug_said` (why
+not), or a session started. The control channel's `fenix/tests*` can
+read the same two fields for a debug's state. The run's end
+(`tests_run_ended`) is still where the notification and `last_task` go;
+a build's end returns before them, so a debug's build is neither.
