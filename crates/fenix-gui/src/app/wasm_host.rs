@@ -2941,6 +2941,9 @@ impl App {
                 self.sync_lsp_for_focused_buffer();
             }
             Request::AgentProvide { id, program } => self.agents_provided(ext, &id, program),
+            // A test provider's runner (API 1.6): the test explorer, which
+            // isn't here yet, keeps it.
+            Request::TestProviderSet { .. } => {}
             Request::DebugAdapter { languages, program } => {
                 let Some(root) = self.wasm.projects.get(ext).cloned().flatten() else { return self.note_output(ext, "-- debug-adapter-set: it has no project".into()) };
                 let key = (ext.to_string(), root);

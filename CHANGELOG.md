@@ -37,6 +37,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - [Differences from Vim](docs/VIM_DIFFERENCES.md), and a suite of cases
   checked against real Vim (`dev/vim-conformance/check.py`) that `cargo
   test` holds Fenix to.
+- Extension API 1.6: test providers. A language pack names its runners in
+  `[[contributes.test_providers]]` (with `engine.api = "1.6"`) and answers
+  five new exports -- `tests_scan`, `tests_plan`, `tests_read`,
+  `tests_step_ended`, `tests_launch` -- with the tests in a file, the
+  commands to run, what it read in their output, and how to debug one;
+  `tests::provider` says which runner it found. Fenix runs the commands.
+  An extension rebuilt on the 1.6 crate that uses none of it may keep
+  `api = "1.5"`, and still runs on Fenix 1.5. See
+  [Writing extensions](docs/WRITING_EXTENSIONS.md#test-providers).
 
 - A file whose built-in language server isn't installed (rust-analyzer,
   pyright, clangd, gopls, ...) brings a notice with the command that

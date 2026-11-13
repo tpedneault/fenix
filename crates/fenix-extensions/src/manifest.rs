@@ -11,7 +11,7 @@ use serde::Deserialize;
 /// The extension API this Fenix offers code extensions
 /// (`fenix-extension-api`'s `wit/world.wit`). An extension built against
 /// 1.x runs on any later 1.x: a minor version only adds.
-pub const API: &str = "1.5.0";
+pub const API: &str = "1.6.0";
 
 /// Whether `fenix` is in an extension's `engine.fenix` range. A nightly
 /// (`1.6.0-nightly.20261112`) counts as the release it leads to: a range
@@ -576,6 +576,38 @@ pub struct Contributes {
     /// as it says (`agent-provide`), offered beside Fenix's own.
     #[serde(default)]
     pub agents: Vec<AgentContribution>,
+    /// The test providers it is (API 1.6): Fenix's test explorer asks
+    /// each, by id, how its runner finds, runs and reports tests
+    /// (`tests-scan`, `tests-plan`, `tests-read`, `tests-step-ended`,
+    /// `tests-launch`).
+    #[serde(default)]
+    pub test_providers: Vec<TestProviderContribution>,
+}
+
+/// A test provider an extension is (API 1.6): a runner it knows -- cargo
+/// test, pytest -- for the projects and files it says.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestProviderContribution {
+    /// Its id, the one Fenix's calls name: the extension's own name
+    /// (`rust` for `fenix.rust`), or one starting with it (`rust.nextest`).
+    pub id: String,
+    /// What it's called until it says otherwise (`test-provider-set`):
+    /// `cargo test`.
+    pub name: String,
+    /// Fenix's names for the languages whose files it scans, open, and
+    /// whose tests run from any door.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// The projects it serves: one holding one of these at its top
+    /// (`Cargo.toml`).
+    #[serde(default)]
+    pub markers: Vec<String>,
+    /// The project's files it scans when they aren't open, by pattern
+    /// (`src/**/*.rs`, `test_*.py`; see `file_matches`). None: only open
+    /// files, and its listing.
+    #[serde(default)]
+    pub scan: Vec<String>,
 }
 
 /// A coding agent an extension brings: one that speaks ACP on stdio, which
@@ -1112,6 +1144,7 @@ impl Manifest {
                 return Err(format!("extension.toml: agent {id} has no name"));
             }
         }
+        self.check_test_providers(&own)?;
         for context in &self.contributes.contexts {
             if context.name.is_empty() || !context.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
                 return Err(format!("extension.toml: context {:?} -- a context's name is lowercase letters, digits and -", context.name));
@@ -1135,6 +1168,46 @@ impl Manifest {
             }
             if !self.permissions.none() || self.contributes != Contributes::default() || self.activation != Activation::default() || self.limits != Limits::default() {
                 return Err("extension.toml: a bundle runs nothing of its own -- no permissions, contributions or activation".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// `[[contributes.test_providers]]` (1.6): ids by its name (`own` is
+    /// its name and a dot), once each; a name; what it serves; patterns
+    /// below the project.
+    fn check_test_providers(&self, own: &str) -> Result<(), String> {
+        let short = self.extension.id.rsplit('.').next().unwrap_or_default();
+        let ours = |id: &str| id == short || id.starts_with(own) || id.starts_with(&format!("{}.", self.extension.id));
+        let api = self.engine.api.as_deref().and_then(|a| semver::Version::parse(&full_version(a)).ok());
+        for (i, provider) in self.contributes.test_providers.iter().enumerate() {
+            let id = provider.id.as_str();
+            if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')) {
+                return Err(format!("extension.toml: test provider {id:?} -- a test provider's id is lowercase letters, digits, -, _ and ."));
+            }
+            if !ours(id) {
+                return Err(format!("extension.toml: test provider {id:?} -- an extension's test providers are called by its name ({short}, or {own}...)"));
+            }
+            if self.contributes.test_providers[..i].iter().any(|p| p.id == id) {
+                return Err(format!("extension.toml: test provider {id:?} is there twice"));
+            }
+            if api.as_ref().is_none_or(|v| *v < semver::Version::new(1, 6, 0)) {
+                return Err(format!("extension.toml: test provider {id} -- test providers need engine.api 1.6"));
+            }
+            if provider.name.trim().is_empty() {
+                return Err(format!("extension.toml: test provider {id} has no name"));
+            }
+            if provider.languages.is_empty() && provider.markers.is_empty() {
+                return Err(format!("extension.toml: test provider {id} -- it serves files of its languages, projects by their markers, or both: it needs one or the other"));
+            }
+            if provider.languages.iter().any(|l| l.trim().is_empty()) {
+                return Err(format!("extension.toml: test provider {id} -- its languages are Fenix's names for them (rust, python)"));
+            }
+            if provider.markers.iter().any(|m| m.trim().is_empty() || m.contains("..") || m.starts_with(['/', '\\'])) {
+                return Err(format!("extension.toml: test provider {id} -- its markers are file names in a project's top folder (Cargo.toml)"));
+            }
+            if provider.scan.iter().any(|p| p.trim().is_empty() || p.contains("..") || p.starts_with(['/', '\\'])) {
+                return Err(format!("extension.toml: test provider {id} -- a scan pattern is a name (test_*.py) or a path below the project (tests/**/*.rs)"));
             }
         }
         Ok(())
@@ -1297,7 +1370,7 @@ mod tests {
         assert!(Manifest::parse(&sample("acme.jira", "1.0.0", "wasm")).unwrap_err().contains("engine.api"), "a wasm one says its API");
         let wasm = |api: &str| Manifest::parse(&sample("acme.jira", "1.0.0", "wasm").replace("fenix = ", &format!("api = \"{api}\"\nfenix = "))).unwrap();
         assert!(wasm("1.0").runs_in(&v("1.0.0")).is_ok());
-        assert!(wasm("2.0").runs_in(&v("1.0.0")).unwrap_err().contains("built for extension API 2.0, and this Fenix offers 1.5.0"));
+        assert!(wasm("2.0").runs_in(&v("1.0.0")).unwrap_err().contains("built for extension API 2.0, and this Fenix offers 1.6.0"));
         assert!(Manifest::parse(&sample("acme.jira", "1.0.0", "lua")).unwrap().runs_in(&v("1.0.0")).unwrap_err().contains("Lua"));
     }
 
@@ -1323,8 +1396,8 @@ mod tests {
 
     #[test]
     fn the_api_fits_by_its_major_and_any_minor_up_to_this_one() {
-        assert!(api_fits("1") && api_fits("1.0") && api_fits("1.0.0") && api_fits("1.1") && api_fits("1.2") && api_fits("1.3") && api_fits("1.4") && api_fits("1.5"));
-        assert!(!api_fits("1.5.1") && !api_fits("1.6"), "a later 1.x has what this one lacks");
+        assert!(api_fits("1") && api_fits("1.0") && api_fits("1.0.0") && api_fits("1.1") && api_fits("1.2") && api_fits("1.3") && api_fits("1.4") && api_fits("1.5") && api_fits("1.6") && api_fits("1.6.0"));
+        assert!(!api_fits("1.6.1") && !api_fits("1.7"), "a later 1.x has what this one lacks");
         assert!(!api_fits("0.8") && !api_fits("0.8.8") && !api_fits("2.0") && !api_fits("x"));
     }
 
@@ -1403,6 +1476,39 @@ mod tests {
         assert!(with("\n[contributes]\nevents = [\"git\"]\n").is_ok());
         let m = with("\n[permissions]\nagents = true\n\n[contributes]\nevents = [\"agents\"]\n").unwrap();
         assert!(m.permissions.lines().iter().any(|l| l.contains("coding agents")));
+    }
+
+    /// A test provider (1.6): called by the extension's name, once, with a
+    /// name and what it serves, its patterns below the project, and only
+    /// in an extension built for 1.6.
+    #[test]
+    fn a_test_provider_is_named_by_its_extension_and_needs_api_1_6() {
+        let with = |api: &str, extra: &str| Manifest::parse(&(sample("fenix.rust", "1.3.0", "wasm").replace("fenix = ", &format!("api = \"{api}\"\nfenix = ")) + "\n" + extra));
+        let rust = "[[contributes.test_providers]]\nid = \"rust\"\nname = \"cargo test\"\nlanguages = [\"rust\"]\nmarkers = [\"Cargo.toml\"]\nscan = [\"src/**/*.rs\", \"tests/**/*.rs\", \"benches/**/*.rs\"]\n";
+        let m = with("1.6", rust).unwrap();
+        assert_eq!(
+            m.contributes.test_providers,
+            [TestProviderContribution { id: "rust".into(), name: "cargo test".into(), languages: vec!["rust".into()], markers: vec!["Cargo.toml".into()], scan: vec!["src/**/*.rs".into(), "tests/**/*.rs".into(), "benches/**/*.rs".into()] }]
+        );
+        assert!(file_matches(&m.contributes.test_providers[0].scan, std::path::Path::new("/p/src/geo/mod.rs"), Some(std::path::Path::new("/p"))));
+        assert!(m.runs_in(&v("1.6.0")).is_ok() && m.runs_in(&v("1.6.0-nightly.20261113")).is_ok());
+        let nextest = "[[contributes.test_providers]]\nid = \"rust.nextest\"\nname = \"cargo nextest\"\nmarkers = [\"Cargo.toml\"]\n";
+        assert_eq!(with("1.6.0", &format!("{rust}\n{nextest}")).unwrap().contributes.test_providers[1].id, "rust.nextest");
+        assert!(with("1.6", "[[contributes.test_providers]]\nid = \"fenix.rust.x\"\nname = \"x\"\nlanguages = [\"rust\"]\n").is_ok(), "or by its whole id");
+        let provider = |fields: &str| with("1.6", &format!("[[contributes.test_providers]]\n{fields}\n"));
+        assert!(with("1.5", rust).unwrap_err().contains("test providers need engine.api 1.6"));
+        assert!(Manifest::parse(&(sample("fenix.rust", "1.3.0", "none") + "\n" + rust)).unwrap_err().contains("need engine.api 1.6"), "and code to run");
+        assert!(provider("id = \"python\"\nname = \"pytest\"\nlanguages = [\"python\"]").unwrap_err().contains("called by its name (rust, or rust."));
+        assert!(provider("id = \"Rust\"\nname = \"x\"\nlanguages = [\"rust\"]").unwrap_err().contains("lowercase"));
+        assert!(with("1.6", &format!("{rust}\n{rust}")).unwrap_err().contains("\"rust\" is there twice"));
+        assert!(provider("id = \"rust\"\nname = \" \"\nlanguages = [\"rust\"]").unwrap_err().contains("has no name"));
+        assert!(provider("id = \"rust\"\nname = \"x\"\nscan = [\"*.rs\"]").unwrap_err().contains("one or the other"));
+        assert!(provider("id = \"rust\"\nname = \"x\"\nmarkers = [\"../Cargo.toml\"]").unwrap_err().contains("markers are file names"));
+        assert!(provider("id = \"rust\"\nname = \"x\"\nmarkers = [\"/Cargo.toml\"]").unwrap_err().contains("markers are file names"));
+        assert!(provider("id = \"rust\"\nname = \"x\"\nlanguages = [\"rust\"]\nscan = [\"../**/*.rs\"]").unwrap_err().contains("scan pattern"));
+        assert!(provider("id = \"rust\"\nname = \"x\"\nlanguages = [\"rust\"]\nrunner = \"cargo\"").unwrap_err().contains("runner"), "nothing it doesn't know");
+        let older = with("1.5", "").unwrap();
+        assert!(older.contributes.test_providers.is_empty() && older.runs_in(&v("1.6.0")).is_ok(), "1.5's still run");
     }
 
     /// What it waits for before loading: the languages and markers its
