@@ -407,6 +407,7 @@ fn the_agents_tools_answer_the_explorers_model_as_data_within_their_budget() {
     let held = agent(&mut p, "test_failures", json!({})).unwrap();
     assert_eq!((held["failures"].as_array().unwrap().len(), held["more"].as_u64()), (0, Some(1)), "{held}");
     // 10,000 tests (the scan's cap): 500, and how many more.
+    p.app.config.set_value("agents.mcp.max_answer_kib", Some(fenix_config::Value::Int(64)));
     p.open("many.fake");
     p.scanned("many.fake::t0");
     let many = agent(&mut p, "tests", json!({ "path": "many.fake" })).unwrap();
@@ -544,4 +545,186 @@ fn the_control_channel_lists_runs_and_reads_failures() {
     off(&mut p);
     let refused = p.app.apply_control(Call::Tests(TestsParams::default())).unwrap_err();
     assert_eq!((refused.code, refused.message.as_str()), (fenix_control::protocol::code::METHOD_NOT_FOUND, "the test explorer is off (tests.enabled)"));
+}
+
+// After the review of step 7.
+
+/// An agent's call, not waited for: its answer comes on the receiver.
+fn ask(p: &mut Project, tool: &str, arguments: Value) -> mpsc::Receiver<crate::ipc::Reply> {
+    let (reply, answered) = mpsc::channel();
+    p.app.control_agent("call", AgentCaller { client: "fenix-mcp".into(), thread: None }, json!({ "call": "1", "tool": tool, "arguments": arguments }), reply);
+    answered
+}
+
+/// S1: every answer is held to its budget -- `tests` and a routed
+/// `run_test`'s to `agents.mcp.max_answer_kib` -- saying what was left
+/// out.
+#[test]
+fn the_agents_answers_are_held_to_max_answer_kib() {
+    let state = tempfile::tempdir().unwrap();
+    let long: String = (0..100).map(|i| format!("# test {}{i}\n", "n".repeat(90))).collect();
+    let message = "m".repeat(5000);
+    let fails = format!("# test fails\n#! err FAIL f.fake::fails f.fake:0 {message}\n");
+    let mut p = Project::new(&[("a.fake", long.as_str()), ("f.fake", fails.as_str())], "a.fake", state.path());
+    allow_runs(&mut p);
+    p.scanned(&format!("a.fake::{}99", "n".repeat(90)));
+    p.app.config.set_value("agents.mcp.max_answer_kib", Some(fenix_config::Value::Int(4)));
+    let listed = agent(&mut p, "tests", json!({ "path": "a.fake" })).unwrap();
+    let shown = listed["tests"].as_array().unwrap().len();
+    assert!(listed.to_string().len() <= 4096, "{} bytes", listed.to_string().len());
+    assert!(shown > 0 && shown < 100, "{shown}");
+    assert_eq!((listed["total"].as_u64(), listed["more"].as_u64()), (Some(100), Some(100 - shown as u64)));
+    p.open("f.fake");
+    p.scanned("f.fake::fails");
+    let path = p.root.join("f.fake").to_string_lossy().into_owned();
+    let one = agent(&mut p, "run_test", json!({ "path": path, "line": 1 })).unwrap();
+    assert_eq!(one["state"], "failed");
+    assert!(one.to_string().len() <= 4096, "{} bytes: {one}", one.to_string().len());
+    assert!(one["message"].as_str().unwrap().ends_with("bytes more]"), "said cut");
+}
+
+/// S2: the explorer turned off answers an agent waiting for a run at once,
+/// and what was waiting doesn't start on its own when it's turned on again.
+#[test]
+fn turning_the_explorer_off_answers_the_agents_waiting_and_drops_what_was_queued() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("slow.fake", "# test slow\n#! wait\n"), ("b.fake", "# test b\n#! out PASS b.fake::b 1ms\n")], "slow.fake", state.path());
+    allow_runs(&mut p);
+    p.scanned("slow.fake::slow");
+    p.open("b.fake");
+    p.scanned("b.fake::b");
+    p.app.tests_request(&p.root.clone(), vec![Selection::File("slow.fake".into())], "slow.fake").unwrap();
+    p.until("the slow step", Project::step_running);
+    let answered = ask(&mut p, "run_tests", json!({ "path": "b.fake" }));
+    assert!(p.model().summary().waiting.is_some(), "queued behind it");
+    off(&mut p);
+    let started = Instant::now();
+    let answer = loop {
+        if let Ok(answer) = answered.try_recv() {
+            break answer;
+        }
+        assert!(started.elapsed() < Duration::from_secs(60), "never answered");
+        std::thread::sleep(Duration::from_millis(5));
+        p.app.pump_wasm();
+        p.app.tests_tick(Instant::now());
+    };
+    assert_eq!(answer.unwrap_err().message, "the test explorer was turned off (tests.enabled)");
+    p.until("the stopped run", |p| test_runs(p) == 1 && p.tests().run.is_none());
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    for _ in 0..50 {
+        p.app.pump_wasm();
+        p.app.tests_tick(Instant::now());
+    }
+    assert_eq!(test_runs(&p), 1, "b.fake's run never started");
+    assert!(p.tests().run.is_none() && p.model().summary().waiting.is_none());
+}
+
+/// S3: a launch waiting on its `preLaunchTask` is under way, not failed:
+/// an agent waits on (`debug_start`'s rule too), and the task doesn't take
+/// `SPC p T` from a door's test run.
+#[test]
+fn a_launch_waiting_on_its_pre_launch_task_is_under_way() {
+    assert_eq!(super::super::debug::debug_outcome(false, true, || "running build".into()), Ok(()));
+    assert_eq!(super::super::debug::debug_outcome(true, false, || unreachable!()), Ok(()));
+    assert_eq!(super::super::debug::debug_outcome(false, false, || "no adapter".into()), Err("no adapter".to_string()));
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test adds\n")], "a.fake", state.path());
+    let root = p.root.clone();
+    let pending = PendingLaunch { language: fenix_syntax::LanguageId::Python, root: root.clone(), adapter: crate::dap::Adapter { command: None, port: Some(1) }, attributes: Default::default(), attach: false, what: "a test".into() };
+    p.app.debug_after_task = Some(("build".into(), pending));
+    let (reply, answered) = mpsc::channel();
+    p.app.agent_debug_wait_start(reply);
+    p.app.agent_debug_tick(Instant::now());
+    assert!(answered.try_recv().is_err(), "not over before it began");
+    // The preLaunchTask runs: SPC p T keeps the door's test run.
+    let key = tool_sessions::root_for_path(&root.join("a.fake"));
+    p.app.tests.last_door.insert(key.clone(), (root.clone(), vec![Selection::All], "all".into()));
+    p.app.run_task_as(fenix_tasks::TaskDef { name: "build".into(), command: "fenix-missing-tool-xyz".into(), args: Vec::new() }, root.clone(), None);
+    assert!(p.app.tests.last_door.contains_key(&key), "a preLaunchTask isn't SPC p t's");
+    p.app.debug_after_task = None;
+    p.app.agent_debug_tick(Instant::now());
+    assert!(answered.try_recv().is_ok(), "no session and nothing pending: answered");
+    p.app.run_task_as(fenix_tasks::TaskDef { name: "lint".into(), command: "fenix-missing-tool-xyz".into(), args: Vec::new() }, root, None);
+    assert!(!p.app.tests.last_door.contains_key(&key), "a task of yours is");
+}
+
+/// S4: reading makes no project: `tests`, `test_failures` and
+/// `fenix/tests*` about a project the explorer doesn't have answer plainly,
+/// and leave none behind.
+#[test]
+fn reading_tests_makes_no_project() {
+    use fenix_control::{Call, TestsParams};
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test adds\n")], "a.fake", state.path());
+    p.scanned("a.fake::adds");
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("fake.toml"), "").unwrap();
+    std::fs::create_dir_all(other.path().join(".fenix")).unwrap();
+    std::fs::write(other.path().join(".fenix").join("project.ini"), "").unwrap();
+    let elsewhere = other.path().join("x.fake").to_string_lossy().into_owned();
+    let before = p.app.tests.projects.len();
+    let listed = p.app.apply_control(Call::Tests(TestsParams { path: Some(elsewhere.clone()), state: None })).unwrap();
+    assert_eq!((listed["tests"].clone(), listed["note"].as_str().is_some()), (json!([]), true), "{listed}");
+    let failures = p.app.apply_control(Call::TestsFailures(TestsParams { path: Some(elsewhere.clone()), state: None })).unwrap();
+    assert_eq!(failures["failures"], json!([]));
+    assert_eq!(agent(&mut p, "tests", json!({ "path": elsewhere })).unwrap()["tests"], json!([]));
+    assert_eq!(agent(&mut p, "test_failures", json!({ "path": elsewhere })).unwrap()["failures"], json!([]));
+    assert_eq!(p.app.tests.projects.len(), before, "no project made");
+    assert_eq!(agent(&mut p, "tests", json!({})).unwrap()["total"], 1, "the project you're in still reads");
+}
+
+/// S5: off, the control channel withholds the explorer's methods, as a
+/// Fenix without them; on, it offers them.
+#[test]
+fn the_control_channel_offers_the_explorers_methods_only_while_its_on() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test adds\n")], "a.fake", state.path());
+    let withheld = |p: &Project| p.app.tests.control.as_ref().map(|c| c.read().unwrap().clone()).unwrap_or_default();
+    p.app.tests_tick(Instant::now());
+    assert!(withheld(&p).is_empty());
+    off(&mut p);
+    p.app.tests_tick(Instant::now());
+    assert_eq!(withheld(&p), ["fenix/tests", "fenix/tests.failures", "fenix/tests.run"]);
+    let mut never = App::with_file(None);
+    never.tests_tick(Instant::now());
+    assert_eq!(never.tests.control.as_ref().unwrap().read().unwrap().len(), 3, "off from the start");
+}
+
+/// S6: a run that timed out is a failed run, its tests all passed or not.
+#[test]
+fn a_run_that_timed_out_is_a_failed_run() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("t.fake", "# test one\n#! out PASS t.fake::one 1ms\n#! wait\n")], "t.fake", state.path());
+    p.app.config.set_value("tests.timeout_minutes", Some(fenix_config::Value::Int(1)));
+    p.app.config.set_value("notifications.tasks", Some(fenix_config::Value::Text("failed".into())));
+    p.scanned("t.fake::one");
+    p.app.tests_run_file();
+    p.until("the passed result", |p| p.model().node(p.model().find(&TestKey::new(&provider(), "t.fake::one")).unwrap()).unwrap().state() == State::Passed);
+    p.app.tests.skew_ms = 61_000;
+    p.until("the run", |p| test_runs(p) == 1);
+    assert_eq!(p.last().halted, Some(fenix_tests::Halt::TimedOut));
+    assert_eq!(p.app.wasm.last_task.as_ref().map(|t| (t.ok, t.tests)), Some((false, Some((1, 0)))));
+    assert_eq!(p.app.tests.told.last().map(String::as_str), Some("ended false"));
+    assert_eq!(notified(&p).iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), ["The tests timed out"]);
+}
+
+/// S7: a run its provider ended (a trap) is a failure you hear of, even
+/// under `long`; one you stopped stays a stop (the test above).
+#[test]
+fn a_run_its_provider_ended_is_a_failure_you_hear_of() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n")], "a.fake", state.path());
+    off(&mut p);
+    p.app.wasm.installed = vec![guest("test.trap")];
+    let trap = ProviderId::new("test.trap", "trap");
+    let root = p.root.clone();
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    p.app.tests_project(&root).model.add_provider(&trap, "trap");
+    p.app.tests_project(&root).model.scan(&trap, "a.fake", vec![fenix_tests::Found::new("a.fake::one", None, "one", Kind::Test)]);
+    p.app.tests.seen.clear();
+    p.app.tests_request(&root, vec![Selection::All], "all").unwrap();
+    p.until("the run", |p| test_runs(p) == 1);
+    assert!(matches!(p.last().halted, Some(fenix_tests::Halt::Stopped(_))));
+    assert_eq!(p.app.wasm.last_task.as_ref().map(|t| (t.name.as_str(), t.ok)), Some(("tests: all", false)));
+    assert_eq!(notified(&p).iter().map(|n| n.0.as_str()).collect::<Vec<_>>(), ["The test run stopped"]);
 }

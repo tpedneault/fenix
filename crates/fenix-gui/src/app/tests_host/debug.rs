@@ -283,9 +283,12 @@ impl App {
         }
         self.set_message(format!("debugging {}", debugging.label));
         self.debug_start_from(template);
-        // Started, or why not as `debug_start_from` said it.
-        let started = if self.debug_session.as_ref().is_some_and(|s| !s.ended) { Ok(()) } else { Err(self.modeline_pieces().1) };
-        self.tests_debug_done(root, started);
+        // Started, or waiting on its `preLaunchTask` in the task pane (the
+        // session starts when that ends: an agent waits on, as
+        // `debug_start`'s does), or why not as `debug_start_from` said it
+        // (step 7's review, S3).
+        let outcome = debug_outcome(self.debug_session.as_ref().is_some_and(|s| !s.ended), self.debug_after_task.is_some(), || self.modeline_pieces().1);
+        self.tests_debug_done(root, outcome);
     }
 
     /// The debug asked for ended without a session: `why`, on the
@@ -328,5 +331,16 @@ impl App {
         let Some(debugging) = project.debug.take_if(|d| d.provider.extension == ext) else { return };
         project.model.drop_build();
         self.tests_debug_ended(root, format!("{} isn't debugged: {}", debugging.label, crate::tests_page::clean(why)));
+    }
+}
+
+/// How a launch handed to `debug_start_from` went, for whoever waits on
+/// it: a session running, or one waiting on its `preLaunchTask`, is under
+/// way; else it didn't start, `said` saying why.
+pub(super) fn debug_outcome(running: bool, task_pending: bool, said: impl FnOnce() -> String) -> Result<(), String> {
+    if running || task_pending {
+        Ok(())
+    } else {
+        Err(said())
     }
 }

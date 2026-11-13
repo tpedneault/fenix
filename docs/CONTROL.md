@@ -386,28 +386,31 @@ agents (`fenix --mcp`'s `run_task` and `run_command`): both are refused
 
 ### `fenix/tests`, `fenix/tests.failures` and `fenix/tests.run`
 
-The test explorer's (`tests.enabled`; off, each answers `-32601`), for
-the project you're in, or `path`'s. A relative `path` is the project's.
+The test explorer's (`tests.enabled`; off, they aren't in `fenix/hello`'s
+`capabilities` and answer `-32601`, as in a Fenix without them; a hello
+after it's turned on lists them), for the project you're in, or
+`path`'s. Reading makes no project: one the explorer has no tests for
+answers an empty list and a `note`. A relative `path` is the project's.
 Lines and columns are from 1.
 
 - `fenix/tests`: params `{ "path"?, "state"? }` -- one file's tests,
   those in one state (`passed`, `failed`, `errored`, `skipped`,
   `not_run`, `queued`, `running`). `{ "root", "tests": [{ "provider",
   "id", "label", "kind", "path", "line", "state", "durationMs", "stale"
-  }], "total", "more"? }`, at most 5,000 (`more` says how many were left
-  out). `provider` is the provider's id (`rust`), or
+  }], "total", "more"? }`, at most 5,000 and 2 MiB (`more` says how many
+  were left out). `provider` is the provider's id (`rust`), or
   `extension:provider` when two extensions have one of that id; `kind`
   is `test` or `case`.
 - `fenix/tests.failures`: params `{ "path"? }`. The failed and errored
   tests, as their last runs left them: `{ "failures": [{ "provider",
   "id", "label", "state", "path", "line", "message", "at": { "path",
   "line", "column" }, "text", "stale" }], "more"? }`, a failure's `text`
-  cut at 4 KiB, the whole at `agents.mcp.max_answer_kib`.
+  cut at 4 KiB, the whole at 2 MiB.
 - `fenix/tests.run`: params `{ "tests"?: [{ "provider", "id" }],
   "path"?, "failed"?: bool, "all"?: bool }`, one or more, run as one
   request. Starts it and answers at once: `{ "run", "requested" }`,
   `requested` being `starts`, `waits` (behind the run going: `run` is
-  `null` until it starts), `already-going` or `replaces`. Refused
+  `null` until it starts) or `already-going`. Refused
   (`-32602`) unless `agents.mcp.fenix_write` is on, as `fenix/tasks.run`
   is, and in a project that isn't trusted (`SPC p y`), as a lens is.
 

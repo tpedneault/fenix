@@ -268,9 +268,13 @@ impl App {
             self.tests.told.push(format!("started {name}"));
             self.editor_call("tasks", fenix_wasm::host::Call::TaskStarted(name.clone()));
         }
-        let stopped = matches!(end.halted, Some(fenix_tests::Halt::Stopped(_)));
+        // Stopped by you (or the explorer turned off) is a stop; stopped
+        // by its provider (a trap, its extension started again elsewhere)
+        // is a failure you hear of, as a timeout is (step 7's review, S6,
+        // S7).
+        let stopped = matches!(end.halted, Some(fenix_tests::Halt::Stopped(_))) && self.tests.projects.get(root).is_some_and(|p| p.stopped_by_you == Some(end.run));
         let failed = end.failed + end.errored;
-        let ok = !stopped && failed == 0 && end.first_broken.is_none();
+        let ok = end.halted.is_none() && failed == 0 && end.first_broken.is_none();
         // Stopped, it's as a task cancelled in the task pane: `last_task`
         // and the notification are left as they were (§20, step 7).
         if !stopped {
@@ -302,12 +306,20 @@ impl App {
             "all" => true,
             "failed" => !ok,
             "never" => false,
-            _ => took >= 10_000,
+            // A run its provider ended (a trap) is said however quick.
+            _ => took >= 10_000 || matches!(end.halted, Some(fenix_tests::Halt::Stopped(_))),
         };
         if !wanted {
             return;
         }
-        let request = if let Some(broken) = &end.first_broken {
+        let halted = match &end.halted {
+            Some(fenix_tests::Halt::TimedOut) => Some(("The tests timed out".to_string(), format!("{} passed · tests.timeout_minutes", end.passed))),
+            Some(fenix_tests::Halt::Stopped(why)) => Some(("The test run stopped".to_string(), crate::tests_page::clean(why))),
+            None => None,
+        };
+        let request = if let Some((summary, body)) = halted {
+            Request::new("tests", summary).body(body).urgency(Urgency::Normal).action("Show the tests", "tests.open").action("Show the output", "tests.output")
+        } else if let Some(broken) = &end.first_broken {
             Request::new("tests", "The tests didn't build").body(crate::tests_page::clean(broken)).urgency(Urgency::Normal).action("Show it", "tests.output")
         } else if end.failed + end.errored > 0 {
             let failed = end.failed + end.errored;

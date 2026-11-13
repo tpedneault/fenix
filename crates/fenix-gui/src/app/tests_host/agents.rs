@@ -37,6 +37,11 @@ const DEBUG_WAIT: Duration = Duration::from_secs(10 * 60);
 /// The most tests `tests` lists, and `fenix/tests`.
 pub(crate) const AGENT_TESTS: usize = 500;
 pub(crate) const CONTROL_TESTS: usize = 5_000;
+/// The bytes `fenix/tests` and `fenix/tests.failures` answer at most:
+/// well under the channel's 4 MiB a message (`MAX_BODY`).
+pub(crate) const CONTROL_BYTES: usize = 2 << 20;
+/// What's said when the project's tests aren't known to the explorer.
+const UNKNOWN: &str = "no test provider has found tests in this project (or none of its files is open)";
 /// A failure's text, and the end of a run's output, as they answer it.
 pub(crate) const TEXT_BYTES: usize = 4 * 1024;
 
@@ -138,8 +143,29 @@ fn provider_named(model: &Model, name: &str) -> Result<ProviderId, String> {
 }
 
 impl App {
-    /// The project the agent's call is about: `path`'s, else the one
-    /// you're in; with the explorer on and not remote.
+    /// The project a reading call is about -- `path`'s, else the one you're
+    /// in -- as the explorer already has it: none when it has none. A read
+    /// makes no project (step 7's review, S4); the explorer on, not remote.
+    fn tests_known_root(&self, path: Option<&Path>) -> Result<Option<PathBuf>, String> {
+        if !self.tests_enabled() {
+            return Err("the test explorer is off (tests.enabled)".into());
+        }
+        let raw = match path {
+            Some(path) => fenix_project::find_project_root(path).ok_or_else(|| format!("{} isn't in a project", path.display()))?,
+            None => self.integration_root(),
+        };
+        if fenix_vfs::is_remote(&raw) {
+            return Err("tests aren't available on a remote project yet".into());
+        }
+        if self.tests.projects.is_empty() {
+            return Ok(None);
+        }
+        let root = self.tests.canon.get(&raw).cloned().unwrap_or_else(|| fenix_lsp::normalize(refactor::identity(&raw)));
+        Ok(self.tests.projects.contains_key(&root).then_some(root))
+    }
+
+    /// The project a run is asked in: `path`'s, else the one you're in;
+    /// with the explorer on and not remote.
     fn tests_agent_root(&mut self, path: Option<&Path>) -> Result<PathBuf, String> {
         if !self.tests_enabled() {
             return Err("the test explorer is off (tests.enabled)".into());
@@ -181,13 +207,19 @@ impl App {
     /// given, in `state` when given, matching every word of `filter`; at
     /// most `max`, saying how many more. `full`: the control channel's,
     /// with each one's label and kind.
-    pub(in crate::app) fn tests_listed(&self, root: &Path, rel: Option<&str>, state: Option<&str>, filter: Option<&str>, max: usize, full: bool) -> Result<Value, String> {
+    /// Held to `bytes` too, those past it counted in `more` (step 7's
+    /// review, S1).
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::app) fn tests_listed(&self, root: &Path, rel: Option<&str>, state: Option<&str>, filter: Option<&str>, max: usize, bytes: usize, full: bool) -> Result<Value, String> {
         if let Some(state) = state.filter(|s| !["passed", "failed", "errored", "skipped", "not_run", "queued", "running"].contains(s)) {
             return Err(format!("state {state}: passed, failed, errored, skipped, not_run, queued or running"));
         }
-        let Some(project) = self.tests.projects.get(root) else { return Ok(json!({ "root": root.to_string_lossy(), "tests": [], "total": 0 })) };
+        let Some(project) = self.tests.projects.get(root) else { return Ok(json!({ "root": root.to_string_lossy(), "tests": [], "total": 0, "note": UNKNOWN })) };
         let model = &project.model;
         let names = provider_names(model);
+        // Room for the answer's own fields and the note.
+        let mut used = 512 + root.to_string_lossy().len();
+        let mut full_up = false;
         let words: Vec<String> = filter.unwrap_or_default().split_whitespace().map(str::to_lowercase).collect();
         let mut tests = Vec::new();
         let mut total = 0usize;
@@ -208,7 +240,7 @@ impl App {
                     }
                 }
                 total += 1;
-                if tests.len() >= max {
+                if full_up || tests.len() >= max {
                     continue;
                 }
                 let mut test = json!({
@@ -224,13 +256,20 @@ impl App {
                     test["label"] = json!(found.label);
                     test["kind"] = json!(kind_name(found.kind));
                 }
+                let size = test.to_string().len() + 1;
+                if used + size > bytes {
+                    full_up = true;
+                    continue;
+                }
+                used += size;
                 tests.push(test);
             }
         }
+        let shown = tests.len();
         let mut answer = json!({ "root": root.to_string_lossy(), "tests": tests, "total": total });
-        if total > max {
-            answer["more"] = json!(total - max);
-            answer["note"] = json!(format!("{} more left out: path, state or filter narrows it", total - max));
+        if total > shown {
+            answer["more"] = json!(total - shown);
+            answer["note"] = json!(format!("{} more left out: path, state or filter narrows it", total - shown));
         }
         Ok(answer)
     }
@@ -258,7 +297,7 @@ impl App {
     /// or of the run that started at `since` (ms) -- held to `max` bytes in
     /// all, saying how many were left out.
     pub(in crate::app) fn tests_failures(&self, root: &Path, rel: Option<&str>, since: Option<u64>, max: usize) -> Value {
-        let Some(project) = self.tests.projects.get(root) else { return json!({ "failures": [] }) };
+        let Some(project) = self.tests.projects.get(root) else { return json!({ "failures": [], "note": UNKNOWN }) };
         let model = &project.model;
         let names = provider_names(model);
         let mut failures = Vec::new();
@@ -291,18 +330,18 @@ impl App {
     /// `tests`: the project's tests, as the explorer has them.
     pub(in crate::app) fn tests_agent_tests(&mut self, arguments: &Value) -> Result<Value, RpcError> {
         let path = self.tests_agent_path(arguments);
-        let root = self.tests_agent_root(path.as_deref()).map_err(invalid)?;
+        let Some(root) = self.tests_known_root(path.as_deref()).map_err(invalid)? else { return Ok(json!({ "tests": [], "total": 0, "note": UNKNOWN })) };
         let rel = path.as_deref().map(|p| self.tests_rel(&root, p));
         let state = arguments.get("state").and_then(Value::as_str).filter(|s| !s.is_empty());
         let filter = arguments.get("filter").and_then(Value::as_str);
-        self.tests_listed(&root, rel.as_deref(), state, filter, AGENT_TESTS, false).map_err(invalid)
+        self.tests_listed(&root, rel.as_deref(), state, filter, AGENT_TESTS, self.agent_answer_max(), false).map_err(invalid)
     }
 
     /// `test_failures`: the failed and errored tests, as the last runs left
     /// them.
     pub(in crate::app) fn tests_agent_failures(&mut self, arguments: &Value) -> Result<Value, RpcError> {
         let path = self.tests_agent_path(arguments);
-        let root = self.tests_agent_root(path.as_deref()).map_err(invalid)?;
+        let Some(root) = self.tests_known_root(path.as_deref()).map_err(invalid)? else { return Ok(json!({ "failures": [], "note": UNKNOWN })) };
         let rel = path.as_deref().map(|p| self.tests_rel(&root, p));
         Ok(self.tests_failures(&root, rel.as_deref(), None, self.agent_answer_max()))
     }
@@ -466,28 +505,45 @@ impl App {
             let node = model.and_then(|m| m.find(key)).and_then(|id| model?.node(id));
             let result = node.as_ref().and_then(|n| n.result()).filter(|r| !r.restored && r.when_ms >= end.started_ms);
             let names = model.map(provider_names).unwrap_or_default();
-            return json!({
+            // Held to `agents.mcp.max_answer_kib` (S1): the message and why
+            // it didn't build a quarter each at most, the failure's text and
+            // the output's end sharing what's left.
+            let max = self.agent_answer_max();
+            let quarter = (max / 4).min(TEXT_BYTES);
+            let mut answer = json!({
                 "test": { "provider": names.get(&key.provider).cloned().unwrap_or_else(|| key.provider.provider.to_string()), "id": key.id },
                 "state": node.as_ref().map_or("not_run", |n| state_name(n.state())),
                 "durationMs": result.and_then(|r| r.duration_ms),
-                "message": result.and_then(|r| r.message.clone()),
+                "message": result.and_then(|r| r.message.as_deref()).map(|m| cut_text(m, quarter)),
                 "at": result.and_then(|r| r.at.as_ref()).map(|at| json!({ "path": at.path, "line": at.line + 1, "column": at.column.map(|c| c + 1) })),
-                "text": result.and_then(|r| r.text.as_deref()).map(|t| cut_text(&crate::tests_page::without_escapes(t), TEXT_BYTES)),
                 "halted": halted,
-                "didntBuild": end.first_broken,
-                "output": last_text(&output, TEXT_BYTES),
+                "didntBuild": end.first_broken.as_deref().map(|b| cut_text(b, quarter)),
             });
+            let room = max.saturating_sub(answer.to_string().len() + 128);
+            let text = result.and_then(|r| r.text.as_deref()).map(|t| crate::tests_page::without_escapes(t).into_owned());
+            // Halved until it fits as JSON (a line break is two bytes there).
+            let mut each = (room / 2).min(TEXT_BYTES);
+            loop {
+                answer["text"] = json!(text.as_deref().map(|t| cut_text(t, each)));
+                answer["output"] = json!(last_text(&output, each));
+                if each == 0 || answer.to_string().len() <= max {
+                    return answer;
+                }
+                each /= 2;
+            }
         }
-        let mut answer = self.tests_failures(root, None, Some(end.started_ms), self.agent_answer_max().saturating_sub(TEXT_BYTES * 2));
+        let max = self.agent_answer_max();
+        let tail = end.first_broken.is_some().then(|| last_text(&output, (max / 4).min(TEXT_BYTES)));
+        let mut answer = self.tests_failures(root, None, Some(end.started_ms), max.saturating_sub(tail.as_ref().map_or(0, String::len) + 1024));
         answer["run"] = json!(end.run.0);
         answer["passed"] = json!(end.passed);
         answer["failed"] = json!(end.failed);
         answer["errored"] = json!(end.errored);
         answer["skipped"] = json!(end.skipped);
         answer["halted"] = json!(halted);
-        answer["didntBuild"] = json!(end.first_broken);
-        if end.first_broken.is_some() {
-            answer["output"] = json!(last_text(&output, TEXT_BYTES));
+        answer["didntBuild"] = json!(end.first_broken.as_deref().map(|b| cut_text(b, (max / 8).min(TEXT_BYTES))));
+        if let Some(tail) = tail {
+            answer["output"] = json!(tail);
         }
         answer
     }
@@ -503,6 +559,14 @@ impl App {
         for wait in done {
             let answer = self.tests_run_answer(root, end, wait.single.as_ref());
             let _ = wait.reply.send(Ok(answer));
+        }
+    }
+
+    /// The explorer turned off: every agent waiting for a run hears at once
+    /// that it won't come (step 7's review, S2).
+    pub(super) fn tests_agents_off(&mut self) {
+        for wait in std::mem::take(&mut self.tests.run_waits) {
+            let _ = wait.reply.send(Err(invalid("the test explorer was turned off (tests.enabled)")));
         }
     }
 
@@ -573,15 +637,15 @@ impl App {
         match call {
             Call::Tests(params) => {
                 let path = path_of(self, &params.path);
-                let root = self.tests_agent_root(path.as_deref()).map_err(invalid)?;
+                let Some(root) = self.tests_known_root(path.as_deref()).map_err(invalid)? else { return Ok(json!({ "tests": [], "total": 0, "note": UNKNOWN })) };
                 let rel = path.as_deref().map(|p| self.tests_rel(&root, p));
-                self.tests_listed(&root, rel.as_deref(), params.state.as_deref(), None, CONTROL_TESTS, true).map_err(invalid)
+                self.tests_listed(&root, rel.as_deref(), params.state.as_deref(), None, CONTROL_TESTS, CONTROL_BYTES, true).map_err(invalid)
             }
             Call::TestsFailures(params) => {
                 let path = path_of(self, &params.path);
-                let root = self.tests_agent_root(path.as_deref()).map_err(invalid)?;
+                let Some(root) = self.tests_known_root(path.as_deref()).map_err(invalid)? else { return Ok(json!({ "failures": [], "note": UNKNOWN })) };
                 let rel = path.as_deref().map(|p| self.tests_rel(&root, p));
-                Ok(self.tests_failures(&root, rel.as_deref(), None, self.agent_answer_max()))
+                Ok(self.tests_failures(&root, rel.as_deref(), None, CONTROL_BYTES))
             }
             Call::TestsRun(params) => {
                 self.control_writes_allowed()?;
@@ -598,9 +662,9 @@ impl App {
                 let requested = match requested {
                     fenix_tests::Requested::Starts => "starts",
                     fenix_tests::Requested::AlreadyGoing => "already-going",
-                    fenix_tests::Requested::Waits | fenix_tests::Requested::Joined => "waits",
-                    fenix_tests::Requested::Replaces => "replaces",
-                    fenix_tests::Requested::Nothing => "nothing",
+                    // A run asked here never replaces, and none asked is an
+                    // error above.
+                    _ => "waits",
                 };
                 Ok(json!({ "run": run, "requested": requested }))
             }

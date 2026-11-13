@@ -253,17 +253,18 @@ pub fn action(lens: &lsp_types::CodeLens, executes: impl Fn(&str) -> bool) -> Ac
     let Some(command) = &lens.command else { return Action::Unresolved };
     let arguments = command.arguments.clone().unwrap_or_default();
     match command.command.as_str() {
-        own @ (RUN_TEST | DEBUG_TEST) => {
-            let path = arguments.first().and_then(|v| v.as_str()).map(str::to_string);
-            let line = arguments.get(1).and_then(|v| v.as_u64()).map(|l| l as usize);
-            match (path, line) {
-                (Some(path), Some(line)) if own == RUN_TEST => Action::RunTest { path, line },
-                (Some(path), Some(line)) => Action::DebugTest { path, line },
-                _ => unknown(command),
-            }
-        }
-        // The server runs it: whatever it is, it knows best.
+        RUN_TEST => match own_place(&arguments) {
+            Some((path, line)) => Action::RunTest { path, line },
+            None => unknown(command),
+        },
+        // The server runs it: whatever it is, it knows best. (Before
+        // `DEBUG_TEST`, as before it was Fenix's: a server's own command of
+        // that name is still its own.)
         c if executes(c) => Action::Server { command: c.to_string(), arguments },
+        DEBUG_TEST => match own_place(&arguments) {
+            Some((path, line)) => Action::DebugTest { path, line },
+            None => unknown(command),
+        },
         "editor.action.showReferences" | "rust-analyzer.showReferences" => {
             // (uri, position, locations)
             match arguments.get(2).cloned().map(serde_json::from_value::<Vec<lsp_types::Location>>) {
@@ -278,6 +279,13 @@ pub fn action(lens: &lsp_types::CodeLens, executes: impl Fn(&str) -> bool) -> Ac
         },
         _ => unknown(command),
     }
+}
+
+/// Fenix's own lens's place: `[path, line]`.
+fn own_place(arguments: &[serde_json::Value]) -> Option<(String, usize)> {
+    let path = arguments.first().and_then(|v| v.as_str())?.to_string();
+    let line = arguments.get(1).and_then(|v| v.as_u64())? as usize;
+    Some((path, line))
 }
 
 fn unknown(command: &lsp_types::Command) -> Action {
@@ -479,5 +487,6 @@ mod tests {
         let d = lens(4, Some("Debug"), DEBUG_TEST, Some(vec![serde_json::json!("/p/a.rs"), serde_json::json!(5)]));
         assert_eq!(action(&d, |_| false), Action::DebugTest { path: "/p/a.rs".into(), line: 5 });
         assert!(matches!(action(&lens(4, Some("Debug"), DEBUG_TEST, None), |_| false), Action::Unknown { .. }), "no place: not one");
+        assert!(matches!(action(&d, |c| c == DEBUG_TEST), Action::Server { .. }), "a server's own command of that name is its own");
     }
 }

@@ -91,6 +91,11 @@ pub(crate) const ASK_BYTES: usize = test_limits::MAX_ANSWER;
 /// The test explorer's own commands: what `tests.enabled` off hides
 /// (`App::command_hidden`), and nothing else -- an extension's own
 /// `tests.coverage` stays offered.
+/// The control channel's methods that are the explorer's: withheld from
+/// `fenix/hello` and answered `-32601` while it's off, as in a Fenix
+/// without it (step 7's review, S5).
+pub(crate) const TESTS_METHODS: &[&str] = &[fenix_control::protocol::method::TESTS, fenix_control::protocol::method::TESTS_FAILURES, fenix_control::protocol::method::TESTS_RUN];
+
 pub(crate) const COMMANDS: &[&str] = &["tests.open", "tests.run_here", "tests.run_file", "tests.run_all", "tests.run_failed", "tests.run_last", "tests.debug_here", "tests.stop", "tests.output"];
 
 // What's plain: records, paths, lines, command lines.
@@ -762,6 +767,10 @@ pub(crate) struct ProjectTests {
     /// The run of tests extensions were last told started (`task-started`,
     /// step 7): told once, and its end after it.
     told_started: Option<RunId>,
+    /// The run stopped by you (`SPC T k`, `x`) or by the explorer being
+    /// turned off: its end is a stop, not a failure to tell of (step 7's
+    /// review, S7).
+    stopped_by_you: Option<RunId>,
     /// How each run ended, in tests.
     #[cfg(test)]
     pub(crate) ended_runs: Vec<fenix_tests::RunEnd>,
@@ -847,6 +856,9 @@ pub(crate) struct TestsHost {
     /// (step 7, `agents`).
     pub(crate) run_waits: Vec<agents::RunWait>,
     pub(crate) debug_waits: Vec<agents::DebugWait>,
+    /// The control channel's methods withheld now (`ipc::withheld`; in
+    /// tests, one of its own): the explorer's while it's off.
+    pub(crate) control: Option<Arc<std::sync::RwLock<Vec<String>>>>,
     /// What extensions were told of test runs, in tests: `started <name>`,
     /// `ended <ok>`.
     #[cfg(test)]
@@ -1017,6 +1029,7 @@ impl App {
                 debug: None,
                 debug_said: None,
                 told_started: None,
+                stopped_by_you: None,
                 #[cfg(test)]
                 ended_runs: Vec::new(),
             };
@@ -1304,7 +1317,9 @@ impl App {
 
     /// What's due by the clock, done; then the pump. When next it's due.
     pub(super) fn tests_tick(&mut self, now: Instant) -> Option<Instant> {
-        if !self.tests_enabled() {
+        let enabled = self.tests_enabled();
+        self.tests_control_offered(enabled);
+        if !enabled {
             self.tests_off();
             // A run still open is driven to its end; nothing else is.
             if self.tests.projects.values().any(|p| p.run.is_some() || p.step.is_some()) {
@@ -1368,6 +1383,25 @@ impl App {
         wake
     }
 
+    /// The control channel offers the explorer's methods only while it's
+    /// on: what a hello lists, and what's answered. A look and nothing
+    /// more when it's as it was.
+    fn tests_control_offered(&mut self, enabled: bool) {
+        let control = self.tests.control.get_or_insert_with(|| {
+            #[cfg(test)]
+            let control = Arc::new(std::sync::RwLock::new(TESTS_METHODS.iter().map(|m| m.to_string()).collect()));
+            #[cfg(not(test))]
+            let control = crate::ipc::withheld();
+            control
+        });
+        let withheld = control.read().is_ok_and(|w| !w.is_empty());
+        if withheld == enabled {
+            if let Ok(mut w) = control.write() {
+                *w = if enabled { Vec::new() } else { TESTS_METHODS.iter().map(|m| m.to_string()).collect() };
+            }
+        }
+    }
+
     /// `tests.enabled` is off: a run still going is stopped, and nothing
     /// else is done.
     fn tests_off(&mut self) {
@@ -1386,7 +1420,12 @@ impl App {
                 project.model.drop_build();
             }
             project.debug_said = None;
+            // What was asked and hadn't started doesn't start on its own
+            // when the explorer is turned on again (step 7's review, S2).
+            project.model.drop_waiting();
         }
+        // Agents waiting for a run hear at once.
+        self.tests_agents_off();
         // An agent waiting for one hears it went.
         for root in debugging {
             self.tests_debug_done(&root, Err("the test explorer was turned off (tests.enabled)".into()));
@@ -2008,7 +2047,11 @@ impl App {
         // A debug waiting its turn, or its provider's answer, goes too.
         let let_go = self.tests_debug_let_go(root, why);
         let Some(project) = self.tests.projects.get_mut(root) else { return (false, let_go) };
+        let going = project.model.summary().running.map(|r| r.run);
         let stopped = project.model.stop(why);
+        if stopped {
+            project.stopped_by_you = going;
+        }
         Self::tests_halt(project, fenix_tests::StepEnd::Stopped);
         project.save_run = None;
         self.tests_pump();

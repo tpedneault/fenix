@@ -2,7 +2,9 @@
 
 - **Status:** planned, 13 November 2026, for the maintainer to review;
   revised the same day after the packs' review of it (§18). Recorded in
-  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 7 are built (§20).
+  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 6 are merged (pull
+  requests #149, #150, #151); step 7 is built, its pull request to come
+  (§20).
 - **Scope:** a page that lists a project's tests before anything has
   run, runs one, a file, a group, the failed or all of them, and shows
   each result as it ends: on the page, in the gutter, after the test's
@@ -20,8 +22,8 @@
   split; it keeps the first design's runner experiments (its §3 and
   appendix, the recorded outputs in fenix-extensions
   `plans/test-explorer-fixtures/`), and its §11 is the review of this
-  plan that §18 answers. Steps 1 to 4 are built (§20); the review of
-  steps 1 and 2 is §19.
+  plan that §18 answers. Steps 1 to 6 are merged and step 7 built
+  (§20); the review of steps 1 and 2 is §19.
 
 Paths are in this repository unless they say `fenix-extensions`. Every
 claim about what Fenix does today cites the tree at `b5c3765`.
@@ -2699,10 +2701,14 @@ debugs.
 - **The lenses are laid out again** when the model changes
   (`tests_views_due`, ten times a second at most) and when an extension
   turns out to have no `tests-launch`; off, once, back to the finder's.
-- **A run you stop** tells `task-ended` (false), so every `task-started`
-  has its end, but leaves `last_task` and notifies nothing, as a task
-  cancelled in the task pane does. A run that timed out is a failed run.
-  A run that ended before its first action is told it started first.
+- **A run you stop** (`SPC T k`, `x`, the explorer turned off) tells
+  `task-ended` (false), so every `task-started` has its end, but leaves
+  `last_task` and notifies nothing, as a task cancelled in the task pane
+  does. A run that timed out, or that its provider ended (a trap, its
+  extension started again elsewhere), is a failed run: `last_task` not
+  ok, and a notification ("The tests timed out", "The test run
+  stopped"; the latter under `long` however quick). A run that ended
+  before its first action is told it started first.
 - **The notification** follows `notifications.tasks` alone, as §10.1
   says (no condition on the tests page being in view). A passing run's
   has no action. *Show the failures* opens the tests page of the project
@@ -2724,8 +2730,11 @@ debugs.
   the explorer on, a test provider; `debug_test` is in `debug` and
   offered with it. Off, the four tools aren't listed and `run_test`'s
   description is 1.5's; on, it says it goes through the explorer.
-- **Off, `fenix/tests*`** answer `-32601` (the capabilities list is the
-  build's, so they're listed).
+- **Off, `fenix/tests*`** aren't in `fenix/hello`'s capabilities and
+  answer `-32601`, before their params are read: the control channel's
+  server takes a list of methods withheld now (`ServerInfo::withheld`),
+  which the editor keeps as the setting changes (`tests_tick`; withheld
+  from the start, the explorer being off until the settings say).
 - **Descriptions**: `notifications.tasks` ("a task or a test run"),
   `notifications.rules` (`tests` a source), `lsp.code_lens_tests` and
   `tests.enabled`, so CONFIGURATION.md's table; CONTROL.md has the
@@ -2742,3 +2751,70 @@ but `run_tests`' one-second timeout, which only has to pass).
 `run_test` through the explorer), the default on, Q9 (which now also
 decides the agents' and `fenix/tests.run`'s rule), the 10,000-test
 measurement, and step 6's review's leftovers listed for it.
+
+**After the review of step 7.** Fixed, each with a test in
+`tests_host/tests/story.rs` unless said:
+
+- *Answers held to their budget* (S1): `tests` to
+  `agents.mcp.max_answer_kib` as well as 500 entries, `fenix/tests` to
+  2 MiB as well as 5,000, `fenix/tests.failures` to 2 MiB; a routed
+  `run_test`'s message and why it didn't build a quarter each, its text
+  and output sharing what's left, halved until the JSON fits; `more` says
+  what was left out (`the_agents_answers_are_held_to_max_answer_kib`).
+- *Off answers the agents waiting* (S2): the explorer turned off answers
+  every agent's run wait at once, and lets go the run waiting
+  (`Model::drop_waiting`, new in `fenix-tests`, with
+  `a_waiting_run_let_go_never_starts`), so it doesn't start on its own
+  when the explorer is turned on again
+  (`turning_the_explorer_off_answers_the_agents_waiting_and_drops_what_was_queued`).
+- *A `preLaunchTask` is under way* (S3): a launch waiting on its
+  `preLaunchTask` is a debug started (`debug_outcome`), and an agent's
+  wait for a first stop isn't over while one is pending -- `debug_start`
+  had the same gap; a debug session's `preLaunchTask` doesn't take `SPC p
+  T` from a door's test run (`a_launch_waiting_on_its_pre_launch_task_is_under_way`;
+  the task pane's own `preLaunchTask` path can't be shown waiting
+  headless, where a task runs to its end at once).
+- *Reading makes no project* (S4): `tests`, `test_failures` and
+  `fenix/tests*` read the projects the explorer has; another answers an
+  empty list and a `note` (`reading_tests_makes_no_project`).
+- *Off, not advertised* (S5): `fenix/tests*` are withheld from the hello
+  while the explorer is off (`the_control_channel_offers_the_explorers_methods_only_while_its_on`;
+  `fenix-control`'s `withheld_methods_are_neither_listed_nor_answered`).
+- *A timeout is a failure* (S6) and *a provider's end is a failure* (S7):
+  the host keeps which run you stopped (`stopped_by_you`); any other halt
+  is a failed run (`a_run_that_timed_out_is_a_failed_run`,
+  `a_run_its_provider_ended_is_a_failure_you_hear_of`).
+- *Status* (S8): the header and the opening say steps 1 to 6 are merged
+  and step 7 built.
+- *A server's `fenix.debugTest`* (N1): its own when it runs it, as before
+  there was Fenix's, and said as itself otherwise
+  (`fenix-lsp`'s `fenix_s_own_lens_runs_a_test_at_its_line`,
+  `lenses_fenix_runs_itself_or_says_why_not`).
+- `fenix/tests.run`'s `requested` is `starts`, `waits` or
+  `already-going` (F7).
+
+Left for step 8, from the same review:
+
+- **F1**: an agent's wait resolves on the next run of tests to end after
+  the one going when it asked; a request of several selections (the
+  first answer counts) or a run on save replacing what waits can resolve
+  it on another run. Record the run the request joined or became.
+- **F2**: the lenses are laid out again at every revision of the model
+  (ten times a second during a run): compare `tests_lens_lines` with
+  what's kept first.
+- **F3**: a run on save notifies as any run; consider not, or only on a
+  change of state, before `tests.on_save` is promoted.
+- **F4**: an agent's or a control client's request writes the modeline
+  ("running ..."): a quiet flag for them.
+- **F5**: `run_tests` runs in the project you're in when it's allowed,
+  which may not be the one asked about if you moved meanwhile: name it on
+  the card, or take it from the thread.
+- **F6**: the `tasks` toolset's fact looks a raw root up through the
+  canonical spellings seen so far: a symlinked root may miss it on the
+  first call.
+- **N3**: what a provider wrote (`message`, `label`, `id`, `didntBuild`)
+  comes back to agents as data, unmarked, as `run_task`'s output does: a
+  line in AGENTS.md when the tools are documented.
+- Trust is checked when a run is asked for, not when a queued one starts
+  (with Q9).
+

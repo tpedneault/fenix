@@ -94,6 +94,7 @@ mod welcome_host;
 mod import_host;
 mod wasm_host;
 mod tests_host;
+pub(crate) use tests_host::TESTS_METHODS;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
 mod reading_host;
@@ -10903,7 +10904,11 @@ impl App {
         task.command = spec.executable.clone();
         task.args = spec.args.clone();
         self.project_last_tasks.insert(root.clone(), task.clone());
-        self.tests_task_ran(&root);
+        // A debug session's `preLaunchTask` isn't what `SPC p t` or `SPC p
+        // r` ran: `SPC p T` keeps a door's test run (step 7's review, S3).
+        if self.debug_after_task.as_ref().is_none_or(|(name, _)| *name != task.name) {
+            self.tests_task_ran(&root);
+        }
         self.quickfix.clear();
         self.search.quickfix_page = None;
         self.quickfix_index = None;
@@ -38118,6 +38123,12 @@ name = \"orbit\"
         app.run_cmd("code.lens");
         assert_eq!(said_now(&app), "Fenix can't run ▶ Run test (fenix.runTest)");
         assert!(app.task_session.is_none());
+        // Its debug command too, said as itself, as an unknown one was
+        // before there was one (step 7's review, N1).
+        let own = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Debug", "command": "fenix.debugTest", "arguments": ["/elsewhere/t.rs", 1]}});
+        let (_dir, mut app, _key) = lensed("lens_debug_own_from_server", serde_json::json!([own]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run Debug (fenix.debugTest)");
         let other = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Peek", "command": "editor.peek"}});
         let (_dir, mut app, _key) = lensed("lens_unknown", serde_json::json!([other]));
         app.run_cmd("code.lens");

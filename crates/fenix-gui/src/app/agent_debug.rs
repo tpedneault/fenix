@@ -57,7 +57,9 @@ impl App {
         if self.agent_calls.debug_waits.is_empty() {
             return;
         }
-        let ended = self.debug_session.as_ref().is_none_or(|s| s.ended);
+        // A session waiting on its `preLaunchTask` isn't over before it
+        // began (step 7's review, S3: `debug_test`, and `debug_start`).
+        let ended = self.debug_after_task.is_none() && self.debug_session.as_ref().is_none_or(|s| s.ended);
         let settled = self.debug_session.as_ref().is_some_and(|s| s.stopped_thread.is_some() && !s.call_stack.is_empty() && (!s.variables.is_empty() || self.agent_calls.debug_stopped_at.is_some_and(|at| now.duration_since(at) >= SETTLE)));
         let stops = self.agent_calls.debug_stops;
         let waits = std::mem::take(&mut self.agent_calls.debug_waits);

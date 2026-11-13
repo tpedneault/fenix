@@ -761,3 +761,39 @@ fn the_test_explorers_methods_take_typed_params() {
     );
     assert!(CAPABILITIES.contains(&method::TESTS) && CAPABILITIES.contains(&method::TESTS_FAILURES) && CAPABILITIES.contains(&method::TESTS_RUN));
 }
+
+/// Methods withheld as the editor runs (the test explorer's, while it's
+/// off) aren't in a hello and are `-32601` -- before their params are
+/// read, so a malformed one isn't told otherwise -- and come back when
+/// they're no longer withheld, on a connection made after.
+#[test]
+fn withheld_methods_are_neither_listed_nor_answered() {
+    let info = info();
+    *info.withheld.write().unwrap() = vec![method::TESTS.into(), method::TESTS_FAILURES.into(), method::TESTS_RUN.into()];
+    let run = |info: &ServerInfo| {
+        let mut input = frame(HELLO);
+        input.extend(frame(r#"{"jsonrpc":"2.0","id":2,"method":"fenix/tests.run","params":{}}"#));
+        input.extend(frame(r#"{"jsonrpc":"2.0","id":3,"method":"fenix/tests"}"#));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut output = Vec::new();
+        let _ = serve(Cursor::new(input), &mut output, info, editor(Arc::clone(&calls)));
+        let mut cursor = Cursor::new(output);
+        let mut replies: Vec<Value> = Vec::new();
+        while let Some(body) = fenix_rpc::read_message(&mut cursor).unwrap() {
+            replies.push(serde_json::from_slice(&body).unwrap());
+        }
+        let calls = calls.lock().unwrap().clone();
+        (replies, calls)
+    };
+    let (replies, calls) = run(&info);
+    let listed: Vec<String> = serde_json::from_value(replies[0]["result"]["capabilities"].clone()).unwrap();
+    assert!(!listed.iter().any(|m| m.starts_with("fenix/tests")), "{listed:?}");
+    assert_eq!(listed.len(), CAPABILITIES.len() - 3);
+    assert_eq!((replies[1]["error"]["code"].clone(), replies[2]["error"]["code"].clone()), (json!(code::METHOD_NOT_FOUND), json!(code::METHOD_NOT_FOUND)));
+    assert!(calls.is_empty());
+    info.withheld.write().unwrap().clear();
+    let (replies, calls) = run(&info);
+    assert_eq!(replies[0]["result"]["capabilities"], json!(CAPABILITIES));
+    assert_eq!(replies[1]["error"]["code"], json!(code::INVALID_PARAMS), "its params read now");
+    assert_eq!(calls, vec![Call::Tests(fenix_control::TestsParams::default())]);
+}

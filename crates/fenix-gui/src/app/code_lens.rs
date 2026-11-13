@@ -774,7 +774,10 @@ impl App {
                 self.set_error(format!("Fenix can't debug from a lens yet ({}): SPC u u starts the debugger", runnable.label));
             }
             // Fenix's own command, which no server's lens runs.
-            lens::Action::RunTest { .. } | lens::Action::DebugTest { .. } => self.set_error(format!("Fenix can't run {} ({})", code_lens.command.as_ref().map_or("", |c| c.title.as_str()), lens::RUN_TEST)),
+            lens::Action::RunTest { .. } | lens::Action::DebugTest { .. } => {
+                let (title, command) = code_lens.command.as_ref().map_or(("", ""), |c| (c.title.as_str(), c.command.as_str()));
+                self.set_error(format!("Fenix can't run {title} ({command})"));
+            }
             lens::Action::Unknown { title, command } => self.set_error(format!("Fenix can't run {title} ({command})")),
             lens::Action::Unresolved => self.set_message("that lens is still being worked out"),
         }
