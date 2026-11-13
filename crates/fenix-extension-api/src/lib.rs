@@ -235,7 +235,9 @@ pub trait Extension: Default + 'static {
     /// The tests in file `path` (`/project/<path>`, with `/`) of its test
     /// provider `provider` (`[[contributes.test_providers]]`), whose text
     /// is `text`, as it's open or on disk: read, nothing run. At most
-    /// 10,000. API 1.6.
+    /// 10,000. It replaces the file's last scan: an empty answer drops the
+    /// file's tests, so a scanner that can't read half-typed text answers
+    /// what it last read well. API 1.6.
     fn tests_scan(&mut self, _provider: &str, _path: &str, _text: &str) -> Vec<tests::Found> {
         Vec::new()
     }
@@ -259,7 +261,8 @@ pub trait Extension: Default + 'static {
     }
 
     /// How to debug test `test` (as Fenix has it, its `data` included),
-    /// for run `run`. API 1.6.
+    /// for run `run`. A [`tests::Launch::BuildFirst`] plan runs as that
+    /// run, and the second call carries the same `run`. API 1.6.
     fn tests_launch(&mut self, _provider: &str, _run: u64, _test: tests::Found) -> Result<tests::Launch, String> {
         Err("no debugging for tests here".into())
     }

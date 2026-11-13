@@ -20,7 +20,8 @@
   split; it keeps the first design's runner experiments (its §3 and
   appendix, the recorded outputs in fenix-extensions
   `plans/test-explorer-fixtures/`), and its §11 is the review of this
-  plan that §18 answers.
+  plan that §18 answers. Steps 1 and 2 are built (§20); the review of
+  them is §19.
 
 Paths are in this repository unless they say `fenix-extensions`. Every
 claim about what Fenix does today cites the tree at `b5c3765`.
@@ -162,6 +163,10 @@ and stable across its scans, listings and runs. Fenix keys a node by
 pytest's node id, Go `<import path> <name>`, Vitest and Jest `<file> >
 <names>` (the packs' plan, §4.4).
 
+A provider is keyed by its extension's id and its own (`fenix.rust`'s
+`rust`): two extensions that both declare `rust` are two providers,
+whose trees and results never meet.
+
 A report names a test by id. Fenix:
 
 1. **Knows the id**: the result is that node's.
@@ -178,8 +183,17 @@ A report names a test by id. Fenix:
    provider's output page.
 
 An id over 1 KiB is cut the same way wherever it comes (a scan, a
-listing, a report), so a provider that sends the same long id
-everywhere still matches; the cut is said on its output page once.
+listing, a report, a `parent`, a step's `covers`), so a provider that
+sends the same long id everywhere still matches, and two that share
+their first KiB stay two; the cut is said on its output page once. The
+cut (§19, finding 9): an id of at most 1,024 bytes is as it is; a
+longer one is its first 1,007 bytes, moved back to a character's start
+when that falls inside one, then `#`, then the FNV-1a 64-bit hash
+(offset basis `0xcbf29ce484222325`, prime `0x100000001b3`) of the whole
+id's UTF-8 bytes as 16 lowercase hex digits: 1,021 to 1,024 bytes, and
+cutting it again changes nothing. The host and the model share one
+implementation (`fenix_tests::cut_id`); the test vectors are
+`WRITING_EXTENSIONS.md`'s.
 
 Fenix never guesses by name. Recognising `add(-1, -1) is -3` as a case
 of `add(%i, %i) is %i` is the provider's business, because only the
@@ -194,7 +208,10 @@ page, the gutter and the doors use is, field by field, the scan's,
 else the listing's, else the run's, a field left `none` falling through
 to the next source: so cargo's `--list`, which gives no line and can't
 tell `src/lib.rs`'s inline `mod tests` from `src/tests.rs`, never takes
-a scanned test's line or file away. `label`, `kind`, `parent` and
+a scanned test's line or file away. A node's place -- `path`, `line`
+and `end_line` -- falls through as one, from the first source that
+gives a path or a line, so a listing's file is never paired with a
+run's line (§19). `label`, `kind`, `parent` and
 `template`, which are never `none`, come from the first of the three,
 in that order, that has the node; `data` falls through as the others.
 `skip` is the one exception: where a scan has the node, its `skip` is
@@ -218,7 +235,13 @@ no source has it any more.
   nothing.
 - A run's record (`case`s of a template, Go's subtests, a macro-made
   test) goes when its template, or its group, runs again and the run
-  ends complete, as a listing is, without naming it.
+  ends complete, as a listing is, without naming it. A node that goes
+  this way goes with the result its run judged it, uncounted.
+
+A node that goes for any other reason -- a test cut and pasted back
+across two scans, a scan of half-typed text -- has its result kept as
+one read at start is: shown stale when the node is found again, and
+written to the results file meanwhile (§19, finding 8).
 
 **A result** is the run's last `ended` for the id: a later `ended` in
 the same run, in the same step or a later one, replaces the earlier,
@@ -265,21 +288,30 @@ A **listing** (`discover`) is a run whose steps report `found`, not
 results. It goes through the same machinery and the same reader; its
 steps' `covers` mean nothing, and an `ended` in it is ignored.
 
-**What the provider is asked.** A `run` ask holds the nodes selected,
-each as the model has it now (the merged fields, its `data`), and after
-each `file` or `suite` among them the tests and cases Fenix has under
-it, so a provider whose runner filters by substring (libtest's `geo::`
-also runs `other::geo::`) can name them exactly. Never under a `group`:
-a target or a package is named to its runner as itself. An ask holds
-at most 10,000 records: past that the tests under an asked file or
-suite are left out (the provider uses its runner's filter for it,
-which runs at least those), and a selection of more than 10,000 nodes
-is asked as their parents, coarser but never fewer; the whole project,
-as `run-all`.
+**What the provider is asked.** A `run` ask holds the nodes selected
+(the topmost of them), in display order, each as the model has it now
+(the merged fields, its `data`, its `parent` the one Fenix put it
+under), and after each `file` or `suite` among them its *fill-in*:
+every node Fenix has under it, the suites between included, in display
+order, so a provider whose runner filters by substring (libtest's
+`geo::` also runs `other::geo::`) can name them exactly. Never under a
+`group`: a target or a package is named to its runner as itself. Every
+fill-in record's `parent` is in the ask, and no selected node's is: so
+**a record whose `parent` is in the ask is a fill-in, one whose
+`parent` isn't was selected**, and a provider tells them apart without
+reading ids (§19, finding 3). An ask holds at most 10,000 records: the
+nodes selected first, then each fill-in in display order while it fits,
+whole or not at all (a later, smaller one may still fit); one left out
+has its runner's filter run it, which runs at least those. A selection
+of more than 10,000 nodes is asked as their parents, coarser but never
+fewer; the whole project, as `run-all`. A node whose id was cut and
+whose `data` isn't kept can't be named to its runner: it's never asked
+for itself, but as its nearest ancestor that can be, and a fill-in that
+holds one is left out (§19, finding 2).
 
 ### What's kept across a restart
 
-- **Results**, not tests: for each `(provider, id)` with a result, its
+- **Results**, not tests: for each `(extension, provider, id)` with a result, its
   state, duration, when, message, place and failure text (cut to 4
   KiB), in `tests/<hash of the project's root>.json` in Fenix's state
   folder (where `agent-usage.json` is, `AGENTS.md`, "Usage"), written
@@ -448,10 +480,17 @@ record found-test {
     /// The provider's own name for it, the same in what it scans, lists
     /// and reads from a run: `orbit/lib tests::adds`,
     /// `tests/test_basic.py::test_cases[negative]`,
-    /// `example.com/orbit TestTable/negative_one`. At most 1 KiB, unique
-    /// among its provider's.
+    /// `example.com/orbit TestTable/negative_one`. Unique among its
+    /// provider's. One over 1 KiB is cut, the same way wherever it
+    /// comes: its first bytes up to 1,007, back to a character's start,
+    /// then `#` and the FNV-1a 64-bit hash of the whole id's UTF-8 as 16
+    /// lowercase hex digits; Fenix gives it back so, and the provider
+    /// names it to its runner by its `data`. A `parent`, a `covers` id
+    /// and a report's id are cut the same way.
     id: string,
     /// The group it's in, by id: none for one at its provider's top.
+    /// Given back, the one Fenix put it under: none when Fenix put it at
+    /// the top (its parent never found).
     parent: option<string>,
     /// What the page calls it: `adds`, `negative`, `orbit (lib)`. At
     /// most 256 characters.
@@ -460,10 +499,14 @@ record found-test {
     /// Its file: `/project/<path>`; or relative, to the project in a
     /// scan's answer and to its step's folder in a run's or a listing's
     /// report; or a full path of the project's machine. In a scan's
-    /// answer, none for a test or case is the file scanned.
+    /// answer, none for a test or case is the file scanned. Given back,
+    /// `/project/<path>` with `/` for a file of the project, whatever
+    /// form it came in, and a full path for one outside it.
     path: option<string>,
     /// Its first line, and its last when it knows: from 0, as a
-    /// problem's (`problem`).
+    /// problem's (`problem`). Given back, with `path`, from the first
+    /// of its scan, its listing and a run that gives a path or a line:
+    /// a scan's may be of unsaved text.
     line: option<u32>,
     end-line: option<u32>,
     /// Left out by its source (`#[ignore = "slow"]`, `@skip`,
@@ -475,8 +518,14 @@ record found-test {
     /// The provider's own, at most 4 KiB: never shown, given back as it
     /// was wherever Fenix gives this node back (`test-ask.run`,
     /// `tests-launch`). What its runner calls it when the id can't say
-    /// (a pytest id over 1 KiB, a describe named `a > b`). Not kept
-    /// across a restart; the scan or the listing gives it again.
+    /// (a pytest id over 1 KiB, a describe named `a > b`). It can come
+    /// back none: one over 4 KiB isn't kept, nor any past 16 MiB of a
+    /// provider's, nor across a restart until a scan, listing or run
+    /// gives it again; a source that gave none, when the one that gave
+    /// it has dropped the node. A provider names a node by its id when
+    /// its `data` is none; a node whose id was cut and whose `data`
+    /// isn't kept is never given back for itself (§4, "Review of steps
+    /// 1 and 2").
     data: option<string>,
 }
 
@@ -488,11 +537,15 @@ variant test-ask {
     /// Its runner's listing of every test it can find in the project.
     discover,
     /// These, as Fenix has them now: tests, cases, and groups (all
-    /// under them). After each `file` or `suite` asked come the tests
-    /// and cases Fenix has under it, while the ask stays within 10,000
-    /// records; one asked with nothing after it is planned by its
-    /// runner's own filter for it (`geo::`, a file's path). Never more
-    /// than 10,000 records: a larger selection is asked as their parents.
+    /// under them). After each `file` or `suite` asked comes its
+    /// fill-in: every node Fenix has under it, suites included, so each
+    /// one's `parent` is in the ask, while the ask stays within 10,000
+    /// records; a fill-in is whole or left out, and one asked with
+    /// nothing after it is planned by its runner's own filter for it
+    /// (`geo::`, a file's path). A record whose `parent` is in the ask
+    /// is a fill-in; one whose `parent` isn't was asked for itself.
+    /// Never more than 10,000 records: a larger selection is asked as
+    /// their parents.
     run(list<found-test>),
     /// Every test.
     run-all,
@@ -537,7 +590,10 @@ record test-line {
     /// As UTF-8, what wasn't replaced by U+FFFD; colour codes taken out.
     text: string,
     stderr: bool,
-    /// The line went on past 64 KiB: the rest is the next line given.
+    /// The line went on past 64 KiB: the rest is the next line of the
+    /// same stream (lines of the other may come between, and a later
+    /// call). Every piece but the last is cut; a line of 64 KiB or less,
+    /// at a stream's end too, never is.
     cut: bool,
 }
 
@@ -591,7 +647,8 @@ record test-output {
     text: string,
 }
 
-/// What didn't build or load: never a test's failure.
+/// What didn't build or load: never a test's failure. What's under it
+/// and has no result in this run yet is errored with it.
 record test-broken {
     /// The group or file that didn't: none for all the step covers.
     id: option<string>,
@@ -602,8 +659,8 @@ record test-broken {
 /// A process that died, and what it held (`test-report.crashed`).
 record test-crash {
     /// The group whose process it was (a test binary's target, a Go
-    /// package): what's under it and hasn't ended in this step is
-    /// errored with it. None: all the step covers that hasn't ended.
+    /// package): what's under it and has no result in this run yet is
+    /// errored with it. None: all the step covers that has none.
     id: option<string>,
     /// What it said: `its binary crashed: SIGABRT`.
     message: string,
@@ -628,8 +685,10 @@ variant test-launch {
     /// This launch, now.
     launch(launch-config),
     /// These first -- a build that says where the test's binary is --
-    /// read as a run's are; then ask again, once, if every step exited
-    /// 0 and nothing was `broken` or `crashed` (§11).
+    /// read as a run's are, as the run `tests-launch` was asked with:
+    /// its steps' `tests-read` and `tests-step-ended` carry that run.
+    /// Then `tests-launch` is asked again, once, with the same run, if
+    /// every step exited 0 and nothing was `broken` or `crashed` (§11).
     build-first(test-plan),
 }
 ```
@@ -645,7 +704,9 @@ variant test-launch {
 /// shown or asked there until a later call says otherwise. A call that
 /// says what Fenix has already changes nothing; one that changes it has
 /// Fenix list the project's tests again, as an automatic listing (§7.1).
-/// 1.6.
+/// Fenix keeps what it said for the project until Fenix exits, across
+/// the extension stopping and starting again; it calls at each start
+/// all the same, since it isn't told what Fenix has. 1.6.
 test-provider-set: func(provider: string, runner: string, problem: option<string>) -> result<_, string>;
 ```
 
@@ -654,7 +715,10 @@ test-provider-set: func(provider: string, runner: string, problem: option<string
 use types.{found-test, test-ask, test-plan, test-line, test-step-end, test-report, test-launch};
 
 /// The tests in file `path` (`/project/<path>`, with `/`), whose text
-/// is `text`, as it's open or on disk: read, nothing run. 1.6.
+/// is `text`, as it's open or on disk: read, nothing run. The answer
+/// replaces the file's last scan: an empty one drops its tests, so a
+/// scanner that can't read half-typed text answers what it last read
+/// well. 1.6.
 export tests-scan: func(provider: string, path: string, text: string) -> list<found-test>;
 /// What to run for `ask`, as run `run`. 1.6.
 export tests-plan: func(provider: string, run: u64, ask: test-ask) -> result<test-plan, string>;
@@ -662,7 +726,8 @@ export tests-plan: func(provider: string, run: u64, ask: test-ask) -> result<tes
 export tests-read: func(provider: string, run: u64, step: u32, lines: list<test-line>) -> list<test-report>;
 /// Step `step` of run `run` ended: what its reader still had. 1.6.
 export tests-step-ended: func(provider: string, run: u64, step: u32, end: test-step-end) -> list<test-report>;
-/// How to debug test `test`, for run `run`. 1.6.
+/// How to debug test `test`, for run `run`: a run of its own, which a
+/// `build-first` plan runs as, and the second ask carries. 1.6.
 export tests-launch: func(provider: string, run: u64, test: found-test) -> result<test-launch, string>;
 ```
 
@@ -687,14 +752,16 @@ first (`Restart`), as §6.4's "One project" says.
 | Promise | |
 |---|---|
 | Calls | `tests-scan`, `tests-plan`, `tests-read`, `tests-step-ended`, `tests-launch` are ordinary calls: pages go first (`WRITING_EXTENSIONS.md:1116-1126`), one call at a time, its deadline the extension's (`limits.call_ms`, 5 s if it doesn't say). |
-| Run ids | Unique for as long as Fenix runs; a listing has one too. |
+| Run ids | Unique for as long as Fenix runs, across projects: every project's model draws them from the host's one count. A listing has one too, and so does a debug launch: its `build-first` plan runs as the run its first `tests-launch` was asked with, and the second ask carries it (§11). |
 | Order | For each step: `tests-read` in output order (as `TaskRunner` gives it), then exactly one `tests-step-ended`, after every line Fenix gives that step. Every step of a plan gets its `tests-step-ended`, `stopped` for one that never started, so the provider can free what it kept. Steps run one after another, never two of one run at once: step *n* + 1's first call comes after step *n*'s `tests-step-ended`. A run's providers go in turn, each plan whole. A call's reports are applied in their order, and before the next call's. |
 | Batches | A `tests-read` holds at most 512 lines and 256 KiB. While one is under way for a step, what comes is held for the next, so a step never has two calls queued. |
 | Stopping | A stop (`x`, `SPC T k`, a replacing run, the timeout) kills the step's tree at once. A call under way isn't cut short: it ends, and its reports are applied, since what a runner said before it was killed is true. Lines read but not yet given are not given (they're in *Test output*). Then `tests-step-ended(stopped)` (or `timed-out`), whose reports are applied too, then `stopped` for each step not started. |
 | Silence | Fenix calls a provider only with lines or an end: never on a timer, and there's no heartbeat. A step that prints nothing for an hour is waiting, as far as Fenix knows, until it ends, you stop it, or `tests.timeout_minutes` passes (§8.3). |
-| Lines | Lossy UTF-8 (`supervisor.rs:404-412`); trailing `\r` dropped (`405-407`); a line past 64 KiB comes in pieces, each but the last `cut` (`436-438`, which gains the flag in step 3); ANSI CSI and OSC sequences removed. Between stdout and stderr, order is as near as `TaskRunner` keeps it: per write on Linux (`supervisor.rs:290-321`), per 10 ms tick on Windows (`322-325`). A provider reads its runner from one stream where it can. |
-| Asks | A `run` ask is at most 10,000 records, its files and suites followed by what Fenix has under them while that fits (§4, "What the provider is asked"). |
-| Scans | One file a call, at most 1 MiB of text (a larger file isn't scanned: its tests come from the listing), its path `/project/<path>` with `/`, as Fenix names files to extensions elsewhere (`app/wasm_host.rs:1176`, `1231`). Only files of the project the instance runs in. After typing pauses, at most one scan per file every 500 ms. A scan's answer replaces that file's last scan. |
+| Lines | Lossy UTF-8 (`supervisor.rs:404-412`); trailing `\r` dropped (`405-407`); a line past 64 KiB comes in pieces of at most 64 KiB, cut at a character's start, each but the last `cut`, the rest of each the next line *of the same stream*: the other stream's lines, and a call's end, may come between (`436-438`, which gains the flag in step 3); a line of 64 KiB or less is never `cut`, nor one that ends with its stream; ANSI CSI and OSC sequences removed. Between stdout and stderr, order is as near as `TaskRunner` keeps it: per write on Linux (`supervisor.rs:290-321`), per 10 ms tick on Windows (`322-325`). A provider reads its runner from one stream where it can. |
+| Asks | A `run` ask is at most 10,000 records, its files and suites followed by their fill-ins while they fit: a record whose `parent` is in the ask is a fill-in (§4, "What the provider is asked"). |
+| What Fenix gives back | A node in an ask or to `tests-launch` is as Fenix has it, merged (§4): `path` `/project/<path>` with `/` for a file of the project, whatever form the provider gave (the model holds the project's relative form; the host turns it back), a full path for one outside it; `line` and `end-line` with that path, from the first of scan, listing and run that gives either (a scan's may be of unsaved text); `parent` the one Fenix put it under; `data` as it was, or none (over 4 KiB, past 16 MiB, after a restart until found again, or the source that gave it gone); `id` cut (§4) when it was over 1 KiB, and then never given back for itself without its `data`. |
+| Scans | One file a call, at most 1 MiB of text (a larger file isn't scanned: its tests come from the listing), its path `/project/<path>` with `/`, as Fenix names files to extensions elsewhere (`app/wasm_host.rs:1176`, `1231`). Only files of the project the instance runs in. After typing pauses, at most one scan per file every 500 ms. A scan's answer replaces that file's last scan: an empty one drops its tests, so a scanner that can't read half-typed text answers what it last read well. |
+| What a provider said | `test-provider-set`'s runner and problem are kept per project until Fenix exits, across the extension stopping and starting again; a provider calls at each start all the same, and on a change. |
 | Paths | Fenix maps what a provider gives (`/project/...`, relative, a full path; `\` or `/`; a drive letter in any case on Windows) to the project's files with `fenix_lsp::normalize`, as task output's places are (`app.rs:11032`). A relative path is the project's in a scan's answer, and the step's `cwd`'s (the project when it has none) in a report: a `found` as much as a `test-location`. A place outside the project is kept for the details, never a problem or a mark. |
 | One project | An extension's instance runs in one project: its `/project` is fixed while it runs (`app/wasm_host.rs:243-249`), and Fenix asks a provider only about that project. Moving to another project starts a language pack of that project again there at once (`app/wasm_host.rs:1157-1170`), any other extension when it's next used, which a scan or `SPC T T` there is. A run of the old instance under way is then stopped as after a trap (below): its tests back to what they were, the page saying `stopped: cargo test started again in orbit-cli`. The new instance is never asked about the old run. A run in a project you've left goes on while its instance does. |
 | After a trap | The extension stops (ADR 0001); its steps under way are stopped, their tests back to what they were, and the page says the provider stopped and why. No call goes to it for them. |
@@ -740,11 +807,24 @@ first (`Restart`), as §6.4's "One project" says.
   too, so a provider's long selection fails in its author's tests, not
   first on a user's Windows; the packs split long selections themselves
   (the packs' plan, §4.3, `split`).
+
+  What's counted (§19): the command line as Rust's standard library
+  builds it for `CreateProcessW`, after `${data}` and `${tools}` are
+  filled in -- the program as Fenix resolved it (its full path), always
+  in `"`, then each argument, in `"` when it's empty or holds a space or
+  a tab, a `"` in it as `\"` with the `\`s right before it doubled, and
+  the `\`s ending a quoted one doubled; joined by one space. For a
+  `.cmd` or `.bat`, the whole line Rust gives `cmd.exe` (`cmd.exe /e:ON
+  /v:OFF /d /c` and its quoting for batch files included). A pack can't
+  know the program's full path or `${data}`'s length: it counts them
+  generously and keeps a margin.
 - **`needs`** are checked on every platform: one that isn't a file under
   `/data` when its step starts ends the step `failed("needs
   /data/lang-kit/tests/fenix_tests.py, which isn't there")`, so a
   provider that forgets to write its reporter learns it here, not first
-  on a remote project.
+  on a remote project. A need is a `/data/...` path with `/`: one over 4
+  KiB, with a `\`, or not naming a file below `/data` fails its step
+  the same way, never cut or mended into another path (§19).
 
 ### 6.6 The Rust side a pack author sees
 
@@ -1135,12 +1215,13 @@ no provider is called on a timer (§6.4, "Silence"). An agent's
   (`app.rs:10876`). `o` and `SPC T o` show it beside the page; it's never
   in the task pane and never clears the quickfix list.
 - **Didn't build, didn't load** (`broken`): never test failures. The
-  tests under it are `errored` with the message; the head says the first;
+  tests under it that have no result in the run yet are `errored` with
+  the message (§19, finding 7); the head says the first;
   no problems are set for it: the language server and the pack's linter
   have them already, and twice is noise.
 - **Failed**: a problem at its place (§9.3).
 - **Crashed**: what's under the `crashed` report's `id` (a target, a
-  package) and hasn't ended in this step is `errored` with what the
+  package) and has no result in this run yet is `errored` with what the
   provider read ("its binary crashed: SIGABRT"); with no `id`, what the
   step covers. `cargo test --workspace --no-fail-fast` goes on to the
   next binary after one aborts, and `go test ./...` to the other
@@ -1339,9 +1420,11 @@ MCP clients reach the tools through `fenix/agent.call` as every tool
      (`dap.rs:154-175`) as the extensions' launches are, and started with
      `debug_start_from` (`app.rs:11231-11298`): its variables filled in,
      its `preLaunchTask` run first, then the session. No picker.
-   - `build-first(plan)`: the plan runs as a run's steps (in *Test
-     output*, read by the provider, so it learns where the binary is),
-     then `tests-launch` is asked again with the same run, once, and
+   - `build-first(plan)`: the plan runs as a run's steps, as the run
+     `tests-launch` was first asked with -- Fenix draws that id from the
+     host's one count before the first ask -- (in *Test output*, read by
+     the provider, so it learns where the binary is), then `tests-launch`
+     is asked again with the same run, once, and
      only if every step `exited` with 0 and nothing was `broken` or
      `crashed`. Otherwise no session starts: the modeline and the page's
      head say `orbit (lib) didn't build: src/lib.rs:19 mismatched types
@@ -1662,7 +1745,101 @@ need a type after step 2, and isn't here because no runner showed a
 case: a per-step timeout, a provider-driven cancel, built-in readers
 (Q6), a runner driven over a socket (§6.1, shape B).
 
-## 19. As built
+## 19. Review of steps 1 and 2
+
+An independent review read steps 1 (`fenix-tests`) and 2 (API 1.6) as
+built, with probe tests against the model, before the API is frozen by
+Fenix 1.6.0. The packs' kit and its stand-in for Fenix, written against
+this plan, then listed fourteen rules the plan left open. Each finding
+was checked against the code (the probes run again) before it was
+ruled on. **No WIT type, field, case, export or import changed**: every
+ruling below is a rule of meaning, written into `world.wit`'s doc
+comments (and §6.3, which stays word for word the same), `tests.rs`'s,
+`WRITING_EXTENSIONS.md`'s "Test providers", §4, §6.4, §6.5, §11, and
+the model's Decisions (`fenix-tests/src/lib.rs`, 1 to 36), where the
+model implements it.
+
+### What blocked the freeze
+
+| | Finding | Ruling | Why | Where |
+|---|---|---|---|---|
+| 1 | Which run a `build-first` plan runs under; run ids counted per project | **Accepted.** Run ids come from one count the host makes and gives every project's model (`RunIds`, `Model::with_run_ids`), so they're unique while Fenix runs, across projects. The host draws the launch's id (`Model::run_id`) before the first `tests-launch`; the `build-first` plan runs as that run (`request_build(run, ...)`), and the second `tests-launch` carries it | §11 already meant "the same run"; the model couldn't honour it with its own counter. The provider keeps per-run state (its reader) keyed by `run`, so one id across the launch, its build and the second ask is what it can use | `test-launch.build-first`, `tests-launch` (WIT, `tests.rs`); §6.4 "Run ids"; §11; Decisions 34; `run_ids_are_unique_across_projects`, `a_build_first_plan_runs_as_the_launchs_run` |
+| 2 | What Fenix gives back in an ask and to `tests-launch` | **Accepted, one stated form.** `path`: `/project/<path>` with `/` for a file of the project, whatever form the provider gave (relative, `\`, a full path), and a full path outside it -- the form F10 gives `tests-scan`. The model holds the project's relative form (Decisions 1); the host turns it back (step 3). `line`, `end-line`: with that path, from the first of scan, listing and run that gives either, so possibly from unsaved text. `parent`: the one Fenix put it under. `data`: as given, or none -- over 4 KiB, past 16 MiB, after a restart until found again, or when only a source that gave none still has the node. A provider plans from `id` when `data` is none; Fenix never gives back for itself a node whose id was cut and whose `data` isn't kept: an ask has its nearest nameable ancestor instead, a fill-in holding one is left out, and it isn't debugged | The provider gave the path in one of several forms Fenix doesn't keep; one form is simplest to read back. Only a cut id needs `data` to be named; "never alone without it" is the smallest guarantee that keeps a pack correct, and an ancestor runs at least the node ("coarser, never fewer", as R1) | `found-test` (WIT, `tests.rs`); §4 "What the provider is asked"; §6.4 "What Fenix gives back"; Decisions 1, 20, 32; `TestNode::given_back`, `TestNode::can_be_named`; `a_cut_id_without_its_data_is_asked_as_its_parent`, `a_records_parent_is_where_fenix_put_it` |
+| 3 | A fill-in can't be told from the next selected node | **Accepted, the first option.** A fill-in holds every node under its file or suite, the suites between included, so each fill-in record's `parent` is in the ask; a selected node's never is (the selection is its topmost nodes). Rule for a provider: *a record whose `parent` is in the ask is a fill-in; one whose `parent` isn't was selected.* Fill-ins are whole or absent, take the room left after the selected nodes in display order, and a later smaller one may fit | No id parsing; holds with the 10,000 cap and with coarsening, both of which keep the selection topmost. Giving `parent` as Fenix placed it (none at the top) keeps the rule exact for a node whose parent was never found or made a loop | `test-ask.run` (WIT, `tests.rs`); §4; §6.4 "Asks"; Decisions 20; `a_fill_in_holds_the_suites_between_so_every_parent_is_in_the_ask`, `past_the_cap_a_selected_test_is_still_told_from_a_fill_in` |
+| 4 | "May keep `api = "1.5"`" depends on what's linked | **Accepted.** A component built on the 1.6 crate may say `api = "1.5"` only when it doesn't import `test-provider-set`: when no code reachable from an export calls `tests::provider`, even behind a condition that never holds. Only 1.6 on 1.5 is promised, because only it is tested | The reviewer's probe: a call behind `if said > 1_000_000` is linked, and 1.5's linker refuses the component | CHANGELOG; `WRITING_EXTENSIONS.md` (Test providers, and the versioning paragraph, no longer general); `tests.rs`'s module doc and `provider`'s; `fenix-wasm/tests/f15.rs` now asserts the five `tests-*` exports and no `test-provider-set` import |
+| 9 | Cut ids collide | **Accepted.** An id of at most 1,024 bytes is as it is; a longer one is its first 1,007 bytes (back to a character's start), `#`, and the FNV-1a 64-bit hash of the whole id's UTF-8 as 16 lowercase hex digits: 1,021 to 1,024 bytes, idempotent. One implementation, `fenix_tests::cut_id`, which `fenix_wasm::test_limits` calls (`fenix-wasm` now depends on `fenix-tests`, whose only dependency is serde: no cycle); test vectors in both crates' tests and in `WRITING_EXTENSIONS.md` | A packs' kit computes it in a dozen lines with no dependency; 64 bits among a provider's 100,000 ids leave a collision about one in 10⁹; a prefix keeps the cut id readable on the page and in *Test output* | `found-test.id` (WIT, `tests.rs`); §4 "Ids"; §6.5; Decisions 33; `a_long_id_is_cut_to_a_prefix_and_a_hash_of_the_whole`, `two_long_ids_that_share_a_kib_stay_two`, `a_long_id_is_cut_to_a_prefix_and_a_hash_as_the_explorer_cuts_it` (fenix-wasm) |
+
+### The model's bugs and costs
+
+| | Finding | Ruling | Where |
+|---|---|---|---|
+| 5 | An unknown id's `ended` rebuilt the tree, and searched every id | **Fixed.** The test is added without working the tree out (once at the call's end), and "the deepest node of the file" is looked for in each provider's index of groups, files and suites by path, kept as merged fields change. 10,000 such results with `at`, in batches of 512: 26 s before (release), about 1 s in a debug build now | Decisions 21; `ten_thousand_unknown_ids_cost_a_build_a_batch` |
+| 6 | `test_at` quadratic with no end lines | **Fixed**: one pass for each family's latest start. 5,000 tests: 65 ms before (release), under 4 ms in a debug build | `the_test_at_a_line_among_5000_without_end_lines` |
+| 7 | A crash or `broken` with no id errored what passed earlier | **Fixed, and the rule widened**: a `broken` or `crashed`, with an id or none, errors only what has no result in this run yet. "Hasn't ended in this step" in the WIT became "has no result in this run yet" | `test-broken`, `test-crash` (WIT); §8.5; Decisions 11; `a_crash_or_broken_with_no_id_leaves_what_ended_earlier_in_the_run`, `a_broken_naming_a_group_leaves_its_tests_that_ended_in_an_earlier_step` |
+| 8 | A test that leaves every source loses its result | **Fixed**: its result is kept as a restored one, stale when it's found again, and in the results file meanwhile. Packs are told an empty scan drops the file's tests, so a scanner that can't parse half-typed text answers its last good scan | §4 "What's dropped"; `tests-scan` (WIT), `tests_scan` (crate); `WRITING_EXTENSIONS.md`; Decisions 29; `a_test_that_leaves_every_source_and_comes_back_keeps_its_result` |
+| 10 | The model cut `data` the host drops | **Fixed**: the model drops it too | Decisions 26; `data_over_4_kib_isnt_kept_rather_than_cut` |
+
+### Listed for step 3, done now
+
+| What | Ruling | Where |
+|---|---|---|
+| Providers keyed by their short id | A provider is `ProviderId { extension, provider }` throughout the model; the results file keeps both (version 2: a version 1 file is refused, "its version is 1", not misread) | §4; Decisions 18, 35; `two_extensions_providers_of_one_id_are_two`, `a_results_file_of_version_1_is_refused` |
+| A stop during a plan, then a plan error | Errors nothing: the tests go back to what they were | Decisions 12; `a_plan_error_after_a_stop_errors_nothing` |
+| Location fell through field by field | As one: `path`, `line`, `end-line` from the first source that gives a path or a line | §4; Decisions 30; `a_nodes_place_falls_through_as_one` |
+| `summary()` re-resolved the waiting selection each frame | Counted once a revision | Decisions 36; `the_heads_waiting_count_follows_the_model` |
+| `errored_under` quadratic | A step's scope, and what of it is without a result, worked out once per step and tree shape; with an id, what's under it only | Decisions 36; `ten_thousand_broken_reports_in_one_call` |
+| A wrongly typed `tests-*` export called "built before 1.6" | Said as "its tests-scan isn't API 1.6's (another type: built on a draft of 1.6?)", on its calls and its output page | `fenix-wasm` `host.rs`; `a_tests_export_of_another_type_is_said_as_that` |
+| A `needs` entry over 4 KiB was cut into another path | Not cut: the step fails, with why. `PlannedStep.needs` is `Vec<Result<PathBuf, String>>` | `test_limits::need`; `a_need_is_a_data_path_or_its_step_fails` |
+| `\`-separated `needs` were accepted | **Refused**: the API promises `needs` as `/data/...` paths, a remote project's copy keeps the path as given, and accepting `\` now would be a promise for 1.x. Other calls' paths still take `\`, as they did | §6.5; `test_limits::need` |
+| A marker or `scan` pattern with a drive (`C:\x`, `C:/x`); a provider id ending in `.` | **Left as they are.** The same checks pass the same values in `contexts`' markers, `language_servers.files` and `agents`' ids; tightening one section alone would be inconsistent, and tightening the others could refuse an extension that loads today. Worth doing for all of them together | `fenix-extensions` `manifest.rs`, unchanged |
+
+### Notes
+
+| What | Ruling |
+|---|---|
+| `use fenix_extension_api::tests;` beside a pack's own `#[cfg(test)] mod tests` is E0255 | The name stays (§6.6, as `lsp` and `forge`); `WRITING_EXTENSIONS.md` says to import its items, or the module under another name |
+| CHANGELOG said "Fenix runs the commands" | Reworded for what exists after step 2: the API, for extension authors; the explorer that calls it is being built |
+| f15 never asserted the exports | It does now (finding 4) |
+
+### What the packs' kit asked
+
+| | Question | Ruling | Model |
+|---|---|---|---|
+| K1 | How an id over 1 KiB is cut | Finding 9 above, with its test vectors | Decisions 33 |
+| K2 | What the command-line limits count | The line as Rust's standard library builds it for `CreateProcessW`, after `${data}` and `${tools}` are filled in: the program as resolved (full path) always quoted, each argument quoted when empty or holding a space or tab (`"` as `\"`, the `\`s before a `"` and ending a quoted argument doubled), joined by spaces; for a `.cmd`/`.bat`, the whole line Rust gives `cmd.exe`. A pack keeps a margin for the path and `${data}` | Step 3 (§6.5) |
+| K3 | A cut line's pieces and the other stream | A piece's rest is the next line *of the same stream*; the other stream's lines, and a call's end, may come between; `cut` is on every piece but the last. A provider keeps one pending piece per stream | Step 3 (§6.4 "Lines") |
+| K4 | A line of exactly 64 KiB at a stream's end | Not `cut`: only a line longer than 64 KiB is split, and a line ending with its stream is whole | Step 3 (§6.4 "Lines") |
+| K5 | `crashed`/`broken` with no id in a step whose `covers` is empty | Its scope is the plan's rest (what of the ask no step names), less what has a result in the run | Decisions 11 |
+| K6 | Does `broken` error tests that already ended in this run | No: `broken` and `crashed` alike, with or without an id, error only what has no result in this run (finding 7) | Decisions 11 |
+| K7 | A template whose cases end but it doesn't | Not errored: once its cases are found it isn't counted, and its state is its cases'. Synthesising its result isn't needed; report its own `ended` only when the runner gives one (Go's parent test) | Decisions 7; `a_template_whose_cases_ended_needs_no_result_of_its_own` |
+| K8 | After a step Fenix failed to start; a plan of no steps | The plan goes on to its next step, the failed step's tests errored with why. A plan of no steps has its ask judged at once: errored "the run ended without a result for it" (unsaved files' tests back to what they were) | Decisions 13; `a_step_that_couldnt_start_errors_its_tests_and_the_plan_goes_on` |
+| K9 | A `found` in a `build-first` plan; a `broken` in a listing | Ignored; makes the listing incomplete (it drops nothing) and changes no result | Decisions 17 |
+| K10 | A `found` before its parent; an id twice in a scan | At its provider's top until the parent comes, then under it; the later record replaces the earlier | Decisions 6, 3 |
+| K11 | A group with failed and errored children | Failed (failed before errored); both are counted | Decisions 8 |
+| K12 | What an ask leaves out past 10,000 | Whole fill-ins, in display order, the first that doesn't fit and any later that doesn't; never part of one, never a selected node (finding 3) | Decisions 20 |
+| K13 | Does the runner survive the extension starting again | Yes: kept per project until Fenix exits. Call at each start all the same (Fenix doesn't say what it has) and on a change; a call repeating it changes nothing, so the kit's way is right | `what_a_provider_said_it_is_survives_its_extension_starting_again` |
+| K14 | A case a complete run dropped that it had just errored | It goes with that result, uncounted in the run's end | Decisions 31; `a_case_dropped_by_a_complete_run_goes_with_its_result` |
+
+### Carried to step 3
+
+- Filling `Spec::test_providers` where `fenix-gui` makes the spec (until
+  then every `test-provider-set` on the nightly fails).
+- The host's side of the rulings: giving a node's path back as
+  `/project/<path>`; drawing a launch's run id with `run_id` and passing
+  it to `request_build`; refusing to debug a node `can_be_named` says no
+  to; one `RunIds` for every project; K2's command-line count; K3's and
+  K4's line pieces (`supervisor.rs` gains the flag); a need's `Err` as
+  the step's `failed`.
+- Cleaning labels and messages of newlines and escape codes before the
+  page draws them (step 4).
+- An answer is lifted from the guest whole before a limit applies (as
+  for every import today): bounded by the guest's memory, not measured.
+  Noted, not changed.
+
+None of the rulings changed a type: the API can be frozen as it stands,
+with these meanings.
+
+## 20. As built
 
 ### Step 2, API 1.6
 

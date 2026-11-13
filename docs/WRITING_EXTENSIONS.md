@@ -660,7 +660,10 @@ a pack's other contributions start it, and when the tests page opens in
 a project its markers match.
 
 Fenix calls five methods of `Extension` for it, each with the provider's
-`id` (`fenix_extension_api::tests` has the types):
+`id` (`fenix_extension_api::tests` has the types; a crate with a `mod
+tests` of its own imports them by name, `use
+fenix_extension_api::tests::{Found, Report}`, or the module under another
+name, `use fenix_extension_api::tests as provider`):
 
 | Method | When | What it returns |
 |---|---|---|
@@ -668,7 +671,7 @@ Fenix calls five methods of `Extension` for it, each with the provider's
 | `tests_plan(provider, run, ask)` | a listing (`Ask::Discover`: every test its runner can find), or a run (`Ask::Run(found)`, `Ask::RunAll`) | a `Plan`: its `Step`s in order, each a `Command`, a `label`, the ids it `covers`, the files under `/data` it `needs`; `list_after` when its listing is cheap once this has run (cargo's `--list` after `cargo test`). Or `Err(why)`. |
 | `tests_read(provider, run, step, lines)` | each batch of a step's output, in order | what it read: `Vec<Report>`. |
 | `tests_step_ended(provider, run, step, end)` | once for every step, after its last line: `StepEnd::Exited(code)`, `Stopped`, `TimedOut`, `Failed(why)` (`Stopped` too for one that never started) | what its reader still had. |
-| `tests_launch(provider, run, test)` | a test is to be debugged | `Launch::Launch(config)`, a launch as `debug::launches` gives one; or `Launch::BuildFirst(plan)`, a build read as a run is, after which it's asked once more. Or `Err(why)`. |
+| `tests_launch(provider, run, test)` | a test is to be debugged | `Launch::Launch(config)`, a launch as `debug::launches` gives one; or `Launch::BuildFirst(plan)`, a build read as a run is, after which it's asked once more. Or `Err(why)`. The build runs as run `run`: its steps' calls carry it, and so does the second `tests_launch`. |
 
 - **A `Found`** is a test or a group: an `id` of the provider's own --
   the same in what it scans, lists and reads from a run (`orbit/lib
@@ -683,27 +686,102 @@ Fenix calls five methods of `Extension` for it, each with the provider's
   alone, and never by name: a case of a template it recognises is the
   provider's to report, as a `Found` with the template as `parent`,
   before its result.
-- **An `Ask::Run`** holds the nodes picked, as Fenix has them, and after
-  each `File` or `Suite` the tests Fenix has under it, so a runner whose
-  filter is a substring can name them exactly. A `Group` (a target, a
-  package) is asked as itself.
+- **An `Ask::Run`** holds the nodes picked, as Fenix has them, in the
+  page's order, and after each `File` or `Suite` its *fill-in*: every
+  node Fenix has under it, suites included, so a runner whose filter is
+  a substring can name them exactly. A `Group` (a target, a package) is
+  asked as itself. A fill-in is whole or left out: the ask is at most
+  10,000 records, the nodes picked counted first, then each fill-in in
+  the page's order while it fits (a later, smaller one may still fit).
+  A `File` or `Suite` with nothing after it is run by the runner's own
+  filter for it, which runs at least what's under it. To tell a fill-in
+  from the next node picked, look at `parent`: **a record whose
+  `parent` is the id of a record in the ask is part of a fill-in; one
+  whose `parent` isn't was picked**. No id needs reading.
 - **A `Report`** is `Found` (from a listing, or found in a run),
   `Started(id)`, `Ended` (its `Outcome`: `Passed`, `Failed`, `Skipped`,
   `Errored`; `duration_ms`, a one-line `message`, the place `at` it
   failed, and all its `text`), `Output` (what a test printed, or the
   run with no id), `Broken` (what didn't build or load: never a test's
   failure) or `Crashed` (a process died, and what it held: what's under
-  its `id` and hasn't ended is errored). Fenix applies them in order; a
-  test's last `Ended` in a run is its result.
+  its `id` and has no result in the run yet is errored). Fenix applies
+  them in order; a test's last `Ended` in a run is its result.
 - **A step's `covers`**: a group's, file's or suite's id stands for all
   under it. Empty, it claims nothing: what of the ask no step names is
-  judged when the plan's last step has ended.
+  judged when the plan's last step has ended. A plan of no steps has its
+  whole ask judged at once: each test without a result is errored "the
+  run ended without a result for it". A step Fenix couldn't start ends
+  `StepEnd::Failed(why)`, its tests errored with why, and the plan goes
+  on to its next step.
+- **`Broken` and `Crashed`** error what's under their `id` -- all the
+  step covers when it's `None`, or names a node Fenix doesn't have --
+  that has **no result in this run yet**: a test that ended earlier, in
+  this step or another, keeps its result. A later `Ended` replaces the
+  error. A template whose cases have results needs no `Ended` of its
+  own: it isn't counted, and its row shows its cases' state; report one
+  only when the runner gives one (Go's parent test).
 - **`tests::provider(id, runner, problem)`** says what the provider is
   in this project: the runner it found (`cargo nextest`), and why it
   can't run tests here when it can't (`pytest isn't installed in
   .venv`). `runner` "" and no problem: it has nothing to run in this
   project, and isn't shown or asked there. A call that changes what Fenix
-  had lists the tests again; one that doesn't changes nothing.
+  had lists the tests again; one that doesn't changes nothing. Fenix
+  keeps it for the project until Fenix exits, across the extension
+  starting again; call it at each start all the same, and on a change.
+
+**What Fenix gives back.** A node in an `Ask::Run`, and the `test` given
+to `tests_launch`, is the node as Fenix has it, merged from its scan,
+its listing and a run (in that order of preference):
+
+- its `path` is `/project/<path>` with `/` for a file of the project,
+  whatever form it came in (relative, `\`, a full path), and a full path
+  for one outside it; its `line` and `end_line` come with that path, from
+  the first of the three that gives a path or a line -- a scan's may be
+  of text not yet saved;
+- its `parent` is the one Fenix put it under: `None` for one Fenix put
+  at the top because its parent was never found;
+- its `data` is as the provider gave it, or `None`: one over 4 KiB isn't
+  kept, nor any past 16 MiB of the provider's, nor across a restart
+  until a scan, a listing or a run gives it again, nor when only a source
+  that gave none still has the node. A provider names a node by its `id`
+  when its `data` is `None`, so an id of 1 KiB or less must be enough to
+  run it;
+- its `id` is cut when it was over 1 KiB (below). Fenix never gives a
+  node whose id was cut and whose `data` isn't kept for itself: an ask
+  has its nearest ancestor that can be named instead, a fill-in holding
+  one is left out, and it isn't debugged.
+
+**An id over 1 KiB** is cut the same way wherever it comes -- a scan, a
+listing, a report's id, a `parent`, a step's `covers` -- so it still
+matches, and two that share their first KiB stay two. A provider that
+compares the ids Fenix gives back with its own cuts its own the same
+way:
+
+1. An id of at most 1,024 bytes (UTF-8) is as it is.
+2. Otherwise: take its first 1,007 bytes, moved back to the start of a
+   character if that falls inside one; then `#`; then the FNV-1a 64-bit
+   hash of the whole id's bytes (offset basis `0xcbf29ce484222325`, prime
+   `0x100000001b3`: for each byte, xor then multiply, wrapping) as 16
+   lowercase hex digits. The result is 1,021 to 1,024 bytes; cutting it
+   again changes nothing.
+
+| The id | Its length | Cut, it ends with |
+|---|---|---|
+| `a` × 1,023 | 1,023 | not cut |
+| `a` × 1,024 | 1,024 | not cut |
+| `a` × 1,025 | 1,025 | `#6a424025ce84288c` (1,024 in all) |
+| `é` × 600 | 1,200 | `#0e3ffe7c6421a045` (its prefix 1,006 bytes, 1,023 in all) |
+| `a` then `😀` × 300 | 1,201 | `#2056db1222d21dec` (its prefix 1,005 bytes, 1,022 in all) |
+| `tests/test_x.py::test_cases[`, `a` × 1,100, `-one]` | 1,133 | `#589a673077e12368` |
+| the same with `-two]` | 1,133 | `#a9074c8a277a3a36` |
+
+The empty string's hash is `cbf29ce484222325`, `a`'s `af63dc4c8601ec8c`.
+
+**A scan's answer** replaces the file's last one: what it leaves out
+goes from the file, and an empty answer drops all the file's tests (a
+test that comes back keeps its result, shown stale). A scanner that
+can't read half-typed text should answer what it last read well from
+that file, not nothing.
 
 What Fenix promises: calls come one at a time, as its other calls do,
 with its deadline (`limits.call_ms`). Run ids are unique while Fenix
@@ -711,7 +789,10 @@ runs, a listing's too. For each step, `tests_read` in output order, then
 exactly one `tests_step_ended`; step *n* + 1's first call comes after
 step *n*'s end. Lines are UTF-8 (what wasn't is U+FFFD), with colour
 codes and a trailing `\r` taken out; a line past 64 KiB comes in pieces,
-each but the last `cut`. Fenix never calls on a timer: a step that
+each but the last `cut`, each piece's rest the next line *of the same
+stream* (a line of the other stream, and a call's end, may come
+between); a line of 64 KiB or less, at a stream's end too, is never
+`cut`. Fenix never calls on a timer: a step that
 prints nothing is waiting. A stop kills the step's tree at once; a call
 under way ends and its reports count; then `tests_step_ended(Stopped)`.
 An instance is only ever asked about its own project.
@@ -733,9 +814,9 @@ over its limit, or whose `needs` aren't there when it would start.
 |---|---|
 | A call's answer, in all | 16 MiB |
 | `tests_scan`'s answer | 10,000 `Found` |
-| A `Found` | `id` and `parent` 1 KiB; `label` 256 characters; `path` 4 KiB; `skip` 1 KiB; `data` 4 KiB |
+| A `Found` | `id` and `parent` 1 KiB, cut as above; `label` 256 characters; `path` 4 KiB; `skip` 1 KiB; `data` 4 KiB (one over isn't kept) |
 | An `Ask::Run` (Fenix's) | 10,000 records |
-| A `Plan` | 256 steps; 10,000 ids in all its `covers`; 32 `needs` a step, each a path under `/data` of at most 4 KiB, 16 MiB of files in all |
+| A `Plan` | 256 steps; 10,000 ids in all its `covers`; 32 `needs` a step, each a file's path under `/data` with `/` of at most 4 KiB (one that isn't fails its step), 16 MiB of files in all |
 | A step's `command` | its command line as Windows quotes it 32,766 characters, on every platform (a `.cmd` or `.bat` on Windows, 8,191): split a long selection into steps; its `env` 64 KiB; its `label` 256 characters |
 | A `tests_read` (Fenix's) | 512 lines and 256 KiB |
 | Reports | 10,000 a call; `message` 4 KiB; `text` and an `Output`'s text 64 KiB, their ends kept; a place's `path` 4 KiB |
@@ -793,13 +874,19 @@ export!(Pack);
 ```
 
 A real reader keeps what it needs per `(run, step)` -- a line cut at 64
-KiB to join to the next, a result held until its text is whole -- made
-at the step's first `tests_read` and dropped at its `tests_step_ended`.
+KiB to join to the next line of the same stream, a result held until its
+text is whole -- made at the step's first `tests_read` and dropped at
+its `tests_step_ended`.
 
 Every extension built on the 1.6 crate exports the five, with defaults
 (nothing found, "no tests here"); only its manifest makes it a provider.
-One that uses nothing else of 1.6 -- that never calls `tests::provider`
--- may keep `api = "1.5"`, and still runs on Fenix 1.5.
+One may keep `api = "1.5"`, and runs on Fenix 1.5, when its component
+doesn't import `test-provider-set`: when **no code reachable from its
+exports calls `tests::provider`**, even behind a condition that never
+holds at run time. What's linked counts, not what runs: a call the
+compiler can't prove unreachable is imported, and Fenix 1.5 refuses the
+component. Fenix's own test (`fenix-wasm/tests/f15.rs`) checks exactly
+this for 1.6 on 1.5.
 
 ## Forges
 
@@ -1340,9 +1427,11 @@ the export `key_scheme_changed`) and keymaps' `[[keys]]` chords; 1.6
 added test providers (`[[contributes.test_providers]]`,
 `tests::provider`, and the exports `tests_scan`, `tests_plan`,
 `tests_read`, `tests_step_ended` and `tests_launch`). An extension
-rebuilt on a later crate that uses nothing that minor added may keep
-the `api` it had: the exports it gains are never called by the Fenix
-before, which doesn't look for them. Its
+rebuilt on the 1.6 crate that uses nothing 1.6 added -- no code
+reachable from its exports calls `tests::provider` -- may keep `api =
+"1.5"`: Fenix 1.5 never looks for the exports it gains (see [Test
+providers](#test-providers)). That's tested for 1.6 on 1.5 only; a
+later minor will say so when it's tested too. Its
 definition is `crates/fenix-extension-api/wit/world.wit` (its package
 stays `fenix:extension@1.0.0` across 1.x, so what an older extension
 imports is still found).

@@ -63,8 +63,18 @@
 //!
 //! Every extension built on this crate exports the five functions, with
 //! the defaults below for those it doesn't write; only its manifest makes
-//! it a provider. One that keeps `engine.api` below 1.6 still runs on an
-//! older Fenix, which never calls them.
+//! it a provider. One may keep `engine.api = "1.5"` and run on Fenix 1.5
+//! only when its component doesn't import `test-provider-set`: when no
+//! code reachable from its exports calls [`provider`], even behind a
+//! condition that never holds. The linker keeps a call it can't prove
+//! unreachable, and Fenix 1.5 refuses a component with that import.
+//!
+//! What Fenix gives back -- a node in [`Ask::Run`] and to `tests_launch`
+//! -- is the node as Fenix has it: its `path` `/project/<path>` with `/`
+//! (a full path outside the project), whatever form the provider gave;
+//! its `line` from its scan (maybe of unsaved text), else its listing,
+//! else a run; its `parent` the one Fenix put it under; its `data` as it
+//! was, or `None` (see [`Found::data`]).
 
 use crate::bindings::fenix::extension::types as wit;
 use crate::{host, Command, LaunchConfig};
@@ -76,10 +86,15 @@ use crate::{host, Command, LaunchConfig};
 pub struct Found {
     /// The provider's own name for it, the same in what it scans, lists
     /// and reads from a run: `orbit/lib tests::adds`,
-    /// `tests/test_basic.py::test_cases[negative]`. At most 1 KiB, unique
-    /// among its provider's.
+    /// `tests/test_basic.py::test_cases[negative]`. Unique among its
+    /// provider's. One over 1 KiB is cut, the same way wherever it comes:
+    /// its first bytes up to 1,007, back to a character's start, then `#`
+    /// and the FNV-1a 64-bit hash of the whole id's UTF-8 as 16 lowercase
+    /// hex digits (`WRITING_EXTENSIONS.md` has test vectors); Fenix gives
+    /// it back so, and the provider names it to its runner by its `data`.
     pub id: String,
     /// The group it's in, by id: `None` for one at its provider's top.
+    /// Given back, the one Fenix put it under.
     pub parent: Option<String>,
     /// What the page calls it: `adds`, `negative`, `orbit (lib)`. At most
     /// 256 characters.
@@ -88,9 +103,12 @@ pub struct Found {
     /// Its file: `/project/<path>`; or relative, to the project in a
     /// scan's answer and to its step's folder in a run's or a listing's
     /// report; or a full path of the project's machine. In a scan's
-    /// answer, `None` for a test or case is the file scanned.
+    /// answer, `None` for a test or case is the file scanned. Given back,
+    /// `/project/<path>` with `/` (a full path outside the project).
     pub path: Option<String>,
-    /// Its first line, and its last when it knows: from 0.
+    /// Its first line, and its last when it knows: from 0. Given back,
+    /// with `path`, from its scan (maybe of unsaved text), else its
+    /// listing, else a run.
     pub line: Option<u32>,
     pub end_line: Option<u32>,
     /// Left out by its source (`#[ignore = "slow"]`, `@skip`,
@@ -101,8 +119,12 @@ pub struct Found {
     pub template: bool,
     /// Its own, at most 4 KiB: never shown, given back as it was wherever
     /// Fenix gives this node back ([`Ask::Run`], `tests_launch`) -- what
-    /// its runner calls it when the id can't say. Not kept across a
-    /// restart.
+    /// its runner calls it when the id can't say. It can come back `None`:
+    /// one over 4 KiB isn't kept, nor any past 16 MiB of a provider's, nor
+    /// across a restart until a scan, listing or run gives it again. A
+    /// provider names a node by its id when its `data` is `None`; a node
+    /// whose id was cut and whose `data` isn't kept is never given back
+    /// for itself (its nearest ancestor is asked instead).
     pub data: Option<String>,
 }
 
@@ -126,9 +148,12 @@ pub enum Ask {
     /// Its runner's listing of every test it can find in the project.
     Discover,
     /// These, as Fenix has them now: tests, cases, and groups (all under
-    /// them). After each `File` or `Suite` come the tests and cases Fenix
-    /// has under it, while the ask stays within 10,000 records; one with
-    /// nothing after it is planned by its runner's own filter for it.
+    /// them). After each `File` or `Suite` comes its fill-in: every node
+    /// Fenix has under it, suites included, while the ask stays within
+    /// 10,000 records; a fill-in is whole or left out, and one with
+    /// nothing after it is planned by its runner's own filter for it. A
+    /// record whose `parent` is in the ask is a fill-in; one whose
+    /// `parent` isn't was asked for itself.
     Run(Vec<Found>),
     /// Every test.
     RunAll,
@@ -171,7 +196,10 @@ pub struct Line {
     /// As UTF-8, what wasn't replaced by U+FFFD; colour codes taken out.
     pub text: String,
     pub stderr: bool,
-    /// The line went on past 64 KiB: the rest is the next line given.
+    /// The line went on past 64 KiB: the rest is the next line of the
+    /// same stream (lines of the other may come between, and a later
+    /// call). Every piece but the last is cut; a line of 64 KiB or less,
+    /// at a stream's end too, never is.
     pub cut: bool,
 }
 
@@ -238,11 +266,12 @@ pub enum Report {
     /// What a test printed, or the run did (`id` `None`).
     Output { id: Option<String>, text: String },
     /// What didn't build or load, never a test's failure: the group or
-    /// file that didn't, `None` for all the step covers.
+    /// file that didn't, `None` for all the step covers. What's under it
+    /// and has no result in this run yet is errored with it.
     Broken { id: Option<String>, message: String, at: Option<Location> },
     /// A process died: the group whose process it was (what's under it and
-    /// hasn't ended in this step is errored with it), `None` for all the
-    /// step covers that hasn't ended.
+    /// has no result in this run yet is errored with it), `None` for all
+    /// the step covers that has none.
     Crashed { id: Option<String>, message: String },
 }
 
@@ -252,8 +281,9 @@ pub enum Launch {
     /// This launch, now.
     Launch(LaunchConfig),
     /// These first -- a build that says where the test's binary is --
-    /// read as a run's are; then `tests_launch` is asked again, once, if
-    /// every step exited 0 and nothing was `Broken` or `Crashed`.
+    /// read as a run's are, as the run `tests_launch` was asked with; then
+    /// `tests_launch` is asked again, once, with the same run, if every
+    /// step exited 0 and nothing was `Broken` or `Crashed`.
     BuildFirst(Plan),
 }
 
@@ -262,7 +292,11 @@ pub enum Launch {
 /// tests there when it can't (`pytest isn't installed in .venv`, at most 4
 /// KiB). `runner` "" and no `problem` is "nothing to run in this project":
 /// it isn't shown or asked there until a later call says otherwise. A call
-/// that changes what Fenix had lists the project's tests again. API 1.6.
+/// that changes what Fenix had lists the project's tests again; one that
+/// doesn't changes nothing. Fenix keeps it for the project until it exits,
+/// across the extension starting again; call it at each start all the
+/// same. Linking a call to it -- reachable from an export, whether or not
+/// it runs -- makes the component need API 1.6. API 1.6.
 pub fn provider(provider: &str, runner: &str, problem: Option<&str>) -> Result<(), String> {
     host::test_provider_set(provider, runner, problem)
 }
