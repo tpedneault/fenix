@@ -593,3 +593,39 @@ impl Project {
         self.app.tests.projects.get(&self.root).map_or(0, |t| t.ended_runs.iter().filter(|e| matches!(e.kind, fenix_tests::RunKind::Listing { .. })).count())
     }
 }
+
+/// A project's first scan (§6.7, §7.1): its files the provider's `scan`
+/// names, walked through the project's ignores -- hidden folders and
+/// what `.gitignore` leaves out aren't -- off the UI thread, into the
+/// model in batches.
+#[test]
+fn a_projects_first_scan_walks_it_through_its_ignores() {
+    let state = tempfile::tempdir().unwrap();
+    let files = [("a.fake", "# test one\n"), ("sub/b.fake", "# test two\n"), ("target/c.fake", "# test three\n"), (".hidden/d.fake", "# test four\n"), (".gitignore", "target/\n")];
+    let mut p = Project::new(&files, "a.fake", state.path());
+    p.until("the walk", |p| p.has("sub/b.fake::two") && p.tests().walk.is_none() && p.tests().walks.is_empty());
+    assert!(p.has("a.fake::one"));
+    assert!(!p.has("target/c.fake::three") && !p.has(".hidden/d.fake::four"), "ignored, hidden");
+    assert_eq!(p.tests().scanned_of.get(&provider()), Some(&(1, 2)), "a.fake is open: scanned from its buffer");
+}
+
+/// Run on save (§8.4): a second after the last save, the saved file's
+/// tests, which the save made stale; only in a trusted project.
+#[test]
+fn a_save_runs_the_saved_files_tests_a_second_later() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n#! out PASS a.fake::one 1ms\n")], "a.fake", state.path());
+    p.app.config.set_value("tests.on_save", Some(fenix_config::Value::Text("file".into())));
+    p.scanned("a.fake::one");
+    p.app.tests_run_file();
+    p.until("the run", Project::ended);
+    let path = p.root.join("a.fake");
+    p.app.tests_file_saved(&path);
+    let node = p.model().find(&TestKey::new(&provider(), "a.fake::one")).unwrap();
+    assert!(p.model().node(node).unwrap().stale(), "saved since its result");
+    p.app.tests_tick(Instant::now());
+    assert_eq!(p.tests().ended_runs.len(), 1, "not yet: a second after the save");
+    p.app.tests_tick(Instant::now() + Duration::from_secs(2));
+    p.until("the run on save", |p| p.tests().ended_runs.len() == 2);
+    assert!(!p.model().node(node).unwrap().stale());
+}
