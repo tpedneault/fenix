@@ -1664,4 +1664,105 @@ case: a per-step timeout, a provider-driven cancel, built-in readers
 
 ## 19. As built
 
-Nothing yet.
+### Step 2, API 1.6
+
+**The WIT is §6.3's**, types, names, fields, cases and signatures alike,
+with §18's four changes. Its doc comments are §6.3's word for word; one
+comment heads the new types in `interface types`, saying that its §
+references are to this plan and that the pack author's account is
+`WRITING_EXTENSIONS.md`'s "Test providers". The world's `use` line and
+the five exports follow 1.2's and 1.5's in `world extension`; the import
+ends `interface host`. `world.wit`'s header now says 1.6, and what 1.5
+and 1.6 added.
+
+**F15 holds** (§6.2, §17): `fenix-wasm/tests/f15.rs` instantiates
+`guests/plain16.wasm`, built on the 1.6 crate with nothing of 1.6 used,
+against a copy of `v1.5.2`'s `wit/` (`tests/wit-1.5/world.wit`, its
+`bindgen!` of `extension-base`, and every one of its 125 `host` imports
+written out in `tests/wit-1.5/host.rs`), with WASI and those imports in
+the `Linker` as 1.5's `run` makes it; then `activate` and a command run.
+It passes in wasmtime 50. The component imports from `host` only what it
+calls (the test checks there's no `test-provider-set` among them), and
+the new records don't stand in the way. Its pair,
+`a_guest_that_uses_1_6_says_what_fenix_1_5_lacks`, has the provider
+guest refused by the same linker: "component imports instance
+`fenix:extension/host@1.0.0`, but a matching implementation was not
+found in the linker: instance export `test-provider-set` has the wrong
+type: function implementation is missing". So the 24 kit users that run
+no tests may keep `api = "1.5"` when rebuilt on the 1.6 crate. The other
+way, `guests/keys.wasm`, built on the 1.5 crate, loads on 1.6 and
+answers each of the five calls that it has no such export.
+
+**No second `bindgen!`.** §6.3's "Host side" was wrong: wasmtime 50's
+`bindgen!` of `extension-base` generates every type of `interface types`,
+whether `extension-base` reaches it or not, so `fenix-wasm` has the new
+records from its one `bindgen!`, the same WIT the guest crate's is.
+
+**The Rust side** is §6.6's names, fields and signatures. Its types are
+the crate's own, not the bindings' renamed, because §6.6's `Report` has
+struct variants where the bindings have a record each
+(`TestReport::Output(TestOutput)`); `export!` converts between them
+(`tests::exports`, hidden). What §6.6 didn't say: every type derives
+`Debug`, `Clone` and `PartialEq`, those without an `f64` or a `Command`
+`Eq` too, `Kind` and `Outcome` `Copy` and `Hash`; `Found`, `Plan`,
+`Line` and `Location` are `Default`, `Kind`'s default `Test`; and `From`
+between them and the bindings' types. A mirror with fewer derives
+compiles against it. The crate's own unit tests in `lib.rs` moved from
+`mod tests` to `mod checks`, for the name.
+
+**The limits** are `fenix_wasm::test_limits`: every number of §6.5's
+table, for the host and step 3. The worker holds each answer to them as
+it comes back (`scanned`, `planned`, `reports`, `launch`, `error`,
+`provider`), and says each kind of cut once while the instance runs
+(`tests: an id over 1 KiB was cut to 1 KiB (said once)`). Where §6.5
+left a choice:
+
+- `found-test.data` over 4 KiB is dropped, not cut: given back cut it
+  wouldn't be "as it was".
+- A `launch-config` over 1 MiB is refused (`tests-launch`'s answer is an
+  `Err`): cut, it wouldn't be a launch.
+- KiB limits cut by bytes at a character's start, "characters" limits by
+  characters; nothing is added to what's cut. `text` and an `output`'s
+  text keep their end. A step's `env` loses the variable that crosses
+  64 KiB and those after it. A call's 16 MiB is the bytes of its
+  strings.
+- A `test-ended.duration-ms` that's NaN, endless or negative is none.
+- The limits on what Fenix sends (an ask's 10,000, a batch's 512 lines
+  and 256 KiB, a scan's 1 MiB) are constants for step 3; the worker
+  doesn't hold Fenix to them.
+
+**What the replies carry.** `Reply::Scanned`, `Reply::Reports`,
+`Reply::Planned(Result<Planned, String>)` and
+`Reply::Launched(Result<Launching, String>)`. A `PlannedStep` is the
+step as given (held to its limits), its command held to
+`permissions.process` and its folder as `spawn`'s is (`Result<(Checked,
+Env), String>`, `${data}` and `${tools}` filled in), and each of its
+`needs` as a path of this machine's when it's one under `/data`. A step
+whose program it may not run isn't refused by the worker: what becomes
+of it is step 3's, as are a command line's length and whether `needs`
+are there when the step starts. A `launch` is checked as `launches-set`'s
+are (the same code, `checked_launch`).
+
+**Providers the component doesn't have.** `Spec::test_providers` holds
+the manifest's provider ids; **step 3 fills it** where `fenix-gui` makes
+the spec (this step left `fenix-gui` alone but for one empty match arm,
+`Request::TestProviderSet { .. } => {}`). With it set and no
+`tests-scan` and `tests-plan`, the worker says so on the output page as
+it starts; any of the five calls to a component without that export ends
+`Err("it has no tests-scan: it was built for an extension API before
+1.6, ...")`, which is how step 3 knows not to offer it. `test-provider-set`
+refuses an id that isn't in `Spec::test_providers`.
+
+**The manifest**: `TestProviderContribution` as §5 has it. A provider in
+an extension whose `engine.api` is under 1.6, or that has none (one
+that runs no code), is refused. Languages aren't checked against
+Fenix's names, as a language server's aren't; a marker or a `scan`
+pattern may not be empty, hold `..` or start with `/`.
+
+**Test guests.** `guests/provider` (every export and the import, a
+reader with cut lines, a provider that traps in each export and one
+that never returns) and `guests/plain16`, built with Rust 1.97.0 here
+for want of 1.98.0. `build.ps1` builds them and `counter`, and no longer
+`hello` and `keys`: those are kept as built on older APIs (1.2's WIT,
+the 1.5 crate) to show those still run, and `hello` doesn't build on the
+current WIT since 1.5 added an export it lacks.
