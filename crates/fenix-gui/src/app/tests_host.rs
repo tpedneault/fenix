@@ -63,6 +63,15 @@ const SCAN_BATCH: usize = 200;
 /// Past this much of a step's output waiting for its provider, it's
 /// given no more (§6.7).
 const BEHIND_BYTES: usize = 32 << 20;
+/// Nor more than this many lines: 1,024 batches.
+const BEHIND_LINES: usize = 1024 * test_limits::MAX_READ_LINES;
+/// How long a project's trust is taken as it was last looked at.
+const TRUST_FOR: Duration = Duration::from_secs(2);
+/// How often a first scan waiting on its thread looks again.
+const WALK_POLL: Duration = Duration::from_millis(20);
+/// How long Fenix's exit waits for steps' trees to be killed and results
+/// written.
+const EXIT_WAIT: Duration = Duration::from_secs(2);
 /// The bytes of a `run` ask Fenix sends, its records' strings in all:
 /// the cap its answers have (`test_limits::MAX_ANSWER`), so an ask of
 /// 10,000 records of 10 KiB each can't fill a guest's memory.
@@ -165,17 +174,26 @@ fn below(full: &str, root: &str) -> Option<String> {
 /// relative (to `base`: the project for a scan, a step's folder for a
 /// report), a full path; `\` or `/`; a drive in any case on Windows.
 pub(crate) fn model_path(given: &str, root: &Path, base: &Path) -> String {
+    model_path_in(given, std::slice::from_ref(&root.to_path_buf()), base)
+}
+
+/// `model_path` for a project that has several spellings: `roots[0]`,
+/// its canonical root, then the others it's reached by (a symlink, an
+/// 8.3 name, a `subst` drive): a full path under any of them is the
+/// project's.
+pub(crate) fn model_path_in(given: &str, roots: &[PathBuf], base: &Path) -> String {
     let slashed = given.replace('\\', "/");
     if slashed == "/project" || slashed.starts_with("/project/") {
         // A `..` out of the project is no file of it: as it was given.
         return lexical(&slashed["/project".len()..]).unwrap_or(slashed);
     }
-    let root_text = root.to_string_lossy().replace('\\', "/");
     let full = if is_full(&slashed) { full_lexical(&slashed) } else { full_lexical(&format!("{}/{slashed}", base.to_string_lossy().replace('\\', "/"))) };
-    match below(&full, &full_lexical(&root_text)) {
-        Some(rel) if !rel.is_empty() => rel,
-        _ => fenix_lsp::normalize(PathBuf::from(&full)).to_string_lossy().into_owned(),
+    for root in roots {
+        if let Some(rel) = below(&full, &full_lexical(&root.to_string_lossy().replace('\\', "/"))).filter(|r| !r.is_empty()) {
+            return rel;
+        }
     }
+    fenix_lsp::normalize(PathBuf::from(&full)).to_string_lossy().into_owned()
 }
 
 /// A path as the model holds it, as Fenix gives it back to a provider
@@ -190,13 +208,13 @@ pub(crate) fn guest_path(path: &str) -> String {
 }
 
 /// A provider's `found-test` as the model's, its path mapped from `base`.
-pub(crate) fn model_found(f: FoundTest, root: &Path, base: &Path) -> fenix_tests::Found {
+pub(crate) fn model_found(f: FoundTest, roots: &[PathBuf], base: &Path) -> fenix_tests::Found {
     fenix_tests::Found {
         id: f.id,
         parent: f.parent,
         label: f.label,
         kind: model_kind(f.kind),
-        path: f.path.map(|p| model_path(&p, root, base)),
+        path: f.path.map(|p| model_path_in(&p, roots, base)),
         line: f.line,
         end_line: f.end_line,
         skip: f.skip,
@@ -221,19 +239,19 @@ pub(crate) fn api_found(f: fenix_tests::Found) -> FoundTest {
     }
 }
 
-fn model_location(at: fenix_wasm::host::TestLocation, root: &Path, base: &Path) -> fenix_tests::Location {
-    fenix_tests::Location { path: model_path(&at.path, root, base), line: at.line, column: at.column }
+fn model_location(at: fenix_wasm::host::TestLocation, roots: &[PathBuf], base: &Path) -> fenix_tests::Location {
+    fenix_tests::Location { path: model_path_in(&at.path, roots, base), line: at.line, column: at.column }
 }
 
 /// A provider's reports as the model's, their paths mapped from its
 /// step's folder `base`.
-pub(crate) fn model_reports(reports: Vec<TestReport>, root: &Path, base: &Path) -> Vec<fenix_tests::Report> {
+pub(crate) fn model_reports(reports: Vec<TestReport>, roots: &[PathBuf], base: &Path) -> Vec<fenix_tests::Report> {
     use fenix_tests::{Ended, Outcome, Report};
     use fenix_wasm::host::TestOutcome;
     reports
         .into_iter()
         .map(|r| match r {
-            TestReport::Found(f) => Report::Found(model_found(f, root, base)),
+            TestReport::Found(f) => Report::Found(model_found(f, roots, base)),
             TestReport::Started(id) => Report::Started(id),
             TestReport::Ended(e) => Report::Ended(Ended {
                 id: e.id,
@@ -245,11 +263,11 @@ pub(crate) fn model_reports(reports: Vec<TestReport>, root: &Path, base: &Path) 
                 },
                 duration_ms: e.duration_ms,
                 message: e.message,
-                at: e.at.map(|at| model_location(at, root, base)),
+                at: e.at.map(|at| model_location(at, roots, base)),
                 text: e.text,
             }),
             TestReport::Output(o) => Report::Output { id: o.id, text: o.text },
-            TestReport::Broken(b) => Report::Broken { id: b.id, message: b.message, at: b.at.map(|at| model_location(at, root, base)) },
+            TestReport::Broken(b) => Report::Broken { id: b.id, message: b.message, at: b.at.map(|at| model_location(at, roots, base)) },
             TestReport::Crashed(c) => Report::Crashed { id: c.id, message: c.message },
         })
         .collect()
@@ -526,13 +544,32 @@ pub(crate) fn test_lines(lines: Vec<fenix_tasks::OutputLine>) -> (Vec<TestLine>,
 #[derive(Default)]
 pub(crate) struct Batch {
     lines: VecDeque<TestLine>,
+    /// Their text, in bytes: what a batch is held to.
     pub bytes: usize,
+    /// What they cost Fenix's memory: their text and each line's own
+    /// size, so that empty lines aren't free.
+    pub cost: usize,
 }
 
 impl Batch {
+    /// What a line waiting costs, beyond its text.
+    const LINE_COST: usize = std::mem::size_of::<TestLine>();
+
     pub fn push(&mut self, line: TestLine) {
         self.bytes += line.text.len();
+        self.cost += line.text.len() + Self::LINE_COST;
         self.lines.push_back(line);
+    }
+
+    /// Whether more waits than its provider may fall behind by (§6.7):
+    /// 32 MiB of what the lines cost, or 512 batches of lines.
+    pub fn too_much(&self) -> bool {
+        self.cost > BEHIND_BYTES || self.lines.len() > BEHIND_LINES
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.lines.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -542,6 +579,7 @@ impl Batch {
     pub fn clear(&mut self) {
         self.lines.clear();
         self.bytes = 0;
+        self.cost = 0;
     }
 
     /// The next batch: the lines waiting, up to 512 of them and 256 KiB
@@ -557,6 +595,7 @@ impl Batch {
             out.push(self.lines.pop_front().expect("one"));
         }
         self.bytes -= bytes;
+        self.cost -= bytes + out.len() * Self::LINE_COST;
         out
     }
 }
@@ -643,7 +682,7 @@ impl CallFor {
 /// A file a first scan read, off the UI thread, or the walk's end.
 enum Walked {
     File { rel: String, text: String },
-    Done { total: usize },
+    Done { total: usize, open: usize },
 }
 
 /// A provider's first scan of a project's files (§7.1).
@@ -656,8 +695,17 @@ struct Walk {
     /// The files' scans not yet given to the model.
     batch: Vec<(String, Vec<fenix_tests::Found>)>,
     scanned: usize,
-    /// The walk ended, with this many files matched.
-    total: Option<usize>,
+    /// The walk ended, with this many files matched, and this many of
+    /// them open (scanned from their buffers).
+    total: Option<(usize, usize)>,
+    /// Set when the walk is let go: its thread stops.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for Walk {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// One project's tests.
@@ -689,6 +737,13 @@ pub(crate) struct ProjectTests {
     pub scanned_of: HashMap<ProviderId, (usize, usize)>,
     /// A run on save due, and the files saved meanwhile.
     save_run: Option<(Instant, BTreeSet<String>)>,
+    /// Whether the project is trusted, and when that was looked at: looked
+    /// at again after `TRUST_FOR`, or when a file of its `.fenix` is saved.
+    trusted: Option<(bool, Instant)>,
+    /// Its results file being read, off the UI thread.
+    restoring: Option<mpsc::Receiver<String>>,
+    /// A run ended while it was being read: written once it's read.
+    write_due: bool,
     /// How each run ended, in tests.
     #[cfg(test)]
     pub(crate) ended_runs: Vec<fenix_tests::RunEnd>,
@@ -738,6 +793,15 @@ pub(crate) struct TestsHost {
     /// The project an extension is being started again in for a call
     /// about it: its runs aren't the old instance's.
     restart_here: Option<PathBuf>,
+    /// The other spellings of each project's root (a symlink, an 8.3
+    /// name): a path under one is the project's.
+    aliases: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Paths as canonicalized, once each: no file system call per frame.
+    canon: HashMap<PathBuf, PathBuf>,
+    /// Results files to write, to the thread that writes them in turn,
+    /// and how many it has still to write.
+    writer: Option<mpsc::Sender<(PathBuf, String)>>,
+    writing: Arc<std::sync::atomic::AtomicUsize>,
     /// Fenix's state folder for results files, in place of the real one
     /// (tests).
     pub(crate) state_dir: Option<PathBuf>,
@@ -746,6 +810,9 @@ pub(crate) struct TestsHost {
     /// Added to the clock, in tests: a timeout without waiting for it.
     #[cfg(test)]
     pub(crate) skew_ms: u64,
+    /// The first scan's cap, in place of 2,000 (tests).
+    #[cfg(test)]
+    pub(crate) scan_cap: Option<usize>,
 }
 
 impl TestsHost {
@@ -775,9 +842,66 @@ impl App {
         self.config.bool_value("tests.enabled") == Some(true)
     }
 
-    /// A project's root as the host keys it.
-    fn tests_root(path: &Path) -> Option<PathBuf> {
-        fenix_project::find_project_root(path).map(|root| refactor::identity(&root))
+    /// `path` canonicalized, once: no file system call the next time.
+    fn tests_canon(&mut self, path: &Path) -> PathBuf {
+        if let Some(canonical) = self.tests.canon.get(path) {
+            return canonical.clone();
+        }
+        let canonical = refactor::identity(path);
+        self.tests.canon.insert(path.to_path_buf(), canonical.clone());
+        canonical
+    }
+
+    /// The project of file `path`, as the host keys it: its root
+    /// canonicalized, the spelling it was found by kept as another.
+    fn tests_root_of(&mut self, path: &Path) -> Option<PathBuf> {
+        let raw = fenix_project::find_project_root(path)?;
+        let root = self.tests_canon(&raw);
+        self.tests_alias(&root, &raw);
+        Some(root)
+    }
+
+    /// `raw` is another spelling of the project at `root`.
+    fn tests_alias(&mut self, root: &Path, raw: &Path) {
+        let raw = fenix_lsp::normalize(raw.to_path_buf());
+        if raw != root {
+            let list = self.tests.aliases.entry(root.to_path_buf()).or_default();
+            if !list.contains(&raw) {
+                list.push(raw);
+            }
+        }
+    }
+
+    /// Every spelling of the project at `root`, the canonical first.
+    fn tests_roots(&self, root: &Path) -> Vec<PathBuf> {
+        std::iter::once(root.to_path_buf()).chain(self.tests.aliases.get(root).into_iter().flatten().cloned()).collect()
+    }
+
+    /// File `path`'s path in the project at `root`, as the model holds it.
+    fn tests_rel(&self, root: &Path, path: &Path) -> String {
+        model_path_in(&path.to_string_lossy(), &self.tests_roots(root), root)
+    }
+
+    /// Whether the project at `root` is trusted (§12): looked at again
+    /// after `TRUST_FOR`, or after a file of its `.fenix` was saved, not
+    /// at every wake -- looking reads and hashes those files.
+    fn tests_trusted(&mut self, root: &Path) -> bool {
+        if let Some((trusted, at)) = self.tests.projects.get(root).and_then(|p| p.trusted) {
+            if at.elapsed() < TRUST_FOR {
+                return trusted;
+            }
+        }
+        let trusted = self.project_is_trusted(root);
+        if let Some(project) = self.tests.projects.get_mut(root) {
+            project.trusted = Some((trusted, Instant::now()));
+        }
+        trusted
+    }
+
+    /// Whether listings no key asked for may run in the project at `root`
+    /// (§7.1, §12): trusted, `tests.list_automatically`, not remote.
+    fn tests_automatic(&mut self, root: &Path) -> bool {
+        self.config.bool_value("tests.list_automatically") != Some(false) && !fenix_vfs::is_remote(root) && self.tests_trusted(root)
     }
 
     /// The providers of every extension switched on, with their extension.
@@ -803,16 +927,20 @@ impl App {
                     model.provider_set(id, runner, problem.as_deref());
                 }
             }
-            if self.config.bool_value("tests.keep_results") != Some(false) {
-                if let Some(file) = self.tests_results_file(root) {
+            // Fenix's choice until it's looked: no listing on its own
+            // (§12, failing closed); set as it is just below.
+            model.set_automatic_listings(false);
+            model.set_timeout_minutes(self.config.int_value("tests.timeout_minutes").unwrap_or(0).clamp(0, 1440) as u32);
+            // Its results file, read off the UI thread (up to 8 MiB).
+            let restoring = (self.config.bool_value("tests.keep_results") != Some(false)).then(|| self.tests_results_file(root)).flatten().map(|file| {
+                let (tx, rx) = mpsc::channel();
+                let _ = std::thread::Builder::new().name("fenix-tests-results".into()).spawn(move || {
                     let small = std::fs::metadata(&file).is_ok_and(|m| m.len() <= fenix_tests::RESULTS_FILE_BYTES as u64);
-                    if let Some(text) = small.then(|| std::fs::read_to_string(&file).ok()).flatten() {
-                        // One that can't be read is left as it is: the next
-                        // run's end writes a good one.
-                        let _ = model.restore_results(&text);
-                    }
-                }
-            }
+                    let text = small.then(|| std::fs::read_to_string(&file).ok()).flatten().unwrap_or_default();
+                    let _ = tx.send(text);
+                });
+                rx
+            });
             let project = ProjectTests {
                 model,
                 providers,
@@ -830,12 +958,91 @@ impl App {
                 walk: None,
                 scanned_of: HashMap::new(),
                 save_run: None,
+                trusted: None,
+                restoring,
+                write_due: false,
                 #[cfg(test)]
                 ended_runs: Vec::new(),
             };
             self.tests.projects.insert(root.to_path_buf(), project);
+            let automatic = self.tests_automatic(root);
+            self.tests.projects.get_mut(root).expect("just made").model.set_automatic_listings(automatic);
         }
         self.tests.projects.get_mut(root).expect("just made")
+    }
+
+    /// The project at `root`'s results file, once read: its results
+    /// restored (shown stale), and a write that waited for it done.
+    fn tests_restored(&mut self, root: &Path) {
+        let Some(project) = self.tests.projects.get_mut(root) else { return };
+        let Some(rx) = &project.restoring else { return };
+        let text = match rx.try_recv() {
+            Ok(text) => text,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => String::new(),
+        };
+        project.restoring = None;
+        // One that can't be read is left as it is: the next run's end
+        // writes a good one.
+        if !text.is_empty() {
+            let _ = project.model.restore_results(&text);
+        }
+        if std::mem::take(&mut project.write_due) {
+            self.tests_write_results(root);
+        }
+    }
+
+    /// The project at `root`'s results written, off the UI thread, by
+    /// the one thread that writes them in turn (§4 "What's kept").
+    fn tests_write_results(&mut self, root: &Path) {
+        let Some(file) = self.tests_results_file(root) else { return };
+        let Some(project) = self.tests.projects.get_mut(root) else { return };
+        if project.restoring.is_some() {
+            // Not before the old results are read: they'd be lost.
+            project.write_due = true;
+            return;
+        }
+        let text = project.model.results_file();
+        if self.tests.writer.is_none() {
+            let (tx, rx) = mpsc::channel::<(PathBuf, String)>();
+            let writing = self.tests.writing.clone();
+            let spawned = std::thread::Builder::new().name("fenix-tests-write".into()).spawn(move || {
+                for (file, text) in rx {
+                    let written = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| fenix_storage::write(&file, text.as_bytes()));
+                    if let Err(e) = written {
+                        eprintln!("fenix: couldn't keep the test results in {}: {e}", file.display());
+                    }
+                    writing.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            });
+            if spawned.is_err() {
+                return;
+            }
+            self.tests.writer = Some(tx);
+        }
+        self.tests.writing.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if self.tests.writer.as_ref().is_some_and(|w| w.send((file, text)).is_err()) {
+            self.tests.writing.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    /// Fenix exits (`exiting`): every step's tree killed, waited for up to
+    /// two seconds -- dropped alone, a `TaskRunner` only asks its thread to,
+    /// and on Linux the process would be gone first, leaving the tree
+    /// running -- and the results still to write written.
+    pub(super) fn tests_shutdown(&mut self) {
+        let runners: Vec<TaskRunner> = self.tests.projects.values_mut().filter_map(|p| p.step.take().and_then(|s| s.runner)).collect();
+        for runner in &runners {
+            runner.cancel();
+        }
+        let deadline = Instant::now() + EXIT_WAIT;
+        while Instant::now() < deadline && !(runners.iter().all(TaskRunner::is_finished) && self.tests.writing.load(std::sync::atomic::Ordering::Acquire) == 0) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.tests.writer = None;
+        for project in self.tests.projects.values_mut() {
+            project.walk = None;
+        }
     }
 
     /// Adds provider `spec` to the project at `root`, if it isn't there.
@@ -871,9 +1078,13 @@ impl App {
         if self.tests.no_tests.contains(ext) {
             return Reach::No("it has no test providers".into());
         }
-        let here = self.code_project_now().map(|p| refactor::identity(&p));
+        // Switched off or removed: nothing would answer.
+        if !self.wasm.installed.iter().any(|e| e.id == ext) {
+            return Reach::No("its extension isn't installed".into());
+        }
+        let here = self.code_project_now().map(|p| self.tests_canon(&p));
         match self.code_instance_project(ext) {
-            Some(Some(project)) if refactor::identity(&project) == root => Reach::Yes,
+            Some(Some(project)) if self.tests_canon(&project) == root => Reach::Yes,
             Some(_) if starts && here.as_deref() == Some(root) => {
                 self.tests.restart_here = Some(root.to_path_buf());
                 self.restart_code_extension(ext);
@@ -926,7 +1137,14 @@ impl App {
     /// switched off (`gone`), its providers go with them.
     pub(super) fn tests_extension_gone(&mut self, ext: &str, why: &str, gone: bool) {
         self.tests.calls.retain(|_, (e, _)| e != ext);
+        // Its next start is a start: its first scans are made again.
         self.tests.ready.remove(ext);
+        self.tests.walked.remove(ext);
+        if gone {
+            for seen in self.tests.seen.values_mut() {
+                seen.providers.retain(|p| p.extension != ext);
+            }
+        }
         let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
         for root in roots {
             if self.tests.restart_here.as_ref() != Some(&root) {
@@ -981,7 +1199,9 @@ impl App {
     /// extension starting again; a repeat changes nothing, `runner` ""
     /// with no problem hides it there, a change lists as §7.1 says.
     pub(super) fn tests_provider_set(&mut self, ext: &str, provider: &str, runner: &str, problem: Option<&str>) {
-        let Some(root) = self.code_instance_project(ext).flatten().map(|p| refactor::identity(&p)) else { return };
+        let Some(raw) = self.code_instance_project(ext).flatten() else { return };
+        let root = self.tests_canon(&raw);
+        self.tests_alias(&root, &raw);
         let id = ProviderId::new(ext, provider);
         self.tests.said.insert((root.clone(), id.clone()), (runner.to_string(), problem.map(str::to_string)));
         if !self.tests_enabled() {
@@ -999,16 +1219,21 @@ impl App {
         if !self.tests_enabled() {
             return;
         }
-        let Some(root) = Self::tests_root(path) else { return };
+        let Some(root) = self.tests_root_of(path) else { return };
+        let rel = self.tests_rel(&root, path);
         let Some(project) = self.tests.projects.get_mut(&root) else { return };
-        let rel = model_path(&path.to_string_lossy(), &root, &root);
         project.model.file_saved(&rel);
+        // A file of its `.fenix` (tools.json, lsp/): its trust is looked
+        // at again.
+        if rel == ".fenix" || rel.starts_with(".fenix/") {
+            project.trusted = None;
+        }
         for seen in self.tests.seen.values_mut().filter(|s| s.root == root && s.rel == rel) {
             seen.scanned = None;
             seen.last_scan = None;
         }
         let on_save = self.config.text_value("tests.on_save").unwrap_or("off").to_string();
-        if on_save != "off" && self.project_is_trusted(&root) && !fenix_vfs::is_remote(&root) {
+        if on_save != "off" && !fenix_vfs::is_remote(&root) && self.tests_trusted(&root) {
             let project = self.tests.projects.get_mut(&root).expect("a project");
             let files = project.save_run.take().map(|(_, f)| f).unwrap_or_default();
             let mut files = files;
@@ -1023,6 +1248,10 @@ impl App {
     pub(super) fn tests_tick(&mut self, now: Instant) -> Option<Instant> {
         if !self.tests_enabled() {
             self.tests_off();
+            // A run still open is driven to its end; nothing else is.
+            if self.tests.projects.values().any(|p| p.run.is_some() || p.step.is_some()) {
+                self.tests_pump();
+            }
             return None;
         }
         self.tests_sync();
@@ -1032,7 +1261,12 @@ impl App {
         let timeout = self.config.int_value("tests.timeout_minutes").unwrap_or(0).max(0) as u64;
         let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
         for root in roots {
+            self.tests_restored(&root);
             let project = self.tests.projects.get_mut(&root).expect("a project");
+            if project.restoring.is_some() || project.walk.as_ref().is_some_and(|w| !w.out) || !project.walks.is_empty() {
+                // A file being read on its thread: looked for again soon.
+                soonest(now + WALK_POLL);
+            }
             // A run past `tests.timeout_minutes` (§8.3), the only clock.
             if let Some((_, started)) = project.run {
                 if timeout > 0 && !project.timed_out {
@@ -1079,7 +1313,9 @@ impl App {
     /// `tests.enabled` is off: a run still going is stopped, and nothing
     /// else is done.
     fn tests_off(&mut self) {
-        let going: Vec<PathBuf> = self.tests.projects.iter().filter(|(_, p)| p.run.is_some() || p.step.is_some()).map(|(r, _)| r.clone()).collect();
+        // Stopped once; it then ends as any stopped run does, its steps
+        // told `stopped` (the pump drives a run still open while off).
+        let going: Vec<PathBuf> = self.tests.projects.iter().filter(|(_, p)| (p.run.is_some() || p.step.is_some()) && !p.model.summary().running.is_some_and(|r| r.stopping)).map(|(r, _)| r.clone()).collect();
         for root in going {
             self.tests_stop_in(&root, "the test explorer was turned off (tests.enabled)");
         }
@@ -1097,7 +1333,9 @@ impl App {
         let fresh: Vec<(String, u64)> = self.tests.ready.iter().filter(|(e, n)| self.tests.walked.get(*e) != Some(*n)).map(|(e, n)| (e.clone(), *n)).collect();
         for (ext, n) in fresh {
             self.tests.walked.insert(ext.clone(), n);
-            let Some(root) = self.code_instance_project(&ext).flatten().map(|p| refactor::identity(&p)) else { continue };
+            let Some(raw) = self.code_instance_project(&ext).flatten() else { continue };
+            let root = self.tests_canon(&raw);
+            self.tests_alias(&root, &raw);
             let specs: Vec<ProviderSpec> = self.tests_specs().into_iter().filter(|(e, _)| *e == ext).map(|(_, s)| s).collect();
             for spec in specs {
                 let known = self.tests.projects.get(&root).is_some_and(|p| p.providers.iter().any(|q| q.id == spec.id));
@@ -1112,12 +1350,11 @@ impl App {
                 }
             }
         }
-        let listing = self.config.bool_value("tests.list_automatically") != Some(false);
         let timeout = self.config.int_value("tests.timeout_minutes").unwrap_or(0).clamp(0, 1440) as u32;
         let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
         for root in roots {
             // What runs without a key runs only in a trusted project (§12).
-            let automatic = listing && self.project_is_trusted(&root) && !fenix_vfs::is_remote(&root);
+            let automatic = self.tests_automatic(&root);
             let project = self.tests.projects.get_mut(&root).expect("a project");
             project.model.set_automatic_listings(automatic);
             project.model.set_timeout_minutes(timeout);
@@ -1139,8 +1376,8 @@ impl App {
             let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { continue };
             let (edits, dirty) = (ob.buffer.edit_count(), ob.buffer.is_dirty());
             if self.tests.seen.get(&id).is_none_or(|s| s.path != path) {
-                let Some(root) = Self::tests_root(&path) else { continue };
-                let rel = model_path(&path.to_string_lossy(), &root, &root);
+                let Some(root) = self.tests_root_of(&path) else { continue };
+                let rel = self.tests_rel(&root, &path);
                 let specs: Vec<ProviderSpec> = self.tests_specs().into_iter().map(|(_, s)| s).filter(|s| s.scans(&root, &path)).collect();
                 let providers = specs.iter().map(|s| s.id.clone()).collect();
                 self.tests.seen.insert(id, Seen { path: path.clone(), root, rel, providers, scanned: None, changed: (edits, now), last_scan: None });
@@ -1166,13 +1403,16 @@ impl App {
             let (root, rel, providers) = (seen.root.clone(), seen.rel.clone(), seen.providers.clone());
             seen.scanned = Some(edits);
             seen.last_scan = Some(now);
-            let text = self.buffers.get(id).map(|ob| ob.buffer.text()).unwrap_or_default();
+            // Not copied when it's past what's scanned: a character is a
+            // byte at least.
+            let small = self.buffers.get(id).is_some_and(|ob| ob.buffer.len_chars() <= test_limits::MAX_SCAN_TEXT);
+            let text = if small { self.buffers.get(id).map(|ob| ob.buffer.text()).unwrap_or_default() } else { String::new() };
             let specs: Vec<ProviderSpec> = self.tests_specs().into_iter().map(|(_, s)| s).filter(|s| providers.contains(&s.id)).collect();
             for spec in specs {
                 self.tests_add_provider(&root, &spec);
             }
             self.tests_project(&root).model.set_unsaved(&rel, dirty);
-            if text.len() > test_limits::MAX_SCAN_TEXT {
+            if !small || text.len() > test_limits::MAX_SCAN_TEXT {
                 continue;
             }
             for provider in providers {
@@ -1195,11 +1435,17 @@ impl App {
         let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
         for root in roots {
             let open: HashSet<String> = self.tests.seen.values().filter(|s| s.root == root).map(|s| s.rel.clone()).collect();
+            #[cfg(test)]
+            let cap = self.tests.scan_cap.unwrap_or(SCAN_FILES);
+            #[cfg(not(test))]
+            let cap = SCAN_FILES;
             let project = self.tests.projects.get_mut(&root).expect("a project");
             if project.walk.is_none() {
                 let Some((provider, ext)) = project.walks.pop_front() else { continue };
                 let Some(spec) = project.providers.iter().find(|p| p.id == provider).cloned() else { continue };
-                project.walk = Some(Walk { provider, ext, files: walk_files(&root, spec.scan, open), out: false, batch: Vec::new(), scanned: 0, total: None });
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let files = walk_files(&root, spec.scan, open, cap, cancel.clone());
+                project.walk = Some(Walk { provider, ext, files, out: false, batch: Vec::new(), scanned: 0, total: None, cancel });
             }
             let walk = project.walk.as_mut().expect("a walk");
             if walk.out {
@@ -1213,21 +1459,25 @@ impl App {
                         self.tests.projects.get_mut(&root).expect("a project").walk = None;
                         continue;
                     }
+                    // Out before it's sent: an answer that comes at once
+                    // (a stopped extension's) finds it so.
+                    self.tests.projects.get_mut(&root).expect("a project").walk.as_mut().expect("a walk").out = true;
                     let call = Call::TestsScan { provider: provider.provider.to_string(), path: guest_path(&rel), text };
                     self.tests_send(&ext, call, CallFor::Scan { root: root.clone(), provider, path: rel, first: true });
-                    self.tests.projects.get_mut(&root).expect("a project").walk.as_mut().expect("a walk").out = true;
                 }
-                Some(Walked::Done { total }) => walk.total = Some(total),
+                Some(Walked::Done { total, open }) => walk.total = Some((total, open)),
                 None => {}
             }
             let project = self.tests.projects.get_mut(&root).expect("a project");
             let Some(walk) = project.walk.as_mut() else { continue };
-            if let (Some(total), false) = (walk.total, walk.out) {
-                let walk = project.walk.take().expect("a walk");
-                project.model.scan_files(&walk.provider, walk.batch);
-                project.scanned_of.insert(walk.provider.clone(), (walk.scanned, total));
-                if total > SCAN_FILES {
-                    let said = format!("tests: {} of {} files of {} scanned; the rest are found by its listing, or when opened", grouped(walk.scanned), grouped(total), walk.provider.provider);
+            if let (Some((total, open)), false) = (walk.total, walk.out) {
+                let mut walk = project.walk.take().expect("a walk");
+                project.model.scan_files(&walk.provider, std::mem::take(&mut walk.batch));
+                // Those open were scanned too, from their buffers.
+                let scanned = walk.scanned + open;
+                project.scanned_of.insert(walk.provider.clone(), (scanned, total));
+                if scanned < total {
+                    let said = format!("tests: {} of {} files of {} scanned; the rest are found by its listing, or when opened", grouped(scanned), grouped(total), walk.provider.provider);
                     self.note_code_output(&walk.ext, said);
                 }
             }
@@ -1253,11 +1503,11 @@ impl App {
                 self.tests_apply_event(tag, event);
                 moved = true;
             }
-            if self.tests_enabled() {
-                let roots: Vec<PathBuf> = self.tests.projects.keys().cloned().collect();
-                for root in roots {
-                    moved |= self.tests_drive(&root);
-                }
+            // Off, a run still open is driven to its end, and nothing more.
+            let enabled = self.tests_enabled();
+            let roots: Vec<PathBuf> = self.tests.projects.iter().filter(|(_, p)| enabled || p.run.is_some() || p.step.is_some()).map(|(r, _)| r.clone()).collect();
+            for root in roots {
+                moved |= self.tests_drive(&root);
             }
             if !moved && self.tests.replies.is_empty() && self.tests.events.is_empty() {
                 break;
@@ -1388,7 +1638,13 @@ impl App {
         let started: Result<TaskRunner, String> = (|| {
             let planned = planned.ok_or_else(|| "its plan isn't known".to_string())?;
             let ((program, args, dir), env) = planned.command.clone()?;
-            cwd = dir.unwrap_or_else(|| root.to_path_buf());
+            // Its folder canonicalized, as the root is, so its reports'
+            // relative paths come out the project's; the instance's own
+            // spelling of the project is another of its roots.
+            if let Some(raw) = self.code_instance_project(&provider.extension).flatten() {
+                self.tests_alias(root, &raw);
+            }
+            cwd = dir.map_or_else(|| root.to_path_buf(), |d| refactor::identity(&d));
             let (program, mut prefix, extra) = self.tests_program(&program);
             prefix.extend(args);
             let args = prefix;
@@ -1407,7 +1663,12 @@ impl App {
                 return Err("running tests isn't available on a remote project yet".into());
             }
             let mut command = std::process::Command::new(&program);
-            command.args(&args).current_dir(&cwd).envs(env).envs(extra);
+            command.args(&args).current_dir(&cwd);
+            // A `.cmd` shim's `cmd.exe` would look in the step's folder (the
+            // project) first for what it runs: not there.
+            #[cfg(windows)]
+            command.env("NoDefaultCurrentDirectoryInExePath", "1");
+            command.envs(env).envs(extra);
             let sink = self.tests_sink(tag);
             TaskRunner::spawn_command(command, sink).map_err(|e| format!("couldn't start {program}: {e}"))
         })();
@@ -1462,10 +1723,13 @@ impl App {
             Ok(reply) => reply,
             Err(why) => return self.tests_call_failed(ext, &root, &what, &why),
         };
+        let roots = self.tests_roots(&root);
         let Some(project) = self.tests.projects.get_mut(&root) else { return };
         match (what, reply) {
             (CallFor::Scan { provider, path, first, .. }, Reply::Scanned(found)) => {
-                let found: Vec<fenix_tests::Found> = found.into_iter().map(|f| model_found(f, &root, &root)).collect();
+                let roots = self.tests_roots(&root);
+                let Some(project) = self.tests.projects.get_mut(&root) else { return };
+                let found: Vec<fenix_tests::Found> = found.into_iter().map(|f| model_found(f, &roots, &root)).collect();
                 match project.walk.as_mut().filter(|w| first && w.provider == provider) {
                     Some(walk) => {
                         walk.out = false;
@@ -1494,12 +1758,12 @@ impl App {
                 let Some(step) = project.step.as_mut().filter(|s| s.tag == tag) else { return };
                 step.reading = false;
                 let (run, number) = (step.run, step.step);
-                let reports = model_reports(reports, &root, &step.cwd);
+                let reports = model_reports(reports, &roots, &step.cwd);
                 project.model.reports(run, number, reports);
             }
             (CallFor::StepEnded { run, step, end, tag, .. }, Reply::Reports(reports)) => {
                 let cwd = project.step.as_ref().filter(|s| Some(s.tag) == tag).map_or_else(|| root.clone(), |s| s.cwd.clone());
-                let reports = model_reports(reports, &root, &cwd);
+                let reports = model_reports(reports, &roots, &cwd);
                 project.model.step_ended(run, step, end, reports);
                 if tag.is_some() && project.step.as_ref().map(|s| s.tag) == tag {
                     project.step = None;
@@ -1558,7 +1822,7 @@ impl App {
                     for line in lines {
                         step.lines.push(line);
                     }
-                    if step.lines.bytes > BEHIND_BYTES {
+                    if step.lines.too_much() {
                         step.behind = true;
                         step.lines.clear();
                         fell_behind = true;
@@ -1633,13 +1897,7 @@ impl App {
             self.tests_output_line(root, &unsaved);
         }
         if self.config.bool_value("tests.keep_results") != Some(false) {
-            if let Some(file) = self.tests_results_file(root) {
-                let text = self.tests.projects[root].model.results_file();
-                let written = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| fenix_storage::write(&file, text.as_bytes()));
-                if let Err(e) = written {
-                    eprintln!("fenix: couldn't keep the test results in {}: {e}", file.display());
-                }
-            }
+            self.tests_write_results(root);
         }
     }
 
@@ -1716,7 +1974,7 @@ impl App {
             self.set_error("no file here, so no project's tests");
             return None;
         };
-        let Some(root) = Self::tests_root(&path) else {
+        let Some(root) = self.tests_root_of(&path) else {
             self.set_error("this file isn't in a project");
             return None;
         };
@@ -1724,7 +1982,7 @@ impl App {
             self.set_error("running tests isn't available on a remote project yet");
             return None;
         }
-        let rel = model_path(&path.to_string_lossy(), &root, &root);
+        let rel = self.tests_rel(&root, &path);
         self.tests_project(&root);
         Some((root, rel))
     }
@@ -1845,26 +2103,34 @@ impl App {
 /// file `patterns` name, but those open (scanned from their buffers),
 /// read, up to 2,000 and 1 MiB each, then how many there were. The
 /// channel holds a few at a time: no more is read than is scanned.
-fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>) -> mpsc::Receiver<Walked> {
+fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>, cap: usize, cancel: Arc<std::sync::atomic::AtomicBool>) -> mpsc::Receiver<Walked> {
     let (tx, rx) = mpsc::sync_channel(4);
     let root = root.to_path_buf();
     let spawned = std::thread::Builder::new().name("fenix-tests-walk".into()).spawn(move || {
         let mut walk = ignore::WalkBuilder::new(&root);
         walk.hidden(true).ignore(true).git_ignore(true).git_global(true).git_exclude(true).parents(true).require_git(false).sort_by_file_name(|a, b| a.cmp(b));
         walk.filter_entry(|entry| entry.file_name() != ".git");
-        let mut total = 0;
+        let (mut total, mut open_seen, mut sent) = (0, 0, 0);
         for entry in walk.build().flatten() {
+            // Let go (a restart, the explorer turned off): stops here,
+            // however much of the tree is left.
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             if !entry.file_type().is_some_and(|t| t.is_file()) || !fenix_extensions::manifest::file_matches(&patterns, entry.path(), Some(&root)) {
                 continue;
             }
             total += 1;
-            if total > SCAN_FILES {
-                continue;
-            }
             let rel = model_path(&entry.path().to_string_lossy(), &root, &root);
+            // An open file is scanned from its buffer, and counts as one.
             if open.contains(&rel) {
+                open_seen += 1;
                 continue;
             }
+            if sent + open_seen >= cap {
+                continue;
+            }
+            sent += 1;
             let small = entry.metadata().is_ok_and(|m| m.len() <= test_limits::MAX_SCAN_TEXT as u64);
             let Some(text) = small.then(|| std::fs::read(entry.path()).ok()).flatten() else { continue };
             let text = String::from_utf8_lossy(&text).into_owned();
@@ -1872,11 +2138,11 @@ fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>) -> mpsc
                 return;
             }
         }
-        let _ = tx.send(Walked::Done { total });
+        let _ = tx.send(Walked::Done { total, open: open_seen });
     });
     if spawned.is_err() {
         let (tx, rx) = mpsc::sync_channel(1);
-        let _ = tx.send(Walked::Done { total: 0 });
+        let _ = tx.send(Walked::Done { total: 0, open: 0 });
         return rx;
     }
     rx

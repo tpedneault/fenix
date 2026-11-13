@@ -23206,6 +23206,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.agents_shutdown();
         // Connections to remote machines ended, and what ran over them.
         self.remote_close_all();
+        // Test runs' trees killed, their results written.
+        self.tests_shutdown();
         self.checkpoint_session();
         self.save_window_layout();
     }

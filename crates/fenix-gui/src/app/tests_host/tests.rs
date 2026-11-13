@@ -29,7 +29,7 @@ fn a_providers_paths_are_the_projects_relative_ones_and_go_back_as_project_paths
     }
     assert_eq!(guest_path("src/lib.rs"), "/project/src/lib.rs");
     assert_eq!(guest_path(outside), outside);
-    let found = api_found(model_found(FoundTest { id: "t".into(), parent: None, label: "t".into(), kind: TestKind::Test, path: Some(full.to_string_lossy().into_owned()), line: Some(3), end_line: None, skip: None, template: false, data: Some("d".into()) }, root, root));
+    let found = api_found(model_found(FoundTest { id: "t".into(), parent: None, label: "t".into(), kind: TestKind::Test, path: Some(full.to_string_lossy().into_owned()), line: Some(3), end_line: None, skip: None, template: false, data: Some("d".into()) }, &[root.to_path_buf()], root));
     assert_eq!((found.path.as_deref(), found.data.as_deref(), found.kind), (Some("/project/src/lib.rs"), Some("d"), TestKind::Test), "given back as /project/<path>, whatever form it came in");
 }
 
@@ -310,6 +310,7 @@ fn a_file_is_scanned_its_tests_run_and_their_results_kept() {
     assert!(output.contains("\ncoloured\n") && !output.contains('\u{1b}'), "escape codes taken out: {output}");
     assert!(output.contains("1 passed, 1 failed, 0 errored, 1 skipped"), "{output}");
     let file = state.path().join(results_name(&p.root));
+    p.until("the results written", |_| std::fs::read_to_string(&file).is_ok_and(|t| t.contains("a.fake::fails")));
     let kept = std::fs::read_to_string(&file).expect("the results file");
     assert!(kept.contains("\"a.fake::fails\"") && kept.contains("\"extension\":\"test.provider\""), "{kept}");
     assert!(!p.app.extension_output_text().contains("error "), "{}", p.app.extension_output_text());
@@ -321,6 +322,7 @@ fn a_file_is_scanned_its_tests_run_and_their_results_kept() {
     q.app.wasm.installed = vec![guest(EXT)];
     q.app.tests.state_dir = Some(state.path().to_path_buf());
     q.scanned("a.fake::fails");
+    q.until("the results read", |q| q.tests().restoring.is_none());
     let node = q.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap();
     let node = q.model().node(node).unwrap();
     assert_eq!((node.state(), node.stale(), node.result().map(|r| r.restored)), (State::Failed, true, Some(true)), "restored, stale");
@@ -606,7 +608,7 @@ fn a_projects_first_scan_walks_it_through_its_ignores() {
     p.until("the walk", |p| p.has("sub/b.fake::two") && p.tests().walk.is_none() && p.tests().walks.is_empty());
     assert!(p.has("a.fake::one"));
     assert!(!p.has("target/c.fake::three") && !p.has(".hidden/d.fake::four"), "ignored, hidden");
-    assert_eq!(p.tests().scanned_of.get(&provider()), Some(&(1, 2)), "a.fake is open: scanned from its buffer");
+    assert_eq!(p.tests().scanned_of.get(&provider()), Some(&(2, 2)), "a.fake is open: scanned from its buffer, and counted");
 }
 
 /// Run on save (§8.4): a second after the last save, the saved file's
@@ -628,4 +630,199 @@ fn a_save_runs_the_saved_files_tests_a_second_later() {
     p.app.tests_tick(Instant::now() + Duration::from_secs(2));
     p.until("the run on save", |p| p.tests().ended_runs.len() == 2);
     assert!(!p.model().node(node).unwrap().stale());
+}
+
+// After the review of step 3.
+
+/// A step whose runner floods empty or short lines while its provider
+/// is slow falls behind by what the lines cost, not their text alone:
+/// 2,000,000 empty lines waiting used to count as nothing (M1).
+#[test]
+fn empty_lines_count_toward_falling_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = refactor::identity(dir.path());
+    let mut app = App::with_file(None);
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    let project = app.tests_project(&root);
+    // A `tests-read` out: nothing drains what waits.
+    project.step = Some(StepRun { tag: 7, run: RunId(1), provider: provider(), step: 0, cwd: root.clone(), runner: None, lines: Batch::default(), reading: true, ending: false, ended: None, failed: None, halt: None, behind: false });
+    let empty = || fenix_tasks::OutputLine { stream: OutputStream::Stdout, text: String::new(), cut: false };
+    for _ in 0..200 {
+        app.tests_apply_event(7, TaskEvent::Output((0..10_000).map(|_| empty()).collect()));
+    }
+    let step = app.tests.projects[&root].step.as_ref().unwrap();
+    assert!(step.behind, "{} lines waiting", step.lines.len());
+    assert_eq!(step.lines.len(), 0, "and given no more");
+    let mut batch = Batch::default();
+    for _ in 0..BEHIND_LINES + 1 {
+        batch.push(TestLine { text: String::new(), stderr: false, cut: false });
+    }
+    assert!(batch.too_much() && batch.bytes == 0);
+}
+
+/// An extension started again makes its first scans again: a file
+/// written since is found (M2).
+#[test]
+fn a_restarted_extension_scans_the_project_again() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n"), ("sub/b.fake", "# test two\n")], "a.fake", state.path());
+    p.until("the walk", |p| p.has("sub/b.fake::two") && p.tests().walk.is_none());
+    std::fs::write(p.root.join("sub/c.fake"), "# test three\n").unwrap();
+    p.app.restart_code_extension(EXT);
+    p.until("the second walk", |p| p.has("sub/c.fake::three"));
+}
+
+/// A switched-off extension isn't asked to scan, and nothing piles up
+/// for it as you type (S1).
+#[test]
+fn nothing_is_asked_of_an_extension_switched_off() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n")], "a.fake", state.path());
+    p.scanned("a.fake::one");
+    p.until("calm", |p| p.app.tests.calls.is_empty());
+    p.app.code_extensions_now(Vec::new());
+    let id = p.app.focused_buffer_id();
+    for i in 0..10 {
+        let ob = p.app.buffers.get_mut(id).unwrap();
+        let mut end = Cursor { char_idx: ob.buffer.len_chars(), sticky_col: 0 };
+        ob.buffer.insert_str(&mut end, &format!("# test more{i}\n"));
+        p.app.tests_tick(Instant::now() + Duration::from_secs(i + 1));
+    }
+    assert!(p.app.tests.calls.is_empty(), "{:?}", p.app.tests.calls);
+    assert!(p.app.tests.seen.values().all(|s| s.providers.is_empty()), "its open files forgot it");
+    let root = p.root.clone();
+    assert!(matches!(p.app.tests_reach(EXT, &root, true), Reach::No(_)), "and it isn't reached, whoever asks");
+}
+
+/// A project reached through a symlink: its files are its own, by the
+/// canonical root, from a buffer opened through the link (S2).
+#[cfg(unix)]
+#[test]
+fn a_project_reached_through_a_symlink_has_its_files() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n#! out PASS a.fake::one 1ms\n")], "a.fake", state.path());
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("link");
+    std::os::unix::fs::symlink(&p.root, &link).unwrap();
+    let id = p.app.buffers.open_path(&link.join("a.fake"));
+    p.app.open_buffer_in_focused_pane(id);
+    p.app.project_root = Some(link.clone());
+    p.scanned("a.fake::one");
+    assert!(p.app.tests.seen.values().all(|s| s.rel == "a.fake"), "{:?}", p.app.tests.seen.values().map(|s| &s.rel).collect::<Vec<_>>());
+    p.app.tests_run_file();
+    p.until("the run", Project::ended);
+    assert_eq!(p.state("a.fake::one"), State::Passed);
+    assert_eq!(model_path_in(&link.join("x/y.rs").to_string_lossy(), &p.app.tests_roots(&p.root), &p.root), "x/y.rs", "the link's spelling of a full path");
+}
+
+/// Fenix exits: a step's tree is killed before it returns, not left to
+/// a thread the exit outruns (S3).
+#[test]
+fn fenix_exiting_kills_a_steps_tree() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n#! child\n#! wait\n")], "a.fake", state.path());
+    p.scanned("a.fake::one");
+    p.app.tests_run_file();
+    let child = p.child();
+    p.app.tests_shutdown();
+    assert!(fenix_tasks::fake_runner::gone_within(child, Duration::from_millis(500)), "the child outlived Fenix's exit");
+}
+
+/// What runs without a key -- a listing on its own, a run on save -- runs
+/// only where `project_is_trusted` says, as a lens's program does: a
+/// project that names programs (`.fenix/tools.json`) nobody allowed, no;
+/// one that names none, yes (§12, and §16's Q9). A model is made with
+/// its listings shut, never open until the first tick (S4, S5).
+#[test]
+fn what_runs_without_a_key_runs_only_in_a_trusted_project() {
+    let state = tempfile::tempdir().unwrap();
+    for (names_programs, trusted) in [(true, false), (false, true)] {
+        let files: &[(&str, &str)] = if names_programs { &[("a.fake", "# test one\n"), (".fenix/tools.json", "{\"tasks\":{}}")] } else { &[("a.fake", "# test one\n")] };
+        let mut p = Project::new(files, "a.fake", state.path());
+        p.app.trust.enforced = true;
+        p.app.config.set_value("tests.on_save", Some(fenix_config::Value::Text("file".into())));
+        let root = p.root.clone();
+        // Made between ticks: no listing until it's looked at, then only
+        // where trusted.
+        p.app.tests_project(&root).model.page_opened();
+        let listing = p.app.tests_project(&root).model.next(0).is_some();
+        assert_eq!(listing, trusted, "a listing on its own, names programs: {names_programs}");
+        p.app.tests_file_saved(&root.join("a.fake"));
+        assert_eq!(p.tests().save_run.is_some(), trusted, "a run on save, names programs: {names_programs}");
+    }
+}
+
+/// Its trust is looked at once a while, not at every wake: a change is
+/// seen when a file of its `.fenix` is saved (S6).
+#[test]
+fn a_projects_trust_is_looked_at_once_a_while() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n")], "a.fake", state.path());
+    p.app.trust.enforced = true;
+    let root = p.root.clone();
+    p.app.tests_project(&root);
+    assert!(p.app.tests_trusted(&root));
+    std::fs::write(root.join(".fenix/tools.json"), "{\"tasks\":{}}").unwrap();
+    assert!(p.app.tests_trusted(&root), "kept: not read again at once");
+    p.app.tests_file_saved(&root.join(".fenix/tools.json"));
+    assert!(!p.app.tests_trusted(&root), "a save of its .fenix: read again");
+}
+
+/// The explorer turned off while a run goes: the run ends, stopped, its
+/// steps told, and nothing goes on at each wake (S7).
+#[test]
+fn turning_the_explorer_off_ends_its_run() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n#! wait\n")], "a.fake", state.path());
+    p.scanned("a.fake::one");
+    p.app.tests_run_file();
+    p.until("the step", Project::step_running);
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    p.until("the run's end", |p| p.ended() && p.tests().run.is_none() && p.tests().step.is_none());
+    assert!(matches!(&p.last().halted, Some(fenix_tests::Halt::Stopped(why)) if why.contains("turned off")));
+    assert!(p.app.tests.calls.is_empty());
+}
+
+/// The first scan's cap counts the files scanned, those open (from their
+/// buffers) among them; and a walk waiting on its thread asks to be
+/// woken (S8).
+#[test]
+fn a_first_scans_cap_counts_what_was_scanned() {
+    let state = tempfile::tempdir().unwrap();
+    let files: Vec<(String, String)> = (0..5).map(|i| (format!("sub/f{i}.fake"), format!("# test t{i}\n"))).collect();
+    let mut all: Vec<(&str, &str)> = files.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+    all.push(("a.fake", "# test one\n"));
+    let mut p = Project::new(&all, "a.fake", state.path());
+    p.app.tests.scan_cap = Some(3);
+    p.until("the walk", |p| p.app.tests.projects.get(&p.root).is_some_and(|t| t.scanned_of.contains_key(&provider())));
+    assert_eq!(p.tests().scanned_of[&provider()], (3, 6), "a.fake and two others, of six");
+    assert!(p.app.extension_output_text().contains("3 of 6 files of provider scanned"));
+}
+
+/// A walk let go stops its thread mid-tree (S8).
+#[test]
+fn a_walk_let_go_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..50 {
+        std::fs::write(dir.path().join(format!("f{i}.fake")), "").unwrap();
+    }
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let rx = walk_files(dir.path(), vec!["*.fake".into()], HashSet::new(), 2_000, cancel);
+    let mut got = Vec::new();
+    while let Ok(walked) = rx.recv_timeout(Duration::from_secs(10)) {
+        got.push(matches!(walked, Walked::Done { .. }));
+    }
+    assert!(got.is_empty(), "nothing sent, not even its end: {got:?}");
+}
+
+/// A walk waiting on its thread has the tick wake for it (S8).
+#[test]
+fn a_walk_waiting_wakes_the_loop() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n"), ("b.fake", "# test two\n")], "a.fake", state.path());
+    let root = p.root.clone();
+    let spec = p.app.tests_specs().into_iter().next().unwrap().1;
+    p.app.tests_project(&root).walks.push_back((spec.id, EXT.into()));
+    let wake = p.app.tests_tick(Instant::now());
+    assert!(wake.is_some_and(|w| w <= Instant::now() + WALK_POLL), "{wake:?}");
 }

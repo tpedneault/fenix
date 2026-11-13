@@ -1597,6 +1597,7 @@ they line up with Fenix's steps.
 | Q6 | Readers in Fenix for standard formats (JUnit XML, TAP, `go test -json`) | (a) no; (b) later, as a new export a plan can name; (c) in 1.6 | **(b) at most, later**: a pack's reader is short, and every runner's quirks are better in the pack. A ctest or Gradle provider might want JUnit; it can read it a line at a time, as a step of its own that prints the file, without parsing it whole in one call. |
 | Q7 | Fenix's built-in `SPC p r` finder once the four packs ship | (a) keep as the fallback; (b) retire it | **(a)**: it's small, and it serves someone without the pack. |
 | Q8 | Does a run save the files it runs first? (F18) | (a) no, as a task and `SPC p r` don't; the head says which were unsaved, and a test the run didn't see goes back to what it was (§8.4); (b) `tests.save_before_run`, `ask`, `always` or `never`, as `agents.save_before_prompt` is (`schema.rs:492`); (c) always save the selection's files | **(a)** for 1.6: it's what every door does today, and `editor.auto_save` (`schema.rs:422`) already serves who wants saving. (b) is a setting and no API, so it can come in a minor if the head's line proves to be read too late. |
+| Q9 | What "trusted" means for what runs without a key (§12): automatic listings and run on save run where `project_is_trusted` allows, which is `Verdict::Nothing` (a project naming no programs, a fresh clone) as well as `Trusted`, as for the lens's programs (`app/code_lens.rs:648-655`). A save in a never-trusted repository can then run `cargo test` or `pytest` (`build.rs`, `conftest.py`) with `tests.on_save` on | (a) as now: `Nothing` counts, as for lenses; (b) only `Trusted`: a project's own "may run tests on its own" decision (`SPC p y`), asked once; (c) (b) for run on save, (a) for listings | To be ruled before step 8 ("trust gating checked"). Step 3 keeps (a), pinned by `what_runs_without_a_key_runs_only_in_a_trusted_project`; (b) changes one function (`tests_trusted`). Raised by the review of step 3, S4 |
 
 ## 17. Risks
 
@@ -2086,3 +2087,70 @@ every export.
 `request_build` are untouched, but `tests-launch` has no `CallFor` yet
 and a `Reply::Launched` would be taken as a failed call; the run's end
 (`tests_run_ended`) is where the notification and `last_task` go.
+
+**After the review of step 3.** Fixed, each with a test:
+
+- *Falling behind* (M1) counts what the lines waiting cost -- their text
+  and each line's own size -- and at most 1,024 batches of them, so a
+  runner's empty lines aren't free (`empty_lines_count_toward_falling_behind`).
+- *A start is a start* (M2): an extension that starts again makes its
+  first scans again (`a_restarted_extension_scans_the_project_again`).
+- *Switched off* (S1): an extension not installed is never asked, and the
+  open files forget its providers (`nothing_is_asked_of_an_extension_switched_off`).
+- *One project, several spellings* (S2): roots are canonicalized once
+  each (cached, no file system call per frame), every other spelling met
+  -- the one a file was opened by, the instance's `/project` -- kept as an
+  alias, a path under any of them the project's; a step's folder is
+  canonicalized as it starts (`a_project_reached_through_a_symlink_has_its_files`,
+  Unix).
+- *Exit* (S3): `exiting` cancels every step and waits up to two seconds
+  for its tree to be killed and the results written; dropped alone, a
+  `TaskRunner` only asks its thread, and on Linux Fenix was gone first
+  (`fenix_exiting_kills_a_steps_tree`). So §6.1's "what the runner
+  started dies with it" holds when Fenix exits too.
+- *Fail closed* (S5): a model is made with its automatic listings shut,
+  then set from trust at once (`what_runs_without_a_key_runs_only_in_a_trusted_project`,
+  which also pins today's trust gating, Q9).
+- *The UI thread* (S6): trust looked at once in two seconds, or when a
+  file of the project's `.fenix` is saved (`a_projects_trust_is_looked_at_once_a_while`);
+  a buffer over 1 MiB of characters isn't copied for a scan; the
+  results file read on a thread when the model is made, applied when it
+  comes (a run's end waits for it before writing), and written by one
+  writer thread in turn.
+- *Off mid-run* (S7): the run is stopped once and driven to its end, its
+  steps told `stopped`; then nothing more (`turning_the_explorer_off_ends_its_run`).
+- *First scans* (S8): the cap counts the files scanned, those open
+  (scanned from their buffers) among them (`a_first_scans_cap_counts_what_was_scanned`);
+  a walk waiting on its thread has the tick wake within 20 ms
+  (`a_walk_waiting_wakes_the_loop`); a walk let go stops its thread
+  mid-tree (`a_walk_let_go_stops`); a walk's scan is marked out before
+  it's sent.
+- On Windows a step runs with `NoDefaultCurrentDirectoryInExePath=1`,
+  so a `.cmd` shim's `cmd.exe` doesn't look in the project first for
+  what it runs (one line in the step's spawn).
+
+Left for the step that owns each, from the same review:
+
+- **Step 4**: *Test output*'s `Enter` resolves against the project, not
+  the step's folder (a step in `/data` or a sub-crate jumps wrong);
+  `output_lines` counts a cut line's pieces as lines, so trimming past
+  16 MiB drops more than it counted (cosmetic); `tests_replace`,
+  `tests_list` and `tests_page_opened` need the `tests.enabled` gate when
+  the page calls them; `list-after` gets its app test with the page's
+  listing.
+- **Step 5**: `/project/../x.rs` is held "as given", a full path naming a
+  `/project` folder: treat it as no place, never open it; a verbatim
+  path (`\\?\C:\...`) is normalized after the project test, not before;
+  a symlink inside the project to a file outside it counts as the
+  project's (canonicalize before marks or a jump); `set_unsaved(rel,
+  true)` isn't cleared when a dirty buffer is closed unsaved; a file
+  changed on disk and not open isn't rescanned (a watch, or the disk
+  poll, before the gutter relies on it).
+- **Step 6**: `Reply::Launched` needs its `CallFor::Launch`; today it
+  would be taken as a failed call and stop the provider.
+- **Step 8**: the timeout counts by `SystemTime`, so a clock step can end
+  a run early or late (`Instant` for the timeout; the model's stamps can
+  stay wall time); an open file seen before a provider's extension was
+  installed isn't scanned until reopened; `ids_sorted_by_path` each wake
+  (cheap today); Q9, what "trusted" means; `C:foo` (drive-relative) reads
+  as `C:/foo`.
