@@ -51,6 +51,9 @@ pub enum LspEvent {
 /// advertised client capabilities and `initializationOptions`).
 pub struct LspClient {
     stdin: Mutex<Box<dyn Write + Send>>,
+    /// Whether the queue behind `stdin` has failed: a message isn't made
+    /// for a server that's gone or too far behind (none: it can't fail).
+    health: Option<fenix_rpc::QueueHealth>,
     next_id: AtomicI64,
     /// The server's process, and everything it started; none for one
     /// reached another way (`connect`): an extension's, in Fenix's own
@@ -89,6 +92,7 @@ impl LspClient {
         let stderr = tree.take_stderr().expect("stderr was requested as piped");
         // Off the caller's thread: see `QueueWriter`.
         let stdin = fenix_rpc::QueueWriter::spawn("fenix-lsp-writer", stdin)?;
+        let health = Some(stdin.health());
 
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_loop(stdout, tx));
@@ -103,7 +107,7 @@ impl LspClient {
         let keeping = Arc::clone(&said);
         thread::spawn(move || drain_keeping_tail(stderr, &keeping));
 
-        Ok((LspClient { stdin: Mutex::new(Box::new(stdin)), next_id: AtomicI64::new(1), tree: Some(tree), stderr: said }, rx))
+        Ok((LspClient { stdin: Mutex::new(Box::new(stdin)), health, next_id: AtomicI64::new(1), tree: Some(tree), stderr: said }, rx))
     }
 
     /// A server that isn't a process: it reads what this client writes to
@@ -111,11 +115,14 @@ impl LspClient {
     pub fn connect(from_server: impl Read + Send + 'static, to_server: impl Write + Send + 'static) -> (LspClient, Receiver<LspEvent>) {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_loop(from_server, tx));
-        let to_server: Box<dyn Write + Send> = match fenix_rpc::QueueWriter::spawn("fenix-lsp-writer", to_server) {
-            Ok(queue) => Box::new(queue),
-            Err(_) => Box::new(std::io::sink()),
+        let (to_server, health): (Box<dyn Write + Send>, _) = match fenix_rpc::QueueWriter::spawn("fenix-lsp-writer", to_server) {
+            Ok(queue) => {
+                let health = Some(queue.health());
+                (Box::new(queue), health)
+            }
+            Err(_) => (Box::new(std::io::sink()), None),
         };
-        (LspClient { stdin: Mutex::new(to_server), next_id: AtomicI64::new(1), tree: None, stderr: Arc::default() }, rx)
+        (LspClient { stdin: Mutex::new(to_server), health, next_id: AtomicI64::new(1), tree: None, stderr: Arc::default() }, rx)
     }
 
     /// The last lines the server wrote to stderr, trimmed: what a server
@@ -156,6 +163,11 @@ impl LspClient {
     }
 
     fn write(&self, message: &RawMessage) -> std::io::Result<()> {
+        // Not made for a server no write would reach: a document's whole
+        // text, serialized on the UI thread, for nothing.
+        if self.health.as_ref().is_some_and(fenix_rpc::QueueHealth::failed) {
+            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the language server has gone, or stopped reading"));
+        }
         let body = serde_json::to_vec(message).expect("RawMessage always serializes");
         let mut stdin = self.stdin.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         fenix_rpc::write_message(&mut *stdin, &body)
@@ -330,13 +342,42 @@ mod tests {
     #[test]
     fn a_server_that_stopped_reading_doesnt_hold_the_caller() {
         let (client, _rx) = LspClient::spawn_command(a_server_behind_a_shell_that_reads_nothing()).unwrap();
-        // Well past any pipe's buffer.
-        let text = "x".repeat(4 * 1024 * 1024);
+        // Past any pipe's buffer (64 KiB by default on Linux, a few KiB on
+        // Windows; 1 MiB at most where raised), and no more: what's proved
+        // is that the caller isn't held, not how fast 16 MiB serializes in
+        // an unoptimized build.
+        let text = "x".repeat(512 * 1024);
         within(Duration::from_secs(5), move || {
             for _ in 0..4 {
                 let _ = client.write(&RawMessage::notification("textDocument/didChange", Value::String(text.clone())));
             }
         });
+    }
+
+    /// Once the queue has failed (its server gone), a write says so without
+    /// making the message: nothing is serialized for a server no write
+    /// reaches.
+    #[test]
+    fn a_write_to_a_server_thats_gone_fails_without_being_made() {
+        struct Gone;
+        impl Write for Gone {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (client, _rx) = LspClient::connect(std::io::empty(), Gone);
+        let started = std::time::Instant::now();
+        // The first goes on the queue; the queue's thread finds the peer gone.
+        while client.write(&RawMessage::notification("initialized", Value::Null)).is_ok() {
+            assert!(started.elapsed() < Duration::from_secs(30), "the queue never failed");
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(client.health.as_ref().is_some_and(fenix_rpc::QueueHealth::failed));
+        let err = client.write(&RawMessage::notification("textDocument/didChange", Value::Null)).unwrap_err();
+        assert_eq!(err.to_string(), "the language server has gone, or stopped reading");
     }
 
     /// Closing a server must not wait on what it started: the pipes stay

@@ -351,6 +351,24 @@ impl QueueWriter {
     pub fn drain(&self) -> QueueDrain {
         QueueDrain(Arc::clone(&self.queued))
     }
+
+    /// What says whether the queue has failed (its peer gone, or too far
+    /// behind), kept apart from the writer: a caller can skip making a
+    /// message no write would take.
+    pub fn health(&self) -> QueueHealth {
+        QueueHealth(Arc::clone(&self.failed))
+    }
+}
+
+/// See `QueueWriter::health`.
+#[derive(Clone)]
+pub struct QueueHealth(Arc<AtomicBool>);
+
+impl QueueHealth {
+    /// Whether every write fails from now on.
+    pub fn failed(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
 }
 
 /// See `QueueWriter::drain`.
