@@ -50,10 +50,7 @@ impl App {
             self.agents_pick_command();
             return true;
         }
-        if keypress == KeyPress::char('v').with_ctrl() && self.agents_paste_image() {
-            return true;
-        }
-        false
+        keypress == KeyPress::char('v').with_ctrl() && self.agents_paste_image()
     }
 
     /// The prompt's text.
