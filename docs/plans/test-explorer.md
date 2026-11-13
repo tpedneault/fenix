@@ -2303,3 +2303,128 @@ jump (`tests_go_to`) through the same normalising of a provider's path
 notification's *Show the failures* is `tests.open`, and the run's end
 (`tests_run_ended`) is still where the notification and `last_task` go.
 
+
+### Step 5, in the file
+
+**Where it is.** `crates/fenix-gui/src/app/tests_host/file.rs`: the
+gutter's test column (`tests_column`, `tests_cells`), a click on a mark
+(`tests_mark_click`), the right click's items (`tests_test_here`,
+`tests_show_here`), the results after a test's line
+(`tests_sync_inline`) and failures as problems (`tests_sync_problems`),
+both worked out in `tests_in_files`, which `tests_views_due` calls each
+wake with the projects whose model changed. Its hooks elsewhere:
+`gutter_chars` gains the cell and `push_gutter` draws it
+(`content_spans_decorated`, `rows.rs`' `row_content_spans`, each asking
+for the marks of the lines it draws); the click beside the fold
+marker's in `handle_click_at_inner`; a file read again from disk marked
+stale; two `MenuAction`s in `mouse.rs`; `TestsPage::show`; the three
+settings in `fenix-config` (`tests.problems`, `tests.inline`,
+`tests.gutter`, as §13 has them) and `docs/CONFIGURATION.md`;
+`Model::is_unsaved` in `fenix-tests`, a read of what the host said, for
+the test of a closed buffer. `TestsHost::by_path` keeps each open file's
+project and path there as its buffer is first seen, so nothing is worked
+out from a path as a frame is drawn.
+
+**The rules, where, and their tests** (all in `tests_host/tests.rs`):
+
+| Rule | Where | Test |
+|---|---|---|
+| One more cell, left of the numbers, in a file a provider found tests in; none in a file without; Git bar and breakpoints where they were | `tests_column`, `gutter_chars`, `push_gutter` | `the_test_column_is_one_cell_left_of_the_numbers_in_every_combination` (96 combinations: numbers absolute, relative, off; folds on, off; blame on, off; a file with tests, without, the explorer off, `tests.gutter` off; a breakpoint on the mark's line or not): the width, the cell's place, the numbers' width and value, the text's first column, and the hits |
+| The worst state's glyph in its colour, dimmed when stale | `tests_cells` (the model's `marks` for the lines drawn) | `a_marks_state_colour_and_the_right_clicks_items`; the end-to-end test after a save |
+| A click on a mark runs that test or group | `tests_mark_click`, `tests_run_node` | the combinations (the selection asked is the node's), and the end-to-end test (it runs, through the guest and `fake-test-runner`) |
+| The right click adds *Run test* and *Show in Tests* beside *Toggle breakpoint* | `text_menu_items`, `MenuAction::RunTest`, `ShowTest` | `a_marks_state_colour_and_the_right_clicks_items` (on a test's line only, right after *Toggle breakpoint*, no *Debug*; *Show in Tests* focuses the test on the page) |
+| After a test's first line, a failure's ` ✗ message` cut at 48 characters, in bad; with `all` a passed one's ` ✓ 3.0 ms`, muted | `tests_sync_inline` (decorations of Fenix's own, `fenix.tests`) | the end-to-end test: the cut, cleaned message at its line; nothing for a pass under `failed`; both times under `all` |
+| Failures as problems under `fenix:#tests` for the project, at `at`, else the test's line; source the runner, code the label; an error | `tests_sync_problems` | the end-to-end test: beside an extension's `<ext>:#problems` for the same file, each set again without touching the other; the problems' list (`code.problems`) has it first and goes to its line |
+| Cleared when the test runs again, when its file is saved, when it's gone, when `tests.problems` is off | the model's `problems()` (Decisions 19), published where they differ | the end-to-end test: a run that passes clears it, the extension's stays; a save clears it |
+| Stale: a save; a result from before a restart (Q4: kept, shown stale) | the model; the marks and the results after the lines muted, not hidden | the end-to-end test: after an edit (not stale, moved with the scan), after a save (stale, dimmed, the problem gone, the result after the line muted) |
+| With `tests.enabled` off: no column, no width, no marks, no results after the lines, no problems, no menu items, no click | `tests_file_of` (one look at an empty map or the setting), `tests_in_files_off` | `with_the_explorer_off_the_file_shows_nothing_of_it` |
+| A frame costs the lines it draws | `marks` for the lines drawn; the rest at most ten times a second | `a_frames_cost_with_5000_tests_in_the_file_is_the_lines_it_draws` |
+
+**Measured** (debug build, Linux; the test prints it): 10,000 tests in
+the project, 5,000 in the open file, a fifth of them failed. Sixty rows
+of the file's text with its gutter, 3.0 ms at the file's start and 3.2 ms
+at its end, 3.2 ms with the explorer off: the column and its marks cost
+nothing that shows beside the rows themselves. `test_at` at a cursor
+move, 1.1 ms (§19's linear pass, over the tests that start above the
+line). The wake after the run (problems for 1,000 failures, the results
+after the lines in view), 16 ms, once.
+
+**Where the plan was silent, or read so:**
+
+- **The column needs line numbers**, as the fold column does: it's one
+  more cell of theirs. With `editor.line_numbers` off there's none; the
+  results after the lines and the problems still say what failed.
+- **Where the cell is**: the gutter's first after the blame, so left of
+  the numbers, the numbers keeping their width. The debugger's square
+  and stop bar are drawn at the gutter's left edge (`text::PAD_LEFT`),
+  over that cell when there's no blame before it: on such a line the
+  breakpoint wins (§17's fallback, for that line only), the mark isn't
+  drawn and a click there isn't a run. With the blame shown, both are.
+- **When the column comes**: when the model has a test with a line in
+  the file -- from the first frame for a file the project's first scan
+  read before it was opened, a few milliseconds after the first frame
+  for one opened before its scan's answer. §9.1's "before the file is
+  first drawn" holds for the first, not always for the second.
+- **A problem's colour on the line number** now goes on the number: the
+  cell after the blame and the test's mark. It went on the row's first
+  cell, which with the blame shown was the blame's.
+- **The results after the lines** are one a line: the worst of what
+  starts there, as the gutter's mark, and only for a test or case with a
+  result of its own. An errored one says `!`, its glyph in the gutter,
+  where §9.2 wrote `✗` for both. The message is cleaned as the page's
+  are (`tests_page::clean`) and cut at 48 characters, `…` the 48th; an
+  empty one says `failed` or `errored`. A test queued or running says
+  nothing until it ends. A stale result stays, muted, as its mark does
+  (Q4); its problem is gone.
+- **Which lines get them**: those a pane shows and a hundred around them
+  (the last frame's, else each pane's scroll), worked out again when the
+  model changes, a setting changes, a file is opened, or a pane moves past
+  them -- so 5,000 tests in a file never mean 5,000 decorations. They move
+  with an edit at once (decorations' anchors) and are placed again at the
+  file's next scan.
+- **Problems' places**: `at` when it's a file of the project (a path the
+  model holds relative), else the test's own line; one the model holds
+  as given because it climbed out of the project (`/project/../x`) is no
+  place, so the test's line; a test whose own file is such a path has no
+  problem. Columns in UTF-16 units from the open buffer's line, the range
+  to the line's end; for a file not open, one character, published again
+  when it's opened. The message is cleaned, not cut. Keyed by the file's
+  canonical path, as the language servers' are, so a symlink inside the
+  project to a file outside it is that file (step 3's review, for step
+  5); a jump (`Enter` on the page, `tests_go_to`) opens `root/<path>`,
+  whatever it resolves to, through the same `place_path`.
+- **`\\?\` paths** (step 3's review): `model_path` takes a verbatim
+  prefix off (`\\?\C:\`, `\\?\UNC\server\`) before it looks for the
+  project, so a provider giving one is held as the project's relative
+  path.
+- **An edit and staleness**: an unsaved edit doesn't make a result stale
+  (the runner reads the file as saved, §8.4); the marks move with the
+  buffer's next scan, half a second after typing pauses. A problem at a
+  run's `at` stays at the line the run said until the save clears it. A
+  file changed on disk and read again by the disk poll is stale as after
+  a save, without a run on save (`tests_file_changed_on_disk`); a file
+  not open isn't rescanned (step 3's note), which the gutter doesn't
+  need: it only marks open files.
+- **A dirty buffer closed unsaved** clears its file's unsaved edits
+  (step 3's review), unless another buffer on the file has edits; a
+  buffer renamed forgets its old name's.
+- ***Show in Tests*** opens the tests page in the focused pane, as `SPC T
+  T` does, on the test, its groups opened; when the tab or the filter
+  hides it, the page goes back to All with no filter.
+- **The menu's keys** are `tests.run_here`'s and `tests.open`'s.
+
+**Tested only as text and numbers.** No window opens where this was
+built. The gutter was read as the rows' text and colours, its hits as
+cells (`tests_mark_click` at a column, as the click handler computes
+it from the pointer), the results after the lines as decorations,
+problems as the diagnostics kept and the problems' list's rows. That
+the breakpoint's square sits over the column's cell, and how the glyphs
+look in the gutter's font beside the numbers, is from reading the
+drawing code (`x = PAD_LEFT`), not seen; how the column, a breakpoint
+and a fold marker look together is for the nightly.
+
+**For the steps after**: step 6 adds *Debug test* after *Run test*
+(`MenuAction`, from `tests_test_here`, which gives the project and the
+node) and `SPC T d`; step 7's lenses can take a file's tests from
+`model.in_file` as the marks do, and the `fenix:#tests` problems are
+what `test_failures` can read back.
