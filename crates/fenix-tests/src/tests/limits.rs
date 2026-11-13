@@ -29,7 +29,85 @@ fn a_cut_never_splits_a_character() {
     let s = "é".repeat(600);
     assert_eq!(cut_start(&s, 1023).len(), 1022);
     assert_eq!(cut_end(&s, 1023).len(), 1022);
-    assert_eq!(cut_id(&format!("a{s}")).len(), 1023);
+}
+
+/// The test vectors of the id cut ("Review of steps 1 and 2", finding 9;
+/// `WRITING_EXTENSIONS.md`, "Test providers"): a pack's kit that cuts
+/// ids itself must give these same strings. `fenix_wasm::test_limits`
+/// cuts with the same function, and its test holds it to the same
+/// vectors.
+pub(crate) const ID_CUT_VECTORS: &[(&str, &str)] = &[
+    // (what the id is, the 17 bytes a cut one ends with, or "" when it isn't cut)
+    ("a × 1,023", ""),
+    ("a × 1,024", ""),
+    ("a × 1,025", "#6a424025ce84288c"),
+    ("é × 600 (1,200 bytes: the prefix cut back to 1,006)", "#0e3ffe7c6421a045"),
+    ("a then 😀 × 300 (1,201 bytes: the prefix cut back to 1,005)", "#2056db1222d21dec"),
+    ("tests/test_x.py::test_cases[ then a × 1,100 then -one]", "#589a673077e12368"),
+    ("tests/test_x.py::test_cases[ then a × 1,100 then -two]", "#a9074c8a277a3a36"),
+];
+
+pub(crate) fn id_cut_inputs() -> Vec<String> {
+    let shared = format!("tests/test_x.py::test_cases[{}", "a".repeat(1_100));
+    vec!["a".repeat(1_023), "a".repeat(1_024), "a".repeat(1_025), "é".repeat(600), format!("a{}", "😀".repeat(300)), format!("{shared}-one]"), format!("{shared}-two]")]
+}
+
+/// §4, §6.5, finding 9: an id over 1 KiB is its first 1,007 bytes or
+/// fewer, to a character's start, then `#` and the FNV-1a 64-bit hash of
+/// the whole id in 16 lowercase hex digits; at most 1,024 is as it was.
+#[test]
+fn a_long_id_is_cut_to_a_prefix_and_a_hash_of_the_whole() {
+    assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+    assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+    let inputs = id_cut_inputs();
+    let lens = [1_023, 1_024, 1_024, 1_023, 1_022, 1_024, 1_024];
+    for ((id, (what, end)), len) in inputs.iter().zip(ID_CUT_VECTORS).zip(lens) {
+        let cut = cut_id(id);
+        assert_eq!(cut.len(), len, "{what}");
+        if end.is_empty() {
+            assert_eq!(cut, id.as_str(), "{what}: kept as it is");
+            assert!(!is_cut_id(&cut), "{what}");
+        } else {
+            assert_eq!(&cut[cut.len() - 17..], *end, "{what}");
+            assert_eq!(&cut[..cut.len() - 17], &id[..cut.len() - 17], "{what}: its start");
+            assert!(is_cut_id(&cut), "{what}");
+            assert_eq!(cut_id(&cut), cut, "{what}: cutting it again changes nothing");
+        }
+    }
+}
+
+/// Finding 9: two ids that share their first 1,100 bytes stay two tests,
+/// each with its own `data`.
+#[test]
+fn two_long_ids_that_share_a_kib_stay_two() {
+    let inputs = id_cut_inputs();
+    let (a, b) = (&inputs[5], &inputs[6]);
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    let mut fa = Found::new(a.clone(), None, "one", Kind::Test).at("tests/test_x.py", 1, Some(2));
+    fa.data = Some("one".into());
+    let mut fb = Found::new(b.clone(), None, "two", Kind::Test).at("tests/test_x.py", 5, Some(6));
+    fb.data = Some("two".into());
+    m.scan(PY, "tests/test_x.py", vec![fa, fb]);
+    assert_ne!(id(&m, PY, a), id(&m, PY, b));
+    assert_eq!(m.summary().counts.tests(), 2);
+    assert_eq!(m.node(id(&m, PY, b)).unwrap().found().data.as_deref(), Some("two"));
+}
+
+/// §6.5, Decisions 26: a test's `data` over 4 KiB isn't kept -- not
+/// cut, which wouldn't give it back "as it was" -- and that's said once.
+#[test]
+fn data_over_4_kib_isnt_kept_rather_than_cut() {
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    let mut f = Found::new("t", None, "t", Kind::Test);
+    f.data = Some("d".repeat(DATA_BYTES + 1));
+    let mut g = Found::new("u", None, "u", Kind::Test);
+    g.data = Some("d".repeat(DATA_BYTES));
+    m.scan(PY, "tests/test_x.py", vec![f, g]);
+    assert_eq!(m.node(id(&m, PY, "t")).unwrap().found().data, None);
+    assert_eq!(m.node(id(&m, PY, "u")).unwrap().found().data.as_ref().map(String::len), Some(DATA_BYTES), "at its limit, whole");
+    assert!(m.take_notices().iter().any(|n| n.text == "a test's data over 4 KiB wasn't kept"));
 }
 
 /// §6.5: a label over 256 characters, a path over 4 KiB, a scan's answer

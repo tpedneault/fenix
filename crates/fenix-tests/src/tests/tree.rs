@@ -8,7 +8,7 @@ fn labels(m: &Model, ids: &[NodeId]) -> Vec<String> {
     ids.iter().map(|&n| m.node(n).unwrap().found().label.clone()).collect()
 }
 
-fn listing(m: &mut Model, provider: &str, found: Vec<Found>, end: StepEnd) {
+fn listing(m: &mut Model, provider: &ProviderId, found: Vec<Found>, end: StepEnd) {
     m.list(Some(provider));
     let mut found = Some(found);
     drive(m, |_, _| Ok(plan(&[("list", &[])])), |_, _, _| (found.take().unwrap_or_default().into_iter().map(Report::Found).collect(), end.clone()));
@@ -227,15 +227,15 @@ fn parents_in_a_loop_put_a_node_at_the_top() {
 #[test]
 fn repeated_names_are_tests_while_their_ids_differ() {
     let mut m = Model::new();
-    m.add_provider("web", "vitest");
+    m.add_provider(WEB, "vitest");
     let file = Found::new("src/orbit.test.js", None, "src/orbit.test.js", Kind::File);
     let a = Found::new("src/orbit.test.js > geo > adds", Some("src/orbit.test.js"), "adds", Kind::Test).at("src/orbit.test.js", 3, None);
     let b = Found::new("src/orbit.test.js > math > adds", Some("src/orbit.test.js"), "adds", Kind::Test).at("src/orbit.test.js", 9, None);
     let twice = Found::new("src/orbit.test.js > math > adds", Some("src/orbit.test.js"), "adds", Kind::Test).at("src/orbit.test.js", 12, None);
-    m.scan("web", "src/orbit.test.js", vec![file, a, b, twice]);
-    let file = m.node(id(&m, "web", "src/orbit.test.js")).unwrap();
+    m.scan(WEB, "src/orbit.test.js", vec![file, a, b, twice]);
+    let file = m.node(id(&m, WEB, "src/orbit.test.js")).unwrap();
     assert_eq!(file.children().len(), 2);
-    assert_eq!(m.node(id(&m, "web", "src/orbit.test.js > math > adds")).unwrap().found().line, Some(12));
+    assert_eq!(m.node(id(&m, WEB, "src/orbit.test.js > math > adds")).unwrap().found().line, Some(12));
 }
 
 /// §4 "Two providers in one file": both are kept, each under its own
@@ -243,9 +243,9 @@ fn repeated_names_are_tests_while_their_ids_differ() {
 #[test]
 fn two_providers_in_one_file_never_share_a_node() {
     let mut m = orbit();
-    m.add_provider("rust.nextest", "cargo nextest");
-    m.scan("rust.nextest", "src/lib.rs", lib_rs());
-    assert_ne!(id(&m, RUST, "orbit/lib tests::adds"), id(&m, "rust.nextest", "orbit/lib tests::adds"));
+    m.add_provider(NEXTEST, "cargo nextest");
+    m.scan(NEXTEST, "src/lib.rs", lib_rs());
+    assert_ne!(id(&m, RUST, "orbit/lib tests::adds"), id(&m, NEXTEST, "orbit/lib tests::adds"));
     assert_eq!(m.providers().len(), 2);
 }
 
@@ -302,4 +302,37 @@ fn a_provider_with_several_roots_shows_them_as_groups() {
     m.scan(RUST, "tests/it.rs", vec![group(IT, "orbit (test it)"), Found::new("orbit/it adds_up", Some(IT), "adds_up", Kind::Test).at("tests/it.rs", 3, Some(6))]);
     let rust = m.providers()[0].provider;
     assert_eq!(labels(&m, m.roots(rust)), ["orbit (lib)", "orbit (test it)"]);
+}
+
+/// "Review of steps 1 and 2", finding 8 (§4 "What's dropped"; Decisions
+/// 29): a test that leaves every source -- cut, then pasted back -- keeps
+/// its result, shown stale, and in the results file meanwhile.
+#[test]
+fn a_test_that_leaves_every_source_and_comes_back_keeps_its_result() {
+    let mut m = orbit();
+    run(&mut m, Selection::All, plan(&[("all", &[])]), vec![ended("orbit/lib tests::adds", Outcome::Failed)], StepEnd::Exited(Some(101)));
+    let mut cut = lib_rs();
+    cut.retain(|f| f.id != "orbit/lib tests::adds");
+    m.scan(RUST, "src/lib.rs", cut);
+    assert!(!has(&m, RUST, "orbit/lib tests::adds"));
+    assert!(m.results_file().contains("orbit/lib tests::adds"), "kept meanwhile");
+    m.scan(RUST, "src/lib.rs", lib_rs());
+    let node = m.node(id(&m, RUST, "orbit/lib tests::adds")).unwrap();
+    assert_eq!((node.state(), node.stale()), (State::Failed, true));
+}
+
+/// "Review of steps 1 and 2", Step 3 items (§4 "A `found` for an id
+/// Fenix has"; Decisions 30): a node's place falls through as one --
+/// `path`, `line` and `end_line` from the first source that gives a path
+/// or a line -- so a listing's file is never paired with a run's line.
+#[test]
+fn a_nodes_place_falls_through_as_one() {
+    let mut m = Model::new();
+    m.add_provider(RUST, "cargo test");
+    let listed = Found { path: Some("src/tests.rs".into()), ..Found::new("orbit/lib tests::adds", None, "adds", Kind::Test) };
+    listing(&mut m, RUST, vec![listed], StepEnd::Exited(Some(0)));
+    let found = Found::new("orbit/lib tests::adds", None, "adds", Kind::Test).at("src/lib.rs", 12, Some(15));
+    run(&mut m, Selection::All, plan(&[("all", &[])]), vec![Report::Found(found), ended("orbit/lib tests::adds", Outcome::Passed)], StepEnd::Exited(Some(0)));
+    let merged = m.node(id(&m, RUST, "orbit/lib tests::adds")).unwrap().found().clone();
+    assert_eq!((merged.path.as_deref(), merged.line, merged.end_line), (Some("src/tests.rs"), None, None));
 }

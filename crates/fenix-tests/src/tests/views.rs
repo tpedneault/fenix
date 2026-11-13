@@ -15,7 +15,7 @@ fn results(m: &mut Model) {
 fn row_labels(m: &Model, rows: &[Row]) -> Vec<String> {
     rows.iter()
         .map(|r| match r.item {
-            Item::Provider(p) => format!("[{}]", m.provider(p).unwrap().id),
+            Item::Provider(p) => format!("[{}]", m.provider(p).unwrap().id.provider),
             Item::Node(n) => format!("{}{}", "  ".repeat(r.depth as usize), m.node(n).unwrap().found().label),
         })
         .collect()
@@ -80,14 +80,14 @@ fn results_restored_after_a_restart_are_stale() {
 #[test]
 fn two_providers_on_one_line_show_the_worst() {
     let mut m = orbit();
-    m.add_provider("rust.nextest", "cargo nextest");
-    m.scan("rust.nextest", "src/lib.rs", lib_rs());
-    run(&mut m, Selection::Nodes(vec![key("rust.nextest", ADDS)]), plan(&[("one", &[])]), vec![ended(ADDS, Outcome::Failed)], StepEnd::Exited(Some(101)));
+    m.add_provider(NEXTEST, "cargo nextest");
+    m.scan(NEXTEST, "src/lib.rs", lib_rs());
+    run(&mut m, Selection::Nodes(vec![key(NEXTEST, ADDS)]), plan(&[("one", &[])]), vec![ended(ADDS, Outcome::Failed)], StepEnd::Exited(Some(101)));
     run(&mut m, Selection::Nodes(vec![key(RUST, ADDS)]), plan(&[("one", &[])]), vec![ended(ADDS, Outcome::Passed)], StepEnd::Exited(Some(0)));
     let marks = m.marks("src/lib.rs", 12..=12);
     assert_eq!(marks.len(), 1);
     assert_eq!(marks[0].state, State::Failed);
-    assert_eq!(marks[0].node, id(&m, "rust.nextest", ADDS));
+    assert_eq!(marks[0].node, id(&m, NEXTEST, ADDS));
 }
 
 /// §9.1, §7.5: marks are worked out for the lines asked, where tests and
@@ -120,14 +120,14 @@ fn the_test_the_cursor_is_in() {
 #[test]
 fn without_a_last_line_the_last_test_above_the_cursor() {
     let mut m = Model::new();
-    m.add_provider("web", "vitest");
+    m.add_provider(WEB, "vitest");
     let path = "src/orbit.test.js";
     let describe = Found::new("src/orbit.test.js > math", None, "math", Kind::Suite).at(path, 2, Some(20));
     let a = Found::new("src/orbit.test.js > math > adds", Some("src/orbit.test.js > math"), "adds", Kind::Test).at(path, 3, None);
     let b = Found::new("src/orbit.test.js > math > subtracts", Some("src/orbit.test.js > math"), "subtracts", Kind::Test).at(path, 8, None);
-    m.scan("web", path, vec![describe, a, b]);
-    assert_eq!(m.test_at(path, 5), Some(id(&m, "web", "src/orbit.test.js > math > adds")));
-    assert_eq!(m.test_at(path, 12), Some(id(&m, "web", "src/orbit.test.js > math > subtracts")));
+    m.scan(WEB, path, vec![describe, a, b]);
+    assert_eq!(m.test_at(path, 5), Some(id(&m, WEB, "src/orbit.test.js > math > adds")));
+    assert_eq!(m.test_at(path, 12), Some(id(&m, WEB, "src/orbit.test.js > math > subtracts")));
     assert_eq!(m.test_at(path, 25), None, "past its parent's lines");
 }
 
@@ -136,14 +136,14 @@ fn without_a_last_line_the_last_test_above_the_cursor() {
 #[test]
 fn two_providers_tests_on_one_line_go_to_the_first_provider() {
     let mut m = orbit();
-    m.add_provider("rust.nextest", "cargo nextest");
-    m.scan("rust.nextest", "src/lib.rs", lib_rs());
+    m.add_provider(NEXTEST, "cargo nextest");
+    m.scan(NEXTEST, "src/lib.rs", lib_rs());
     assert_eq!(m.test_at("src/lib.rs", 13), Some(id(&m, RUST, ADDS)));
     // An inner test of the second provider wins over the first's outer one.
     let mut inner = lib_rs();
     inner.push(test("orbit/lib tests::adds::inner", ADDS, "inner", 13, Some(14)));
-    m.scan("rust.nextest", "src/lib.rs", inner);
-    assert_eq!(m.test_at("src/lib.rs", 13), Some(id(&m, "rust.nextest", "orbit/lib tests::adds::inner")));
+    m.scan(NEXTEST, "src/lib.rs", inner);
+    assert_eq!(m.test_at("src/lib.rs", 13), Some(id(&m, NEXTEST, "orbit/lib tests::adds::inner")));
 }
 
 /// §7.2, §7.5: only open groups' rows are laid out; with one provider
@@ -225,4 +225,23 @@ fn the_head_says_counts_progress_and_the_last_run() {
     assert!(last.end.ended_ms > last.end.started_ms);
     assert!(summary.running.is_none());
     assert_eq!(m.last_selection(), Some(&[Selection::All][..]));
+}
+
+/// "Review of steps 1 and 2", Step 3 items (§7.2): the head's count of
+/// the waiting run is worked out once a revision, and follows what
+/// changes it.
+#[test]
+fn the_heads_waiting_count_follows_the_model() {
+    let mut m = orbit();
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+    m.request(Selection::Failed, Mode::Queue);
+    assert_eq!(m.summary().waiting, None, "nothing failed yet: nothing waits");
+    m.planned(run, Ok(plan(&[("all", &[])])));
+    m.next(0);
+    m.request(Selection::Nodes(vec![key(RUST, "orbit/lib tests")]), Mode::Queue);
+    assert_eq!(m.summary().waiting, Some(3));
+    assert_eq!(m.summary().waiting, Some(3), "drawn again: the same");
+    m.reports(run, 0, vec![Report::Found(Found::new("orbit/lib tests::more", Some("orbit/lib tests"), "more", Kind::Test))]);
+    assert_eq!(m.summary().waiting, Some(4));
 }

@@ -72,3 +72,94 @@ fn ten_thousand_tests_scanned_run_filtered_and_marked() {
 fn suite_of(id: &str, path: &str) -> Found {
     suite(id, LIB, "tests", path, 1, 200)
 }
+
+/// "Review of steps 1 and 2", finding 5 (§4 "Ids", 3; §7.5): 10,000
+/// results for ids no source gave (macro-made tests), in batches of 512,
+/// with and without `at`, cost a build a batch, not one a result, and
+/// "the deepest node of the file" is found in the provider's index of
+/// files, not by a walk of every id.
+#[test]
+fn ten_thousand_unknown_ids_cost_a_build_a_batch() {
+    let mut m = Model::new();
+    m.add_provider(RUST, "cargo test");
+    let files: Vec<(String, Vec<Found>)> = (0..500)
+        .map(|f| {
+            let path = format!("src/m{f}.rs");
+            let suite = format!("orbit/lib m{f}::tests");
+            let mut found = vec![group(LIB, "orbit (lib)"), suite_of(&suite, &path)];
+            found.extend((0..20).map(|t| test(&format!("{suite}::case_{t}"), &suite, &format!("case_{t}"), 10 + t * 5, Some(13 + t * 5))));
+            (path, found)
+        })
+        .collect();
+    for batch in files.chunks(50) {
+        m.scan_files(RUST, batch.to_vec());
+    }
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+    m.planned(run, Ok(plan(&[("all", &[])])));
+    m.next(0);
+    let plain: Vec<Report> = (0..10_000).map(|i| ended(&format!("orbit/lib macro_{i}"), Outcome::Passed)).collect();
+    timed("10,000 unknown ids, batches of 512", Duration::from_secs(5), || {
+        for batch in plain.chunks(512) {
+            m.reports(run, 0, batch.to_vec());
+        }
+    });
+    let placed: Vec<Report> = (0..10_000)
+        .map(|i| {
+            let mut e = Ended::new(&format!("orbit/lib m{}::tests::made_{i}", i % 500), Outcome::Passed);
+            e.at = Some(Location { path: format!("src/m{}.rs", i % 500), line: 50, column: None });
+            Report::Ended(e)
+        })
+        .collect();
+    timed("10,000 more, each with `at`", Duration::from_secs(5), || {
+        for batch in placed.chunks(512) {
+            m.reports(run, 0, batch.to_vec());
+        }
+    });
+    m.step_ended(run, 0, StepEnd::Exited(Some(0)), Vec::new());
+    while m.next(0).is_some() {}
+    let made = m.node(id(&m, RUST, "orbit/lib m7::tests::made_7")).unwrap();
+    assert_eq!(made.parent(), Some(id(&m, RUST, "orbit/lib m7::tests")));
+    assert_eq!(m.summary().counts.passed, 20_000);
+}
+
+/// "Review of steps 1 and 2", finding 6 (§9.4): the test the cursor is
+/// in, among 5,000 tests of one file with no end line, costs one pass
+/// over them, on every cursor move.
+#[test]
+fn the_test_at_a_line_among_5000_without_end_lines() {
+    let mut m = Model::new();
+    m.add_provider(RUST, "cargo test");
+    let mut found = vec![group(LIB, "orbit (lib)")];
+    found.extend((0..5_000).map(|i| test(&format!("orbit/lib t{i}"), LIB, &format!("t{i}"), i * 3, None)));
+    m.scan(RUST, "src/big.rs", found);
+    let at = timed("test_at, 5,000 tests with no end line", Duration::from_millis(20), || m.test_at("src/big.rs", 14_998));
+    assert_eq!(at, Some(id(&m, RUST, "orbit/lib t4999")));
+    assert_eq!(m.test_at("src/big.rs", 7), Some(id(&m, RUST, "orbit/lib t2")));
+}
+
+/// "Review of steps 1 and 2", Step 3 items (§8.5): 10,000 `broken`
+/// reports in one call, each naming a file's suite, cost what's under
+/// each, not the run each.
+#[test]
+fn ten_thousand_broken_reports_in_one_call() {
+    let mut m = Model::new();
+    m.add_provider(RUST, "cargo test");
+    let files: Vec<(String, Vec<Found>)> = (0..500)
+        .map(|f| {
+            let path = format!("src/m{f}.rs");
+            let suite = format!("orbit/lib m{f}::tests");
+            let mut found = vec![group(LIB, "orbit (lib)"), suite_of(&suite, &path)];
+            found.extend((0..20).map(|t| test(&format!("{suite}::case_{t}"), &suite, &format!("case_{t}"), 10 + t * 5, Some(13 + t * 5))));
+            (path, found)
+        })
+        .collect();
+    m.scan_files(RUST, files);
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+    m.planned(run, Ok(plan(&[("all", &[])])));
+    m.next(0);
+    let broken: Vec<Report> = (0..10_000).map(|i| Report::Broken { id: if i % 2 == 0 { Some(format!("orbit/lib m{}::tests", i % 500)) } else { None }, message: "didn't build".into(), at: None }).collect();
+    timed("10,000 broken in one call", Duration::from_secs(2), || m.reports(run, 0, broken));
+    assert_eq!(m.summary().counts.errored, 10_000);
+}

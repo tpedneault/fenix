@@ -21,14 +21,17 @@
 //!
 //! # Its callers
 //!
-//! **The host** (step 3) adds providers (`add_provider`,
-//! `provider_set`), gives scans (`scan`, `scan_files`), saves
+//! **The host** (step 3) makes one `RunIds` and gives it to every
+//! project's model (`Model::with_run_ids`), so a run id is unique while
+//! Fenix runs. It adds providers, each a `ProviderId` -- its extension's
+//! id and its own (`add_provider`, `provider_set`) -- gives scans (`scan`, `scan_files`), saves
 //! (`file_saved`, `set_unsaved`) and the results file
 //! (`restore_results`, `results_file`). It asks for runs and listings
 //! (`request` with a `Selection` -- this test, a file, all, the failed;
 //! `list`, `page_opened`, `request_build`), then drives them: it calls
 //! `next(now)` whenever nothing is under way and does what the `Action`
-//! says -- `Plan` (call `tests-plan` with the `Ask` given, which holds
+//! says (a debug launch draws its run id with `run_id`, and a
+//! `build-first` answer runs as that run, `request_build`) -- `Plan` (call `tests-plan` with the `Ask` given, which holds
 //! §4's fill-in and 10,000-record cap, then `planned`), `Step` (start it,
 //! then `reports` per `tests-read` and `step_ended`), `NotStarted` (send
 //! `stopped` for each), `Ended` (the notification, `last_task`). `stop`,
@@ -53,8 +56,12 @@
 //! 1. **Paths are the host's** (§6.4 "Paths"). The host maps every
 //!    path a provider gives (`/project/...`, relative, a full path) to
 //!    the project's form, relative with `/`, before the model sees it;
-//!    the model compares paths as strings. A place outside the project
-//!    keeps its full path, and the host tells the two apart.
+//!    the model holds and compares paths in that form, as strings. A
+//!    place outside the project keeps its full path, and the host tells
+//!    the two apart. What the model gives back (an ask's records,
+//!    `TestNode::given_back`) is in that form too: the host turns a
+//!    project's file back into `/project/<path>`, the one form a provider
+//!    is given (§6.4 "What Fenix gives back").
 //! 2. **A scan's missing path** (§6.3 `found-test.path`: "none for a
 //!    test or case is the file scanned") is the file scanned for every
 //!    kind but `group`: a suite and a file are in the file they were
@@ -91,9 +98,13 @@
 //! 11. **What a step with empty `covers` covers**, for a `broken` or
 //!     `crashed` with no id (§6.3 `test-crash`: "all the step covers"),
 //!     is the plan's rest: what of the ask no step names. So a plan of
-//!     one step that names nothing errors its whole ask on a crash.
+//!     one step that names nothing errors its whole ask on a crash. A
+//!     `broken` or `crashed`, with an id or none, errors only what has
+//!     no result in the run yet: a test that ended earlier, in this step
+//!     or another, keeps its result.
 //! 12. **A plan that's an error** (`tests-plan`'s `err`, §8 silent):
-//!     the provider's tests in the run are errored with its message.
+//!     the provider's tests in the run are errored with its message;
+//!     after a stop, nothing is (they go back to what they were, §4).
 //! 13. **A plan of no steps**: its ask is judged at once as if its last
 //!     step exited (errored, "the run ended without a result for it").
 //!     A listing of no steps isn't complete: it drops nothing.
@@ -114,19 +125,31 @@
 //! 18. **The results file** keeps results read at start for tests not
 //!     found since, until 8 MiB pushes the oldest out: a test in a file
 //!     not scanned this session keeps its result. A failure's text is
-//!     kept by its end, as everywhere.
+//!     kept by its end, as everywhere. A result is kept by its
+//!     provider's extension, its provider and its id (version 2); a file
+//!     of another version is refused whole.
 //! 19. **Problems** (§9.3) come from `failed` results only (errored is
 //!     "couldn't run to a result", and §8.5 sets no problem for a broken
 //!     build), and not from a stale result (its line may have moved,
 //!     §9.3 "Cleared ... when its file is saved") or a test being run
 //!     again ("Cleared when that test runs again").
 //! 20. **An ask** (§4) holds the topmost nodes selected, in display
-//!     order. A file's or suite's tests follow it whole or not at all,
-//!     so a provider never takes part of a file for all of it.
-//!     Coarsening replaces the deepest nodes by their parents first.
+//!     order. A file's or suite's fill-in -- every node under it, the
+//!     suites between included, in display order -- follows it whole or
+//!     not at all, so a provider never takes part of a file for all of
+//!     it, and every fill-in record's `parent` is in the ask while a
+//!     selected node's isn't. Fill-ins take the room left under 10,000
+//!     in display order: one that doesn't fit is left out, and a later,
+//!     smaller one may still fit. Coarsening replaces the deepest nodes
+//!     by their parents first. A record's `parent` is the one the model
+//!     put it under (none at its provider's top).
 //! 21. **An unknown id's `ended`** goes under "the deepest node of the
 //!     file its `at` names" (§4): the deepest group, file or suite of
-//!     that file whose lines hold `at`'s line, else the deepest of it.
+//!     that file whose lines hold `at`'s line, else the deepest of it;
+//!     between equals, the one that starts first, then the id that sorts
+//!     first. They're looked for in the provider's index of them by file,
+//!     and the test is added without working the tree out, which is done
+//!     once at the end of the call.
 //! 22. **The test at a line** (§9.4), among several that hold it: the
 //!     one that starts last, then ends first, then is deepest, then
 //!     the provider whose id sorts first.
@@ -138,13 +161,50 @@
 //! 25. **Stale is ordered by the model's own clock**, a count of what
 //!     happened, not the time: a save and a result in the same
 //!     millisecond still come in order.
-//! 26. **A test's `data` is cut at 4 KiB** as any string is (§6.5),
-//!     though a cut may leave what the provider can't read back.
+//! 26. **A test's `data` over 4 KiB isn't kept** (§6.5, §19): cut, it
+//!     wouldn't be given back "as it was". The host drops it the same way.
 //! 27. **A file's tests** (`SPC T f`) are every provider's topmost
 //!     nodes, but groups, whose file is that file.
 //! 28. **A listing waiting** behind a run starts after it, and after a
 //!     run waiting: you asked for that run, and a listing then is
 //!     still warm.
+//!
+//! Added after the review of steps 1 and 2 (plan, "Review of steps 1
+//! and 2"):
+//!
+//! 29. **A test that leaves every source** -- cut and pasted back, a
+//!     scan of half-typed text -- has its result kept as one read at
+//!     start is: shown stale when it's found again, and in the results
+//!     file meanwhile. Not for a provider removed, nor for a case its
+//!     template's run dropped (31).
+//! 30. **A node's place falls through as one**: `path`, `line` and
+//!     `end_line` all from the first source, scan then listing then run,
+//!     that gives a path or a line; never a listing's file with a run's
+//!     line.
+//! 31. **A case its template's complete run dropped** goes with the
+//!     result the run's end judged it ("ended without a result"), which
+//!     the run's counts leave out.
+//! 32. **A node its provider can't name** -- its id was cut (over 1 KiB)
+//!     and its `data` isn't kept (past the 16 MiB budget, or no source
+//!     that has it now gave any) -- is never asked for by itself: an ask
+//!     has its nearest ancestor that can be named instead, a fill-in
+//!     holding one is left out, and the host doesn't debug it
+//!     (`TestNode::can_be_named`). A provider can always name a node by
+//!     its id up to 1 KiB, and by its `data` past it.
+//! 33. **An id over 1 KiB** is its start up to 1,007 bytes, cut back to
+//!     a character's start, then `#` and the FNV-1a 64-bit hash of the
+//!     whole id as 16 lowercase hex digits (`cut_id`): the same wherever
+//!     it comes, and two that share their first KiB stay two.
+//! 34. **Run ids are the host's** (`RunIds`, shared by every project's
+//!     model); a `build-first` plan runs as the run its launch's first
+//!     `tests-launch` was asked with (`run_id`, `request_build`).
+//! 35. **A provider is its extension and its id** (`ProviderId`): two
+//!     extensions that both declare `rust` are two providers. The page
+//!     orders them by id, then extension.
+//! 36. **A step's scope**, and what of it has no result, are worked out
+//!     once per step and shape of the tree, so that many `broken` or
+//!     `crashed` reports in one call cost what's under each, not the run
+//!     each; the head's count of the waiting run, once a revision.
 
 mod kept;
 mod limits;
@@ -154,10 +214,10 @@ mod run;
 mod view;
 
 pub use kept::ResultsFileError;
-pub use limits::{cut_end, cut_id, cut_start, ASK_RECORDS, ID_BYTES, LABEL_CHARS, MESSAGE_BYTES, RESULTS_FILE_BYTES, TESTS_PER_PROVIDER, TEXT_BYTES};
-pub use model::{Counts, Model, NodeId, Notice, ProviderRef, State, TestKey, TestResult};
+pub use limits::{cut_end, cut_id, cut_start, fnv1a_64, is_cut_id, ASK_RECORDS, DATA_BYTES, ID_BYTES, ID_PREFIX_BYTES, LABEL_CHARS, MESSAGE_BYTES, RESULTS_FILE_BYTES, TESTS_PER_PROVIDER, TEXT_BYTES};
+pub use model::{Counts, Model, NodeId, Notice, ProviderId, ProviderRef, State, TestKey, TestResult};
 pub use records::{Ask, Ended, Found, Kind, Location, Outcome, Plan, Report, Step, StepEnd};
-pub use run::{Action, Halt, Mode, Requested, RunEnd, RunId, RunKind, Selection};
+pub use run::{Action, Halt, Mode, Requested, RunEnd, RunId, RunIds, RunKind, Selection};
 pub use view::{Item, LastRun, Mark, Problem, Progress, ProviderView, Row, RowQuery, Summary, Tab, TestNode};
 
 #[cfg(test)]

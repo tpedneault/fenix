@@ -4,10 +4,10 @@
 //! failures as problems, and the page's head. Each walks only what it
 //! shows, from counts kept as results land (§7.5).
 
-use crate::model::{Counts, Model, Node, NodeId, ProviderRef, State, TestKey, TestResult};
+use crate::model::{Counts, Model, Node, NodeId, ProviderId, ProviderRef, State, TestKey, TestResult};
 use crate::records::{Found, Location, Outcome};
 use crate::run::{RunEnd, RunId};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
 
 /// A node of the tree as the views see it.
@@ -24,7 +24,7 @@ impl<'a> TestNode<'a> {
     }
 
     pub fn key(&self) -> TestKey {
-        TestKey::new(self.model.providers[self.node.provider as usize].id.clone(), self.node.id.clone())
+        TestKey::new(&self.model.providers[self.node.provider as usize].id, self.node.id.clone())
     }
 
     pub fn provider(&self) -> ProviderRef {
@@ -35,6 +35,23 @@ impl<'a> TestNode<'a> {
     /// and what's given back to its provider.
     pub fn found(&self) -> &'a Found {
         &self.node.merged
+    }
+
+    /// It as Fenix gives it back to its provider (`tests-launch`, and in
+    /// a `run` ask): `found` with its `parent` the one Fenix put it under
+    /// (none at its provider's top). Its `path` is the project's form
+    /// (Decisions, 1): the host gives a file of the project back as
+    /// `/project/<path>`.
+    pub fn given_back(&self) -> Found {
+        self.model.given_back(self.id)
+    }
+
+    /// Whether its provider can be asked for it by itself: false for a
+    /// node whose id was cut (over 1 KiB) and whose `data` isn't kept.
+    /// Such a node is asked as its nearest ancestor that can be, and isn't
+    /// debugged (Decisions, 32).
+    pub fn can_be_named(&self) -> bool {
+        self.model.can_be_named(self.id)
     }
 
     /// Its file: its own path, else its parent's unless that's a group.
@@ -90,7 +107,7 @@ impl<'a> TestNode<'a> {
 #[derive(Clone, Copy)]
 pub struct ProviderView<'a> {
     pub provider: ProviderRef,
-    pub id: &'a str,
+    pub id: &'a ProviderId,
     /// The runner it said it uses, else its manifest's name.
     pub name: &'a str,
     /// Why it can't run tests here, when it said.
@@ -386,6 +403,18 @@ impl Model {
         let starts = |id: NodeId| self.n(id).merged.line.unwrap_or(0);
         let upto = nodes.partition_point(|&id| starts(id) <= line);
         let candidates = &nodes[..upto];
+        // A test with no `end_line` holds the line when no test of its
+        // provider and parent starts after it and at or above the line:
+        // the latest start of each such family, in one pass, not one per
+        // test (§9.4, on every cursor move).
+        let mut latest: HashMap<(u32, Option<NodeId>), u32> = HashMap::new();
+        for &id in candidates {
+            let node = self.n(id);
+            if node.merged.kind.is_test() {
+                let start = latest.entry((node.provider, node.parent)).or_insert(0);
+                *start = (*start).max(starts(id));
+            }
+        }
         let parent_holds = |node: &Node| match node.parent.map(|p| self.n(p)) {
             Some(parent) if parent.merged.path == node.merged.path => match (parent.merged.line, parent.merged.end_line) {
                 (Some(start), Some(end)) => start <= line && line <= end,
@@ -401,13 +430,7 @@ impl Model {
             }
             match node.merged.end_line {
                 Some(end) => line <= end,
-                None => {
-                    parent_holds(node)
-                        && !candidates.iter().any(|&other| {
-                            let o = self.n(other);
-                            other != id && o.provider == node.provider && o.parent == node.parent && o.merged.kind.is_test() && starts(other) > start
-                        })
-                }
+                None => parent_holds(node) && latest.get(&(node.provider, node.parent)).is_none_or(|&last| last <= start),
             }
         };
         candidates.iter().copied().filter(|&id| holds(id)).max_by(|&a, &b| {
@@ -473,7 +496,8 @@ impl Model {
                 unsaved: run.unsaved.iter().cloned().collect(),
             }
         });
-        let waiting = self.waiting.as_ref().map(|w| self.count_selected(w));
+        // Drawn every frame: counted once a revision (`waiting_count`).
+        let waiting = self.waiting.as_ref().map(|w| *self.waiting_count.get_or_init(|| self.count_selected(w)));
         let saved_since = self.last.as_ref().map_or(0, |last| last.files.iter().filter(|f| self.saved.get(*f).is_some_and(|&s| s > last.started_seq)).count() as u32);
         Summary { counts, running, waiting, last: self.last.clone(), saved_since }
     }

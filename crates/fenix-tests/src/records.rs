@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 pub struct Found {
     /// The provider's own name for it, the same in what it scans, lists
     /// and reads from a run: `orbit/lib tests::adds`,
-    /// `tests/test_basic.py::test_cases[negative]`. Cut at 1 KiB.
+    /// `tests/test_basic.py::test_cases[negative]`. Over 1 KiB, cut as
+    /// `cut_id` cuts it (Decisions, 33).
     pub id: String,
     /// The node it's in, by id: none for one at its provider's top.
     pub parent: Option<String>,
@@ -35,7 +36,9 @@ pub struct Found {
     /// Its cases are found only by running it.
     pub template: bool,
     /// The provider's own, never shown or matched on, given back as it
-    /// was in a `run` ask (§6.3, F6). Cut at 4 KiB.
+    /// was in a `run` ask (§6.3, F6). Over 4 KiB, not kept (Decisions,
+    /// 26); none, too, past the provider's 16 MiB or when no source that
+    /// has the node now gave it (Decisions, 32).
     pub data: Option<String>,
 }
 
@@ -80,8 +83,8 @@ pub enum Ask {
     /// Its runner's listing of every test it can find in the project.
     Discover,
     /// These nodes as the model has them now, each `file` or `suite`
-    /// followed by the tests and cases under it while the ask stays
-    /// within 10,000 records (§4, "What the provider is asked").
+    /// followed by every node under it while the ask stays within 10,000
+    /// records (§4, "What the provider is asked"; Decisions, 20 and 32).
     Run(Vec<Found>),
     /// Every test.
     RunAll,

@@ -101,3 +101,17 @@ fn a_restored_result_never_replaces_a_newer_one() {
     assert_eq!(state(&m, RUST, FAILS), State::Passed);
     assert!(!m.node(id(&m, RUST, FAILS)).unwrap().stale());
 }
+
+/// "Review of steps 1 and 2", Step 3 items: the file keys a result by
+/// its provider's extension too (version 2); a file of version 1, which
+/// didn't, is refused, not misread.
+#[test]
+fn a_results_file_of_version_1_is_refused() {
+    let mut m = orbit();
+    let old = "{\"version\":1,\"results\":[{\"provider\":\"rust\",\"id\":\"orbit/lib tests::fails_on_purpose\",\"outcome\":\"failed\",\"when_ms\":1}]}";
+    assert_eq!(m.restore_results(old), Err(ResultsFileError::Unreadable("its version is 1".into())));
+    assert_eq!(state(&m, RUST, FAILS), State::Unknown);
+    run(&mut m, Selection::All, plan(&[("all", &[])]), vec![ended(FAILS, Outcome::Failed)], StepEnd::Exited(Some(101)));
+    let file = m.results_file();
+    assert!(file.starts_with("{\"version\":2,") && file.contains("\"extension\":\"fenix.rust\""), "{file}");
+}

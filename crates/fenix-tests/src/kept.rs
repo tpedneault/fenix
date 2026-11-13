@@ -5,11 +5,14 @@
 //! provider starts.
 
 use crate::limits::{self, KEPT_TEXT_BYTES, MESSAGE_BYTES, PATH_BYTES, RESULTS_FILE_BYTES};
-use crate::model::{Model, TestKey, TestResult};
+use crate::model::{Model, ProviderId, TestKey, TestResult};
 use crate::records::{Location, Outcome};
 use serde::{Deserialize, Serialize};
 
-const VERSION: u32 = 1;
+/// 2 keys a result by its provider's extension too (Decisions, 18): a
+/// file of 1, which didn't, is refused as unreadable, not misread, and
+/// the next run's end writes a 2.
+const VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct File {
@@ -19,6 +22,7 @@ struct File {
 
 #[derive(Serialize, Deserialize)]
 struct Kept {
+    extension: String,
     provider: String,
     id: String,
     outcome: Outcome,
@@ -69,7 +73,7 @@ impl Model {
         for (key, result) in &self.restored {
             kept.push(Self::kept(&key.provider, &key.id, result));
         }
-        kept.sort_by(|a, b| b.when_ms.cmp(&a.when_ms).then_with(|| (&a.provider, &a.id).cmp(&(&b.provider, &b.id))));
+        kept.sort_by(|a, b| b.when_ms.cmp(&a.when_ms).then_with(|| (&a.provider, &a.extension, &a.id).cmp(&(&b.provider, &b.extension, &b.id))));
         let head = format!("{{\"version\":{VERSION},\"results\":[");
         let mut out = head;
         let mut first = true;
@@ -88,9 +92,10 @@ impl Model {
         out
     }
 
-    fn kept(provider: &str, id: &str, result: &TestResult) -> Kept {
+    fn kept(provider: &ProviderId, id: &str, result: &TestResult) -> Kept {
         Kept {
-            provider: provider.to_string(),
+            extension: provider.extension.to_string(),
+            provider: provider.provider.to_string(),
             id: id.to_string(),
             outcome: result.outcome,
             duration_ms: result.duration_ms.filter(|d| d.is_finite()),
@@ -110,13 +115,20 @@ impl Model {
         if text.len() > RESULTS_FILE_BYTES {
             return Err(ResultsFileError::TooLarge(text.len()));
         }
-        let file: File = serde_json::from_str(text).map_err(|e| ResultsFileError::Unreadable(e.to_string()))?;
-        if file.version != VERSION {
-            return Err(ResultsFileError::Unreadable(format!("its version is {}", file.version)));
+        // Its version first: another version's results aren't read as
+        // this one's, whatever their fields.
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
         }
+        let version: Version = serde_json::from_str(text).map_err(|e| ResultsFileError::Unreadable(e.to_string()))?;
+        if version.version != VERSION {
+            return Err(ResultsFileError::Unreadable(format!("its version is {}", version.version)));
+        }
+        let file: File = serde_json::from_str(text).map_err(|e| ResultsFileError::Unreadable(e.to_string()))?;
         let mut read = 0;
         for k in file.results {
-            let id = limits::cut_id(&k.id).to_string();
+            let id = limits::cut_id(&k.id).into_owned();
             let result = TestResult {
                 outcome: k.outcome,
                 duration_ms: k.duration_ms.filter(|d| d.is_finite() && *d >= 0.0),
@@ -128,7 +140,7 @@ impl Model {
                 restored: true,
                 seq: 0,
             };
-            let key = TestKey::new(k.provider, id);
+            let key = TestKey { provider: ProviderId::new(k.extension, k.provider), id };
             match self.find(&key) {
                 Some(node) => {
                     if self.raw(node).is_some_and(|n| n.result.is_none()) {

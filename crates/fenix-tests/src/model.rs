@@ -5,19 +5,64 @@
 
 use crate::limits::{self, MAX_DEPTH, TESTS_PER_PROVIDER};
 use crate::records::{Found, Kind, Location, Outcome};
-use crate::run::{Run, Selection};
+use crate::run::{Run, RunIds, Selection};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::OnceLock;
 
-/// A node as the outside names it: its provider's id and its own.
+/// A test provider as the model keys it: the extension whose manifest
+/// declares it, and its id there (`[[contributes.test_providers]]`,
+/// §5). Two extensions may both declare `rust` (`fenix.rust`,
+/// `acme.rust`): they're two providers, whose trees and results never
+/// meet. Sorted by its id, then its extension's: the page's order, and
+/// the tie-break of §4 "Two providers in one file".
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProviderId {
+    /// The extension's id: `fenix.rust`.
+    pub extension: Cow<'static, str>,
+    /// The provider's id in its manifest: `rust`, `rust.nextest`.
+    pub provider: Cow<'static, str>,
+}
+
+impl ProviderId {
+    pub fn new(extension: impl Into<String>, provider: impl Into<String>) -> Self {
+        ProviderId { extension: Cow::Owned(extension.into()), provider: Cow::Owned(provider.into()) }
+    }
+
+    /// One whose names are fixed in the code.
+    pub const fn fixed(extension: &'static str, provider: &'static str) -> Self {
+        ProviderId { extension: Cow::Borrowed(extension), provider: Cow::Borrowed(provider) }
+    }
+}
+
+impl Ord for ProviderId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (&self.provider, &self.extension).cmp(&(&other.provider, &other.extension))
+    }
+}
+
+impl PartialOrd for ProviderId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.provider, self.extension)
+    }
+}
+
+/// A node as the outside names it: its provider and its own id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TestKey {
-    pub provider: String,
+    pub provider: ProviderId,
     pub id: String,
 }
 
 impl TestKey {
-    pub fn new(provider: impl Into<String>, id: impl Into<String>) -> Self {
-        TestKey { provider: provider.into(), id: id.into() }
+    pub fn new(provider: &ProviderId, id: impl Into<String>) -> Self {
+        TestKey { provider: provider.clone(), id: id.into() }
     }
 }
 
@@ -250,6 +295,9 @@ pub(crate) struct Node {
     pub counts: Counts,
     pub result: Option<TestResult>,
     pub live: Live,
+    /// The file it's indexed under in its provider's `containers`: a
+    /// group, file or suite with a path.
+    indexed: Option<String>,
 }
 
 impl Node {
@@ -278,7 +326,7 @@ struct Slot {
 
 /// What a provider is in this project (§6.3 `test-provider-set`).
 pub(crate) struct Provider {
-    pub id: String,
+    pub id: ProviderId,
     pub name: String,
     /// The runner it said it uses; none until it says.
     pub runner: Option<String>,
@@ -290,6 +338,10 @@ pub(crate) struct Provider {
     pub scanned: HashMap<String, HashSet<String>>,
     pub data_bytes: usize,
     pub roots: Vec<NodeId>,
+    /// Its groups, files and suites by their own path: where an unknown
+    /// id's `ended` goes is looked for here (Decisions, 21), kept as the
+    /// merged fields change, never by a walk of every id.
+    pub containers: HashMap<String, Vec<NodeId>>,
     pub counts: Counts,
     /// The limits already said on its output page.
     pub said: HashSet<&'static str>,
@@ -307,7 +359,7 @@ impl Provider {
 /// a report naming an id it never found (§4, §6.5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
-    pub provider: String,
+    pub provider: ProviderId,
     pub text: String,
 }
 
@@ -334,9 +386,17 @@ pub struct Model {
     pub(crate) restored: HashMap<TestKey, TestResult>,
     pub(crate) run: Option<Run>,
     pub(crate) waiting: Option<Vec<Selection>>,
-    pub(crate) waiting_build: Option<(u32, String, crate::records::Plan)>,
+    pub(crate) waiting_build: Option<(u32, String, crate::records::Plan, crate::run::RunId)>,
     pub(crate) listings: Vec<u32>,
-    pub(crate) next_run: u64,
+    /// Where run ids come from: the host's, shared by every project's
+    /// model, so they're unique while Fenix runs (§6.4).
+    pub(crate) run_ids: RunIds,
+    /// How many times the tree's shape was worked out: what a step's
+    /// scope is cached against.
+    pub(crate) built: u64,
+    /// The waiting run's count of tests for the head, worked out once a
+    /// revision, not once a frame.
+    pub(crate) waiting_count: OnceLock<u32>,
     pub(crate) timeout_minutes: u32,
     pub(crate) auto_listing: bool,
     pub(crate) page_opened: bool,
@@ -351,7 +411,17 @@ impl Default for Model {
 }
 
 impl Model {
+    /// A model with run ids of its own, unique only within it: for one
+    /// project, or a test. The host gives every project's model the same
+    /// `RunIds` (`with_run_ids`).
     pub fn new() -> Self {
+        Self::with_run_ids(RunIds::new())
+    }
+
+    /// A model whose run ids come from `run_ids`, which the host shares
+    /// between every project's model so that a run id is unique while
+    /// Fenix runs, across projects (§6.4).
+    pub fn with_run_ids(run_ids: RunIds) -> Self {
         Model {
             slots: Vec::new(),
             free: Vec::new(),
@@ -368,7 +438,9 @@ impl Model {
             waiting: None,
             waiting_build: None,
             listings: Vec::new(),
-            next_run: 1,
+            run_ids,
+            built: 0,
+            waiting_count: OnceLock::new(),
             timeout_minutes: 0,
             auto_listing: true,
             page_opened: false,
@@ -420,7 +492,7 @@ impl Model {
     /// Adds provider `id` (`[[contributes.test_providers]]`), shown as
     /// `name` until it says what runner it uses. Adding one that's there
     /// renames it.
-    pub fn add_provider(&mut self, id: &str, name: &str) -> ProviderRef {
+    pub fn add_provider(&mut self, id: &ProviderId, name: &str) -> ProviderRef {
         let p = self.provider_index(id);
         let provider = &mut self.providers[p as usize];
         provider.name = limits::cut_chars(name, limits::LABEL_CHARS).to_string();
@@ -433,13 +505,13 @@ impl Model {
         ProviderRef(p)
     }
 
-    pub(crate) fn provider_index(&mut self, id: &str) -> u32 {
-        if let Some(p) = self.providers.iter().position(|p| p.id == id) {
+    pub(crate) fn provider_index(&mut self, id: &ProviderId) -> u32 {
+        if let Some(p) = self.providers.iter().position(|p| p.id == *id) {
             return p as u32;
         }
         self.providers.push(Provider {
-            id: id.to_string(),
-            name: id.to_string(),
+            id: id.clone(),
+            name: id.provider.to_string(),
             runner: None,
             problem: None,
             gone: false,
@@ -447,14 +519,15 @@ impl Model {
             scanned: HashMap::new(),
             data_bytes: 0,
             roots: Vec::new(),
+            containers: HashMap::new(),
             counts: Counts::default(),
             said: HashSet::new(),
         });
         (self.providers.len() - 1) as u32
     }
 
-    pub(crate) fn find_provider(&self, id: &str) -> Option<u32> {
-        self.providers.iter().position(|p| p.id == id && !p.gone).map(|p| p as u32)
+    pub(crate) fn find_provider(&self, id: &ProviderId) -> Option<u32> {
+        self.providers.iter().position(|p| p.id == *id && !p.gone).map(|p| p as u32)
     }
 
     /// `test-provider-set` (§6.3, F8): what provider `id` is in this
@@ -462,7 +535,10 @@ impl Model {
     /// the page has opened in the session, a listing of it is asked for
     /// as an automatic one (§7.1). `runner` "" with no `problem` hides
     /// the provider: no row, never asked, no marks.
-    pub fn provider_set(&mut self, id: &str, runner: &str, problem: Option<&str>) -> bool {
+    /// Kept while the model lives: an extension that stops and starts
+    /// again (a trap, a move to another project and back) keeps what it
+    /// said here; only `remove_provider` forgets it.
+    pub fn provider_set(&mut self, id: &ProviderId, runner: &str, problem: Option<&str>) -> bool {
         let p = self.provider_index(id);
         let runner = limits::cut_chars(runner, limits::LABEL_CHARS).to_string();
         let problem = problem.map(|s| limits::cut_start(s, limits::MESSAGE_BYTES).to_string());
@@ -485,12 +561,13 @@ impl Model {
 
     /// Removes provider `id` and everything it found: its extension was
     /// uninstalled or turned off.
-    pub fn remove_provider(&mut self, id: &str) {
+    pub fn remove_provider(&mut self, id: &ProviderId) {
         let Some(p) = self.find_provider(id) else { return };
         let nodes: Vec<NodeId> = self.providers[p as usize].ids.values().copied().collect();
         for node in nodes {
             self.free_node(node);
         }
+        self.providers[p as usize].containers.clear();
         let provider = &mut self.providers[p as usize];
         provider.gone = true;
         provider.ids.clear();
@@ -528,7 +605,7 @@ impl Model {
     }
 
     pub(crate) fn lookup(&self, p: u32, id: &str) -> Option<NodeId> {
-        self.providers.get(p as usize)?.ids.get(limits::cut_id(id)).copied()
+        self.providers.get(p as usize)?.ids.get(&*limits::cut_id(id)).copied()
     }
 
     /// The node `key` names, its id cut as every id is.
@@ -549,6 +626,7 @@ impl Model {
     }
 
     fn free_node(&mut self, id: NodeId) {
+        self.unindex(id);
         let slot = &mut self.slots[id.index as usize];
         if slot.generation == id.generation && slot.node.take().is_some() {
             slot.generation = slot.generation.wrapping_add(1);
@@ -569,7 +647,7 @@ impl Model {
                     self.say_once(p, "past 100,000 tests, what it finds isn't kept");
                     return None;
                 }
-                let key = TestKey::new(self.providers[p as usize].id.clone(), found.id.clone());
+                let key = TestKey::new(&self.providers[p as usize].id, found.id.clone());
                 let result = self.restored.remove(&key);
                 let node = Node {
                     provider: p,
@@ -589,6 +667,7 @@ impl Model {
                     counts: Counts::default(),
                     result,
                     live: Live::Idle,
+                    indexed: None,
                 };
                 let id = self.alloc(node);
                 self.providers[p as usize].ids.insert(found.id.clone(), id);
@@ -647,7 +726,16 @@ impl Model {
         if keep {
             self.remerge(id);
         } else {
-            let key = self.n(id).id.clone();
+            // Its result waits for it, as one read at start does, shown
+            // stale when it's found again (Decisions, 29): a test cut and
+            // pasted back, or a scan of half-typed text, doesn't lose it.
+            let node = self.raw_mut(id).expect("held");
+            let key = node.id.clone();
+            if let Some(mut result) = node.result.take() {
+                result.restored = true;
+                let provider = self.providers[p as usize].id.clone();
+                self.restored.insert(TestKey { provider, id: key.clone() }, result);
+            }
             self.providers[p as usize].ids.remove(&key);
             self.free_node(id);
             self.dirty = true;
@@ -655,24 +743,26 @@ impl Model {
     }
 
     /// Works a node's fields out again from its sources (§4): field by
-    /// field the scan's, else the listing's, else the run's; `label`,
-    /// `kind`, `parent` and `template` from the first that has the node;
-    /// `skip` the scan's as it is wherever a scan has the node.
+    /// field the scan's, else the listing's, else the run's; its place
+    /// (`path`, `line`, `end_line`) as one, from the first that gives a
+    /// path or a line (Decisions, 30); `label`, `kind`, `parent` and
+    /// `template` from the first that has the node; `skip` the scan's as
+    /// it is wherever a scan has the node.
     fn remerge(&mut self, id: NodeId) {
         let node = self.n(id);
         let scan = node.latest_scan();
         let sources = [scan, node.listing.as_ref(), node.run.as_ref()];
         let Some(first) = sources.iter().flatten().next() else { return };
         let pick = |get: fn(&Found) -> Option<&String>| sources.iter().flatten().find_map(|f| get(f)).cloned();
-        let pick_u32 = |get: fn(&Found) -> Option<u32>| sources.iter().flatten().find_map(|f| get(f));
+        let place = sources.iter().flatten().find(|f| f.path.is_some() || f.line.is_some());
         let merged = Found {
             id: node.id.clone(),
             parent: first.parent.clone(),
             label: first.label.clone(),
             kind: first.kind,
-            path: pick(|f| f.path.as_ref()),
-            line: pick_u32(|f| f.line),
-            end_line: pick_u32(|f| f.end_line),
+            path: place.and_then(|f| f.path.clone()),
+            line: place.and_then(|f| f.line),
+            end_line: place.and_then(|f| f.end_line),
             skip: match scan {
                 Some(scan) => scan.skip.clone(),
                 None => pick(|f| f.skip.as_ref()),
@@ -691,6 +781,35 @@ impl Model {
         if shape_changed {
             self.dirty = true;
         }
+        self.reindex(id);
+    }
+
+    /// Puts node `id` in its provider's `containers` under its path, or
+    /// takes it out, as its merged fields now say.
+    fn reindex(&mut self, id: NodeId) {
+        let node = self.n(id);
+        let want = (!node.merged.kind.is_test()).then(|| node.merged.path.clone()).flatten();
+        if want == node.indexed {
+            return;
+        }
+        self.unindex(id);
+        if let Some(path) = want {
+            let p = self.n(id).provider as usize;
+            self.providers[p].containers.entry(path.clone()).or_default().push(id);
+            self.raw_mut(id).expect("held").indexed = Some(path);
+        }
+    }
+
+    fn unindex(&mut self, id: NodeId) {
+        let Some(node) = self.raw_mut(id) else { return };
+        let Some(path) = node.indexed.take() else { return };
+        let p = node.provider as usize;
+        if let Some(list) = self.providers[p].containers.get_mut(&path) {
+            list.retain(|&n| n != id);
+            if list.is_empty() {
+                self.providers[p].containers.remove(&path);
+            }
+        }
     }
 
     // Scans.
@@ -699,7 +818,7 @@ impl Model {
     /// Decisions, 1): replaces that file's last scan (§6.4, "Scans").
     /// What the last scan gave and this one doesn't loses this file's
     /// record; a group another file's scan still gives stays (§4).
-    pub fn scan(&mut self, provider: &str, path: &str, found: Vec<Found>) {
+    pub fn scan(&mut self, provider: &ProviderId, path: &str, found: Vec<Found>) {
         let p = self.provider_index(provider);
         self.scan_one(p, path, found);
         self.changed();
@@ -708,7 +827,7 @@ impl Model {
     /// Several files' scans at once, as `scan` each: a project's first
     /// scan (§7.1) given a batch at a time works the tree out once a
     /// batch, not once a file.
-    pub fn scan_files(&mut self, provider: &str, files: Vec<(String, Vec<Found>)>) {
+    pub fn scan_files(&mut self, provider: &ProviderId, files: Vec<(String, Vec<Found>)>) {
         let p = self.provider_index(provider);
         for (path, found) in files {
             self.scan_one(p, &path, found);
@@ -740,7 +859,7 @@ impl Model {
     }
 
     /// Forgets a file's scan: it was deleted, or left the scanned set.
-    pub fn forget_file(&mut self, provider: &str, path: &str) {
+    pub fn forget_file(&mut self, provider: &ProviderId, path: &str) {
         self.scan(provider, path, Vec::new());
         if let Some(p) = self.find_provider(provider) {
             self.providers[p as usize].scanned.remove(path);
@@ -793,7 +912,7 @@ impl Model {
         let counted = !self.dirty && node.leaf;
         let before = self.look(node);
         change(self.raw_mut(id).expect("held"));
-        self.revision += 1;
+        self.bump();
         if !counted {
             return;
         }
@@ -821,8 +940,14 @@ impl Model {
     /// again if its shape did: once per call that changed it, never per
     /// frame.
     pub(crate) fn changed(&mut self) {
-        self.revision += 1;
+        self.bump();
         self.ensure_built();
+    }
+
+    /// A new revision: what's cached against the last one goes.
+    fn bump(&mut self) {
+        self.revision += 1;
+        self.waiting_count = OnceLock::new();
     }
 
     pub(crate) fn ensure_built(&mut self) {
@@ -837,6 +962,7 @@ impl Model {
     /// fields. A parent the provider hasn't given (yet), or one that
     /// would make a loop, puts the node at its provider's top (Decisions, 6).
     fn build(&mut self) {
+        self.built += 1;
         let ids: Vec<NodeId> = self.nodes().map(|(id, _)| id).collect();
         for &id in &ids {
             let node = self.n(id);

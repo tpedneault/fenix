@@ -213,7 +213,7 @@ fn a_crash_naming_an_unknown_id_is_taken_as_none() {
     m.take_notices();
     run(&mut m, Selection::All, plan(&[("all", &[])]), vec![Report::Crashed { id: Some("\u{1f}orbit\u{1f}nope".into()), message: "SIGABRT".into() }], StepEnd::Exited(None));
     assert_eq!(state(&m, RUST, "orbit/it adds_up"), State::Errored);
-    assert!(m.take_notices().iter().any(|n| n.provider == RUST && n.text.contains("taken as all the step covers")));
+    assert!(m.take_notices().iter().any(|n| n.provider == *RUST && n.text.contains("taken as all the step covers")));
 }
 
 /// §8.5: what didn't build is never a test failure: its tests are
@@ -309,7 +309,7 @@ fn a_run_stopped_mid_way_puts_its_tests_back() {
         },
     );
     assert_eq!(seen.steps.len(), 1);
-    assert_eq!(seen.not_started, vec![(RUST.to_string(), 1..2)]);
+    assert_eq!(seen.not_started, vec![(RUST.clone(), 1..2)]);
     assert_eq!(seen.ends[0].halted, Some(Halt::Stopped("stopped".into())));
     assert_eq!(state(&m, RUST, ADDS), State::Passed);
     assert_eq!(state(&m, RUST, NEG), State::Failed, "back to what it was");
@@ -334,7 +334,7 @@ fn a_timed_out_step_then_steps_never_started() {
             (vec![ended(ADDS, Outcome::Passed)], StepEnd::TimedOut)
         },
     );
-    assert_eq!(seen.not_started, vec![(RUST.to_string(), 1..2)]);
+    assert_eq!(seen.not_started, vec![(RUST.clone(), 1..2)]);
     assert_eq!(seen.ends[0].halted, Some(Halt::TimedOut));
     assert_eq!(state(&m, RUST, ADDS), State::Passed);
     assert_eq!(message(&m, RUST, NEG).as_deref(), Some("timed out after 30 min"));
@@ -390,13 +390,14 @@ fn an_ended_in_a_listing_is_ignored() {
 #[test]
 fn a_build_first_plan_says_whether_it_built() {
     let mut m = orbit();
-    assert_eq!(m.request_build(RUST, ADDS, plan(&[("cargo test --no-run", &[])])), Requested::Starts);
+    let launch = m.run_id();
+    assert_eq!(m.request_build(launch, RUST, ADDS, plan(&[("cargo test --no-run", &[])])), Requested::Starts);
     let seen = drive(&mut m, |_, _| unreachable!(), |_, _, _| (vec![ended(ADDS, Outcome::Failed)], StepEnd::Exited(Some(0))));
     assert!(seen.ends[0].build_ok);
-    assert_eq!(seen.ends[0].kind, RunKind::Build { provider: RUST.into(), test: ADDS.into() });
+    assert_eq!(seen.ends[0].kind, RunKind::Build { provider: RUST.clone(), test: ADDS.into() });
     assert_eq!(state(&m, RUST, ADDS), State::Unknown);
 
-    m.request_build(RUST, ADDS, plan(&[("cargo test --no-run", &[])]));
+    m.request_build(m.run_id(), RUST, ADDS, plan(&[("cargo test --no-run", &[])]));
     let seen = drive(&mut m, |_, _| unreachable!(), |_, _, _| (vec![Report::Broken { id: None, message: "didn't build".into(), at: None }], StepEnd::Exited(Some(101))));
     assert!(!seen.ends[0].build_ok);
     assert_eq!(seen.ends[0].first_broken.as_deref(), Some("didn't build"));
@@ -526,9 +527,9 @@ fn a_runs_providers_go_in_turn() {
     m.add_provider(PY, "pytest");
     m.scan(PY, "tools/tests/test_basic.py", vec![Found::new("tests/test_basic.py::test_adds", None, "test_adds", Kind::Test).at("tools/tests/test_basic.py", 3, Some(5))]);
     let seen = run(&mut m, Selection::All, plan(&[("a", &[]), ("b", &[])]), Vec::new(), StepEnd::Exited(Some(0)));
-    let order: Vec<(&str, u32)> = seen.steps.iter().map(|(p, s)| (p.as_str(), *s)).collect();
+    let order: Vec<(&ProviderId, u32)> = seen.steps.iter().map(|(p, s)| (p, *s)).collect();
     assert_eq!(order, [(PY, 0), (PY, 1), (RUST, 0), (RUST, 1)]);
-    assert_eq!(seen.asks.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), [PY, RUST]);
+    assert_eq!(seen.asks.iter().map(|(p, _)| p).collect::<Vec<_>>(), [PY, RUST]);
 }
 
 /// §8.4 "The failed again": the tests whose last result is failed or
@@ -576,4 +577,194 @@ fn reports_for_another_run_or_step_are_dropped() {
     m.reports(RunId(run.0 + 7), 0, vec![ended(ADDS, Outcome::Passed)]);
     m.reports(run, 3, vec![ended(ADDS, Outcome::Passed)]);
     assert_eq!(state(&m, RUST, ADDS), State::Running);
+}
+
+/// "Review of steps 1 and 2", finding 1 (§6.4 "Run ids"): run ids come
+/// from the host's one count, so two projects' models never give the
+/// same one.
+#[test]
+fn run_ids_are_unique_across_projects() {
+    let ids = RunIds::new();
+    let mut a = Model::with_run_ids(ids.clone());
+    let mut b = Model::with_run_ids(ids.clone());
+    let mut runs = Vec::new();
+    for m in [&mut a, &mut b] {
+        m.add_provider(RUST, "cargo test");
+        m.scan(RUST, "src/lib.rs", lib_rs());
+        m.request(Selection::All, Mode::Queue);
+        let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+        runs.push(run);
+    }
+    runs.push(a.run_id());
+    runs.push(ids.next());
+    let distinct: std::collections::BTreeSet<RunId> = runs.iter().copied().collect();
+    assert_eq!(distinct.len(), runs.len(), "{runs:?}");
+}
+
+/// "Review of steps 1 and 2", finding 1 (§11): a `build-first` plan
+/// runs as the run its first `tests-launch` was asked with: every step
+/// and the run's end carry it, so the second ask carries it too.
+#[test]
+fn a_build_first_plan_runs_as_the_launchs_run() {
+    let mut m = orbit();
+    let launch = m.run_id();
+    m.request_build(launch, RUST, ADDS, plan(&[("build", &[]), ("again", &[])]));
+    let mut runs = Vec::new();
+    while let Some(action) = m.next(0) {
+        match action {
+            Action::Step { run, step, .. } => {
+                runs.push(run);
+                m.step_ended(run, step, StepEnd::Exited(Some(0)), Vec::new());
+            }
+            Action::Ended(end) => {
+                runs.push(end.run);
+                assert!(end.build_ok);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(runs, [launch, launch, launch]);
+    // The next run draws a new one.
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+    assert_ne!(run, launch);
+}
+
+/// "Review of steps 1 and 2", finding 7 (§8.5; Decisions 11): a
+/// `crashed` or `broken` with no id in a later step errors what of the
+/// step's scope has no result in the run: what passed in an earlier step
+/// keeps its result.
+#[test]
+fn a_crash_or_broken_with_no_id_leaves_what_ended_earlier_in_the_run() {
+    for report in [Report::Crashed { id: None, message: "SIGABRT".into() }, Report::Broken { id: None, message: "didn't build".into(), at: None }] {
+        let mut m = orbit();
+        m.request(Selection::All, Mode::Queue);
+        let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+        m.planned(run, Ok(plan(&[("bin a", &[]), ("bin b", &[])])));
+        assert!(matches!(m.next(0), Some(Action::Step { step: 0, .. })));
+        m.step_ended(run, 0, StepEnd::Exited(Some(0)), vec![ended(ADDS, Outcome::Passed)]);
+        assert!(matches!(m.next(0), Some(Action::Step { step: 1, .. })));
+        m.reports(run, 1, vec![report.clone()]);
+        assert_eq!(state(&m, RUST, ADDS), State::Passed, "{report:?}");
+        assert_eq!(state(&m, RUST, FAILS), State::Errored, "{report:?}");
+    }
+}
+
+/// "Review of steps 1 and 2", finding 7: a `broken` naming a group
+/// leaves its tests that ended earlier in the run, in another step.
+#[test]
+fn a_broken_naming_a_group_leaves_its_tests_that_ended_in_an_earlier_step() {
+    let mut m = orbit();
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+    m.planned(run, Ok(plan(&[("tests", &["orbit/lib tests"]), ("lib", &[LIB])])));
+    m.next(0);
+    m.step_ended(run, 0, StepEnd::Exited(Some(0)), vec![ended(ADDS, Outcome::Passed)]);
+    m.next(0);
+    m.reports(run, 1, vec![Report::Broken { id: Some(LIB.into()), message: "didn't build".into(), at: None }]);
+    assert_eq!(state(&m, RUST, ADDS), State::Passed);
+    assert_eq!(message(&m, RUST, NONE).as_deref(), Some("didn't build"));
+}
+
+/// "Review of steps 1 and 2", Step 3 items (§4 "States": "Nothing is
+/// marked as having failed because you stopped it"; Decisions 12): a
+/// plan that's an error, after a stop while it was asked for, errors
+/// nothing.
+#[test]
+fn a_plan_error_after_a_stop_errors_nothing() {
+    let mut m = orbit();
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run, .. }) = m.next(0) else { panic!() };
+    m.stop("you");
+    m.planned(run, Err("cargo: interrupted".into()));
+    let mut ends = Vec::new();
+    while let Some(action) = m.next(0) {
+        if let Action::Ended(end) = action {
+            ends.push(end);
+        }
+    }
+    assert_eq!(state(&m, RUST, ADDS), State::Unknown);
+    assert_eq!((ends[0].errored, &ends[0].halted), (0, &Some(Halt::Stopped("you".into()))));
+}
+
+/// Kit question 14 (§4 "What's dropped"; Decisions 31): a case its
+/// template ran again, complete, without naming, goes -- with the
+/// errored result the run's end judged it, which isn't counted.
+#[test]
+fn a_case_dropped_by_a_complete_run_goes_with_its_result() {
+    let mut m = Model::new();
+    m.add_provider(GO, "go test");
+    let mut table = Found::new("example.com/orbit TestTable", None, "TestTable", Kind::Test).at("orbit_test.go", 10, Some(30));
+    table.template = true;
+    m.scan(GO, "orbit_test.go", vec![table]);
+    let case = |name: &str| Report::Found(Found::new(format!("example.com/orbit TestTable/{name}"), Some("example.com/orbit TestTable"), name, Kind::Case));
+    let sel = || Selection::Nodes(vec![key(GO, "example.com/orbit TestTable")]);
+    run(&mut m, sel(), plan(&[("go", &[])]), vec![case("one"), ended("example.com/orbit TestTable/one", Outcome::Passed), case("two"), ended("example.com/orbit TestTable/two", Outcome::Failed)], StepEnd::Exited(Some(1)));
+    let seen = run(&mut m, sel(), plan(&[("go", &[])]), vec![case("one"), ended("example.com/orbit TestTable/one", Outcome::Passed)], StepEnd::Exited(Some(0)));
+    assert!(!has(&m, GO, "example.com/orbit TestTable/two"));
+    assert_eq!((seen.ends[0].passed, seen.ends[0].errored), (1, 0));
+    assert!(!m.results_file().contains("TestTable/two"));
+}
+
+/// Kit question 7 (§4 "A group's state"; Decisions 7): a template whose
+/// cases ended needs no `ended` of its own: it isn't counted, isn't
+/// errored "ended without a result", and its state is its cases'.
+#[test]
+fn a_template_whose_cases_ended_needs_no_result_of_its_own() {
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    let mut template = Found::new("tests/test_a.py::test_cases", None, "test_cases", Kind::Test).at("tests/test_a.py", 3, Some(9));
+    template.template = true;
+    m.scan(PY, "tests/test_a.py", vec![template]);
+    let case = Found::new("tests/test_a.py::test_cases[1]", Some("tests/test_a.py::test_cases"), "1", Kind::Case);
+    let seen = run(&mut m, Selection::Nodes(vec![key(PY, "tests/test_a.py::test_cases")]), plan(&[("pytest", &[])]), vec![Report::Found(case), ended("tests/test_a.py::test_cases[1]", Outcome::Failed)], StepEnd::Exited(Some(1)));
+    let node = m.node(id(&m, PY, "tests/test_a.py::test_cases")).unwrap();
+    assert_eq!((node.result(), node.state()), (None, State::Failed));
+    assert_eq!((seen.ends[0].failed, seen.ends[0].errored), (1, 0));
+}
+
+/// Kit question 8 (§8.5): a step Fenix couldn't start ends `failed`:
+/// its tests are errored with why, and the plan goes on to its next step.
+#[test]
+fn a_step_that_couldnt_start_errors_its_tests_and_the_plan_goes_on() {
+    let mut m = orbit();
+    m.request(Selection::All, Mode::Queue);
+    let seen = drive(&mut m, |_, _| Ok(plan(&[("lib", &["orbit/lib tests"]), ("geo", &["orbit/lib geo::tests"])])), |_, _, step| match step {
+        0 => (Vec::new(), StepEnd::Failed("its command line is 41,203 characters; Windows takes 32,766".into())),
+        _ => (vec![ended(DIST, Outcome::Passed), ended(NONE, Outcome::Passed)], StepEnd::Exited(Some(0))),
+    });
+    assert_eq!(seen.steps.len(), 2);
+    assert!(message(&m, RUST, ADDS).unwrap().contains("41,203"));
+    assert_eq!(state(&m, RUST, DIST), State::Passed);
+}
+
+/// Kit question 13 (§6.3 `test-provider-set`): what a provider said it
+/// is in the project stays across its extension stopping and starting
+/// again; saying it again changes nothing.
+#[test]
+fn what_a_provider_said_it_is_survives_its_extension_starting_again() {
+    let mut m = orbit();
+    assert!(m.provider_set(RUST, "cargo nextest", None));
+    m.provider_stopped(RUST, "it trapped");
+    assert_eq!(m.providers()[0].name, "cargo nextest");
+    assert!(!m.provider_set(RUST, "cargo nextest", None), "said again: nothing changes");
+}
+
+/// "Review of steps 1 and 2", Step 3 items (§5): two extensions may each
+/// declare provider `rust`; they're two providers, their trees and
+/// results apart.
+#[test]
+fn two_extensions_providers_of_one_id_are_two() {
+    let acme = &ProviderId::fixed("acme.rust", "rust");
+    let mut m = orbit();
+    m.add_provider(acme, "acme test");
+    m.scan(acme, "src/lib.rs", lib_rs());
+    assert_eq!(m.providers().len(), 2);
+    run(&mut m, Selection::Nodes(vec![key(acme, ADDS)]), one_step(), vec![ended(ADDS, Outcome::Failed)], StepEnd::Exited(Some(1)));
+    assert_eq!((state(&m, acme, ADDS), state(&m, RUST, ADDS)), (State::Failed, State::Unknown));
+    let mut after = Model::new();
+    after.add_provider(RUST, "cargo test");
+    after.scan(RUST, "src/lib.rs", lib_rs());
+    after.restore_results(&m.results_file()).unwrap();
+    assert_eq!(state(&after, RUST, ADDS), State::Unknown, "acme's result isn't fenix.rust's");
 }

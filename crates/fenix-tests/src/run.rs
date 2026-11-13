@@ -10,17 +10,45 @@
 //! ended -- then tells the model what came of it (`planned`, `reports`,
 //! `step_ended`).
 
-use crate::limits::{self, ASK_RECORDS, MESSAGE_BYTES, PLAN_COVERS, PLAN_STEPS, REPORTS_PER_CALL, TEXT_BYTES};
-use crate::model::{Live, Model, NodeId, Source, TestKey, TestResult};
+use crate::limits::{self, ASK_RECORDS, MAX_DEPTH, MESSAGE_BYTES, PLAN_COVERS, PLAN_STEPS, REPORTS_PER_CALL, TEXT_BYTES};
+use crate::model::{Live, Model, NodeId, ProviderId, Source, TestKey, TestResult};
 use crate::records::{Ask, Ended, Found, Kind, Location, Outcome, Plan, Report, StepEnd};
 use crate::view::LastRun;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-/// A run, as the provider sees it (`run: u64`, §6.4): unique for the
-/// model's life. A listing and a build have one too.
+/// A run, as the provider sees it (`run: u64`, §6.4): unique while
+/// Fenix runs, across projects, when every model draws from the host's
+/// one `RunIds`. A listing and a build have one too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RunId(pub u64);
+
+/// Where run ids come from: a count the host makes once and gives every
+/// project's model (`Model::with_run_ids`), so no two runs while Fenix
+/// runs share an id (§6.4, "Run ids"). A clone shares the count.
+#[derive(Clone, Debug)]
+pub struct RunIds(Arc<AtomicU64>);
+
+impl RunIds {
+    /// A count from 1.
+    pub fn new() -> Self {
+        RunIds(Arc::new(AtomicU64::new(1)))
+    }
+
+    /// The next id: never one given before by this count or its clones.
+    pub fn next(&self) -> RunId {
+        RunId(self.0.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl Default for RunIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// What to run (§4 "Runs", §8.4). Worked out into tests when the run
 /// starts, not when it's asked for: the failed are those failed then.
@@ -72,13 +100,13 @@ pub enum Requested {
 pub enum Action {
     /// Ask `provider` for a plan (`tests-plan(provider, run, ask)`),
     /// then give its answer to `planned`.
-    Plan { run: RunId, provider: String, ask: Ask },
+    Plan { run: RunId, provider: ProviderId, ask: Ask },
     /// Start step `step` of `provider`'s plan, feed its output's reports
     /// to `reports` and its end to `step_ended`.
-    Step { run: RunId, provider: String, step: u32, label: String },
+    Step { run: RunId, provider: ProviderId, step: u32, label: String },
     /// These steps of `provider`'s plan won't start: give it
     /// `tests-step-ended(stopped)` for each (§6.4, "Order").
-    NotStarted { run: RunId, provider: String, steps: Range<u32> },
+    NotStarted { run: RunId, provider: ProviderId, steps: Range<u32> },
     /// The run ended.
     Ended(RunEnd),
 }
@@ -88,9 +116,10 @@ pub enum Action {
 pub enum RunKind {
     Tests(Vec<Selection>),
     /// A provider's listing (`discover`).
-    Listing { provider: String },
-    /// A debug launch's `build-first` plan for a test (§11).
-    Build { provider: String, test: String },
+    Listing { provider: ProviderId },
+    /// A debug launch's `build-first` plan for a test (§11), run as the
+    /// run the launch was first asked with.
+    Build { provider: ProviderId, test: String },
 }
 
 /// Why a run ended early.
@@ -169,8 +198,13 @@ struct Part {
     crashed: bool,
     /// Its provider stopped (a trap, a restart): no call goes to it.
     dead: bool,
-    /// The step each test ended in.
-    ended_in: HashMap<NodeId, u32>,
+    /// The tests its selection holds, as of the tree's `built`th shape.
+    universe: Option<(u64, Rc<[NodeId]>)>,
+    /// A step's scope (`step_scope`), as of the tree's `built`th shape.
+    scope: Option<(u32, u64, Rc<[NodeId]>)>,
+    /// Of that scope, those that had no result in the run when last
+    /// looked: only ever fewer, as results are only ever added.
+    pending: Option<(u32, u64, Vec<NodeId>)>,
     /// What a report named in this run: found, started, ended, printed.
     named: HashSet<NodeId>,
     /// What a test printed before its result came.
@@ -249,7 +283,7 @@ impl Model {
 
     /// `u` on the page: list `provider`, or every provider shown. Asked
     /// with a key, so it runs whatever `set_automatic_listings` says.
-    pub fn list(&mut self, provider: Option<&str>) {
+    pub fn list(&mut self, provider: Option<&ProviderId>) {
         match provider {
             Some(id) => {
                 if let Some(p) = self.find_provider(id) {
@@ -332,13 +366,22 @@ impl Model {
         self.last_selection.as_deref()
     }
 
+    /// A new run id from the model's `RunIds`: the one to call
+    /// `tests-launch` with (§11). Its `build-first` plan runs as that
+    /// run (`request_build`), and the second `tests-launch` carries it.
+    pub fn run_id(&self) -> RunId {
+        self.run_ids.next()
+    }
+
     /// Asks to run a debug launch's `build-first` plan for test `id` of
-    /// `provider` (§11). It goes before a waiting run: you're waiting at
-    /// the debugger for it.
-    pub fn request_build(&mut self, provider: &str, id: &str, plan: Plan) -> Requested {
+    /// `provider` (§11), as run `run`: the one its first `tests-launch`
+    /// was asked with (`run_id`), so the plan's steps, its reports and
+    /// the second `tests-launch` all carry it. It goes before a waiting
+    /// run: you're waiting at the debugger for it.
+    pub fn request_build(&mut self, run: RunId, provider: &ProviderId, id: &str, plan: Plan) -> Requested {
         let Some(p) = self.find_provider(provider) else { return Requested::Nothing };
         let plan = self.bound_plan(p, plan);
-        self.waiting_build = Some((p, limits::cut_id(id).to_string(), plan));
+        self.waiting_build = Some((p, limits::cut_id(id).into_owned(), plan, run));
         if self.run.is_some() {
             Requested::Waits
         } else {
@@ -380,7 +423,7 @@ impl Model {
     /// turn in the run is under way, the run is stopped (the host kills
     /// its step) and no further call goes to it; when its turn hadn't
     /// come, it's left out. Its waiting listing or build is dropped.
-    pub fn provider_stopped(&mut self, provider: &str, why: &str) {
+    pub fn provider_stopped(&mut self, provider: &ProviderId, why: &str) {
         let Some(p) = self.find_provider(provider) else { return };
         self.listings.retain(|&l| l != p);
         if self.waiting_build.as_ref().is_some_and(|b| b.0 == p) {
@@ -416,8 +459,8 @@ impl Model {
         self.ensure_built();
         loop {
             if self.run.is_none() {
-                if let Some((p, test, plan)) = self.waiting_build.take() {
-                    self.start_run(Job::Build(test), vec![(p, Sel::Nodes(Vec::new()))], now);
+                if let Some((p, test, plan, run)) = self.waiting_build.take() {
+                    self.start_run(Job::Build(test), vec![(p, Sel::Nodes(Vec::new()))], now, run);
                     let part = self.run.as_mut().and_then(|r| r.part.as_mut());
                     if let Some(part) = part {
                         Self::take_plan(part, plan);
@@ -427,13 +470,15 @@ impl Model {
                 if let Some(selections) = self.waiting.take() {
                     let parts = self.resolve(&selections);
                     self.last_selection = Some(selections.clone());
-                    self.start_run(Job::Tests(selections), parts, now);
+                    let run = self.run_ids.next();
+                    self.start_run(Job::Tests(selections), parts, now, run);
                     continue;
                 }
                 while !self.listings.is_empty() {
                     let p = self.listings.remove(0);
                     if !self.providers[p as usize].hidden() {
-                        self.start_run(Job::Listing, vec![(p, Sel::All)], now);
+                        let run = self.run_ids.next();
+                        self.start_run(Job::Listing, vec![(p, Sel::All)], now, run);
                         break;
                     }
                 }
@@ -516,7 +561,9 @@ impl Model {
             broken: false,
             crashed: false,
             dead: false,
-            ended_in: HashMap::new(),
+            universe: None,
+            scope: None,
+            pending: None,
             named: HashSet::new(),
             printed: HashMap::new(),
         }
@@ -531,9 +578,7 @@ impl Model {
         part.planned_ok = true;
     }
 
-    fn start_run(&mut self, job: Job, parts: Vec<(u32, Sel)>, now: u64) {
-        let id = RunId(self.next_run);
-        self.next_run += 1;
+    fn start_run(&mut self, job: Job, parts: Vec<(u32, Sel)>, now: u64, id: RunId) {
         let started_seq = self.tick();
         let provider = parts.first().map(|p| p.0);
         let mut run = Run {
@@ -680,44 +725,89 @@ impl Model {
         }
     }
 
-    /// The records of a `run` ask for `nodes`, or none for `run-all`.
-    pub(crate) fn ask_records(&self, mut nodes: Vec<NodeId>) -> Option<Vec<Found>> {
+    /// The records of a `run` ask for `nodes`, or none for `run-all`
+    /// (§4 "What the provider is asked"; Decisions, 20 and 32):
+    ///
+    /// - A node its provider can't name -- a cut id whose `data` isn't
+    ///   kept -- is asked as its nearest ancestor it can name; with none,
+    ///   the provider is asked `run-all`. Coarser, never fewer.
+    /// - Past 10,000 nodes, the deepest are replaced by their parents
+    ///   until they fit; at the top, `run-all`.
+    /// - The nodes asked go in display order, each `file` or `suite`
+    ///   followed by its fill-in: every node under it, suites included,
+    ///   in display order, so each one's parent is in the ask. A fill-in
+    ///   goes whole or not at all: it's left out when it doesn't fit in
+    ///   what's left of the 10,000 (the earlier in display order taking
+    ///   room first), or when it holds a node its provider can't name.
+    /// - Each record's `parent` is the parent Fenix put it under: none
+    ///   for one Fenix put at the top (Decisions, 6).
+    ///
+    /// So a record whose `parent` is in the ask is part of a fill-in; one
+    /// whose `parent` isn't was asked for itself.
+    pub(crate) fn ask_records(&self, nodes: Vec<NodeId>) -> Option<Vec<Found>> {
+        let mut nodes = self.nameable(nodes)?;
         while nodes.len() > ASK_RECORDS {
             let deepest = nodes.iter().map(|&n| self.n(n).depth).max().unwrap_or(0);
             if deepest == 0 {
                 return None;
             }
-            let mut coarser: Vec<NodeId> = nodes.iter().map(|&n| if self.n(n).depth == deepest { self.n(n).parent.unwrap_or(n) } else { n }).collect();
-            coarser.sort();
-            coarser.dedup();
-            let set: HashSet<NodeId> = coarser.iter().copied().collect();
-            nodes = coarser.into_iter().filter(|&id| !self.ancestry(id).skip(1).any(|a| set.contains(&a))).collect();
+            let coarser: Vec<NodeId> = nodes.iter().map(|&n| if self.n(n).depth == deepest { self.n(n).parent.unwrap_or(n) } else { n }).collect();
+            nodes = self.nameable(coarser)?;
         }
         nodes.sort_by_key(|&n| self.n(n).order);
         let mut room = ASK_RECORDS - nodes.len();
         let mut records = Vec::new();
         for node in nodes {
-            records.push(self.n(node).merged.clone());
+            records.push(self.given_back(node));
             if !matches!(self.n(node).merged.kind, Kind::File | Kind::Suite) {
                 continue;
             }
             let mut under = Vec::new();
-            self.tests_under(node, &mut under);
-            if under.len() <= room {
+            self.all_under(node, &mut under);
+            if under.len() <= room && under.iter().all(|&n| self.can_be_named(n)) {
                 room -= under.len();
-                records.extend(under.into_iter().map(|n| self.n(n).merged.clone()));
+                records.extend(under.into_iter().map(|n| self.given_back(n)));
             }
         }
         Some(records)
     }
 
-    /// The tests and cases under `id`, in display order.
-    fn tests_under(&self, id: NodeId, out: &mut Vec<NodeId>) {
+    /// `nodes`, each a node its provider can name (itself or its nearest
+    /// such ancestor), the topmost of them only; none when one has no
+    /// such ancestor.
+    fn nameable(&self, nodes: Vec<NodeId>) -> Option<Vec<NodeId>> {
+        let mut out = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            out.push(self.ancestry(node).find(|&a| self.can_be_named(a))?);
+        }
+        out.sort();
+        out.dedup();
+        let set: HashSet<NodeId> = out.iter().copied().collect();
+        Some(out.into_iter().filter(|&id| !self.ancestry(id).skip(1).any(|a| set.contains(&a))).collect())
+    }
+
+    /// Whether node `id`'s provider can be asked for it by itself: its id
+    /// isn't a cut one, or its `data` is kept to name it by (Decisions,
+    /// 32).
+    pub(crate) fn can_be_named(&self, id: NodeId) -> bool {
+        let node = self.n(id);
+        node.merged.data.is_some() || !limits::is_cut_id(&node.id)
+    }
+
+    /// Node `id` as Fenix gives it back (`test-ask.run`, `tests-launch`):
+    /// its merged fields, its `parent` the one Fenix put it under.
+    pub(crate) fn given_back(&self, id: NodeId) -> Found {
+        let node = self.n(id);
+        let mut found = node.merged.clone();
+        found.parent = node.parent.map(|p| self.n(p).id.clone());
+        found
+    }
+
+    /// Every node under `id`, in display order.
+    fn all_under(&self, id: NodeId, out: &mut Vec<NodeId>) {
         for &child in &self.n(id).children {
-            if self.n(child).merged.kind.is_test() {
-                out.push(child);
-            }
-            self.tests_under(child, out);
+            out.push(child);
+            self.all_under(child, out);
         }
     }
 
@@ -737,7 +827,7 @@ impl Model {
             }
             ids += step.covers.len();
             for id in &mut step.covers {
-                limits::bound(id, limits::ID_BYTES, "an id over 1 KiB was cut", &mut |w| said.push(w));
+                limits::bound_id(id, &mut |w| said.push(w));
             }
         }
         for what in said {
@@ -766,11 +856,16 @@ impl Model {
                 let part = self.part_mut().expect("a part");
                 part.phase = Phase::Steps;
                 part.all_exited = false;
-                if self.is_tests_run() {
+                // After a stop its tests go back to what they were: nothing
+                // is marked failed because you stopped it (§4 "States";
+                // Decisions, 12).
+                let halted = self.run.as_ref().is_some_and(|r| r.halt.is_some());
+                if self.is_tests_run() && !halted {
+                    self.ensure_built();
                     let leaves = self.universe();
-                    for leaf in leaves {
+                    for &leaf in leaves.iter() {
                         if !self.has_run_result(leaf) {
-                            self.give_result(leaf, Outcome::Errored, Some(error.clone()), None, None, None, None);
+                            self.give_result(leaf, Outcome::Errored, Some(error.clone()), None, None, None);
                         }
                     }
                 }
@@ -798,9 +893,28 @@ impl Model {
     /// The counted tests the current part answers for: those its
     /// selection holds now, cases found in the run included. Steps judge
     /// nothing outside it (Decisions, 10).
-    fn universe(&self) -> Vec<NodeId> {
+    /// Worked out once per shape of the tree, so that many reports in
+    /// one call don't each walk the run.
+    fn universe(&mut self) -> Rc<[NodeId]> {
+        let built = self.built;
+        if let Some((at, leaves)) = &self.part().universe {
+            if *at == built {
+                return leaves.clone();
+            }
+        }
         let part = self.part();
-        self.sel_leaves(part.provider, &part.sel)
+        let leaves: Rc<[NodeId]> = self.sel_leaves(part.provider, &part.sel).into();
+        self.part_mut().expect("a part").universe = Some((built, leaves.clone()));
+        leaves
+    }
+
+    /// Whether counted test `leaf` is one the current part answers for.
+    fn in_universe(&self, leaf: NodeId) -> bool {
+        let part = self.part();
+        match &part.sel {
+            Sel::All => self.n(leaf).provider == part.provider,
+            Sel::Nodes(_) => self.ancestry(leaf).any(|a| part.asked.contains(&a)),
+        }
     }
 
     fn in_covers(&self, id: NodeId, covers: &HashSet<String>) -> bool {
@@ -809,15 +923,24 @@ impl Model {
 
     /// Step `step`'s own tests, or, for a step with empty `covers`, the
     /// plan's rest: what of the ask no step names (§8.5; Decisions, 11).
-    fn step_scope(&self, step: u32) -> Vec<NodeId> {
+    /// Worked out once per step and shape of the tree.
+    fn step_scope(&mut self, step: u32) -> Rc<[NodeId]> {
+        let built = self.built;
+        if let Some((s, at, scope)) = &self.part().scope {
+            if *s == step && *at == built {
+                return scope.clone();
+            }
+        }
+        let leaves = self.universe();
         let part = self.part();
         let covers = &part.covers[step as usize];
-        let leaves = self.universe();
-        if covers.is_empty() {
-            leaves.into_iter().filter(|&l| !self.in_covers(l, &part.named_by_steps)).collect()
+        let scope: Rc<[NodeId]> = if covers.is_empty() {
+            leaves.iter().copied().filter(|&l| !self.in_covers(l, &part.named_by_steps)).collect()
         } else {
-            leaves.into_iter().filter(|&l| self.in_covers(l, covers)).collect()
-        }
+            leaves.iter().copied().filter(|&l| self.in_covers(l, covers)).collect()
+        };
+        self.part_mut().expect("a part").scope = Some((step, built, scope.clone()));
+        scope
     }
 
     fn start_step(&mut self, step: u32, now: u64) {
@@ -843,7 +966,8 @@ impl Model {
         if empty {
             self.part_mut().expect("a part").rest_running = true;
         }
-        for leaf in self.step_scope(step) {
+        let scope = self.step_scope(step);
+        for &leaf in scope.iter() {
             if !self.has_run_result(leaf) {
                 self.run.as_mut().expect("a run").overlaid.insert(leaf);
                 self.update(leaf, |n| n.live = Live::Running);
@@ -886,11 +1010,12 @@ impl Model {
         if self.is_tests_run() {
             let mut judged: Vec<NodeId> = Vec::new();
             if !self.part().covers[step as usize].is_empty() {
-                judged.extend(self.step_scope(step));
+                judged.extend(self.step_scope(step).iter().copied());
             }
             if step as usize + 1 == self.part().labels.len() {
                 let named = self.part().named_by_steps.clone();
-                judged.extend(self.universe().into_iter().filter(|&l| !self.in_covers(l, &named)));
+                let leaves = self.universe();
+                judged.extend(leaves.iter().copied().filter(|&l| !self.in_covers(l, &named)));
             }
             self.judge(judged, &end);
         }
@@ -908,9 +1033,10 @@ impl Model {
             return;
         }
         self.ensure_built();
-        for leaf in self.step_scope(step) {
+        let scope = self.step_scope(step);
+        for &leaf in scope.iter() {
             if !self.has_run_result(leaf) {
-                self.give_result(leaf, Outcome::Errored, Some(message.to_string()), None, None, None, None);
+                self.give_result(leaf, Outcome::Errored, Some(message.to_string()), None, None, None);
             }
         }
         self.changed();
@@ -926,26 +1052,20 @@ impl Model {
             match end {
                 StepEnd::Stopped => self.update(leaf, |n| n.live = Live::Idle),
                 StepEnd::Exited(_) if unsaved => self.update(leaf, |n| n.live = Live::Idle),
-                StepEnd::Exited(_) => self.give_result(leaf, Outcome::Errored, Some(NO_RESULT.to_string()), None, None, None, None),
-                StepEnd::TimedOut => self.give_result(leaf, Outcome::Errored, Some(timed_out.clone()), None, None, None, None),
-                StepEnd::Failed(why) => self.give_result(leaf, Outcome::Errored, Some(why.clone()), None, None, None, None),
+                StepEnd::Exited(_) => self.give_result(leaf, Outcome::Errored, Some(NO_RESULT.to_string()), None, None, None),
+                StepEnd::TimedOut => self.give_result(leaf, Outcome::Errored, Some(timed_out.clone()), None, None, None),
+                StepEnd::Failed(why) => self.give_result(leaf, Outcome::Errored, Some(why.clone()), None, None, None),
             }
         }
     }
 
     /// Node `id`'s result in this run: the last `ended` wins (§4 "A result").
-    #[allow(clippy::too_many_arguments)]
-    fn give_result(&mut self, id: NodeId, outcome: Outcome, message: Option<String>, at: Option<Location>, text: Option<String>, duration_ms: Option<f64>, step: Option<u32>) {
+    fn give_result(&mut self, id: NodeId, outcome: Outcome, message: Option<String>, at: Option<Location>, text: Option<String>, duration_ms: Option<f64>) {
         let seq = self.tick();
         let run = self.run.as_mut().expect("a run");
         let when_ms = run.step_ms;
         let again = run.results.insert(id, outcome).is_some();
-        let pending = run.part.as_mut().and_then(|part| {
-            if let Some(step) = step {
-                part.ended_in.insert(id, step);
-            }
-            part.printed.remove(&id)
-        });
+        let pending = run.part.as_mut().and_then(|part| part.printed.remove(&id));
         self.update(id, |n| {
             // A second `ended` in the run keeps what the test printed.
             let mut printed = if again { n.result.take().map(|r| r.printed).unwrap_or_default() } else { String::new() };
@@ -1005,7 +1125,7 @@ impl Model {
                 if job != 0 {
                     return;
                 }
-                self.ended(p, step, ended);
+                self.ended(p, ended);
             }
             Report::Output { id: Some(id), text } => {
                 if job != 0 {
@@ -1061,10 +1181,10 @@ impl Model {
     /// earlier in the run is known by then; an unknown one is added as a
     /// test labelled by its id, found in a run, under the deepest node of
     /// the file its `at` names, else at its provider's top.
-    fn ended(&mut self, p: u32, step: u32, ended: Ended) {
+    fn ended(&mut self, p: u32, ended: Ended) {
         let mut ended = ended;
         let mut said = Vec::new();
-        limits::bound(&mut ended.id, limits::ID_BYTES, "an id over 1 KiB was cut", &mut |w| said.push(w));
+        limits::bound_id(&mut ended.id, &mut |w| said.push(w));
         if let Some(message) = &mut ended.message {
             limits::bound(message, MESSAGE_BYTES, "a message over 4 KiB was cut", &mut |w| said.push(w));
         }
@@ -1081,20 +1201,22 @@ impl Model {
         let id = match self.lookup(p, &ended.id) {
             Some(id) => id,
             None => {
-                self.ensure_built();
+                // Added without working the tree out: a batch of 512 such
+                // results costs one build, at the call's end (§7.5).
                 let parent = ended.at.as_ref().and_then(|at| self.deepest_in(p, &at.path, at.line));
-                let mut found = Found::new(ended.id.clone(), parent.map(|n| self.n(n).id.as_str()), limits::cut_chars(&ended.id, limits::LABEL_CHARS), Kind::Test);
-                found.parent = parent.map(|n| self.n(n).id.clone());
+                let parent = parent.map(|n| self.n(n).id.clone());
+                let found = Found::new(ended.id.clone(), parent.as_deref(), limits::cut_chars(&ended.id, limits::LABEL_CHARS), Kind::Test);
                 let Some(id) = self.set_source(p, found, Source::Run, None) else { return };
                 id
             }
         };
         self.part_mut().expect("a part").named.insert(id);
-        self.give_result(id, ended.outcome, ended.message, ended.at, ended.text, duration, Some(step));
+        self.give_result(id, ended.outcome, ended.message, ended.at, ended.text, duration);
     }
 
     /// The deepest group, file or suite of provider `p` in file `path`,
-    /// preferring one whose lines hold `line` (Decisions, 21).
+    /// preferring one whose lines hold `line` (Decisions, 21): from the
+    /// provider's index of them by file, its depth by its `parent`s.
     fn deepest_in(&self, p: u32, path: &str, line: u32) -> Option<NodeId> {
         let holds = |id: NodeId| {
             let node = self.n(id);
@@ -1104,20 +1226,28 @@ impl Model {
                 _ => false,
             }
         };
-        self.providers[p as usize]
-            .ids
-            .values()
-            .copied()
-            .filter(|&id| {
-                let node = self.n(id);
-                !node.merged.kind.is_test() && node.merged.path.as_deref() == Some(path)
-            })
-            .max_by_key(|&id| (holds(id), self.n(id).depth, std::cmp::Reverse(self.n(id).order)))
+        let depth = |id: NodeId| {
+            let mut at = self.n(id).merged.parent.as_deref();
+            let mut depth = 0;
+            while let Some(up) = at.and_then(|up| self.lookup(p, up)) {
+                depth += 1;
+                if depth > MAX_DEPTH || up == id {
+                    break;
+                }
+                at = self.n(up).merged.parent.as_deref();
+            }
+            depth
+        };
+        let first = |id: NodeId| std::cmp::Reverse((self.n(id).merged.line.unwrap_or(u32::MAX), self.n(id).id.as_str()));
+        self.providers[p as usize].containers.get(path)?.iter().copied().max_by_key(|&id| (holds(id), depth(id), first(id)))
     }
 
-    /// A `broken` or `crashed` (§8.5, F4): what's under `id` and hasn't
-    /// ended in this step is errored with `message`; with no `id`, or one
-    /// the provider never found (said on its page), what the step covers.
+    /// A `broken` or `crashed` (§8.5, F4): what's under `id` and has no
+    /// result in this run yet is errored with `message`; with no `id`, or
+    /// one the provider never found (said on its page), what the step
+    /// covers that has none. A test that ended earlier in the run, in
+    /// this step or another, keeps its result (Decisions, 11). Costs what's
+    /// under `id`, not the run: the step's scope is worked out once.
     fn errored_under(&mut self, p: u32, step: u32, id: Option<String>, message: String, at: Option<Location>, what: &str) {
         self.ensure_built();
         let node = match id {
@@ -1132,14 +1262,26 @@ impl Model {
             None => None,
         };
         let targets: Vec<NodeId> = match node {
-            Some(node) => self.universe().into_iter().filter(|&l| self.ancestry(l).any(|a| a == node)).collect(),
-            None => self.step_scope(step),
+            Some(node) => {
+                let mut under = Vec::new();
+                self.leaves_under(node, &mut under);
+                under.into_iter().filter(|&l| !self.has_run_result(l) && self.in_universe(l)).collect()
+            }
+            None => {
+                // The step's scope without a result, kept between reports:
+                // a thousand `broken`s with no id walk the scope once.
+                let built = self.built;
+                let pending = match self.part_mut().expect("a part").pending.take() {
+                    Some((s, at, pending)) if s == step && at == built => pending,
+                    _ => self.step_scope(step).to_vec(),
+                };
+                let pending: Vec<NodeId> = pending.into_iter().filter(|&l| !self.has_run_result(l)).collect();
+                self.part_mut().expect("a part").pending = Some((step, built, pending.clone()));
+                pending
+            }
         };
         for leaf in targets {
-            if self.part().ended_in.get(&leaf) == Some(&step) {
-                continue;
-            }
-            self.give_result(leaf, Outcome::Errored, Some(message.clone()), at.clone(), None, None, Some(step));
+            self.give_result(leaf, Outcome::Errored, Some(message.clone()), at.clone(), None, None);
         }
     }
 
@@ -1166,7 +1308,7 @@ impl Model {
                     // A plan of no steps: its whole ask is the plan's
                     // rest, judged at once as if it ended (Decisions, 13).
                     self.run.as_mut().expect("a run").part = Some(part);
-                    let leaves = self.universe();
+                    let leaves = self.universe().to_vec();
                     self.judge(leaves, &StepEnd::Exited(Some(0)));
                     let part = self.run.as_mut().expect("a run").part.take().expect("a part");
                     return self.after_part(part, false);
@@ -1184,6 +1326,14 @@ impl Model {
                         })
                         .collect();
                     for id in gone {
+                        // A case its template no longer has goes with the
+                        // result this run judged it, uncounted (Decisions, 31).
+                        if !self.n(id).has_scan() && self.n(id).listing.is_none() {
+                            self.run.as_mut().expect("a run").results.remove(&id);
+                            if let Some(node) = self.raw_mut(id) {
+                                node.result = None;
+                            }
+                        }
                         self.drop_source(id, Source::Run, None);
                     }
                 }
@@ -1254,7 +1404,7 @@ impl Model {
         let kind = match run.job {
             Job::Tests(selections) => RunKind::Tests(selections),
             Job::Listing | Job::Build(_) => {
-                let provider = run.provider.map(|p| self.providers[p as usize].id.clone()).unwrap_or_default();
+                let provider = self.providers[run.provider.expect("a listing or a build is of a provider") as usize].id.clone();
                 match run.job {
                     Job::Build(test) => RunKind::Build { provider, test },
                     _ => RunKind::Listing { provider },

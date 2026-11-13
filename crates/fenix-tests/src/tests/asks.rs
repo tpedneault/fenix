@@ -117,8 +117,8 @@ fn a_selection_past_10000_is_asked_as_its_parents() {
 #[test]
 fn a_files_tests_are_every_providers_in_it() {
     let mut m = orbit();
-    m.add_provider("rust.nextest", "cargo nextest");
-    m.scan("rust.nextest", "src/lib.rs", lib_rs());
+    m.add_provider(NEXTEST, "cargo nextest");
+    m.scan(NEXTEST, "src/lib.rs", lib_rs());
     m.request(Selection::File("src/lib.rs".into()), Mode::Queue);
     let mut asked = Vec::new();
     drive(&mut m, |p, ask| {
@@ -127,4 +127,91 @@ fn a_files_tests_are_every_providers_in_it() {
     }, |_, _, _| unreachable!());
     assert_eq!(asked.len(), 2);
     assert_eq!(asked[0].1[0], "orbit/lib tests");
+}
+
+/// "Review of steps 1 and 2", finding 3 (§4 "What the provider is
+/// asked"): a fill-in holds every node under the file or suite asked,
+/// the suites between included, so each of its records' `parent` is in
+/// the ask; a node asked for itself has a `parent` that isn't. The
+/// provider tells the two apart without reading its ids.
+#[test]
+fn a_fill_in_holds_the_suites_between_so_every_parent_is_in_the_ask() {
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    let path = "tests/test_a.py";
+    let class = format!("{path}::TestMath");
+    let other = "tests/test_b.py";
+    m.scan(PY, path, vec![
+        Found::new(path, None, path, Kind::File),
+        Found::new(class.clone(), Some(path), "TestMath", Kind::Suite).at(path, 2, Some(20)),
+        Found::new(format!("{class}::test_adds"), Some(&class), "test_adds", Kind::Test).at(path, 3, Some(5)),
+        Found::new(format!("{path}::test_top"), Some(path), "test_top", Kind::Test).at(path, 30, Some(32)),
+    ]);
+    m.scan(PY, other, vec![Found::new(other, None, other, Kind::File), Found::new(format!("{other}::test_b"), Some(other), "test_b", Kind::Test).at(other, 1, Some(2))]);
+    let ask = ask_for(&mut m, Selection::Nodes(vec![key(PY, path), key(PY, &format!("{other}::test_b"))]));
+    let Ask::Run(records) = &ask else { panic!() };
+    let asked: Vec<&str> = records.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(asked, [path, class.as_str(), &format!("{class}::test_adds"), &format!("{path}::test_top"), &format!("{other}::test_b")]);
+    let in_ask = |id: &Option<String>| id.as_deref().is_some_and(|id| asked.contains(&id));
+    let selected: Vec<&str> = records.iter().filter(|r| !in_ask(&r.parent)).map(|r| r.id.as_str()).collect();
+    assert_eq!(selected, [path, &format!("{other}::test_b")], "test_b's parent, its file, wasn't asked");
+}
+
+/// "Review of steps 1 and 2", finding 3 (§4): with the fill-in left
+/// out past 10,000 records, a test selected beside its file's sibling is
+/// still told apart: its parent isn't in the ask.
+#[test]
+fn past_the_cap_a_selected_test_is_still_told_from_a_fill_in() {
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    let big = "tests/test_big.py";
+    let mut found = vec![Found::new(big, None, big, Kind::File)];
+    found.extend((0..10_000).map(|i| Found::new(format!("{big}::t{i}"), Some(big), format!("t{i}"), Kind::Test).at(big, i, None)));
+    m.scan(PY, big, found);
+    let small = "tests/test_small.py";
+    m.scan(PY, small, vec![Found::new(small, None, small, Kind::File), Found::new(format!("{small}::u"), Some(small), "u", Kind::Test).at(small, 1, None)]);
+    let ask = ask_for(&mut m, Selection::Nodes(vec![key(PY, big), key(PY, &format!("{small}::u"))]));
+    assert_eq!(ids(&ask), [big, &format!("{small}::u")], "the big file's fill-in doesn't fit: left out whole");
+    let Ask::Run(records) = &ask else { panic!() };
+    assert_eq!(records[1].parent.as_deref(), Some(small), "not in the ask: asked for itself");
+}
+
+/// "Review of steps 1 and 2", finding 2 (§4, §6.5; Decisions 32): a
+/// node whose id was cut and whose `data` isn't kept can't be named to
+/// its runner, so it's asked as its parent; a fill-in holding one is
+/// left out whole; with data, it's asked as itself.
+#[test]
+fn a_cut_id_without_its_data_is_asked_as_its_parent() {
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    let path = "tests/test_long.py";
+    let long = format!("{path}::test_cases[{}]", "x".repeat(2_000));
+    let mut with_data = Found::new(format!("{long}-kept"), Some(path), "kept", Kind::Case).at(path, 9, None);
+    with_data.data = Some("its own name".into());
+    m.scan(PY, path, vec![Found::new(path, None, path, Kind::File), Found::new(long.clone(), Some(path), "long", Kind::Case).at(path, 3, None), with_data, Found::new(format!("{path}::short"), Some(path), "short", Kind::Test).at(path, 20, None)]);
+    let cut = cut_id(&long).into_owned();
+    assert!(!m.node(id(&m, PY, &long)).unwrap().can_be_named());
+    let ask = ask_for(&mut m, Selection::Nodes(vec![key(PY, &long)]));
+    assert_eq!(ids(&ask), [path], "its file, without a fill-in that holds it");
+    let ask = ask_for(&mut m, Selection::Nodes(vec![key(PY, &format!("{long}-kept"))]));
+    let Ask::Run(records) = &ask else { panic!() };
+    assert_eq!((records.len(), records[0].data.as_deref()), (1, Some("its own name")));
+    assert!(m.node(id(&m, PY, &format!("{long}-kept"))).unwrap().can_be_named());
+    assert_ne!(cut, records[0].id);
+}
+
+/// "Review of steps 1 and 2", finding 3: a record's `parent` is the one
+/// Fenix put it under -- none for one at its provider's top because
+/// its parent was never found (Decisions 6).
+#[test]
+fn a_records_parent_is_where_fenix_put_it() {
+    let mut m = Model::new();
+    m.add_provider(PY, "pytest");
+    m.scan(PY, "tests/test_a.py", vec![Found::new("tests/test_a.py::t", Some("tests/test_a.py::Missing"), "t", Kind::Test).at("tests/test_a.py", 1, None)]);
+    let ask = ask_for(&mut m, Selection::Nodes(vec![key(PY, "tests/test_a.py::t")]));
+    let Ask::Run(records) = &ask else { panic!() };
+    assert_eq!(records[0].parent, None);
+    let node = m.node(id(&m, PY, "tests/test_a.py::t")).unwrap();
+    assert_eq!(node.found().parent.as_deref(), Some("tests/test_a.py::Missing"), "the provider's own is kept");
+    assert_eq!(node.given_back().parent, None);
 }

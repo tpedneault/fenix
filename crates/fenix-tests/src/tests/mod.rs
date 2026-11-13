@@ -14,9 +14,11 @@ mod scale;
 mod tree;
 mod views;
 
-pub(super) const RUST: &str = "rust";
-pub(super) const PY: &str = "python";
-pub(super) const GO: &str = "go";
+pub(super) const RUST: &ProviderId = &ProviderId::fixed("fenix.rust", "rust");
+pub(super) const PY: &ProviderId = &ProviderId::fixed("fenix.python", "python");
+pub(super) const GO: &ProviderId = &ProviderId::fixed("fenix.go", "go");
+pub(super) const WEB: &ProviderId = &ProviderId::fixed("fenix.web", "web");
+pub(super) const NEXTEST: &ProviderId = &ProviderId::fixed("fenix.rust", "rust.nextest");
 
 /// Cargo's lib target of `orbit`, as lang-kit names a group.
 pub(super) const LIB: &str = "\u{1f}orbit\u{1f}orbit (lib)";
@@ -67,23 +69,23 @@ pub(super) fn orbit() -> Model {
     m
 }
 
-pub(super) fn key(provider: &str, id: &str) -> TestKey {
+pub(super) fn key(provider: &ProviderId, id: &str) -> TestKey {
     TestKey::new(provider, id)
 }
 
-pub(super) fn id(m: &Model, provider: &str, test: &str) -> NodeId {
+pub(super) fn id(m: &Model, provider: &ProviderId, test: &str) -> NodeId {
     m.find(&key(provider, test)).unwrap_or_else(|| panic!("{provider} has {test}"))
 }
 
-pub(super) fn state(m: &Model, provider: &str, test: &str) -> State {
+pub(super) fn state(m: &Model, provider: &ProviderId, test: &str) -> State {
     m.node(id(m, provider, test)).unwrap().state()
 }
 
-pub(super) fn has(m: &Model, provider: &str, test: &str) -> bool {
+pub(super) fn has(m: &Model, provider: &ProviderId, test: &str) -> bool {
     m.find(&key(provider, test)).is_some()
 }
 
-pub(super) fn message(m: &Model, provider: &str, test: &str) -> Option<String> {
+pub(super) fn message(m: &Model, provider: &ProviderId, test: &str) -> Option<String> {
     m.node(id(m, provider, test)).unwrap().result().and_then(|r| r.message.clone())
 }
 
@@ -98,15 +100,15 @@ pub(super) fn plan(steps: &[(&str, &[&str])]) -> Plan {
 /// What a scripted host saw of a run.
 #[derive(Default)]
 pub(super) struct Seen {
-    pub asks: Vec<(String, Ask)>,
-    pub steps: Vec<(String, u32)>,
-    pub not_started: Vec<(String, std::ops::Range<u32>)>,
+    pub asks: Vec<(ProviderId, Ask)>,
+    pub steps: Vec<(ProviderId, u32)>,
+    pub not_started: Vec<(ProviderId, std::ops::Range<u32>)>,
     pub ends: Vec<RunEnd>,
 }
 
 /// Drives the model as the host does until nothing is left to do: each
 /// provider's plan from `plans`, each step's reports and end from `steps`.
-pub(super) fn drive(m: &mut Model, mut plans: impl FnMut(&str, &Ask) -> Result<Plan, String>, mut steps: impl FnMut(&mut Model, &str, u32) -> (Vec<Report>, StepEnd)) -> Seen {
+pub(super) fn drive(m: &mut Model, mut plans: impl FnMut(&ProviderId, &Ask) -> Result<Plan, String>, mut steps: impl FnMut(&mut Model, &ProviderId, u32) -> (Vec<Report>, StepEnd)) -> Seen {
     let mut seen = Seen::default();
     let mut now = 1_000;
     for _ in 0..10_000 {
