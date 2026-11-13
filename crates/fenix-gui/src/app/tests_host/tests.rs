@@ -1583,9 +1583,6 @@ impl Project {
         let json = format!("{{\"debugServer\": {port}}}");
         let mut all: Vec<(&str, &str)> = files.to_vec();
         all.push(("fake-debug.json", &json));
-        // A debug session's start moves an empty `.fenix/project.ini` into
-        // `settings.toml`, and leaves no marker if it's empty: one stays.
-        all.push((".fenix/settings.toml", "# a project\n"));
         (Project::new(&all, focused, state), launches)
     }
 
