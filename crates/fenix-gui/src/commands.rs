@@ -170,7 +170,8 @@ impl CommandRegistry {
         registry.register("tests.run_all", "Test explorer: run all of this project's tests", |ctx| ctx.app.tests_run_all());
         registry.register("tests.run_failed", "Test explorer: run the tests that failed again", |ctx| ctx.app.tests_run_failed());
         registry.register("tests.run_last", "Test explorer: run the last test run again", |ctx| ctx.app.tests_run_last());
-        registry.register("tests.stop", "Test explorer: stop the test run", |ctx| ctx.app.tests_stop());
+        registry.register("tests.debug_here", "Test explorer: debug the test the cursor is in, built first if its provider says so", |ctx| ctx.app.tests_debug_here());
+        registry.register("tests.stop", "Test explorer: stop the test run, or a test's build to debug it", |ctx| ctx.app.tests_stop());
         registry.register("tests.output", "Test explorer: the last test run's output (Test output)", |ctx| ctx.app.tests_output());
         registry.external("dashboard.open", "Show Home, the start-up dashboard", |app| app.open_dashboard());
         registry.external("terminal.toggle", "Toggle the terminal panel", |app| app.toggle_terminal());

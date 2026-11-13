@@ -38,6 +38,9 @@
 //!   marks for the lines drawn, a click on one, the right click's items,
 //!   a result after a test's line, failures as problems under
 //!   `fenix:#tests`, worked out when the model changes.
+//! - **Debugging a test** (`debug`, step 6): `tests-launch` asked, a
+//!   `build-first` plan run as the launch's run, `tests-launch` asked
+//!   again, and the debug session started from the launch it gives.
 //! - **The page's host** (`page`, step 4): `tests.open`, the tests page's
 //!   actions, its head counted at most ten times a second, the modeline's
 //!   item, and *Test output* beside the page; the page itself is
@@ -657,12 +660,14 @@ enum CallFor {
     Plan { root: PathBuf, run: RunId, provider: ProviderId },
     Read { root: PathBuf, tag: u64 },
     StepEnded { root: PathBuf, run: RunId, step: u32, end: fenix_tests::StepEnd, tag: Option<u64> },
+    /// `tests-launch` for a test to debug (step 6, `debug`).
+    Launch { root: PathBuf, run: RunId },
 }
 
 impl CallFor {
     fn root(&self) -> &Path {
         match self {
-            CallFor::Scan { root, .. } | CallFor::Plan { root, .. } | CallFor::Read { root, .. } | CallFor::StepEnded { root, .. } => root,
+            CallFor::Scan { root, .. } | CallFor::Plan { root, .. } | CallFor::Read { root, .. } | CallFor::StepEnded { root, .. } | CallFor::Launch { root, .. } => root,
         }
     }
 }
@@ -745,6 +750,10 @@ pub(crate) struct ProjectTests {
     restoring: Option<mpsc::Receiver<String>>,
     /// A run ended while it was being read: written once it's read.
     write_due: bool,
+    /// A test being got ready to debug (step 6), and what the page's
+    /// head says of the last one: building it, why it didn't build.
+    pub(crate) debug: Option<debug::Debugging>,
+    debug_said: Option<(String, crate::page::Role)>,
     /// How each run ended, in tests.
     #[cfg(test)]
     pub(crate) ended_runs: Vec<fenix_tests::RunEnd>,
@@ -783,6 +792,9 @@ pub(crate) struct TestsHost {
     /// The extensions that turned out to have no test provider's exports:
     /// not asked again while Fenix runs.
     no_tests: HashSet<String>,
+    /// The extensions that turned out to have no `tests-launch`: their
+    /// tests run, but aren't offered to debug (step 6).
+    no_launch: HashSet<String>,
     /// How many times each extension has been ready, and the last time
     /// its first scans were asked for.
     ready: HashMap<String, u64>,
@@ -983,6 +995,8 @@ impl App {
                 trusted: None,
                 restoring,
                 write_due: false,
+                debug: None,
+                debug_said: None,
                 #[cfg(test)]
                 ended_runs: Vec::new(),
             };
@@ -1182,6 +1196,7 @@ impl App {
         }
         if gone {
             self.tests.no_tests.remove(ext);
+            self.tests.no_launch.remove(ext);
             self.tests.said.retain(|(_, id), _| id.extension != ext);
         }
         self.tests_pump();
@@ -1191,6 +1206,7 @@ impl App {
     /// `Model::provider_stopped` says, and the host's side -- its step's
     /// tree killed, no call to it after.
     fn tests_provider_stopped(&mut self, root: &Path, ext: &str, why: &str) {
+        self.tests_debug_provider_stopped(root, ext, why);
         let Some(project) = self.tests.projects.get_mut(root) else { return };
         for provider in project.providers.iter().filter(|p| p.id.extension == ext) {
             project.model.provider_stopped(&provider.id, why);
@@ -1345,6 +1361,10 @@ impl App {
             project.walk = None;
             project.walks.clear();
             project.save_run = None;
+            if project.debug.take().is_some() {
+                project.model.drop_build();
+            }
+            project.debug_said = None;
         }
     }
 
@@ -1645,6 +1665,7 @@ impl App {
                 }
             }
             fenix_tests::Action::Step { run, provider, step, label } => {
+                self.tests_debug_plan(root, run);
                 self.tests_run_started(root, run, now_ms);
                 self.tests_start_step(root, run, provider, step, &label);
             }
@@ -1674,8 +1695,9 @@ impl App {
         project.run = Some((run, now_ms));
         project.timed_out = false;
         let what = match project.model.summary().running {
-            Some(p) if p.tests => "tests",
-            _ => "a listing",
+            Some(p) if p.tests => "tests".to_string(),
+            Some(p) if p.build => format!("a build to debug {}", project.debug.as_ref().filter(|d| d.run == run).map_or("a test", |d| d.label.as_str())),
+            _ => "a listing".to_string(),
         };
         self.tests_output_reset(root, &format!("-- {what}, run {} --\n", run.0));
     }
@@ -1821,11 +1843,15 @@ impl App {
             (CallFor::StepEnded { run, step, end, tag, .. }, Reply::Reports(reports)) => {
                 let cwd = project.step.as_ref().filter(|s| Some(s.tag) == tag).map_or_else(|| root.clone(), |s| s.cwd.clone());
                 let reports = model_reports(reports, &roots, &cwd);
+                if let Some(debugging) = project.debug.as_mut().filter(|d| d.run == run) {
+                    debugging.step_ended(&end);
+                }
                 project.model.step_ended(run, step, end, reports);
                 if tag.is_some() && project.step.as_ref().map(|s| s.tag) == tag {
                     project.step = None;
                 }
             }
+            (CallFor::Launch { run, .. }, Reply::Launched(launched)) => self.tests_launched(&root, run, token, launched),
             (CallFor::Scan { .. }, _) => {}
             (what, reply) => {
                 let why = format!("it answered {what:?} with {reply:?}");
@@ -1836,6 +1862,10 @@ impl App {
 
     /// A call to `ext` that failed (`why`).
     fn tests_call_failed(&mut self, ext: &str, root: &Path, what: &CallFor, why: &str) {
+        // Debugging alone: the provider's runs aren't touched (step 6).
+        if let CallFor::Launch { run, .. } = what {
+            return self.tests_launch_failed(ext, root, *run, why);
+        }
         let no_exports = why.contains("it has no tests-") || why.contains("isn't API 1.6's");
         if no_exports {
             if self.tests.no_tests.insert(ext.to_string()) {
@@ -1926,8 +1956,10 @@ impl App {
 
     /// Stops the run in the project at `root`, `why`.
     fn tests_stop_in(&mut self, root: &Path, why: &str) -> bool {
-        let Some(project) = self.tests.projects.get_mut(root) else { return false };
-        let stopped = project.model.stop(why);
+        // A debug waiting its turn, or its provider's answer, goes too.
+        let let_go = self.tests_debug_let_go(root, why);
+        let Some(project) = self.tests.projects.get_mut(root) else { return let_go };
+        let stopped = project.model.stop(why) || let_go;
         Self::tests_halt(project, fenix_tests::StepEnd::Stopped);
         project.save_run = None;
         self.tests_pump();
@@ -1946,12 +1978,18 @@ impl App {
             (Some(fenix_tests::Halt::Stopped(why)), _) => format!("-- stopped: {why} --"),
             (Some(fenix_tests::Halt::TimedOut), _) => "-- timed out --".to_string(),
             (None, fenix_tests::RunKind::Listing { provider }) => format!("-- {} listed, in {} ms --", provider.provider, took),
+            (None, fenix_tests::RunKind::Build { .. }) if end.build_ok => format!("-- built, in {took} ms --"),
+            (None, fenix_tests::RunKind::Build { .. }) => format!("-- didn't build, in {took} ms --"),
             (None, _) => format!("-- {} passed, {} failed, {} errored, {} skipped, in {} ms --", end.passed, end.failed, end.errored, end.skipped, took),
         };
         let unsaved = (!end.unsaved.is_empty()).then(|| format!("-- {} had unsaved edits: the runner read them as last saved --", end.unsaved.join(", ")));
         self.tests_output_line(root, &said);
         if let Some(unsaved) = unsaved {
             self.tests_output_line(root, &unsaved);
+        }
+        if let fenix_tests::RunKind::Build { .. } = end.kind {
+            // Nothing of a build is a result to keep: on to the debugger.
+            return self.tests_built(root, &end);
         }
         if self.config.bool_value("tests.keep_results") != Some(false) {
             self.tests_write_results(root);
@@ -2220,6 +2258,7 @@ fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>, cap: us
     rx
 }
 
+mod debug;
 mod file;
 pub(in crate::app) use file::TestCells;
 mod page;

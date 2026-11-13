@@ -208,6 +208,21 @@ fn a_provider_scans_plans_reads_and_launches() {
     let Ok(Launching::BuildFirst(build)) = launch(&mut p, test("tests/a.fake::cases/neg", TestKind::Case, None)) else { panic!() };
     assert_eq!(build.steps[0].command.clone().unwrap().0 .1, ["--build", "tests/a.fake::cases/neg"]);
     assert_eq!(launch(&mut p, test("x", TestKind::Test, None)), Err("x can't be debugged".into()));
+
+    // A build first, read as the launch's run; asked again with that run,
+    // the binary its build said; with none said, a build again (§11).
+    let launch_in = |p: &mut Running, run: u64, test: FoundTest| match p.call(Call::TestsLaunch { provider: "provider".into(), run, test }).0 {
+        Ok(Reply::Launched(launched)) => launched,
+        other => panic!("{other:?}"),
+    };
+    let it = || test("tests/a.fake::build_it", TestKind::Test, None);
+    let Ok(Launching::BuildFirst(build)) = launch_in(&mut p, 11, it()) else { panic!() };
+    assert_eq!(build.steps[0].command.clone().unwrap().0 .1, ["--build", "tests/a.fake::build_it"]);
+    assert_eq!(reports(p.call(Call::TestsRead { provider: "provider".into(), run: 11, step: 0, lines: vec![line("BUILT /data/bin/it")] }).0), []);
+    let Ok(Launching::Launch(config)) = launch_in(&mut p, 11, it()) else { panic!() };
+    assert_eq!((config.program, config.args), (Some(path(&p.data().join("bin/it"))), vec!["tests/a.fake::build_it".to_string(), "--exact".into()]), "its own path as Fenix's");
+    let Ok(Launching::BuildFirst(_)) = launch_in(&mut p, 12, it()) else { panic!() };
+    let Ok(Launching::BuildFirst(_)) = launch_in(&mut p, 12, it()) else { panic!("no binary said: another build, which Fenix refuses") };
 }
 
 /// `test-provider-set`: for its own providers only, held to its limits.

@@ -457,7 +457,6 @@ command = "task.run_test_at_cursor"
 # The test explorer (`tests_page`; docs/plans/test-explorer.md §7.4):
 # one group for every language a pack serves. Offered only while
 # `tests.enabled` is on: off, `SPC T` is as unbound as it was in 1.5.
-# `SPC T d` (`tests.debug_here`) comes with debugging a test.
 [[leader]]
 keys = "SPC T"
 group = "tests"
@@ -491,6 +490,11 @@ command = "tests.run_failed"
 keys = "SPC T l"
 label = "run the last run again"
 command = "tests.run_last"
+
+[[leader]]
+keys = "SPC T d"
+label = "debug the test here"
+command = "tests.debug_here"
 
 [[leader]]
 keys = "SPC T k"

@@ -713,6 +713,7 @@ pub fn layout(page: &mut TestsPage, view: &View<'_>, cols: usize, height: Option
                 pieces.push((format!("then: {} test{}", grouped(n), if n == 1 { "" } else { "s" }), Role::Muted));
             }
         }
+        Some(run) if run.build => pieces.push(("building to debug…".into(), Role::Accent)),
         Some(_) => pieces.push(("listing…".into(), Role::Accent)),
         None => {
             pieces = count_chips(&summary.counts);
@@ -877,9 +878,10 @@ pub fn layout(page: &mut TestsPage, view: &View<'_>, cols: usize, height: Option
     let keys: &[(&str, &str)] = if page.filter.typing {
         &[("Enter", "keep it"), ("Esc", "clear it")]
     } else if wide {
-        &[("r", "run"), ("R", "all"), ("f", "the failed"), (".", "again"), ("Enter", "go to it"), ("o", "output"), ("/", "filter"), ("x", "stop"), ("u", "list"), ("q", "close")]
+        &[("r", "run"), ("R", "all"), ("f", "the failed"), (".", "again"), ("d", "debug"), ("Enter", "go to it"), ("o", "output"), ("/", "filter"), ("x", "stop"), ("u", "list"), ("q", "close")]
     } else {
-        &[("r", "run"), ("R", "all"), ("f", "failed"), (".", "again"), ("Enter", "go"), ("o", "output"), ("/", "filter"), ("x", "stop")]
+        // Narrow, `/` is said by the tabs' line ("/ to filter") alone.
+        &[("r", "run"), ("R", "all"), ("f", "failed"), (".", "again"), ("d", "debug"), ("Enter", "go"), ("o", "output"), ("x", "stop")]
     };
     g.keys(left, width, keys);
     let mut out = g.finish();

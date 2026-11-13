@@ -239,6 +239,10 @@ impl Run {
         matches!(self.job, Job::Tests(_))
     }
 
+    pub fn is_build(&self) -> bool {
+        matches!(self.job, Job::Build(_))
+    }
+
     fn current_provider(&self) -> Option<u32> {
         self.part.as_ref().map(|p| p.provider)
     }
@@ -386,6 +390,17 @@ impl Model {
         } else {
             Requested::Starts
         }
+    }
+
+    /// Lets go a debug launch's `build-first` plan that hasn't started
+    /// (`request_build` while a run went): the debug was stopped, or the
+    /// explorer turned off, before its turn. Whether one was waiting.
+    pub fn drop_build(&mut self) -> bool {
+        let dropped = self.waiting_build.take().is_some();
+        if dropped {
+            self.revision_bump();
+        }
+        dropped
     }
 
     /// Stops the run going (`x`, `SPC T k`): the step under way is

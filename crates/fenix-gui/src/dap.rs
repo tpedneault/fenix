@@ -172,6 +172,11 @@ pub struct Template {
     /// extension's one choice): not in the file.
     #[serde(skip)]
     pub filled: std::collections::BTreeMap<String, String>,
+    /// A test's launch (`tests-launch`, plan test-explorer §11): never
+    /// remembered as the project's last launch, so `SPC u u` doesn't start
+    /// the test again; `SPC T d` does.
+    #[serde(skip)]
+    pub test: bool,
 }
 
 /// The attribute naming an adapter already listening (`Template::debug_server`).
@@ -281,6 +286,7 @@ impl Template {
             attributes,
             pre_launch_task: config.pre_launch_task,
             filled: Default::default(),
+            test: false,
         })
     }
 
@@ -309,6 +315,7 @@ impl Template {
             attributes,
             pre_launch_task: launch.pre_launch_task.clone(),
             filled: Default::default(),
+            test: false,
         })
     }
 

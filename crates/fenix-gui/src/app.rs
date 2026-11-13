@@ -11298,8 +11298,9 @@ impl App {
             }
         }
         let file = self.open().buffer.path().map(Path::to_path_buf);
-        // Remembered for this project: SPC u u starts it again.
-        if template.name != "tools.json" {
+        // Remembered for this project: SPC u u starts it again. Not a
+        // test's (`tests.debug_here`): SPC T d starts that again.
+        if template.name != "tools.json" && !template.test {
             self.debug_last_launch.insert(root.clone(), template.name.clone());
         }
         let attributes = match template.arguments(language, file.as_deref(), &root) {

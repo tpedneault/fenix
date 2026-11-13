@@ -1071,7 +1071,7 @@ mod tests {
         let t = [KeyPress::char(' '), KeyPress::char('T')];
         let under: Vec<(Vec<KeyPress>, &str)> = trie.bindings().into_iter().filter(|(seq, _)| seq.starts_with(&t)).map(|(seq, id)| (seq, *id)).collect();
         assert!(under.iter().all(|(_, id)| id.starts_with("tests.")), "{under:?}");
-        let expect = [("T", "tests.open"), ("t", "tests.run_here"), ("f", "tests.run_file"), ("a", "tests.run_all"), ("F", "tests.run_failed"), ("l", "tests.run_last"), ("k", "tests.stop"), ("o", "tests.output")];
+        let expect = [("T", "tests.open"), ("t", "tests.run_here"), ("f", "tests.run_file"), ("a", "tests.run_all"), ("F", "tests.run_failed"), ("l", "tests.run_last"), ("d", "tests.debug_here"), ("k", "tests.stop"), ("o", "tests.output")];
         assert_eq!(under.len(), expect.len(), "{under:?}");
         for (key, id) in expect {
             let mut m = trie.matcher();

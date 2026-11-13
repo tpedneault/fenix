@@ -176,7 +176,7 @@ fn guest(id: &str) -> crate::installed::CodeExtension {
     std::fs::copy(guests.join("provider.wasm"), staged.join("extension.wasm")).unwrap();
     let short = id.rsplit('.').next().unwrap();
     let manifest = fenix_extensions::Manifest::parse(&format!(
-        "[extension]\nid = \"{id}\"\nname = \"Provider\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.6\"\nfenix = \">=1.5, <2\"\n\n[permissions]\nprocess = [\"fake-test-runner\"]\nfilesystem = \"project-read\"\n\n[[contributes.test_providers]]\nid = \"{short}\"\nname = \"fake\"\nmarkers = [\"fake.toml\"]\nscan = [\"*.fake\"]\n"
+        "[extension]\nid = \"{id}\"\nname = \"Provider\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.6\"\nfenix = \">=1.5, <2\"\n\n[permissions]\nprocess = [\"fake-test-runner\"]\nfilesystem = \"project-read\"\n\n[[contributes.test_providers]]\nid = \"{short}\"\nname = \"fake\"\nmarkers = [\"fake.toml\"]\nscan = [\"*.fake\", \"*.py\"]\n"
     ))
     .unwrap();
     crate::installed::CodeExtension { id: id.into(), name: "Provider".into(), dir: staged, manifest }
@@ -225,6 +225,11 @@ impl Project {
             std::thread::sleep(Duration::from_millis(5));
             self.app.pump_wasm();
             self.app.tests_tick(Instant::now());
+            // A debug session's adapter, as the event loop hands it on.
+            let events: Vec<_> = self.app.dap_unread.iter().flat_map(|(generation, rx)| rx.try_iter().map(|e| (*generation, e)).collect::<Vec<_>>()).collect();
+            for (generation, event) in events {
+                self.app.handle_user_event(FenixUserEvent::Dap { generation, event });
+            }
         }
     }
 
@@ -1269,8 +1274,7 @@ fn a_marks_state_colour_and_the_right_clicks_items() {
     app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
     let items = labels(&app);
     let after = items.iter().position(|l| l == "Toggle breakpoint").unwrap();
-    assert_eq!(&items[after + 1..after + 3], ["Run test", "Show in Tests"], "beside Toggle breakpoint: {items:?}");
-    assert!(!items.iter().any(|l| l.contains("Debug")), "debugging a test is step 6's");
+    assert_eq!(&items[after + 1..after + 4], ["Run test", "Debug test", "Show in Tests"], "beside Toggle breakpoint, Debug test after Run test: {items:?}");
     // Saved: stale, dimmed, its glyph kept.
     let path = app.open().buffer.path().unwrap().to_path_buf();
     app.tests_file_saved(&path);
@@ -1315,7 +1319,7 @@ fn with_the_explorer_off_the_file_shows_nothing_of_it() {
     let at = app.open().buffer.line_start_char(4);
     app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
     assert!(app.tests_test_here().is_none());
-    assert!(!app.text_menu_items().iter().any(|i| i.label == "Run test" || i.label == "Show in Tests"));
+    assert!(!app.text_menu_items().iter().any(|i| i.label == "Run test" || i.label == "Debug test" || i.label == "Show in Tests"));
     assert!(!app.tests_mark_click(app.focused_pane_id(), 4, 0));
     assert!(app.tests_views_due(Instant::now()).0, "a frame to take it away");
     assert_eq!(ours(&app), 0, "no problems");
@@ -1532,4 +1536,268 @@ fn a_failure_from_the_gutter_is_shown_at_its_line_and_as_a_problem_beside_an_ext
     p.app.tests_tick(Instant::now());
     assert!(!p.model().is_unsaved("a.fake"));
     assert!(p.app.tests.by_path.is_empty() && p.app.tests.inline.is_empty());
+}
+
+// Debugging a test (step 6, `debug`).
+
+/// A debug adapter already listening, as a launch's `debugServer` names
+/// one (a recorded exchange's shape: `initialize`, `launch`, then
+/// `initialized` and `configurationDone`): it hands on `launch`'s
+/// arguments and answers what follows until Fenix lets it go.
+fn fake_adapter() -> (u16, mpsc::Receiver<serde_json::Value>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else { return };
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let write = |message: serde_json::Value| {
+            let body = message.to_string();
+            let _ = (&stream).write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes());
+        };
+        let mut seq = 1;
+        while let Some(frame) = read_lsp_frame(&mut reader) {
+            let asked: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if asked["type"] != "request" {
+                continue;
+            }
+            let body = if asked["command"] == "initialize" { serde_json::json!({"supportsConfigurationDoneRequest": true}) } else { serde_json::json!({}) };
+            seq += 1;
+            write(serde_json::json!({"seq": seq, "type": "response", "request_seq": asked["seq"], "success": true, "command": asked["command"], "body": body}));
+            if asked["command"] == "launch" {
+                let _ = tx.send(asked["arguments"].clone());
+                seq += 1;
+                write(serde_json::json!({"seq": seq, "type": "event", "event": "initialized"}));
+            }
+        }
+    });
+    (port, rx)
+}
+
+impl Project {
+    /// A project of `files` whose provider's launches name an adapter
+    /// listening (`fake-debug.json`, which the guest's launches take).
+    fn debugging(files: &[(&str, &str)], focused: &str, state: &Path) -> (Project, mpsc::Receiver<serde_json::Value>) {
+        let (port, launches) = fake_adapter();
+        let json = format!("{{\"debugServer\": {port}}}");
+        let mut all: Vec<(&str, &str)> = files.to_vec();
+        all.push(("fake-debug.json", &json));
+        // A debug session's start moves an empty `.fenix/project.ini` into
+        // `settings.toml`, and leaves no marker if it's empty: one stays.
+        all.push((".fenix/settings.toml", "# a project\n"));
+        (Project::new(&all, focused, state), launches)
+    }
+
+    /// `launch`'s arguments, once the adapter has them.
+    fn launched(&mut self, launches: &mpsc::Receiver<serde_json::Value>) -> serde_json::Value {
+        let started = Instant::now();
+        loop {
+            if let Ok(arguments) = launches.try_recv() {
+                return arguments;
+            }
+            assert!(started.elapsed() < Duration::from_secs(120), "no launch: {:?}\n--- Test output ---\n{}", self.app.status_message.as_ref().map(|m| m.text.clone()), self.output());
+            std::thread::sleep(Duration::from_millis(5));
+            self.app.pump_wasm();
+            self.app.tests_tick(Instant::now());
+            let events: Vec<_> = self.app.dap_unread.iter().flat_map(|(generation, rx)| rx.try_iter().map(|e| (*generation, e)).collect::<Vec<_>>()).collect();
+            for (generation, event) in events {
+                self.app.handle_user_event(FenixUserEvent::Dap { generation, event });
+            }
+        }
+    }
+
+    fn said(&self) -> String {
+        self.app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+    }
+
+    fn debug_done(&self) -> bool {
+        self.tests().debug.is_none()
+    }
+
+    fn builds(&self) -> Vec<fenix_tests::RunEnd> {
+        self.tests().ended_runs.iter().filter(|e| matches!(e.kind, fenix_tests::RunKind::Build { .. })).cloned().collect()
+    }
+}
+
+/// `d` on the page, a test whose provider launches it now: the session
+/// starts from its launch, its paths and `${data}` Fenix's, its file open
+/// at its line beside the page, nothing built, and it isn't the project's
+/// last launch (`SPC u u` doesn't start it again). One its provider
+/// refuses says why and stops nothing: the provider runs tests after.
+#[test]
+fn a_test_is_debugged_from_the_launch_its_provider_gives() {
+    let state = tempfile::tempdir().unwrap();
+    let a = "\n\n# each launched\n# test plain\n#! out PASS a.py::plain 1ms\n";
+    let (mut p, launches) = Project::debugging(&[("a.py", a)], "a.py", state.path());
+    p.scanned("a.py::plain");
+    let file = p.app.focused_buffer_id();
+    p.app.run_cmd("tests.open");
+    p.until("the page's first listing", |p| p.tests().run.is_none() && p.listings() == 1);
+    assert!(p.page().contains("d debug"), "on the key strip:\n{}", p.page());
+    p.focus_row("launched");
+    p.keys("d");
+    let run = p.tests().debug.as_ref().expect("asked").run;
+    let launch = p.launched(&launches);
+    let data = p.app.wasm.installed[0].dir.join("data");
+    assert_eq!(launch["program"], serde_json::json!(data.join("fake-debugger")), "{launch}");
+    assert_eq!(launch["args"], serde_json::json!(["a.py::launched", format!("run {}", run.0)]));
+    assert_eq!(launch["env"]["AT"], serde_json::json!(data.to_string_lossy()), "${{data}} filled in");
+    assert_eq!(launch["data"], serde_json::json!("{\"template\":\"launched\"}"), "its attributes, its data given back");
+    assert!(launch.get("debugServer").is_none(), "not sent to the adapter");
+    assert!(p.app.debug_session.is_some());
+    assert_eq!(p.app.focused_buffer_id(), file, "its file, beside the page");
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 2, "at its line");
+    assert!(p.app.debug_last_launch.is_empty(), "not remembered: {:?}", p.app.debug_last_launch);
+    assert!(p.builds().is_empty() && p.debug_done());
+    p.app.debug_stop();
+    p.app.debug_session = None;
+
+    // A refusal: said, nothing stopped.
+    p.open("a.py");
+    let at = p.app.open().buffer.line_start_char(3);
+    p.app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+    p.app.run_cmd("tests.debug_here");
+    assert!(p.tests().debug.is_some(), "{}", p.said());
+    p.until("the refusal", Project::debug_done);
+    assert_eq!(p.said(), "plain can't be debugged: a.py::plain can't be debugged");
+    assert!(p.app.debug_session.is_none());
+    p.app.tests_run_file();
+    p.until("a run after", |p| p.model().last_run().is_some());
+    assert_eq!(p.state("a.py::plain"), State::Passed, "its provider still runs");
+}
+
+/// `SPC T d` on a test its provider builds first: the plan runs as the
+/// run the first `tests-launch` was asked with, its output in *Test
+/// output*, read by the provider; then it's asked again with the same
+/// run, and the launch it gives names the binary its build said, as a
+/// `/project/...` path mapped to the project's. A second debug while one
+/// is building is refused; a build asked while a run goes waits for it.
+#[test]
+fn a_test_built_first_is_debugged_with_what_its_build_said() {
+    let state = tempfile::tempdir().unwrap();
+    let ok = "# test build_ok\n#! sleep 300\n#! out BUILT /project/target/fake-bin\n";
+    let slow = "# test slow\n#! sleep 1500\n#! out PASS slow.py::slow 1ms\n";
+    let (mut p, launches) = Project::debugging(&[("ok.py", ok), ("slow.py", slow)], "slow.py", state.path());
+    p.scanned("slow.py::slow");
+    p.open("ok.py");
+    p.scanned("ok.py::build_ok");
+    p.app.tests_request(&p.root.clone(), vec![Selection::File("slow.py".into())], "slow.py");
+    p.until("the run", Project::step_running);
+    p.app.tests_debug_here();
+    let run = p.tests().debug.as_ref().expect("asked").run;
+    p.until("the build waiting", |p| p.tests().debug.as_ref().is_some_and(|d| d.building));
+    assert!(p.said().contains("waits for the run going"), "{}", p.said());
+    p.app.tests_debug_here();
+    assert_eq!(p.said(), "already building build_ok -- SPC T k lets it go");
+    let launch = p.launched(&launches);
+    assert_eq!(p.state("slow.py::slow"), State::Passed, "the run going went first");
+    assert_eq!(launch["program"], serde_json::json!(p.root.join("target").join("fake-bin")), "{launch}");
+    assert_eq!(launch["cwd"].as_str().map(Path::new), Some(p.root.as_path()), "/project is the project");
+    assert_eq!(launch["args"], serde_json::json!(["ok.py::build_ok", "--exact"]));
+    let builds = p.builds();
+    assert_eq!(builds.len(), 1);
+    assert!(builds[0].build_ok && builds[0].run == run, "as the launch's run: {builds:?}");
+    let output = p.output();
+    assert!(output.contains(&format!("-- a build to debug build_ok, run {} --", run.0)) && output.contains("--build ok.py::build_ok") && output.contains("-- built, in "), "{output}");
+    assert!(p.app.debug_last_launch.is_empty());
+    assert!(p.debug_done() && p.tests().plan.is_none());
+    p.app.debug_stop();
+}
+
+/// A build that fails starts no session and says why, on the modeline
+/// and the page's head: the first `broken`'s message, else the step's
+/// end. A provider that asks to build twice is refused.
+#[test]
+fn a_build_that_fails_says_why_and_starts_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let bad = "# test build_bad\n#! out BROKEN bad.py bad.py didn't build: mismatched types\n#! exit 101\n";
+    let exits = "# test build_exits\n#! exit 3\n";
+    let twice = "# test build_twice\n";
+    let (mut p, _launches) = Project::debugging(&[("bad.py", bad), ("exits.py", exits), ("twice.py", twice)], "bad.py", state.path());
+    for (file, id) in [("exits.py", "exits.py::build_exits"), ("twice.py", "twice.py::build_twice"), ("bad.py", "bad.py::build_bad")] {
+        p.open(file);
+        p.scanned(id);
+    }
+    p.app.tests_debug_here();
+    p.until("the build", |p| p.builds().len() == 1 && p.debug_done());
+    assert_eq!(p.said(), "bad.py didn't build: mismatched types · o shows it");
+    assert!(!p.builds()[0].build_ok && p.app.debug_session.is_none());
+    assert!(p.output().contains("-- didn't build, in "), "{}", p.output());
+    let notes = p.app.tests_page_notes(&p.root.clone());
+    assert_eq!(notes.first().map(|n| n.0.as_str()), Some("bad.py didn't build: mismatched types · o shows it"), "the page's head");
+    assert_eq!(p.state("bad.py::build_bad"), State::Unknown, "a build has no results");
+
+    p.open("exits.py");
+    p.app.tests_debug_here();
+    p.until("the build", |p| p.builds().len() == 2 && p.debug_done());
+    assert_eq!(p.said(), "build_exits didn't build: its build exited 3 · o shows it");
+
+    p.open("twice.py");
+    p.app.tests_debug_here();
+    p.until("the second ask", |p| p.builds().len() == 3 && p.debug_done());
+    assert_eq!(p.said(), "build_twice can't be debugged: provider asked to build it twice");
+    assert!(p.app.debug_session.is_none());
+}
+
+/// A stop while a test's build runs kills its tree and starts nothing;
+/// one while its build waits for a run lets it go with the run. Turned
+/// off, nothing of it is left.
+#[test]
+fn a_stop_during_a_debugs_build_starts_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let slow = "# test build_slow\n#! child\n#! wait\n";
+    let (mut p, _launches) = Project::debugging(&[("slow.py", slow)], "slow.py", state.path());
+    p.scanned("slow.py::build_slow");
+    p.app.tests_debug_here();
+    let child = p.child();
+    assert!(p.model().summary().running.is_some_and(|r| r.build), "the head says building to debug…");
+    let notes = p.app.tests_page_notes(&p.root.clone());
+    assert_eq!(notes.first().map(|n| n.0.as_str()), Some("building build_slow to debug it -- o shows it, x stops it"));
+    p.app.run_cmd("tests.stop");
+    p.until("the build's end", |p| p.builds().len() == 1);
+    assert!(matches!(p.builds()[0].halted, Some(fenix_tests::Halt::Stopped(_))));
+    assert_eq!(p.said(), "build_slow isn't debugged: its build was stopped (stopped)");
+    assert!(p.debug_done() && p.app.debug_session.is_none());
+    assert!(fenix_tasks::fake_runner::gone_within(child, Duration::from_secs(10)), "the child outlived its build");
+
+    // The explorer turned off mid-build: stopped, then nothing.
+    p.app.tests_debug_here();
+    p.until("the second build", Project::step_running);
+    let child = p.child();
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    p.until("the build's end", |p| p.builds().len() == 2);
+    assert!(p.debug_done() && p.app.debug_session.is_none());
+    assert!(fenix_tasks::fake_runner::gone_within(child, Duration::from_secs(10)));
+    p.app.tests_debug_here();
+    assert_eq!(p.said(), "the test explorer is off (tests.enabled)");
+    assert!(p.app.command_hidden("tests.debug_here"));
+    assert!(!p.app.text_menu_items().iter().any(|i| i.label == "Debug test"));
+}
+
+/// An extension whose component has no `tests-launch` is said once on
+/// its output page, and its tests aren't asked about again: they still
+/// run. (The provider guest has every export, so the worker's answer is
+/// given to the host as it would come.)
+#[test]
+fn a_provider_with_no_tests_launch_is_said_once_and_not_asked_again() {
+    let state = tempfile::tempdir().unwrap();
+    let (mut p, _launches) = Project::debugging(&[("a.py", "# test build_x\n#! out PASS a.py::build_x 1ms\n")], "a.py", state.path());
+    p.scanned("a.py::build_x");
+    p.app.tests_debug_here();
+    let token = p.tests().debug.as_ref().and_then(|d| d.asking).expect("asked");
+    let why = "it has no tests-launch: it was built for an extension API before 1.6, which had no test providers";
+    p.app.tests_reply(EXT, token, Err(why.into()));
+    assert!(p.debug_done());
+    assert_eq!(p.said(), format!("build_x can't be debugged: {why}"));
+    assert_eq!(p.app.extension_output_text().matches("its tests aren't offered to debug").count(), 1);
+    let calls = p.app.tests.calls.len();
+    p.app.tests_debug_here();
+    assert_eq!(p.said(), "build_x can't be debugged: provider has no tests-launch (said on its output page)");
+    assert_eq!(p.app.tests.calls.len(), calls, "not asked");
+    assert!(p.has("a.py::build_x"), "its tests stay");
+    p.app.tests_run_file();
+    p.until("a run", |p| p.model().last_run().is_some());
+    assert_eq!(p.state("a.py::build_x"), State::Passed);
+    assert_eq!(p.app.extension_output_text().matches("its tests aren't offered to debug").count(), 1, "said once");
 }

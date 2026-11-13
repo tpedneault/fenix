@@ -119,6 +119,11 @@ impl App {
     pub(in crate::app) fn tests_page_notes(&mut self, root: &Path) -> Vec<(String, crate::page::Role)> {
         use crate::page::Role;
         let mut notes = Vec::new();
+        // A test being got ready to debug, or why the last didn't build
+        // (step 6): first, as it's what you're waiting on.
+        if let Some(said) = self.tests.projects.get(root).and_then(|p| p.debug_said.clone()) {
+            notes.push(said);
+        }
         let listing = self.config.bool_value("tests.list_automatically") != Some(false);
         let has_providers = self.tests.projects.get(root).is_some_and(|p| !p.model.providers().is_empty());
         if has_providers && listing && !self.tests_trusted(root) {
@@ -250,7 +255,7 @@ impl App {
         }) else {
             return;
         };
-        let runs = matches!(action, PageAction::Run(_) | PageAction::RunAll | PageAction::RunFailed | PageAction::RunLast | PageAction::List);
+        let runs = matches!(action, PageAction::Run(_) | PageAction::RunAll | PageAction::RunFailed | PageAction::RunLast | PageAction::List | PageAction::Debug(_));
         if runs && !self.tests_enabled() {
             self.set_error("the test explorer is off (tests.enabled)");
             return;
@@ -298,8 +303,7 @@ impl App {
             PageAction::Output => self.tests_output_beside(&root, Some(id)),
             PageAction::GoTo(node) => self.tests_go_to(id, &root, node),
             PageAction::Copy(node) => self.tests_copy_failure(&root, node),
-            // Debugging a test is step 6's (`tests.debug_here`, §11).
-            PageAction::Debug(_) => self.set_message("debugging a test from the page isn't in Fenix yet (tests.debug_here)"),
+            PageAction::Debug(node) => self.tests_debug(&root, node, Some(id)),
         }
         self.restale_page(id);
     }
@@ -343,30 +347,42 @@ impl App {
     /// `Enter` on a test: its file at its line, beside the page, the
     /// keyboard with it.
     fn tests_go_to(&mut self, page: BufferId, root: &Path, node: fenix_tests::NodeId) {
-        let Some(project) = self.tests.projects.get(root) else { return };
-        let Some(n) = project.model.node(node) else { return };
+        if let Err(why) = self.tests_open_test(root, node, Some(page)) {
+            self.set_error(why);
+        }
+    }
+
+    /// Test `node`'s file at its line, the keyboard with it: beside tests
+    /// page `page` when it's from there, else in the focused pane. Why
+    /// not, when it can't be.
+    pub(in crate::app) fn tests_open_test(&mut self, root: &Path, node: fenix_tests::NodeId, page: Option<BufferId>) -> Result<(), String> {
+        let Some(project) = self.tests.projects.get(root) else { return Ok(()) };
+        let Some(n) = project.model.node(node) else { return Ok(()) };
         let label = crate::tests_page::clean(&n.found().label);
         let (file, line) = (n.found().path.clone().or_else(|| n.file().map(str::to_string)), n.found().line);
         let Some(file) = file else {
-            return self.set_error(format!("{label}: no file is known for it"));
+            return Err(format!("{label}: no file is known for it"));
         };
         let Some(line) = line else {
-            return self.set_error(format!("{label} was found in a run: no line is known for it"));
+            return Err(format!("{label} was found in a run: no line is known for it"));
         };
         // As the gutter and the problems read a provider's path: one that
         // climbed out of the project is no place.
         let Some(path) = place_path(root, &file) else {
-            return self.set_error(format!("{label}: its file is outside the project ({file})"));
+            return Err(format!("{label}: its file is outside the project ({file})"));
         };
         if !path.is_file() {
-            return self.set_error(format!("{} isn't a file", readable_path(&path)));
+            return Err(format!("{} isn't a file", readable_path(&path)));
         }
-        self.tests_beside(page);
+        if let Some(page) = page {
+            self.tests_beside(page);
+        }
         let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
         self.open_file_as_preview(&path);
         self.jump_to_grep_match(&fenix_project::GrepMatch { path, line: line as usize + 1, col: 1, text: String::new() });
         self.record_jump(from);
         self.wake_caret();
+        Ok(())
     }
 
     /// `y` on a failed test: its name, place and message, on the clipboard.

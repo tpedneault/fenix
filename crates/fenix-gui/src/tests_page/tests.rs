@@ -396,3 +396,20 @@ fn ten_thousand_tests_cost_what_is_in_view() {
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "{:?}", started.elapsed());
 }
 
+
+/// A debug launch's build (step 6) is said as one in the head, not as a
+/// listing, and `d debug` is on the key strip at both sizes.
+#[test]
+fn a_build_to_debug_a_test_is_said_as_one() {
+    let mut m = orbit();
+    let run = m.run_id();
+    assert_eq!(m.request_build(run, &rust(), ADDS, Plan { steps: vec![Step::new("build", &[])], list_after: false }), Requested::Starts);
+    assert!(matches!(m.next(1_000), Some(Next::Step { .. })));
+    let mut p = page();
+    for (cols, rows) in [(100, 30), (80, 24)] {
+        let out = lay_out(&mut p, &m, cols, rows);
+        let l = lines(&out);
+        assert!(l[0].contains("building to debug…") && !l[0].contains("listing"), "{}", l[0]);
+        assert!(l[rows - 1].contains("d debug"), "{}", l[rows - 1]);
+    }
+}

@@ -191,6 +191,8 @@ pub struct Progress {
     pub run: RunId,
     /// A run of tests (else a listing or a build).
     pub tests: bool,
+    /// A debug launch's `build-first` plan (§11).
+    pub build: bool,
     /// Its tests with a result, of all it has: `running 12 of 40`.
     pub done: u32,
     pub total: u32,
@@ -487,6 +489,7 @@ impl Model {
             Progress {
                 run: run.id,
                 tests: run.is_tests(),
+                build: run.is_build(),
                 done: run.results.len() as u32,
                 total: run.total,
                 failed,
