@@ -136,6 +136,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Opening a project from before 1.5 no longer deletes its
+  `.fenix/project.ini` when there's nothing in it to move (empty, or
+  comments alone), which left a folder that file alone marked no longer a
+  project; sections and keys Fenix doesn't move (and comments) stay in
+  it, where they were deleted with the moved ones.
 - With Git blame shown beside a file (`SPC g B`), a problem on a line
   colours that line's number, as without blame; it coloured the blame's
   text before it.
