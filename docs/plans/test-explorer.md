@@ -2,7 +2,7 @@
 
 - **Status:** planned, 13 November 2026, for the maintainer to review;
   revised the same day after the packs' review of it (§18). Recorded in
-  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 4 are built (§20).
+  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 7 are built (§20).
 - **Scope:** a page that lists a project's tests before anything has
   run, runs one, a file, a group, the failed or all of them, and shows
   each result as it ends: on the page, in the gutter, after the test's
@@ -2627,3 +2627,118 @@ Left for the step that owns each, from the same review:
   file a provider's `scan` names); `build.ps1` names Rust 1.98.0, and
   1.100.0 rebuilds `provider.wasm` byte for byte; `place_path` gives
   `root\src/lib.rs` on Windows (equal as a path, read so in a title).
+
+### Step 7, one story
+
+**Where it is.** `crates/fenix-gui/src/app/tests_host/doors.rs`: which
+way a door goes (`tests_door`: `Fallback`, `Test`, `NotATest`), a door's
+run and what `SPC p T` runs again (`tests_door_run`, `tests_rerun_door`,
+`last_door`), Fenix's own lens over a served file (`tests_lens_lines`,
+`tests_lens_debug`), rust-analyzer's lenses (`tests_ra_lens`), and what a
+test run tells the rest of Fenix (`tests_door_started`,
+`tests_door_ended`, `tests_notify`). `tests_host/agents.rs`: the agents'
+`tests`, `test_failures`, `run_tests`, `run_test` (served files),
+`debug_test`, their waits, and `fenix/tests*`. Hooks elsewhere:
+`run_test_at` (so `SPC p r`, Fenix's own lens and today's `run_test`
+share one entry), `rerun_last_task`, `run_task_as` (a task forgets the
+door's run), `run_lens` and `find_own_lenses` in `code_lens.rs`, the
+right click's *Debug test* in `mouse.rs`, `agent_tools.rs`
+(`TESTS_TOOLS`, `RUN_TEST_EXPLORER`), `agent_calls.rs` (the list, the
+`tasks` toolset's facts, the tick), `agent_toolsets.rs`,
+`agent_debug.rs`, `control_host.rs`. `fenix-control`: `fenix/tests`,
+`fenix/tests.failures`, `fenix/tests.run`, typed params (`TestsParams`,
+`TestsRunParams`, `TestRef`) checked before the editor is asked.
+`fenix-lsp`: `DEBUG_TEST` (`fenix.debugTest`) and `Action::DebugTest`.
+`fenix-wasm`: `Reply::Missing(MissingExport)`.
+
+**The rules, where, and their tests** (in `tests_host/tests/story.rs`):
+
+| Rule | Where | Test |
+|---|---|---|
+| `SPC p r` through the explorer in a served file, the explorer's word on a line in no test; today's finder elsewhere; off, today's everywhere | `run_test_at`, `tests_door` | `spc_p_r_and_spc_p_t_go_through_the_explorer_where_a_provider_serves_the_file` |
+| `SPC p T` runs what `SPC p t` or `SPC p r` ran last: the door's test run, until a task runs | `tests_rerun_door`, `tests_task_ran` | the same |
+| Fenix's own lens: "▶ Run test \| Debug" over each test, "▶ Run test" over a group and where its extension has no `tests-launch`; *Run* and *Debug* through the explorer; today's lens on a file no provider serves, and everywhere off | `find_own_lenses`, `tests_lens_lines`, `run_lens` | `fenix_s_own_lens_runs_and_debugs_through_the_explorer_where_a_provider_serves_the_file` |
+| The lens's *Debug* keeps the lens's trusted-project rule; `SPC T d`, a key, doesn't need it | `tests_lens_debug` (`lens_may_start`) | `the_lens_s_debug_starts_nothing_in_a_project_that_isnt_trusted` |
+| rust-analyzer's `runSingle`/`debugSingle` on a line the explorer has a test at go through it; a binary's run and off as before | `tests_ra_lens`, `run_lens` | `rust_analyzer_s_lenses_on_an_explorer_s_test_go_through_it` |
+| *Debug test* on the right click only where it then debugs (a test or case, nameable, `tests-launch` there) | `tests_debuggable`, `text_menu_items` | the own-lens test |
+| A test run is `last_task` (`tests: <what ran>`, exact counts, `failed` counting errored); `task-started` and `task-ended` once each; one notification under `notifications.tasks`, *Show the failures* `tests.open`, *Run the failed again*; a target that didn't build said as that, *Show it* `tests.output`; a listing none of it | `tests_door_started`, `tests_door_ended`, `tests_notify` | `a_test_run_is_the_last_task_tells_extensions_once_and_notifies_once`, `a_run_that_didnt_build_notifies_as_that_and_a_quick_one_under_long_doesnt` |
+| One stop for a run and a debug waiting behind it, saying both | `tests_stop_said` | `one_stop_says_the_run_and_the_debug_behind_it` |
+| `tests`, `test_failures`, `run_tests`, `run_test` answer the model as data: 500 tests and `more`, a failure's text cut at 4 KiB, the whole at `agents.mcp.max_answer_kib` with `more`; `run_tests` waits, past its time "still running" | `agents.rs` | `the_agents_tools_answer_the_explorers_model_as_data_within_their_budget`, `run_tests_past_its_time_says_still_running` |
+| `run_tests`, `run_test`, `debug_test` are `run` tools (asked about, refused to a client by default) and run only in a trusted project; off, the four tools aren't listed and `run_test` is today's | `agent_tools.rs`, `tests_agent_may_run`, `agent_known_tools` | `the_agents_run_tools_keep_the_rules_and_trust` |
+| `debug_test`: built first if asked, answered at the first stop as `debug_start`; a provider's refusal said; a debug's build tells nothing | `tests_agent_debug`, `tests_agents_debug_done` | `debug_test_debugs_a_test_through_the_explorer_and_says_why_not` |
+| `fenix/tests*`: label and kind, 5,000; the failures; a run started, its id at once; `fenix_write` and trust; off `-32601` | `tests_control` | `the_control_channel_lists_runs_and_reads_failures`; `fenix-control`'s `the_test_explorers_methods_take_typed_params` |
+| The tool list in budget, with the explorer on, descriptions under 300 | `agent_tools.rs` | `the_default_tool_list_fits_the_budget`, `the_test_explorers_tools_say_little_and_run_tools_are_asked_about` |
+
+**From the review of steps 4 to 6, done**: `tests_request` and
+`tests_debug` give a result back (`Result<Requested, String>`,
+`Result<RunId, String>`), and a debug's end comes to `tests_debug_done`
+(session started, or why not), which the agents' waits read; a missing
+export is typed (`fenix_wasm::host::MissingExport`, as
+`Reply::Missing`), the host matching on it, no words read; the lens's
+*Debug* keeps the trust rule; `SPC T k` says both a run and a debug it
+let go; *Debug test* (and the lens's *Debug*) only where it then
+debugs.
+
+**Where the plan was silent, or read so:**
+
+- **"A provider serves the file"** is the gutter's test: the model has a
+  test with a line in it (`Model::serves`). A file whose scan hasn't come
+  back yet, or found nothing, takes today's way; a remote project too
+  (runs aren't available there yet). On a served file's line in no test
+  the explorer's word is said, never the finder's (the two never apply to
+  the same file).
+- **A door asks as `SPC T t`**: queued behind a run going, never
+  replacing it. `tests_replace` is kept for tests only.
+- **`SPC p T`** is keyed as `SPC p t` keys a task (the project's
+  `root_for_path`); any task run in the task pane takes its place again.
+  The explorer turned off forgets it.
+- **rust-analyzer's lens** goes through the explorer only for a `cargo
+  test` runnable (not `--doc`) whose line is the test's own, or within
+  its `end-line`: a test without an end line doesn't claim the lines
+  after it for a binary's `▶ Run`.
+- **The lenses are laid out again** when the model changes
+  (`tests_views_due`, ten times a second at most) and when an extension
+  turns out to have no `tests-launch`; off, once, back to the finder's.
+- **A run you stop** tells `task-ended` (false), so every `task-started`
+  has its end, but leaves `last_task` and notifies nothing, as a task
+  cancelled in the task pane does. A run that timed out is a failed run.
+  A run that ended before its first action is told it started first.
+- **The notification** follows `notifications.tasks` alone, as §10.1
+  says (no condition on the tests page being in view). A passing run's
+  has no action. *Show the failures* opens the tests page of the project
+  `tests.open` picks (the focused file's), which is the run's unless you
+  moved to another project meanwhile.
+- **Agents' trust**: the run tools refuse in a project that isn't
+  trusted, as a lens does (Q9 stays open: today's `project_is_trusted`).
+  `fenix/tests.run` keeps it too, besides `agents.mcp.fenix_write`.
+  `run_test` on a file no provider serves is today's, untouched.
+- **Names in answers**: a provider by its id, `extension:id` when two
+  extensions share one; lines and columns from 1; a path the model's
+  (relative to `root`, or full outside the project). `run_test`'s
+  `output` is the end of the run's *Test output*.
+- **Which run an agent waits for**: the next run of tests to end in the
+  project other than the one going when it asked (that one itself when
+  it was already the same). `fenix/tests.run` answers `run: null` when
+  its run waits behind another.
+- **The `tasks` toolset** is offered when the project has tasks or, with
+  the explorer on, a test provider; `debug_test` is in `debug` and
+  offered with it. Off, the four tools aren't listed and `run_test`'s
+  description is 1.5's; on, it says it goes through the explorer.
+- **Off, `fenix/tests*`** answer `-32601` (the capabilities list is the
+  build's, so they're listed).
+- **Descriptions**: `notifications.tasks` ("a task or a test run"),
+  `notifications.rules` (`tests` a source), `lsp.code_lens_tests` and
+  `tests.enabled`, so CONFIGURATION.md's table; CONTROL.md has the
+  methods, WRITING_EXTENSIONS.md says test runs count as tasks (Q1).
+
+**Not verified**: rust-analyzer's real lenses (a recorded server's
+answers stood in); a real adapter stopping at a breakpoint for
+`debug_test` (the session's end stood in for its first stop); the
+notification drawn; Windows (paths are compared as the model's relative
+ones or built with `Path::join`; no wait in the tests is by the clock
+but `run_tests`' one-second timeout, which only has to pass).
+
+**For step 8**: FEATURES, KEYBINDINGS, AGENTS (the four tools, and
+`run_test` through the explorer), the default on, Q9 (which now also
+decides the agents' and `fenix/tests.run`'s rule), the 10,000-test
+measurement, and step 6's review's leftovers listed for it.
