@@ -48,6 +48,11 @@ fenix-ssh = { path = "../fenix-ssh" }
 fenix-vfs = { path = "../fenix-vfs" }
 fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }
+fenix-tests = { path = "../fenix-tests" }
+fenix-rpc = { path = "../fenix-rpc" }
+# A project's files walked through its ignores, as Search walks them
+# (fenix-project), for the test explorer's first scan.
+ignore = "0.4.34"
 fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-window = { path = "../fenix-window" }
@@ -78,6 +83,8 @@ winresource = "0.1"
 fenix-brand = { path = "../fenix-brand", features = ["ico"] }
 
 [dev-dependencies]
+# Its made-up test runner, which the test explorer's tests run.
+fenix-tasks = { path = "../fenix-tasks", features = ["fake-runner"] }
 tempfile = "3"
 accesskit_consumer = "0.39.2"
 minisign-verify = "0.2"

@@ -93,6 +93,7 @@ mod extensions_host;
 mod welcome_host;
 mod import_host;
 mod wasm_host;
+mod tests_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
 mod reading_host;
@@ -1954,6 +1955,9 @@ pub enum FenixUserEvent {
     /// Ordered task output/completion tagged by run identity. The same buffer
     /// can display a newer run before the previous run's events are delivered.
     TaskEvent(BufferId, fenix_tasks::RunId, fenix_tasks::TaskEvent),
+    /// A test run's step said something, or ended, by its tag
+    /// (`tests_host`).
+    TestsStep(u64, fenix_tasks::TaskEvent),
     /// A fresh `git status --porcelain=v2 --branch` snapshot (`None`
     /// outside a repo), from the active Git session's background
     /// poller.
@@ -2395,6 +2399,7 @@ impl FenixUserEvent {
             Self::LspDeadline(_) => "LspDeadline",
             Self::Dap { .. } => "Dap",
             Self::TaskEvent { .. } => "TaskEvent",
+            Self::TestsStep { .. } => "TestsStep",
             Self::GitStatusReady { .. } => "GitStatusReady",
             Self::GitMainReady { .. } => "GitMainReady",
             Self::GitHistoryDetailReady { .. } => "GitHistoryDetailReady",
@@ -5434,6 +5439,9 @@ pub struct App {
     commands: Rc<CommandRegistry>,
     /// The extensions that run code, and their workers (`wasm_host`).
     wasm: wasm_host::WasmHost,
+    /// The test explorer's host: providers run, tests found and run
+    /// (`tests_host`), behind `tests.enabled`.
+    tests: tests_host::TestsHost,
     /// The commands run lately, newest first (the palette's order).
     recent_commands: Vec<String>,
     /// A command the palette chose, run by `handle_key` (which has the
@@ -6431,6 +6439,7 @@ impl App {
             notification_rates: HashMap::new(),
             commands: Rc::new(CommandRegistry::with_builtins().with_code_extensions(&crate::installed::code_extensions())),
             wasm: wasm_host::WasmHost::default(),
+            tests: tests_host::TestsHost::default(),
             recent_commands: Vec::new(),
             queued_command: None,
             palette_describes: false,
@@ -9508,6 +9517,7 @@ impl App {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         self.editor_event("saved", fenix_wasm::host::Notice::Saved(name));
         self.code_file_saved(path);
+        self.tests_file_saved(path);
         // A server's settings, edited (`.fenix/lsp/<name>.json`): it's
         // told.
         if let Some(project) = lsp_settings_file(path) {
@@ -16689,6 +16699,7 @@ impl App {
             FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
             FenixUserEvent::LspDeadline(fanout) => self.lsp_fanout_progress(fanout),
             FenixUserEvent::TaskEvent(buffer_id, run_id, event) => self.apply_task_event(buffer_id, run_id, event),
+            FenixUserEvent::TestsStep(tag, event) => self.tests_step_event(tag, event),
             FenixUserEvent::Dap { generation, event } => {
                 if self.debug_session.as_ref().is_some_and(|s| s.generation == generation || s.children.iter().any(|c| c.generation == generation)) { self.apply_dap_event_on(generation, event); }
             },
@@ -23588,6 +23599,12 @@ impl App {
         };
         // The Search page's typing, once it pauses.
         let wait_until = match self.search_fire_due(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // The test explorer: scans once typing pauses, runs on save, a
+        // run's timeout, a project's first scan.
+        let wait_until = match self.tests_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
