@@ -54,7 +54,9 @@ pub use bindings::fenix::extension::types::{
     CellColor, TextView,
     AgentTurn, DebugSession, DebugState, GitSummary, LaunchConfig, LaunchRequest, QuickFix, TaskResult,
     Notification, NotificationAction, Urgency,
+    FoundTest, TestAsk, TestBroken, TestCrash, TestEnded, TestKind, TestLaunch, TestLine, TestLocation, TestOutcome, TestOutput, TestPlan, TestReport, TestStep, TestStepEnd,
 };
+use crate::test_limits;
 
 /// The most pixels a surface may have (4096 x 4096), and either side.
 pub const MAX_SURFACE: u32 = 4096;
@@ -542,6 +544,12 @@ pub enum Request {
     /// taken away (`secret-set`): held to `permissions.secrets`
     /// already.
     SecretSet { key: String, value: Option<Hidden> },
+    /// What its test provider `provider` -- one its manifest names
+    /// (`Spec::test_providers`) -- is in its project now
+    /// (`test-provider-set`, 1.6): its runner, and why it can't run tests
+    /// there, held to their limits. `runner` empty with no `problem`:
+    /// nothing to run in this project.
+    TestProviderSet { provider: String, runner: String, problem: Option<String> },
 }
 
 /// A secret, or what's typed at a masked prompt: shown as dots when it's
@@ -564,6 +572,51 @@ pub enum Reply {
     Restored(bool),
     /// Its answer, or none when it comes later (`Request::ServiceAnswer`).
     Served(Option<Result<String, String>>),
+    /// The tests it found in a file (`tests-scan`, 1.6), held to their
+    /// limits (`test_limits`).
+    Scanned(Vec<FoundTest>),
+    /// What to run (`tests-plan`, 1.6): its plan, held to its limits and
+    /// to its permissions, or why it has none.
+    Planned(Result<Planned, String>),
+    /// What it read in a step's output, or still had at its end
+    /// (`tests-read`, `tests-step-ended`, 1.6), held to their limits.
+    Reports(Vec<TestReport>),
+    /// How to debug a test (`tests-launch`, 1.6), or why it can't.
+    Launched(Result<Launching, String>),
+}
+
+/// A test provider's plan as Fenix would run it (`tests-plan`, a
+/// `build-first` launch).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Planned {
+    pub steps: Vec<PlannedStep>,
+    /// Its listing is cheap once this has run: list after it.
+    pub list_after: bool,
+}
+
+/// One step of a `Planned`: as the provider gave it, held to the limits
+/// (`test_limits::planned`), and as its permissions let it run. Its
+/// command line's length, and whether its `needs` are there, are judged
+/// when it would start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedStep {
+    pub step: TestStep,
+    /// Its program, arguments and folder, held to `permissions.process`
+    /// as `spawn`'s are, and its environment, `${data}` and `${tools}`
+    /// filled in; or why it may not run.
+    pub command: Result<(Checked, Env), String>,
+    /// Each of `step.needs` as a path of this machine's: none for one
+    /// that isn't a file's path under `/data`.
+    pub needs: Vec<Option<PathBuf>>,
+}
+
+/// How to debug a test (`tests-launch`), as Fenix would start it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Launching {
+    /// This launch, checked as `launches-set`'s are.
+    Launch(LaunchConfig),
+    /// This plan first, then ask again.
+    BuildFirst(Planned),
 }
 
 /// What a running extension tells Fenix.
@@ -647,6 +700,22 @@ pub enum Call {
     /// Its `agents.ask` call `call`'s answer so far
     /// (`agent-ask-progress`, 1.2), when it has that.
     AgentAskProgress { call: u64, text: String },
+    /// The tests its provider `provider` finds in file `path`
+    /// (`/project/<path>`), whose text is `text` (`tests-scan`, 1.6):
+    /// `Reply::Scanned`.
+    TestsScan { provider: String, path: String, text: String },
+    /// What its provider runs for `ask`, as run `run` (`tests-plan`, 1.6):
+    /// `Reply::Planned`.
+    TestsPlan { provider: String, run: u64, ask: TestAsk },
+    /// A batch of the output of step `step` of run `run` (`tests-read`,
+    /// 1.6): `Reply::Reports`.
+    TestsRead { provider: String, run: u64, step: u32, lines: Vec<TestLine> },
+    /// Step `step` of run `run` ended (`tests-step-ended`, 1.6):
+    /// `Reply::Reports`.
+    TestsStepEnded { provider: String, run: u64, step: u32, end: TestStepEnd },
+    /// How to debug test `test`, for run `run` (`tests-launch`, 1.6):
+    /// `Reply::Launched`.
+    TestsLaunch { provider: String, run: u64, test: FoundTest },
 }
 
 impl Call {
@@ -662,7 +731,15 @@ struct Optional {
     service_cancelled: Option<wasmtime::component::TypedFunc<(u64,), ()>>,
     agent_ask_progress: Option<wasmtime::component::TypedFunc<(u64, String), ()>>,
     key_scheme_changed: Option<wasmtime::component::TypedFunc<(KeyScheme,), ()>>,
+    tests_scan: Export<(String, String, String), Vec<FoundTest>>,
+    tests_plan: Export<(String, u64, TestAsk), Result<TestPlan, String>>,
+    tests_read: Export<(String, u64, u32, Vec<TestLine>), Vec<TestReport>>,
+    tests_step_ended: Export<(String, u64, u32, TestStepEnd), Vec<TestReport>>,
+    tests_launch: Export<(String, u64, FoundTest), Result<TestLaunch, String>>,
 }
+
+/// An export that answers, when the guest has it.
+type Export<Params, Answer> = Option<wasmtime::component::TypedFunc<Params, (Answer,)>>;
 
 impl Optional {
     fn of(store: &mut Store<State>, instance: &wasmtime::component::Instance) -> Optional {
@@ -670,8 +747,24 @@ impl Optional {
             service_cancelled: instance.get_typed_func::<(u64,), ()>(&mut *store, "service-cancelled").ok(),
             agent_ask_progress: instance.get_typed_func::<(u64, String), ()>(&mut *store, "agent-ask-progress").ok(),
             key_scheme_changed: instance.get_typed_func::<(KeyScheme,), ()>(&mut *store, "key-scheme-changed").ok(),
+            tests_scan: instance.get_typed_func(&mut *store, "tests-scan").ok(),
+            tests_plan: instance.get_typed_func(&mut *store, "tests-plan").ok(),
+            tests_read: instance.get_typed_func(&mut *store, "tests-read").ok(),
+            tests_step_ended: instance.get_typed_func(&mut *store, "tests-step-ended").ok(),
+            tests_launch: instance.get_typed_func(&mut *store, "tests-launch").ok(),
         }
     }
+
+    /// Whether it can be a test provider: it scans and plans (1.6).
+    fn tests(&self) -> bool {
+        self.tests_scan.is_some() && self.tests_plan.is_some()
+    }
+}
+
+/// What a guest built before 1.6 answers a test provider's call: it has
+/// no such export.
+fn no_export(export: &str) -> String {
+    format!("it has no {export}: it was built for an extension API before 1.6, which has no test providers")
 }
 
 /// Reads a secret, for `host.secret`; Fenix's keychain behind it.
@@ -735,6 +828,9 @@ pub struct Spec {
     pub key_scheme: Arc<RwLock<KeyScheme>>,
     /// The keys that run a command (`key-for`).
     pub key_for: KeyFor,
+    /// Its test providers, by id (`[[contributes.test_providers]]`): the
+    /// ones `test-provider-set` may name.
+    pub test_providers: Vec<String>,
 }
 
 impl Spec {
@@ -765,6 +861,7 @@ impl Spec {
             palette: Arc::default(),
             key_scheme: Arc::new(RwLock::new(KeyScheme::Vim)),
             key_for: Arc::new(|_| None),
+            test_providers: Vec::new(),
             theme: Arc::new(RwLock::new(EditorTheme { name: String::new(), background: (0, 0, 0), text: (255, 255, 255), panel: (0, 0, 0), accent: (255, 255, 255), muted: (128, 128, 128), tint: (0, 0, 0), warn: (255, 200, 0), dark: true })),
         }
     }
@@ -1081,6 +1178,9 @@ struct State {
     /// The secrets it kept or took away (`secret-set`) this run, read
     /// before Fenix's.
     secrets_set: HashMap<String, Option<String>>,
+    /// What its test provider's answers had over a limit, said once each
+    /// (`test_limits::Cuts`).
+    cuts_said: HashSet<&'static str>,
 }
 
 impl State {
@@ -1095,6 +1195,56 @@ impl State {
 
     fn deliver(jobs: &mpsc::Sender<Job>, notice: Notice) {
         let _ = jobs.send(Job::Deliver(notice));
+    }
+
+    /// What a test provider's answer had over a limit, on its output page:
+    /// each kind once while it runs.
+    fn say_cuts(&mut self, cuts: test_limits::Cuts) {
+        for what in cuts.0 {
+            if self.cuts_said.insert(what) {
+                (self.sink)(Event::Said(Source::Log(Level::Warn), format!("tests: {what} (said once)")));
+            }
+        }
+    }
+
+    /// A test provider's plan, held to its limits and its permissions.
+    fn planned(&mut self, plan: TestPlan) -> Planned {
+        let (plan, cuts) = test_limits::planned(plan);
+        self.say_cuts(cuts);
+        let steps = plan
+            .steps
+            .into_iter()
+            .map(|step| {
+                let command = self.checked_with_env(&step.command);
+                let needs = step.needs.iter().map(|n| Some(n.replace('\\', "/")).filter(|n| n.starts_with("/data/")).and_then(|n| self.host_path(&n))).collect();
+                PlannedStep { step, command, needs }
+            })
+            .collect();
+        Planned { steps, list_after: plan.list_after }
+    }
+
+    /// A launch it offers, checked as `launches-set` checks them: a name,
+    /// its languages, its attributes a JSON object; its own paths as
+    /// Fenix's, `${data}` and `${tools}` filled in.
+    fn checked_launch(&self, mut launch: LaunchConfig) -> Result<LaunchConfig, String> {
+        if launch.name.trim().is_empty() {
+            return Err("a launch has a name".into());
+        }
+        if launch.languages.iter().all(|l| l.trim().is_empty()) {
+            return Err(format!("{}: it names no languages", launch.name));
+        }
+        match serde_json::from_str::<serde_json::Value>(if launch.attributes.trim().is_empty() { "{}" } else { &launch.attributes }) {
+            Ok(serde_json::Value::Object(_)) => {}
+            Ok(_) => return Err(format!("{}: its attributes are a JSON object", launch.name)),
+            Err(e) => return Err(format!("{}: its attributes: {e}", launch.name)),
+        }
+        // Its own paths (`/project/build/app`) as Fenix's.
+        let own = |me: &Self, text: Option<String>| text.map(|t| if t.starts_with('/') { me.host_path(&t).map(|p| p.to_string_lossy().into_owned()).unwrap_or(t) } else { t });
+        launch.program = own(self, launch.program.take());
+        launch.cwd = own(self, launch.cwd.take());
+        launch.env = launch.env.iter().map(|(k, v)| (k.clone(), self.filled(v))).collect();
+        launch.args = launch.args.iter().map(|a| self.filled(a)).collect();
+        Ok(launch)
     }
 
     /// A full path of this machine's (`/home/me/x`, `C:\x`): absolute
@@ -2798,27 +2948,7 @@ impl fenix::extension::host::Host for State {
         if launches.len() > MAX_LAUNCHES {
             return Err(format!("{} launches: at most {MAX_LAUNCHES}", launches.len()));
         }
-        let mut checked = Vec::with_capacity(launches.len());
-        for mut launch in launches {
-            if launch.name.trim().is_empty() {
-                return Err("a launch has a name".into());
-            }
-            if launch.languages.iter().all(|l| l.trim().is_empty()) {
-                return Err(format!("{}: it names no languages", launch.name));
-            }
-            match serde_json::from_str::<serde_json::Value>(if launch.attributes.trim().is_empty() { "{}" } else { &launch.attributes }) {
-                Ok(serde_json::Value::Object(_)) => {}
-                Ok(_) => return Err(format!("{}: its attributes are a JSON object", launch.name)),
-                Err(e) => return Err(format!("{}: its attributes: {e}", launch.name)),
-            }
-            // Its own paths (`/project/build/app`) as Fenix's.
-            let own = |me: &Self, text: Option<String>| text.map(|t| if t.starts_with('/') { me.host_path(&t).map(|p| p.to_string_lossy().into_owned()).unwrap_or(t) } else { t });
-            launch.program = own(self, launch.program.take());
-            launch.cwd = own(self, launch.cwd.take());
-            launch.env = launch.env.iter().map(|(k, v)| (k.clone(), self.filled(v))).collect();
-            launch.args = launch.args.iter().map(|a| self.filled(a)).collect();
-            checked.push(launch);
-        }
+        let checked = launches.into_iter().map(|launch| self.checked_launch(launch)).collect::<Result<Vec<_>, String>>()?;
         self.ask(Request::Launches(checked));
         Ok(())
     }
@@ -2917,6 +3047,16 @@ impl fenix::extension::host::Host for State {
             None => None,
         };
         self.ask(Request::AgentProvide { id, program });
+        Ok(())
+    }
+
+    fn test_provider_set(&mut self, provider: String, mut runner: String, mut problem: Option<String>) -> Result<(), String> {
+        if !self.spec.test_providers.contains(&provider) {
+            return Err(format!("{provider:?} isn't one of its test providers ([[contributes.test_providers]])"));
+        }
+        let cuts = test_limits::provider(&mut runner, &mut problem);
+        self.say_cuts(cuts);
+        self.ask(Request::TestProviderSet { provider, runner, problem });
         Ok(())
     }
 
@@ -3792,7 +3932,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let state = State {
             wasi: wasi.build(), table: ResourceTable::new(), limits, sink: sink.clone(), spec, jobs: back, next: 0, processes: HashMap::new(), timers: HashMap::new(), git_read: None, found: Vec::new(), lsp_out: HashMap::new(),
             sockets: HashMap::new(), surfaces: HashMap::new(), given: Vec::new(), restoring: None, listed: Vec::new(), scratches: HashSet::new(), requests: HashMap::new(),
-            background: HashSet::new(), secrets_set: HashMap::new(),
+            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(),
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -3802,6 +3942,10 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let instance = linker.instantiate(&mut store, &component)?;
         let ext = Extension::new(&mut store, &instance)?;
         let optional = Optional::of(&mut store, &instance);
+        if !store.data().spec.test_providers.is_empty() && !optional.tests() {
+            let names = store.data().spec.test_providers.join(", ");
+            sink(Event::Said(Source::Log(Level::Warn), format!("its manifest names test providers ({names}), but it has no tests-scan and tests-plan (it was built for an extension API before 1.6): they aren't offered")));
+        }
         ext.call_activate(&mut store)?.map_err(|e| wasmtime::format_err!("{e}"))?;
         Ok((store, ext, optional))
     })();
@@ -3932,6 +4076,50 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             Call::KeySchemeChanged(scheme) => match &optional.key_scheme_changed {
                 Some(f) => f.call(&mut *store, (scheme,)).map(|()| Ok(Reply::Done)),
                 None => Ok(Ok(Reply::Done)),
+            },
+            // 1.6's, a test provider's: what it answers held to the
+            // limits; a guest built before answers that it has none.
+            Call::TestsScan { provider, path, text } => match &optional.tests_scan {
+                Some(f) => f.call(&mut *store, (provider, path, text)).map(|(found,)| {
+                    let (found, cuts) = test_limits::scanned(found);
+                    store.data_mut().say_cuts(cuts);
+                    Ok(Reply::Scanned(found))
+                }),
+                None => Ok(Err(no_export("tests-scan"))),
+            },
+            Call::TestsPlan { provider, run, ask } => match &optional.tests_plan {
+                Some(f) => f.call(&mut *store, (provider, run, ask)).map(|(plan,)| Ok(Reply::Planned(plan.map(|p| store.data_mut().planned(p)).map_err(test_limits::error)))),
+                None => Ok(Err(no_export("tests-plan"))),
+            },
+            Call::TestsRead { provider, run, step, lines } => match &optional.tests_read {
+                Some(f) => f.call(&mut *store, (provider, run, step, lines)).map(|(reports,)| {
+                    let (reports, cuts) = test_limits::reports(reports);
+                    store.data_mut().say_cuts(cuts);
+                    Ok(Reply::Reports(reports))
+                }),
+                None => Ok(Err(no_export("tests-read"))),
+            },
+            Call::TestsStepEnded { provider, run, step, end } => match &optional.tests_step_ended {
+                Some(f) => f.call(&mut *store, (provider, run, step, end)).map(|(reports,)| {
+                    let (reports, cuts) = test_limits::reports(reports);
+                    store.data_mut().say_cuts(cuts);
+                    Ok(Reply::Reports(reports))
+                }),
+                None => Ok(Err(no_export("tests-step-ended"))),
+            },
+            Call::TestsLaunch { provider, run, test } => match &optional.tests_launch {
+                Some(f) => f.call(&mut *store, (provider, run, test)).map(|(launch,)| {
+                    let state = store.data_mut();
+                    let launched = launch.map_err(test_limits::error).and_then(test_limits::launch).and_then(|(launch, cuts)| {
+                        state.say_cuts(cuts);
+                        match launch {
+                            TestLaunch::Launch(config) => state.checked_launch(config).map(Launching::Launch),
+                            TestLaunch::BuildFirst(plan) => Ok(Launching::BuildFirst(state.planned(plan))),
+                        }
+                    });
+                    Ok(Reply::Launched(launched))
+                }),
+                None => Ok(Err(no_export("tests-launch"))),
             },
         };
         drop(calling);
