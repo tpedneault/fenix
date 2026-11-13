@@ -474,6 +474,13 @@ Setting::stored("editor.wrap", Editor, "Wrap long lines", Kind::Bool, "A line wi
 
         // Debugging
         Setting::stored("debug.trail_stops", Category::Completion, "Ember Trail stops", Kind::Int { min: 1, max: 10_000 }, "How many of a debug session's stops the Ember Trail keeps, oldest first to go. Kept in memory only.").with_default("200"),
+        // The test explorer (docs/plans/test-explorer.md), being built
+        // behind `tests.enabled`.
+        Setting::stored("tests.enabled", Category::Completion, "Test explorer (being built)", Kind::Bool, "Finds and runs tests through the test providers of extensions that have them (extension API 1.6), their output in Test output (tests.output). Being built: its page, the gutter and results in the file come later. Off: nothing is scanned, listed or run for it, and every key and lens is as before.").with_default("off"),
+        Setting::stored("tests.list_automatically", Category::Completion, "List tests automatically", Kind::Bool, "With the test explorer on, in a trusted project: list a project's tests with its runner after a run that built what the listing needs, and when a provider says it changed. A listing runs project code (it builds or imports the tests). Off: only when asked.").with_default("on"),
+        Setting::stored("tests.on_save", Category::Completion, "Run tests on save", Kind::Choice(&["off", "file", "failed"]), "With the test explorer on, in a trusted project: a second after a save, run the saved file's tests, or those that failed again.").with_default("off"),
+        Setting::stored("tests.timeout_minutes", Category::Completion, "Stop a test run after", Kind::Int { min: 0, max: 1440 }, "With the test explorer on: a test run that has gone on this many minutes is stopped, its unfinished tests errored. 0: never.").with_default("0"),
+        Setting::stored("tests.keep_results", Category::Completion, "Keep test results", Kind::Bool, "With the test explorer on: each project's last test results are kept across restarts, in Fenix's state folder, and shown stale until the tests run again.").with_default("on"),
         s("workspaces", Documents, "Workspace shelf", Kind::Map { key: "Name", value: "Opens", paths: false }, "SPC TAB f: git, jira, containers, vnc:HOST, project:PATH, or nothing.", field!(workspaces, map_get, map_set)),
         // Windows & session
         s("session.restore_windows", Session, "Reopen windows", Kind::Bool, "Put Fenix's windows back where they were, on the monitors they were on.", field!(restore_windows, bool_get, bool_set)).default("on").restart(),

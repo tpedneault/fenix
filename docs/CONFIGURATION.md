@@ -628,6 +628,11 @@ when it's out of date).
 | `lsp.offer_install` | true / false | on | When a file's built-in language server (rust-analyzer, pyright, clangd, gopls...) isn't installed, a notice says so and how to get it; SPC l i shows the command and runs it once you say y. Off, no notice: SPC l i still works. |
 | `lsp.servers` | language = command | – | A language server to run for a language, as the command line that starts it. |
 | `debug.trail_stops` | 1–10000 | 200 | How many of a debug session's stops the Ember Trail keeps, oldest first to go. Kept in memory only. |
+| `tests.enabled` | true / false | off | Finds and runs tests through the test providers of extensions that have them (extension API 1.6), their output in Test output (tests.output). Being built: its page, the gutter and results in the file come later. Off: nothing is scanned, listed or run for it, and every key and lens is as before. |
+| `tests.list_automatically` | true / false | on | With the test explorer on, in a trusted project: list a project's tests with its runner after a run that built what the listing needs, and when a provider says it changed. A listing runs project code (it builds or imports the tests). Off: only when asked. |
+| `tests.on_save` | off / file / failed | off | With the test explorer on, in a trusted project: a second after a save, run the saved file's tests, or those that failed again. |
+| `tests.timeout_minutes` | 0–1440 | 0 | With the test explorer on: a test run that has gone on this many minutes is stopped, its unfinished tests errored. 0: never. |
+| `tests.keep_results` | true / false | on | With the test explorer on: each project's last test results are kept across restarts, in Fenix's state folder, and shown stale until the tests run again. |
 | **Git** | | | |
 | `git.base_branch` | text | main or master | The branch pull requests and comparisons start from. *A project can set it.* |
 | `git.reviewers` | a list | – | Usernames asked to review a new pull request. *A project can set it.* |
