@@ -1110,3 +1110,426 @@ fn the_pages_marks_read_in_a_dark_and_a_light_theme() {
         }
     }
 }
+
+// The tests in the file (step 5).
+
+#[test]
+fn a_place_is_a_file_of_the_project_or_a_full_path_never_one_that_climbed_out() {
+    let root = Path::new(if cfg!(windows) { r"C:\src\orbit" } else { "/src/orbit" });
+    assert_eq!(place_path(root, "src/lib.rs"), Some(root.join("src/lib.rs")));
+    assert_eq!(place_path(root, r"src\lib.rs"), Some(root.join("src/lib.rs")));
+    assert_eq!(place_path(root, "/project/../x.rs"), None, "it climbed out of the project: no place, never opened");
+    assert_eq!(place_path(root, "/project"), None);
+    assert_eq!(place_path(root, ""), None);
+    let outside = if cfg!(windows) { r"C:\rust\lib\core.rs" } else { "/rust/lib/core.rs" };
+    assert_eq!(place_path(root, outside), Some(PathBuf::from(outside)));
+    // A verbatim path is the plain one it names, under the project or not.
+    let drive = Path::new("C:/src/orbit");
+    assert_eq!(model_path(r"\\?\C:\src\orbit\src\lib.rs", drive, drive), "src/lib.rs");
+    let share = Path::new("//server/share/orbit");
+    assert_eq!(model_path(r"\\?\UNC\server\share\orbit\a.rs", share, share), "a.rs");
+    assert_eq!(file::short_message("assertion failed:\n  two\tand two"), "assertion failed: two and two");
+    let cut = file::short_message(&"x".repeat(60));
+    assert!(cut.chars().count() == 48 && cut.ends_with('…'), "{cut}");
+}
+
+/// A file of `lines` lines, open and focused, in a project of its own,
+/// the explorer on; the model given `tests` (id, line) as a provider's
+/// scan of it, with no extension, and the buffer seen.
+fn served(lines: usize, tests: &[(&str, u32)]) -> (App, PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = refactor::identity(dir.path());
+    std::fs::create_dir_all(root.join(".fenix")).unwrap();
+    std::fs::write(root.join(".fenix/project.ini"), "").unwrap();
+    let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(root.join("a.fake"), text).unwrap();
+    let mut app = App::with_file(Some(root.join("a.fake").to_string_lossy().into_owned()));
+    app.project_root = Some(root.clone());
+    app.line_number_mode = LineNumberMode::Absolute;
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    let model = &mut app.tests_project(&root).model;
+    model.add_provider(&provider(), "fake");
+    model.scan(&provider(), "a.fake", tests.iter().map(|(id, line)| fenix_tests::Found::new(*id, None, *id, Kind::Test).at("a.fake", *line, None)).collect());
+    app.tests_tick(Instant::now());
+    (app, root, dir)
+}
+
+/// The model's tests all run, each given its report: as a host would,
+/// with one step and no runner.
+fn ran(model: &mut Model, reports: Vec<fenix_tests::Report>) {
+    assert_ne!(model.request(Selection::All, fenix_tests::Mode::Queue), fenix_tests::Requested::Nothing);
+    let mut reports = Some(reports);
+    let mut now = 1_000;
+    for _ in 0..100 {
+        now += 10;
+        match model.next(now) {
+            None => return,
+            Some(fenix_tests::Action::Plan { run, .. }) => model.planned(run, Ok(fenix_tests::Plan { steps: vec![fenix_tests::Step::new("all", &[])], list_after: false })),
+            Some(fenix_tests::Action::Step { run, step, .. }) => model.step_ended(run, step, fenix_tests::StepEnd::Exited(Some(0)), reports.take().unwrap_or_default()),
+            Some(_) => {}
+        }
+    }
+    panic!("the run never ended");
+}
+
+fn rows_of(app: &App, rows: usize) -> Vec<String> {
+    let gutter = app.gutter_chars(app.open());
+    let spans = app.content_spans(app.open(), 0, rows, gutter, None, &[], 0, &TabStops::Fixed(4), 0);
+    spans.iter().map(|(s, _)| s.as_str()).collect::<String>().split('\n').map(str::to_string).collect()
+}
+
+/// The test column's width and its cell beside the blame, the numbers,
+/// the fold column and a breakpoint, in every combination the gutter's
+/// own tests cover: one cell more, left of the numbers, only in a file
+/// with tests, only with line numbers, the explorer and `tests.gutter`
+/// on; a click on a mark runs it, a click beside it doesn't; a
+/// breakpoint drawn over the cell wins its line.
+#[test]
+fn the_test_column_is_one_cell_left_of_the_numbers_in_every_combination() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Tests {
+        Served,
+        Without,
+        ExplorerOff,
+        GutterOff,
+    }
+    for numbers in [LineNumberMode::Absolute, LineNumberMode::Relative, LineNumberMode::Off] {
+        for fold in [true, false] {
+            for blame in [false, true] {
+                for tests in [Tests::Served, Tests::Without, Tests::ExplorerOff, Tests::GutterOff] {
+                    for breakpoint in [false, true] {
+                        let what = format!("{numbers:?}, folds {fold}, blame {blame}, {tests:?}, breakpoint {breakpoint}");
+                        let (mut app, root, _dir) = served(12, if tests == Tests::Without { &[] } else { &[("a.fake::t", 4)] });
+                        app.line_number_mode = numbers;
+                        app.config.set_value("editor.fold_markers", Some(fenix_config::Value::Bool(fold)));
+                        let path = app.open().buffer.path().unwrap().to_path_buf();
+                        if blame {
+                            app.test_blame(&path, 12);
+                        }
+                        match tests {
+                            Tests::ExplorerOff => app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false))),
+                            Tests::GutterOff => app.config.set_value("tests.gutter", Some(fenix_config::Value::Bool(false))),
+                            _ => {}
+                        }
+                        if breakpoint {
+                            let at = app.open().buffer.line_start_char(4);
+                            app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+                            app.debug_toggle_breakpoint();
+                            app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+                        }
+                        let blame_w = if blame { git_editor::BLAME_WIDTH } else { 0 };
+                        let on = numbers != LineNumberMode::Off;
+                        let base = if on { 2 + 1 + blame_w + usize::from(fold) } else { blame_w };
+                        let column = on && tests == Tests::Served;
+                        let gutter = app.gutter_chars(app.open());
+                        assert_eq!(gutter, base + usize::from(column), "{what}");
+                        let row: Vec<char> = rows_of(&app, 12)[4].chars().collect();
+                        assert_eq!(row[gutter..].iter().collect::<String>(), "line 4", "{what}: the text starts where it did");
+                        let drawn = column && !(breakpoint && !blame);
+                        if column {
+                            assert_eq!(row[blame_w], if drawn { '?' } else { ' ' }, "{what}");
+                        }
+                        if on {
+                            let number: String = row[blame_w + usize::from(column)..gutter - 1 - usize::from(fold)].iter().collect();
+                            assert_eq!(number.trim_start(), if numbers == LineNumberMode::Relative { "4" } else { "5" }, "{what}: {number:?}");
+                            assert_eq!(number.len(), 2, "{what}: the numbers keep their width");
+                        }
+                        let pane = app.focused_pane_id();
+                        assert!(!app.tests_mark_click(pane, 4, blame_w + 1), "{what}: the number isn't the mark");
+                        assert!(!app.tests_mark_click(pane, 1, blame_w), "{what}: a line without a mark");
+                        assert_eq!(app.tests_mark_click(pane, 4, blame_w), drawn, "{what}");
+                        let asked = app.tests.projects.get(&root).and_then(|p| p.model.last_selection()).map(<[Selection]>::to_vec);
+                        assert_eq!(asked.is_some(), drawn, "{what}: {asked:?}");
+                        if drawn {
+                            assert_eq!(asked.unwrap(), [Selection::Nodes(vec![TestKey::new(&provider(), "a.fake::t")])]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Marks: the worst state of what starts on a line, in its colour, dimmed
+/// when stale; and the right click's items on a test's lines only.
+#[test]
+fn a_marks_state_colour_and_the_right_clicks_items() {
+    let (mut app, root, _dir) = served(12, &[("a.fake::ok", 1), ("a.fake::bad", 4)]);
+    let model = &mut app.tests.projects.get_mut(&root).unwrap().model;
+    let failed = fenix_tests::Ended { message: Some("two and two".into()), ..fenix_tests::Ended::new("a.fake::bad", Outcome::Failed) };
+    ran(model, vec![fenix_tests::Report::Ended(fenix_tests::Ended::new("a.fake::ok", Outcome::Passed)), fenix_tests::Report::Ended(failed)]);
+    let cells = app.tests_cells(app.open(), 0..=11).unwrap();
+    let role = |r| crate::app::pages::role_color(app.theme, r);
+    assert_eq!(cells.at(1).map(|c| (c.0, c.1)), Some(('✓', role(crate::page::Role::Good))));
+    assert_eq!(cells.at(4).map(|c| (c.0, c.1)), Some(('✗', role(crate::page::Role::Bad))));
+    assert!(cells.at(0).is_none() && cells.at(5).is_none());
+    let labels = |app: &App| app.text_menu_items().into_iter().map(|i| i.label).collect::<Vec<_>>();
+    assert!(!labels(&app).contains(&"Run test".to_string()), "line 1 of a.fake is in no test");
+    let at = app.open().buffer.line_start_char(4);
+    app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+    let items = labels(&app);
+    let after = items.iter().position(|l| l == "Toggle breakpoint").unwrap();
+    assert_eq!(&items[after + 1..after + 3], ["Run test", "Show in Tests"], "beside Toggle breakpoint: {items:?}");
+    assert!(!items.iter().any(|l| l.contains("Debug")), "debugging a test is step 6's");
+    // Saved: stale, dimmed, its glyph kept.
+    let path = app.open().buffer.path().unwrap().to_path_buf();
+    app.tests_file_saved(&path);
+    let cells = app.tests_cells(app.open(), 0..=11).unwrap();
+    assert_eq!(cells.at(4).map(|c| (c.0, c.1)), Some(('✗', role(crate::page::Role::Muted))));
+    // Show in Tests: the page, on the test.
+    app.run_menu_action(crate::app::mouse::MenuAction::ShowTest);
+    let id = app.find_page(|m| matches!(m, PageModel::Tests(_))).expect("the tests page");
+    let Some(PageModel::Tests(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+    let bad = app.tests.projects[&root].model.find(&TestKey::new(&provider(), "a.fake::bad"));
+    assert_eq!(page.focus, bad.map(fenix_tests::Item::Node));
+}
+
+/// With `tests.enabled` off the file shows nothing of the explorer: no
+/// column and no width, no marks, no results after the lines, no
+/// problems, no menu items, a click on the cell does nothing; and what
+/// was shown goes at the next wake. Never turned on, nothing is kept to
+/// look at as a frame is drawn.
+#[test]
+fn with_the_explorer_off_the_file_shows_nothing_of_it() {
+    let mut never = App::with_file(None);
+    assert!(never.tests.by_path.is_empty() && never.tests.projects.is_empty());
+    assert!(never.tests_cells(never.open(), 0..=10).is_none());
+    assert_eq!(never.tests_views_due(Instant::now()), (false, None));
+
+    let (mut app, root, _dir) = served(12, &[("a.fake::bad", 4)]);
+    let failed = fenix_tests::Ended { message: Some("two and two".into()), ..fenix_tests::Ended::new("a.fake::bad", Outcome::Failed) };
+    ran(&mut app.tests.projects.get_mut(&root).unwrap().model, vec![fenix_tests::Report::Ended(failed)]);
+    app.tests_views_due(Instant::now() + Duration::from_secs(1));
+    let path = app.open().buffer.path().unwrap().to_path_buf();
+    let canonical = refactor::identity(&path);
+    let ours = |app: &App| app.diagnostics.for_path(&canonical).len();
+    let inline = |app: &App| app.wasm.decorations.get(&app.focused_buffer_id()).is_some_and(|sets| sets.iter().any(|(who, _)| who == file::TESTS_OWNER));
+    assert_eq!(ours(&app), 1);
+    assert!(inline(&app));
+    let with = app.gutter_chars(app.open());
+
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    assert_eq!(app.gutter_chars(app.open()), with - 1, "no column, no width");
+    assert!(app.tests_cells(app.open(), 0..=11).is_none());
+    assert!(!rows_of(&app, 12)[4].contains('✗'));
+    let at = app.open().buffer.line_start_char(4);
+    app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+    assert!(app.tests_test_here().is_none());
+    assert!(!app.text_menu_items().iter().any(|i| i.label == "Run test" || i.label == "Show in Tests"));
+    assert!(!app.tests_mark_click(app.focused_pane_id(), 4, 0));
+    assert!(app.tests_views_due(Instant::now()).0, "a frame to take it away");
+    assert_eq!(ours(&app), 0, "no problems");
+    assert!(!inline(&app), "no results after the lines");
+    assert_eq!(app.tests_views_due(Instant::now()), (false, None), "then nothing, each wake");
+}
+
+/// What a frame costs with 10,000 tests in the project and 5,000 in the
+/// open file, a fifth of them failed: the column's width, its marks and
+/// the rows drawn, the test the cursor is in at each move; and the wake's
+/// work when the model changes (problems, the results after the lines).
+/// The marks cost the lines drawn: a frame at the file's end costs what
+/// one at its start does.
+#[test]
+fn a_frames_cost_with_5000_tests_in_the_file_is_the_lines_it_draws() {
+    let lines = 10_000usize;
+    let ids: Vec<String> = (0..5_000).map(|i| format!("a.fake::t{i}")).collect();
+    let tests: Vec<(&str, u32)> = ids.iter().enumerate().map(|(i, id)| (id.as_str(), (i * 2) as u32)).collect();
+    let (mut app, root, _dir) = served(lines, &tests);
+    {
+        let model = &mut app.tests.projects.get_mut(&root).unwrap().model;
+        model.scan(&provider(), "b.fake", (0..5_000).map(|i| fenix_tests::Found::new(format!("b.fake::t{i}"), None, "t", Kind::Test).at("b.fake", i, None)).collect());
+        let reports = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let outcome = if i % 5 == 0 { Outcome::Failed } else { Outcome::Passed };
+                fenix_tests::Report::Ended(fenix_tests::Ended { message: (outcome == Outcome::Failed).then(|| format!("assertion failed: {i}")), ..fenix_tests::Ended::new(id, outcome) })
+            })
+            .collect();
+        ran(model, reports);
+        assert_eq!(model.summary().counts.tests(), 10_000);
+    }
+    let started = Instant::now();
+    assert!(app.tests_in_files(std::slice::from_ref(&root)));
+    let wake = started.elapsed();
+
+    let frame = |app: &App, top: usize| {
+        let ob = app.open();
+        let gutter = app.gutter_chars(ob);
+        let spans = app.content_spans(ob, top, 60, gutter, None, &[], top, &TabStops::Fixed(4), 0);
+        assert_eq!(spans.iter().any(|(s, _)| s == "✗"), app.tests_enabled());
+    };
+    let time = |app: &App, top: usize| {
+        let started = Instant::now();
+        for _ in 0..100 {
+            frame(app, top);
+        }
+        started.elapsed() / 100
+    };
+    let (start, end) = (time(&app, 0), time(&app, lines - 70));
+    // The cursor moving: the test it's in, at every line of a screen.
+    let model = &app.tests.projects[&root].model;
+    let started = Instant::now();
+    for line in 5_000..5_060 {
+        assert!(model.test_at("a.fake", line).is_some());
+    }
+    let moves = started.elapsed() / 60;
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let off = time(&app, 0);
+    eprintln!("10,000 tests, 5,000 in the file: a frame's rows {start:?} at its start, {end:?} at its end, {off:?} with the explorer off; a cursor move's test_at {moves:?}; the wake after a run {wake:?}");
+    assert!(start < Duration::from_millis(20) && end < Duration::from_millis(20), "{start:?} {end:?}");
+    assert!(end < start * 4 + Duration::from_millis(1), "the file's end costs what its start does: {start:?} {end:?}");
+    assert!(moves < Duration::from_millis(5), "{moves:?}");
+    assert!(wake < Duration::from_secs(2), "{wake:?}");
+}
+
+impl Project {
+    /// A wake past the tenth of a second the views wait for.
+    fn wake(&mut self) {
+        std::thread::sleep(Duration::from_millis(120));
+        self.app.tests_views_due(Instant::now());
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        refactor::identity(&self.root.join(name))
+    }
+
+    /// The problems on file `name`: (source, line, message).
+    fn problems(&self, name: &str) -> Vec<(String, u32, String)> {
+        let mut out: Vec<(String, u32, String)> = self.app.diagnostics.for_path(&self.path(name)).into_iter().map(|d| (d.source.unwrap_or_default(), d.range.start.line, d.message)).collect();
+        out.sort();
+        out
+    }
+
+    /// The results after the lines of the focused buffer: (line, text, role).
+    fn inline(&self) -> Vec<(usize, String, crate::page::Role)> {
+        let ob = self.app.open();
+        let sets = self.app.wasm.decorations.get(&self.app.focused_buffer_id());
+        sets.into_iter()
+            .flatten()
+            .filter(|(who, _)| who == file::TESTS_OWNER)
+            .flat_map(|(_, set)| set.iter())
+            .filter_map(|d| match &d.look {
+                crate::decorations::Look::Text { text, role, .. } => Some((ob.buffer.line_col(&Cursor { char_idx: d.start, sticky_col: 0 }).0, text.clone(), *role)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn glyph(&self, line: usize) -> Option<char> {
+        self.app.tests_cells(self.app.open(), line..=line).and_then(|c| c.at(line)).map(|c| c.0)
+    }
+}
+
+/// The file end to end, with the provider guest and `fake-test-runner`: a
+/// click on a test's mark runs it; its failure is shown after its line,
+/// cleaned and cut, and is a problem at its place beside an extension's
+/// own for the same file, neither replacing the other; confirming it in
+/// the problems' list goes to its line; a run that passes clears it; an
+/// edit moves the marks with the file's next scan and leaves them as they
+/// were, and a save makes them stale: dimmed, the problem gone.
+#[test]
+fn a_failure_from_the_gutter_is_shown_at_its_line_and_as_a_problem_beside_an_extensions() {
+    let state = tempfile::tempdir().unwrap();
+    let long = "assertion failed: left == right, left: 2, right: 4, at the second try";
+    let failing = format!("# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! err FAIL a.fake::fails a.fake:1 {long}\n");
+    let passing = "# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! out PASS a.fake::fails 1ms\n";
+    let mut p = Project::new(&[("a.fake", &failing)], "a.fake", state.path());
+    // The jump below opens the file again, which moves an old
+    // `.fenix/project.ini` away: the project keeps a marker after it.
+    std::fs::write(p.root.join(".fenix/settings.toml"), "").unwrap();
+    p.scanned("a.fake::fails");
+    p.app.tests_tick(Instant::now());
+    assert!(p.app.tests_column(p.app.open()), "a file with tests has the column");
+    assert_eq!(p.glyph(1), Some('?'));
+    // An extension's own problem on the same file.
+    let canonical = p.path("a.fake");
+    let theirs = |message: &str| lsp_types::Diagnostic { range: lsp_types::Range::default(), severity: Some(lsp_types::DiagnosticSeverity::WARNING), source: Some("lint".into()), message: message.into(), ..Default::default() };
+    let key = LspKey { server: LspServer::Additional(super::super::wasm_host::problems_key("test.lint")), root: p.root.clone() };
+    p.app.publish_diagnostics(canonical.clone(), key.clone(), "test.lint", vec![theirs("unused")]);
+
+    // A click on its mark runs it.
+    let pane = p.app.focused_pane_id();
+    assert!(p.app.tests_mark_click(pane, 1, 0));
+    p.until("the run", Project::ended);
+    assert_eq!(p.state("a.fake::fails"), State::Failed);
+    p.wake();
+    assert_eq!(p.glyph(1), Some('✗'));
+    assert_eq!(p.glyph(0), Some('✓'));
+    let shown = format!(" ✗ {}…", &long[..47]);
+    assert_eq!(p.inline(), [(1, shown.clone(), crate::page::Role::Bad)], "after its line, cut at 48 characters");
+    let problems = p.problems("a.fake");
+    assert_eq!(problems.iter().map(|(_, l, m)| (*l, m.as_str())).collect::<Vec<_>>(), [(1, long), (0, "unused")], "both, neither in the other's place: {problems:?}");
+    let ours = p.app.diagnostics.for_path(&canonical).into_iter().find(|d| d.source.as_deref() != Some("lint")).unwrap();
+    let runner = crate::tests_page::clean(p.model().providers()[0].name);
+    assert_eq!((ours.severity, ours.code.clone(), ours.source.clone()), (Some(lsp_types::DiagnosticSeverity::ERROR), Some(lsp_types::NumberOrString::String("fails".into())), Some(runner)), "an error, its code the test's label, its source the runner");
+    // The extension sets its problems again: ours stay; and the other way.
+    p.app.publish_diagnostics(canonical.clone(), key.clone(), "test.lint", vec![theirs("unused again")]);
+    assert_eq!(p.problems("a.fake").len(), 2);
+
+    // The problems' list goes to it: ours first, an error.
+    p.app.picker_problems();
+    let Some(ActivePicker::Problems(list)) = &p.app.active_picker else { panic!("the problems' list") };
+    let rows: Vec<String> = list.visible_rows(0, list.len()).map(|(_, c)| c.label.clone()).collect();
+    assert!(rows.len() == 2 && rows[0].starts_with("error") && rows[0].contains("a.fake:2") && rows[0].contains("assertion failed") && rows[1].contains("unused again"), "{rows:?}");
+    let end = p.app.open().buffer.line_start_char(3);
+    p.app.test_set_cursor(Cursor { char_idx: end, sticky_col: 0 });
+    p.app.picker_confirm();
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 1, "at the failure's line");
+
+    // A run that passes clears it; theirs stays.
+    // The runner reads the file; the buffer keeps its text. Noted as
+    // Fenix's own write, so the save below isn't refused as a change made
+    // elsewhere.
+    std::fs::write(p.root.join("a.fake"), passing).unwrap();
+    let id = p.app.focused_buffer_id();
+    p.app.note_disk_state(id);
+    p.app.tests_run_file();
+    p.until("the passing run", |p| p.state("a.fake::fails") == State::Passed && p.tests().run.is_none());
+    p.wake();
+    assert_eq!(p.problems("a.fake"), [("lint".to_string(), 0, "unused again".to_string())]);
+    assert_eq!(p.inline(), [], "a passed test says nothing with tests.inline = failed");
+    assert_eq!(p.glyph(1), Some('✓'));
+    p.app.config.set_value("tests.inline", Some(fenix_config::Value::Text("all".into())));
+    p.wake();
+    assert_eq!(p.inline().iter().map(|(l, t, _)| (*l, t.clone())).collect::<Vec<_>>(), [(0, " ✓ 3.0 ms".to_string()), (1, " ✓ 1.0 ms".to_string())]);
+    p.app.config.set_value("tests.inline", Some(fenix_config::Value::Text("failed".into())));
+
+    // Failing again; then an edit above it: the marks move with the next
+    // scan, as they were, not stale.
+    std::fs::write(p.root.join("a.fake"), &failing).unwrap();
+    p.app.note_disk_state(id);
+    p.app.tests_run_file();
+    p.until("the failing run", |p| p.state("a.fake::fails") == State::Failed && p.tests().run.is_none());
+    p.wake();
+    assert_eq!(p.problems("a.fake").len(), 2);
+    p.app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+    let (buffer, cursor) = p.app.focused_buffer_and_cursor_mut();
+    buffer.insert_char(cursor, '\n');
+    p.until("the edit's scan", |p| p.model().node(p.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap()).unwrap().found().line == Some(2));
+    p.wake();
+    assert_eq!((p.glyph(1), p.glyph(2)), (Some('✓'), Some('✗')), "moved with the file");
+    let fails = p.model().node(p.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap()).unwrap();
+    assert!(!fails.stale(), "an edit doesn't make a result stale: the runner reads the file as saved");
+    assert_eq!(p.inline(), [(2, shown.clone(), crate::page::Role::Bad)]);
+
+    // Saved: stale, dimmed; the problem goes, the result stays after its
+    // line, muted; the extension's problem stays.
+    p.app.save();
+    p.wake();
+    let fails = p.model().node(p.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap()).unwrap();
+    assert!(fails.stale());
+    assert_eq!(p.app.tests_cells(p.app.open(), 2..=2).and_then(|c| c.at(2)).map(|c| c.1), Some(crate::app::pages::role_color(p.app.theme, crate::page::Role::Muted)));
+    assert_eq!(p.problems("a.fake"), [("lint".to_string(), 0, "unused again".to_string())]);
+    assert_eq!(p.inline(), [(2, shown, crate::page::Role::Muted)]);
+
+    // An edit not saved, then the buffer closed without saving: the file
+    // has no unsaved edits any more (§8.4).
+    let (buffer, cursor) = p.app.focused_buffer_and_cursor_mut();
+    buffer.insert_char(cursor, 'x');
+    p.until("the unsaved edit seen", |p| p.model().is_unsaved("a.fake"));
+    p.app.buffers.close(id);
+    p.app.tests_tick(Instant::now());
+    assert!(!p.model().is_unsaved("a.fake"));
+    assert!(p.app.tests.by_path.is_empty() && p.app.tests.inline.is_empty());
+}

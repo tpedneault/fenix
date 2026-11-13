@@ -34,6 +34,10 @@
 //! - **The tick** (`App::tests_tick`, from `plan_wake`): what's due by
 //!   the clock -- a buffer's scan once typing pauses, a run on save, a
 //!   run's timeout, the next file of a first scan -- and the pump.
+//! - **In the file** (`file`, step 5): the gutter's test column and its
+//!   marks for the lines drawn, a click on one, the right click's items,
+//!   a result after a test's line, failures as problems under
+//!   `fenix:#tests`, worked out when the model changes.
 //! - **The page's host** (`page`, step 4): `tests.open`, the tests page's
 //!   actions, its head counted at most ten times a second, the modeline's
 //!   item, and *Test output* beside the page; the page itself is
@@ -187,6 +191,15 @@ pub(crate) fn model_path(given: &str, root: &Path, base: &Path) -> String {
 /// project's.
 pub(crate) fn model_path_in(given: &str, roots: &[PathBuf], base: &Path) -> String {
     let slashed = given.replace('\\', "/");
+    // A verbatim path (`\\?\C:\...`, `\\?\UNC\server\...`) as the
+    // plain one it names, before it's looked for under the project.
+    let slashed = match slashed.strip_prefix("//?/") {
+        Some(rest) => match rest.strip_prefix("UNC/") {
+            Some(unc) => format!("//{unc}"),
+            None => rest.to_string(),
+        },
+        None => slashed,
+    };
     if slashed == "/project" || slashed.starts_with("/project/") {
         // A `..` out of the project is no file of it: as it was given.
         return lexical(&slashed["/project".len()..]).unwrap_or(slashed);
@@ -198,6 +211,23 @@ pub(crate) fn model_path_in(given: &str, roots: &[PathBuf], base: &Path) -> Stri
         }
     }
     fenix_lsp::normalize(PathBuf::from(&full)).to_string_lossy().into_owned()
+}
+
+/// A path as the model holds it, as a file on this machine (the gutter,
+/// problems, a jump): a file of the project under `root`, whatever it
+/// resolves to (a symlink inside the project to a file outside it is the
+/// project's); a full path as it is. None for a path held as given
+/// because it climbed out of the project (`/project/../x.rs`): no place,
+/// never opened.
+pub(crate) fn place_path(root: &Path, path: &str) -> Option<PathBuf> {
+    let slashed = path.replace('\\', "/");
+    if slashed == "/project" || slashed.starts_with("/project/") {
+        return None;
+    }
+    if is_full(&slashed) {
+        return Some(PathBuf::from(path));
+    }
+    lexical(&slashed).filter(|rel| !rel.is_empty()).map(|rel| root.join(rel))
 }
 
 /// A path as the model holds it, as Fenix gives it back to a provider
@@ -691,6 +721,9 @@ pub(crate) struct ProjectTests {
     /// Its last line has no end yet (a cut line's first pieces): the next
     /// text goes on it, not on a line of its own.
     output_partial: bool,
+    /// The failures published as problems under `fenix:#tests` (§9.3),
+    /// by file as the problems are keyed: what the next look replaces.
+    problems: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
     /// Where each step's lines begin, counted from the run's first line
     /// (those dropped included), and the step's folder: what a place on
     /// one of its lines is relative to (`Enter`, step 4).
@@ -758,6 +791,15 @@ pub(crate) struct TestsHost {
     /// kept until Fenix exits.
     said: HashMap<(PathBuf, ProviderId), (String, Option<String>)>,
     seen: HashMap<BufferId, Seen>,
+    /// Each open file's project and path there, by the path its buffer
+    /// has (step 5: the gutter's column, its marks, the menu): looked up
+    /// as a frame is drawn, never worked out then.
+    pub(crate) by_path: HashMap<PathBuf, (PathBuf, String)>,
+    /// What's shown of the tests in open files (step 5, `file`): each
+    /// buffer's results after its lines, and the settings they were
+    /// shown under.
+    inline: HashMap<BufferId, file::Inline>,
+    file_settings: Option<file::Settings>,
     /// The project an extension is being started again in for a call
     /// about it: its runs aren't the old instance's.
     restart_here: Option<PathBuf>,
@@ -932,6 +974,7 @@ impl App {
                 output_dropped: 0,
                 output_partial: false,
                 output_steps: Vec::new(),
+                problems: HashMap::new(),
                 shown: None,
                 walks: VecDeque::new(),
                 walk: None,
@@ -1346,7 +1389,7 @@ impl App {
     /// the next is due.
     fn tests_scan_buffers(&mut self, now: Instant) -> Option<Instant> {
         let mut wake: Option<Instant> = None;
-        self.tests.seen.retain(|id, _| self.buffers.get(*id).is_some());
+        self.tests_forget_closed();
         for id in self.buffers.ids_sorted_by_path() {
             let Some(ob) = self.buffers.get(id) else { continue };
             if !ob.kind.tracks_unsaved_changes() {
@@ -1355,8 +1398,13 @@ impl App {
             let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { continue };
             let (edits, dirty) = (ob.buffer.edit_count(), ob.buffer.is_dirty());
             if self.tests.seen.get(&id).is_none_or(|s| s.path != path) {
+                // Renamed: what its old name had goes with it.
+                if let Some(old) = self.tests.seen.remove(&id) {
+                    self.tests_forget_seen(id, old);
+                }
                 let Some(root) = self.tests_root_of(&path) else { continue };
                 let rel = self.tests_rel(&root, &path);
+                self.tests.by_path.insert(path.clone(), (root.clone(), rel.clone()));
                 let specs: Vec<ProviderSpec> = self.tests_specs().into_iter().map(|(_, s)| s).filter(|s| s.scans(&root, &path)).collect();
                 let providers = specs.iter().map(|s| s.id.clone()).collect();
                 self.tests.seen.insert(id, Seen { path: path.clone(), root, rel, providers, scanned: None, changed: (edits, now), last_scan: None });
@@ -1404,6 +1452,33 @@ impl App {
             }
         }
         wake
+    }
+
+    /// The buffers closed since last looked, forgotten.
+    fn tests_forget_closed(&mut self) {
+        let gone: Vec<BufferId> = self.tests.seen.keys().copied().filter(|id| self.buffers.get(*id).is_none()).collect();
+        for id in gone {
+            if let Some(seen) = self.tests.seen.remove(&id) {
+                self.tests_forget_seen(id, seen);
+            }
+        }
+    }
+
+    /// What was known of buffer `id` as `seen` goes: its results after its
+    /// lines, its path's entry, and its file's unsaved edits -- a buffer
+    /// closed without saving leaves the file as it is on disk, which is
+    /// what a runner reads (§8.4), unless another buffer on it has edits.
+    fn tests_forget_seen(&mut self, id: BufferId, seen: Seen) {
+        self.tests_inline_clear(id);
+        if !self.tests.seen.values().any(|s| s.path == seen.path) {
+            self.tests.by_path.remove(&seen.path);
+        }
+        let still = self.tests.seen.iter().any(|(other, s)| s.root == seen.root && s.rel == seen.rel && self.buffers.get(*other).is_some_and(|ob| ob.buffer.is_dirty()));
+        if !still {
+            if let Some(project) = self.tests.projects.get_mut(&seen.root) {
+                project.model.set_unsaved(&seen.rel, false);
+            }
+        }
     }
 
     /// The first scans (§6.7, §7.1): one provider's at a time per project,
@@ -2145,6 +2220,8 @@ fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>, cap: us
     rx
 }
 
+mod file;
+pub(in crate::app) use file::TestCells;
 mod page;
 #[cfg(test)]
 mod tests;

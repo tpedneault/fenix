@@ -888,6 +888,11 @@ impl Model {
         }
     }
 
+    /// Whether the host said file `path` has edits not yet saved.
+    pub fn is_unsaved(&self, path: &str) -> bool {
+        self.unsaved.contains(path)
+    }
+
     // States.
 
     pub(crate) fn is_stale(&self, node: &Node, result: &TestResult) -> bool {

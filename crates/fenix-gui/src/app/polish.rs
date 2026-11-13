@@ -125,6 +125,7 @@ impl App {
         };
         let mut problem_lines: Vec<(usize, Severity)> = Vec::new();
         if let Some(ob) = self.buffers.get(view.buffer) {
+            let number_cell = if self.line_number_mode == LineNumberMode::Off { 0 } else { usize::from(self.blame_width(ob) > 0) + usize::from(self.tests_column(ob)) };
             let rope = ob.buffer.rope();
             let mut worst: HashMap<usize, (Severity, String)> = HashMap::new();
             for d in &diagnostics {
@@ -170,8 +171,9 @@ impl App {
                 }
                 let color = self.severity_color(*sev);
                 if view.gutter_chars > 0 && inline != "off" {
-                    // The line number takes the problem's colour.
-                    if let Some(first) = rows.get_mut(on.start).filter(|_| view.map.row(on.start).is_some_and(|r| r.first)).and_then(|cells| cells.first_mut()) {
+                    // The line number takes the problem's colour: the
+                    // cell after the blame and the test column's mark.
+                    if let Some(first) = rows.get_mut(on.start).filter(|_| view.map.row(on.start).is_some_and(|r| r.first)).and_then(|cells| cells.get_mut(number_cell)) {
                         first.1 = color;
                     }
                 }

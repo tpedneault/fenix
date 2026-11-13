@@ -13302,6 +13302,8 @@ impl App {
         }
         self.disk_state.insert(id, fingerprint);
         self.externally_changed.remove(&id);
+        // Its test results are older than the file now, as after a save.
+        self.tests_file_changed_on_disk(&path);
         sweep.reloaded.push(name);
     }
 
@@ -18824,7 +18826,9 @@ impl App {
         if self.line_number_mode == LineNumberMode::Off {
             return blame;
         }
-        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame + usize::from(self.fold_column(ob))
+        // The test column (§9.1, step 5): a cell on the left of the
+        // numbers in a file a provider found tests in.
+        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame + usize::from(self.fold_column(ob)) + usize::from(self.tests_column(ob))
     }
 
     /// Rich-text spans for one pane's content area covering `rows` screen
@@ -18911,10 +18915,12 @@ impl App {
         // The fold markers' column: ▾ on a fold's first line, ▸ when it's
         // closed.
         let fold_marks = if dashboard_pad.is_none() && gutter_chars > 0 { self.fold_marks(ob) } else { None };
+        // The test column's marks, for these rows' lines only.
+        let test_cells = if dashboard_pad.is_none() && gutter_chars > 0 && rows > 0 { self.tests_cells(ob, render_base_line..=render_base_line + rows - 1) } else { None };
         for r in 0..rows {
             let buffer_line = render_base_line + r;
             let has_line = buffer_line < visual_lines;
-            self.push_gutter(ob, buffer_line, has_line, gutter_chars, dashboard_pad, cursor_line, fold_marks.as_ref(), &mut spans);
+            self.push_gutter(ob, buffer_line, has_line, gutter_chars, dashboard_pad, cursor_line, fold_marks.as_ref(), test_cells.as_ref(), &mut spans);
             if has_line {
                 self.push_line_text(ob, buffer_line, scroll_col..scroll_col.saturating_add(MAX_ROW_CHARS), syntax_highlights, tab_stops, decorated, &mut spans);
             }
@@ -18926,8 +18932,9 @@ impl App {
     }
 
     /// The start of a content row: `dashboard_pad`'s pad, or the gutter
-    /// -- `buffer_line`'s blame, number (`~` past the end, `has_line`
-    /// false) and fold marker -- or, with no gutter, `~` past the end.
+    /// -- `buffer_line`'s blame, test mark (`test_cells`, with the test
+    /// column), number (`~` past the end, `has_line` false) and fold
+    /// marker -- or, with no gutter, `~` past the end.
     #[allow(clippy::too_many_arguments)]
     fn push_gutter(
         &self,
@@ -18938,6 +18945,7 @@ impl App {
         dashboard_pad: Option<&[usize]>,
         cursor_line: usize,
         fold_marks: Option<&(HashMap<usize, usize>, HashSet<usize>)>,
+        test_cells: Option<&tests_host::TestCells>,
         spans: &mut Vec<(String, glyphon::Color)>,
     ) {
         let theme = self.theme;
@@ -18954,12 +18962,19 @@ impl App {
             let numbers = gutter_chars - blame;
             if numbers > 0 {
                 let marker_cells = usize::from(fold_marks.is_some());
+                let test_cell = usize::from(test_cells.is_some());
+                // The test column's cell, left of the number; past the end
+                // the `~` takes it, as it takes the numbers'.
+                if let (Some(cells), true) = (test_cells, has_line) {
+                    let (glyph, color) = cells.at(buffer_line).map_or((' ', theme.gutter_fg), |(g, c, _)| (g, c));
+                    spans.push((glyph.to_string(), color));
+                }
                 let gutter = if has_line {
                     let n = match self.line_number_mode {
                         LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
                         _ => buffer_line + 1,
                     };
-                    format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
+                    format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells + test_cell))
                 } else {
                     format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
                 };
@@ -20349,6 +20364,10 @@ impl App {
                     if pos.1 >= content.y && self.explorer_in_pane(id).is_none() {
                         let (row, col) = self.cell_at(pos, (content.x, content.y), 0);
                         if self.fold_marker_click(id, row, col) {
+                            return;
+                        }
+                        // A test's mark: it runs (§9.1).
+                        if self.tests_mark_click(id, row, col) {
                             return;
                         }
                     }

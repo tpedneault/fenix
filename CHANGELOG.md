@@ -50,14 +50,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests::provider`. See
   [Writing extensions](docs/WRITING_EXTENSIONS.md#test-providers).
 - `tests.enabled`, off, on the settings page under Completion & LSP,
-  with `tests.list_automatically`, `tests.on_save`,
-  `tests.timeout_minutes` and `tests.keep_results`: the test explorer
-  being built. Turned on, Fenix scans, lists and runs tests through the
-  providers of extensions that have them, their output in *Test output*
-  (`tests.output`), from commands with no keys yet (`tests.run_here`,
-  `tests.run_file`, `tests.run_all`, `tests.run_failed`,
-  `tests.run_last`, `tests.stop`); its page, the gutter and results in
-  the file aren't there yet. Off, nothing changes.
+  with `tests.list_automatically`, `tests.on_save`, `tests.problems`,
+  `tests.inline`, `tests.gutter`, `tests.timeout_minutes` and
+  `tests.keep_results`: the test explorer being built. Turned on, Fenix
+  scans, lists and runs tests through the providers of extensions that
+  have them, their output in *Test output* (`tests.output`), from its
+  page (`SPC T T`), `SPC T` and the file: a mark in the gutter beside
+  each test, a click running it, a failure's message after its line and
+  as a problem, *Run test* and *Show in Tests* on the right click.
+  Debugging a test, and `SPC p r` through the explorer, aren't there yet.
+  Off, nothing changes.
 
 - A file whose built-in language server isn't installed (rust-analyzer,
   pyright, clangd, gopls, ...) brings a notice with the command that

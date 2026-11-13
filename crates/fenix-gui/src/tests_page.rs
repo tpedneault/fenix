@@ -377,6 +377,22 @@ impl TestsPage {
         self.folds += 1;
     }
 
+    /// `node`'s row focused, its groups opened (*Show in Tests*, §9.1); on
+    /// a tab that doesn't hold it, or hidden by the filter, the page goes
+    /// back to All with no filter.
+    pub fn show(&mut self, model: &Model, node: NodeId) {
+        self.reveal(model, node);
+        self.focus = Some(Item::Node(node));
+        self.refresh(model);
+        if !self.rows.iter().any(|r| r.item == Item::Node(node)) {
+            self.tab = Tab::All;
+            self.filter = Filter::default();
+            self.focus = Some(Item::Node(node));
+            self.refresh(model);
+        }
+        self.details_top = 0;
+    }
+
     /// The row above `item`'s: its parent's, or its provider's.
     fn parent_of(&self, model: &Model, item: Item) -> Option<usize> {
         let Item::Node(id) = item else { return None };

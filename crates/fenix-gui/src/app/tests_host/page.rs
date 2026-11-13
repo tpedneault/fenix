@@ -163,11 +163,13 @@ impl App {
             return (false, None);
         }
         if !self.tests_enabled() {
+            // What the files showed of it goes too (step 5).
+            let cleared = self.tests_in_files_off();
             if self.tests.page_shown {
                 self.tests_pages_off();
                 return (true, None);
             }
-            return (false, None);
+            return (cleared, None);
         }
         let mut changed: Vec<PathBuf> = Vec::new();
         let mut due: Option<Instant> = None;
@@ -185,8 +187,11 @@ impl App {
             project.shown = Some(Shown { revision, at: now, summary: project.model.summary() });
             changed.push(root.clone());
         }
+        // The files' marks, results after their lines and problems, from
+        // the same counting (step 5).
+        let files = self.tests_in_files(&changed);
         if changed.is_empty() {
-            return (false, due);
+            return (files, due);
         }
         if self.tests.page_shown {
             for state in self.pages.values_mut() {
@@ -348,7 +353,11 @@ impl App {
         let Some(line) = line else {
             return self.set_error(format!("{label} was found in a run: no line is known for it"));
         };
-        let path = if Path::new(&file).is_absolute() { PathBuf::from(&file) } else { root.join(&file) };
+        // As the gutter and the problems read a provider's path: one that
+        // climbed out of the project is no place.
+        let Some(path) = place_path(root, &file) else {
+            return self.set_error(format!("{label}: its file is outside the project ({file})"));
+        };
         if !path.is_file() {
             return self.set_error(format!("{} isn't a file", readable_path(&path)));
         }
