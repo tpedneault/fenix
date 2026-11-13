@@ -32324,7 +32324,7 @@ configure_board stm32
         app.task_session.as_mut().unwrap().run_id = Some(current);
         let before = app.open().buffer.text();
         app.apply_task_event(buffer, stale, fenix_tasks::TaskEvent::Output(vec![fenix_tasks::OutputLine {
-            stream: fenix_tasks::OutputStream::Stdout, text: "stale.rs:1:1: old error".into(),
+            stream: fenix_tasks::OutputStream::Stdout, text: "stale.rs:1:1: old error".into(), cut: false,
         }]));
         app.apply_task_event(buffer, stale, fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled));
         assert_eq!(app.open().buffer.text(), before);

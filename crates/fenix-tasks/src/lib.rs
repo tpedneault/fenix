@@ -24,6 +24,11 @@ pub use test_at::{test_at, test_lines};
 mod tests_count;
 pub use tests_count::test_counts;
 
+/// The test explorer's made-up runner, for its tests (`fake-test-runner`).
+#[cfg(feature = "fake-runner")]
+#[doc(hidden)]
+pub mod fake_runner;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 

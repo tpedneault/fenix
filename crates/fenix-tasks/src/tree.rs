@@ -115,3 +115,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// The same on Windows, where the tree is a job object: the grandchild
+/// holding the pipe goes when the tree is killed. No shell: the test
+/// harness itself is the tree (`supervisor`'s fixture, mode `tree`,
+/// whose child says `READY <pid>`). Every wait is bounded.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+
+    #[test]
+    fn killing_the_tree_kills_what_it_started() {
+        let mut command = crate::supervisor::tests::fixture_command("tree");
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut tree = ProcessTree::spawn(command).unwrap();
+        let stdout = tree.take_stdout().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(pid) = line.strip_prefix("READY ") {
+                    let _ = tx.send(pid.trim().parse::<u32>().unwrap());
+                }
+            }
+        });
+        let grandchild = rx.recv_timeout(Duration::from_secs(30)).expect("the grandchild never started");
+        // SAFETY: the handle is checked, waited on and closed once; held
+        // from before the kill, it can't be another process's.
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, grandchild) };
+        assert!(!handle.is_null());
+        tree.kill();
+        let stopped = unsafe { WaitForSingleObject(handle, 10_000) };
+        unsafe { CloseHandle(handle) };
+        assert_eq!(stopped, WAIT_OBJECT_0, "the grandchild outlived its tree");
+    }
+}

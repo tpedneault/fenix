@@ -34,6 +34,12 @@ pub enum OutputStream {
 pub struct OutputLine {
     pub stream: OutputStream,
     pub text: String,
+    /// The line went on past 64 KiB: this is a piece of it, cut at a
+    /// character's start, and the rest is the next line of the same
+    /// stream (lines of the other may come between). Every piece but the
+    /// last is cut; a line of 64 KiB or less, at its stream's end too,
+    /// never is.
+    pub cut: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskOutcome {
@@ -408,8 +414,26 @@ impl<R: ReadyRead> Pipe<R> {
         lines.push(OutputLine {
             stream: self.stream,
             text: String::from_utf8_lossy(&self.pending).into_owned(),
+            cut: false,
         });
         self.pending.clear();
+    }
+    /// A line that goes on past `MAX_LINE`: its first piece, up to a
+    /// character's start at or before `MAX_LINE`, given as `cut`; what's
+    /// after it stays for the next piece. Bytes that aren't UTF-8 at the
+    /// edge are cut at `MAX_LINE` itself.
+    fn emit_piece(&mut self, lines: &mut Vec<OutputLine>) {
+        let continuation = |b: u8| b & 0b1100_0000 == 0b1000_0000;
+        // `pending` holds a byte past `MAX_LINE`, so whether a character
+        // starts at each place up to it is known.
+        let at = (0..=3).map(|back| MAX_LINE - back).find(|&i| i < self.pending.len() && !continuation(self.pending[i])).unwrap_or(MAX_LINE);
+        let rest = self.pending.split_off(at);
+        lines.push(OutputLine {
+            stream: self.stream,
+            text: String::from_utf8_lossy(&self.pending).into_owned(),
+            cut: true,
+        });
+        self.pending = rest;
     }
     fn poll(&mut self, lines: &mut Vec<OutputLine>) -> io::Result<()> {
         if self.eof {
@@ -431,10 +455,15 @@ impl<R: ReadyRead> Pipe<R> {
                         if byte == b'\n' {
                             self.emit(lines);
                         } else {
+                            // Bound unbroken/binary output rather than
+                            // accumulating forever: a line goes on past 64
+                            // KiB only once a byte past it comes that isn't
+                            // its end (a line of exactly 64 KiB, `\r\n`
+                            // included, is whole).
                             self.pending.push(byte);
-                            // Bound unbroken/binary output rather than accumulating forever.
-                            if self.pending.len() == MAX_LINE {
-                                self.emit(lines);
+                            let crlf = self.pending.len() == MAX_LINE + 1 && byte == b'\r';
+                            if self.pending.len() > MAX_LINE && !crlf {
+                                self.emit_piece(lines);
                             }
                         }
                     }
@@ -452,12 +481,12 @@ impl<R: ReadyRead> Pipe<R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::mpsc::{self, Receiver};
 
-    fn fixture_command(mode: &str) -> Command {
+    pub(crate) fn fixture_command(mode: &str) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command.args([
             "--ignored",
@@ -652,6 +681,71 @@ mod tests {
         let (outcome, lines) = finish(&rx);
         assert_eq!(outcome, TaskOutcome::Cancelled);
         assert!(lines.iter().all(|l| l.text.len() <= MAX_LINE));
+    }
+
+    /// A pipe that gives `bytes` a chunk at a time, then its end.
+    struct Chunks(std::collections::VecDeque<Vec<u8>>);
+    impl Read for Chunks {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some(chunk) = self.0.pop_front() else { return Ok(0) };
+            let n = chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&chunk[..n]);
+            if n < chunk.len() {
+                self.0.push_front(chunk[n..].to_vec());
+            }
+            Ok(n)
+        }
+    }
+    impl ReadyRead for Chunks {
+        fn configure(&self) -> io::Result<()> {
+            Ok(())
+        }
+        #[cfg(unix)]
+        fn fd(&self) -> std::os::fd::RawFd {
+            -1
+        }
+        fn ready_read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.read(bytes)
+        }
+    }
+
+    /// The lines a stream of `bytes` is read as, given 1,000 bytes at a
+    /// time (so a character can fall across two reads).
+    fn read_lines(bytes: &[u8]) -> Vec<(String, bool)> {
+        let mut pipe = Pipe::new(Chunks(bytes.chunks(1000).map(<[u8]>::to_vec).collect()), OutputStream::Stdout).unwrap();
+        let mut lines = Vec::new();
+        while !pipe.eof {
+            pipe.poll(&mut lines).unwrap();
+        }
+        lines.into_iter().map(|l| (l.text, l.cut)).collect()
+    }
+
+    /// A line past 64 KiB comes in pieces of at most 64 KiB, cut at a
+    /// character's start, every piece but the last `cut`; joined, they're
+    /// the line (plan, review of steps 1 and 2, K3).
+    #[test]
+    fn a_line_past_64_kib_comes_in_pieces_cut_at_a_characters_start() {
+        let line = "é".repeat(50_000) + "x";
+        let lines = read_lines(format!("{line}\nnext\n").as_bytes());
+        let pieces: Vec<&(String, bool)> = lines.iter().take_while(|(t, _)| t != "next").collect();
+        assert_eq!(pieces.len(), 2, "{:?}", lines.iter().map(|(t, c)| (t.len(), *c)).collect::<Vec<_>>());
+        assert!(pieces.iter().all(|(t, _)| t.len() <= MAX_LINE && !t.contains('\u{fffd}')), "never half a character");
+        assert_eq!(pieces.iter().map(|(_, c)| *c).collect::<Vec<_>>(), [true, false]);
+        assert_eq!(pieces.iter().map(|(t, _)| t.as_str()).collect::<String>(), line);
+        assert_eq!(lines.last(), Some(&("next".to_string(), false)));
+        let long = read_lines(&[b'x'; 200 << 10]);
+        assert_eq!(long.iter().map(|(t, c)| (t.len(), *c)).collect::<Vec<_>>(), [(MAX_LINE, true), (MAX_LINE, true), (MAX_LINE, true), (8 << 10, false)], "at its stream's end, the last isn't cut");
+    }
+
+    /// A line of exactly 64 KiB is whole and never `cut`: before a `\n`, a
+    /// `\r\n` or its stream's end (K4), with no empty line after it.
+    #[test]
+    fn a_line_of_64_kib_is_whole() {
+        let full = "a".repeat(MAX_LINE);
+        assert_eq!(read_lines(format!("{full}\nb\n").as_bytes()), [(full.clone(), false), ("b".to_string(), false)]);
+        assert_eq!(read_lines(format!("{full}\r\n").as_bytes()), [(full.clone(), false)]);
+        assert_eq!(read_lines(full.as_bytes()), [(full.clone(), false)]);
+        assert_eq!(read_lines(format!("{full}a").as_bytes()), [(full, true), ("a".to_string(), false)]);
     }
 
     #[test]

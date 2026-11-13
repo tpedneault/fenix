@@ -7,6 +7,15 @@ repository.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[features]
+# `fake-test-runner`, a made-up test runner, and what the test explorer's
+# tests drive it with (`fake_runner`): for tests only.
+fake-runner = []
+
+[[bin]]
+name = "fake-test-runner"
+required-features = ["fake-runner"]
+
 [dependencies]
 process-wrap = { version = "10", features = ["std"] }
 fenix-rpc = { path = "../fenix-rpc" }
@@ -21,3 +30,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_Pipes", "Win32_Found
 libc = "0.2"
 
 [dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "fake_runner"
+required-features = ["fake-runner"]
