@@ -16,7 +16,6 @@ use crate::records::{Ask, Ended, Found, Kind, Location, Outcome, Plan, Report, S
 use crate::view::LastRun;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -199,9 +198,9 @@ struct Part {
     /// Its provider stopped (a trap, a restart): no call goes to it.
     dead: bool,
     /// The tests its selection holds, as of the tree's `built`th shape.
-    universe: Option<(u64, Rc<[NodeId]>)>,
+    universe: Option<(u64, Arc<[NodeId]>)>,
     /// A step's scope (`step_scope`), as of the tree's `built`th shape.
-    scope: Option<(u32, u64, Rc<[NodeId]>)>,
+    scope: Option<(u32, u64, Arc<[NodeId]>)>,
     /// Of that scope, those that had no result in the run when last
     /// looked: only ever fewer, as results are only ever added.
     pending: Option<(u32, u64, Vec<NodeId>)>,
@@ -895,7 +894,7 @@ impl Model {
     /// nothing outside it (Decisions, 10).
     /// Worked out once per shape of the tree, so that many reports in
     /// one call don't each walk the run.
-    fn universe(&mut self) -> Rc<[NodeId]> {
+    fn universe(&mut self) -> Arc<[NodeId]> {
         let built = self.built;
         if let Some((at, leaves)) = &self.part().universe {
             if *at == built {
@@ -903,7 +902,7 @@ impl Model {
             }
         }
         let part = self.part();
-        let leaves: Rc<[NodeId]> = self.sel_leaves(part.provider, &part.sel).into();
+        let leaves: Arc<[NodeId]> = self.sel_leaves(part.provider, &part.sel).into();
         self.part_mut().expect("a part").universe = Some((built, leaves.clone()));
         leaves
     }
@@ -924,7 +923,7 @@ impl Model {
     /// Step `step`'s own tests, or, for a step with empty `covers`, the
     /// plan's rest: what of the ask no step names (§8.5; Decisions, 11).
     /// Worked out once per step and shape of the tree.
-    fn step_scope(&mut self, step: u32) -> Rc<[NodeId]> {
+    fn step_scope(&mut self, step: u32) -> Arc<[NodeId]> {
         let built = self.built;
         if let Some((s, at, scope)) = &self.part().scope {
             if *s == step && *at == built {
@@ -934,7 +933,7 @@ impl Model {
         let leaves = self.universe();
         let part = self.part();
         let covers = &part.covers[step as usize];
-        let scope: Rc<[NodeId]> = if covers.is_empty() {
+        let scope: Arc<[NodeId]> = if covers.is_empty() {
             leaves.iter().copied().filter(|&l| !self.in_covers(l, &part.named_by_steps)).collect()
         } else {
             leaves.iter().copied().filter(|&l| self.in_covers(l, covers)).collect()

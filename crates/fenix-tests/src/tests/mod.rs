@@ -139,3 +139,10 @@ pub(super) fn run(m: &mut Model, selection: Selection, the_plan: Plan, reports: 
     let mut reports = Some(reports);
     drive(m, |_, _| Ok(the_plan.clone()), |_, _, _| (reports.take().unwrap_or_default(), end.clone()))
 }
+
+/// The host may hold a project's model on any thread: it's `Send`.
+#[test]
+fn the_model_is_send() {
+    fn send<T: Send>() {}
+    send::<Model>();
+}

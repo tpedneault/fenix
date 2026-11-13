@@ -161,7 +161,7 @@
 //! 25. **Stale is ordered by the model's own clock**, a count of what
 //!     happened, not the time: a save and a result in the same
 //!     millisecond still come in order.
-//! 26. **A test's `data` over 4 KiB isn't kept** (§6.5, §19): cut, it
+//! 26. **A test's `data` over 4 KiB isn't kept** (§6.5, §20): cut, it
 //!     wouldn't be given back "as it was". The host drops it the same way.
 //! 27. **A file's tests** (`SPC T f`) are every provider's topmost
 //!     nodes, but groups, whose file is that file.
