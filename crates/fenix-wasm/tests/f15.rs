@@ -4,8 +4,12 @@
 //! "1.5"` in its manifest, instantiated the way Fenix 1.5 instantiates an
 //! extension -- WASI and 1.5's `extension-base` imports in its `Linker`
 //! (`host.rs`'s `run`), bound from a copy of v1.5.2's `wit/` -- then
-//! activated, and a command run. It stays, for every later minor against
-//! the one before.
+//! activated, and a command run. What it shows, and all it shows: a
+//! component built on the 1.6 crate whose code has no call to
+//! `tests::provider` reachable from an export -- so no `test-provider-set`
+//! import, which the test checks along with its five `tests-*` exports --
+//! starts on Fenix 1.5. A later minor's crate on the Fenix before it is
+//! promised only once a test like this one shows it.
 
 use std::path::PathBuf;
 
@@ -61,10 +65,17 @@ fn a_guest_built_on_the_1_6_crate_that_uses_nothing_new_starts_on_fenix_1_5() {
 
     let engine = fenix_wasm::engine(&fenix_wasm::Options::default()).unwrap();
     let component = Component::from_file(&engine, guest("plain16.wasm")).unwrap();
-    // It imports only what it calls: not 1.6's `test-provider-set`.
+    // Built on the 1.6 crate, it exports the five `tests-*` (else this
+    // test would pass for a guest built on 1.5, proving nothing); it
+    // imports only what it calls, and nothing reachable from its exports
+    // calls `tests::provider`: no `test-provider-set`.
+    let exports: Vec<String> = component.component_type().exports(&engine).map(|(name, _)| name.to_string()).collect();
+    for export in ["tests-scan", "tests-plan", "tests-read", "tests-step-ended", "tests-launch"] {
+        assert!(exports.iter().any(|e| e == export), "{export} among {exports:?}");
+    }
     let imports = host_imports(&engine, &component);
     assert!(imports.contains(&"log".to_string()), "{imports:?}");
-    assert!(!imports.iter().any(|i| i.starts_with("test-")), "{imports:?}");
+    assert!(!imports.iter().any(|i| i == "test-provider-set"), "{imports:?}");
 
     let mut linker: Linker<Host15> = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker).unwrap();

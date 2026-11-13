@@ -16,14 +16,15 @@ pub const MAX_ANSWER: usize = 16 << 20;
 /// `tests-scan`'s answer.
 pub const MAX_SCANNED: usize = 10_000;
 /// A `found-test`'s `id` and `parent`, and any id a report or a step's
-/// `covers` names: cut the same way wherever it comes, so a long id still
-/// matches.
+/// `covers` names: one over it is cut the same way wherever it comes
+/// (`cut_id`), so a long id still matches, and two long ids stay two.
 pub const MAX_ID: usize = 1 << 10;
 /// What the page shows of a test (`found-test.label`) or a step
 /// (`test-step.label`), in characters.
 pub const MAX_LABEL: usize = 256;
 /// A path: `found-test.path`, `test-location.path`, one of a step's
-/// `needs`.
+/// `needs` (one longer isn't cut but fails its step: cut, it would name
+/// another file).
 pub const MAX_PATH: usize = 4 << 10;
 /// `found-test.skip`.
 pub const MAX_SKIP: usize = 1 << 10;
@@ -139,6 +140,23 @@ pub fn cut_chars(s: &mut String, max: usize) -> bool {
     }
 }
 
+/// An id held to 1 KiB as the test explorer cuts it (`fenix_tests::cut_id`,
+/// the plan's "Review of steps 1 and 2"): one of at most 1,024 bytes as
+/// it is; a longer one its start up to 1,007 bytes, back to a
+/// character's start, then `#` and the FNV-1a 64-bit hash of the whole
+/// id in 16 lowercase hex digits. Whether it was cut.
+pub fn cut_id(s: &mut String) -> bool {
+    if s.len() <= MAX_ID {
+        return false;
+    }
+    *s = fenix_tests::cut_id(s).into_owned();
+    true
+}
+
+fn cut_id_opt(s: &mut Option<String>) -> bool {
+    s.as_mut().is_some_and(cut_id)
+}
+
 fn cut_opt(s: &mut Option<String>, max: usize) -> bool {
     s.as_mut().is_some_and(|s| cut(s, max))
 }
@@ -147,7 +165,7 @@ fn len(s: &Option<String>) -> usize {
     s.as_ref().map_or(0, String::len)
 }
 
-const ID: &str = "an id over 1 KiB was cut to 1 KiB";
+const ID: &str = "an id over 1 KiB was cut to 1 KiB, ending in a hash of the whole";
 const LABEL: &str = "a label over 256 characters was cut";
 const PATH: &str = "a path over 4 KiB was cut";
 const SKIP: &str = "a skip's reason over 1 KiB was cut";
@@ -158,7 +176,7 @@ const ANSWER: &str = "an answer over 16 MiB: what came after was left out";
 
 /// A `found-test` held to its limits.
 pub fn found(f: &mut FoundTest, cuts: &mut Cuts) {
-    cuts.note(cut(&mut f.id, MAX_ID) | cut_opt(&mut f.parent, MAX_ID), ID);
+    cuts.note(cut_id(&mut f.id) | cut_id_opt(&mut f.parent), ID);
     cuts.note(cut_chars(&mut f.label, MAX_LABEL), LABEL);
     cuts.note(cut_opt(&mut f.path, MAX_PATH), PATH);
     cuts.note(cut_opt(&mut f.skip, MAX_SKIP), SKIP);
@@ -216,13 +234,12 @@ pub fn planned(mut plan: TestPlan) -> (TestPlan, Cuts) {
         step.covers.truncate(room);
         covers += step.covers.len();
         for id in &mut step.covers {
-            cuts.note(cut(id, MAX_ID), ID);
+            cuts.note(cut_id(id), ID);
         }
         cuts.note(step.needs.len() > MAX_NEEDS, "a step needing over 32 files: the rest were left out");
         step.needs.truncate(MAX_NEEDS);
-        for need in &mut step.needs {
-            cuts.note(cut(need, MAX_PATH), PATH);
-        }
+        // A need isn't cut: it fails its step when it would start
+        // (`need`).
         let mut env = 0;
         let before = step.command.env.len();
         step.command.env.retain(|(k, v)| {
@@ -257,9 +274,9 @@ fn report_size(r: &TestReport) -> usize {
 pub fn report(r: &mut TestReport, cuts: &mut Cuts) {
     match r {
         TestReport::Found(f) => found(f, cuts),
-        TestReport::Started(id) => cuts.note(cut(id, MAX_ID), ID),
+        TestReport::Started(id) => cuts.note(cut_id(id), ID),
         TestReport::Ended(TestEnded { id, duration_ms, message, at, text, .. }) => {
-            cuts.note(cut(id, MAX_ID), ID);
+            cuts.note(cut_id(id), ID);
             // A time is a time: not NaN, endless or before it started.
             *duration_ms = duration_ms.filter(|ms| ms.is_finite() && *ms >= 0.0);
             cuts.note(cut_opt(message, MAX_MESSAGE), MESSAGE);
@@ -267,16 +284,16 @@ pub fn report(r: &mut TestReport, cuts: &mut Cuts) {
             cuts.note(text.as_mut().is_some_and(|t| cut_end(t, MAX_TEXT)), TEXT);
         }
         TestReport::Output(o) => {
-            cuts.note(cut_opt(&mut o.id, MAX_ID), ID);
+            cuts.note(cut_id_opt(&mut o.id), ID);
             cuts.note(cut_end(&mut o.text, MAX_TEXT), TEXT);
         }
         TestReport::Broken(b) => {
-            cuts.note(cut_opt(&mut b.id, MAX_ID), ID);
+            cuts.note(cut_id_opt(&mut b.id), ID);
             cuts.note(cut(&mut b.message, MAX_MESSAGE), MESSAGE);
             location(&mut b.at, cuts);
         }
         TestReport::Crashed(c) => {
-            cuts.note(cut_opt(&mut c.id, MAX_ID), ID);
+            cuts.note(cut_id_opt(&mut c.id), ID);
             cuts.note(cut(&mut c.message, MAX_MESSAGE), MESSAGE);
         }
     }
@@ -308,6 +325,26 @@ pub fn launch(launch: TestLaunch) -> Result<(TestLaunch, Cuts), String> {
             let (plan, cuts) = planned(plan);
             Ok((TestLaunch::BuildFirst(plan), cuts))
         }
+    }
+}
+
+/// One of a step's `needs` as it's checked before Fenix maps it (§6.3
+/// `test-step.needs`, §6.5): a path under `/data`, with `/`, of at most
+/// 4 KiB, naming a file below it. Not cut and not mended: one that
+/// isn't so fails its step when it would start, with why. A `\` isn't
+/// taken for a `/` here, though other calls take it: the API promises
+/// `needs` only as `/data/...` paths, and a remote project's copy keeps
+/// the path as given.
+pub fn need(path: &str) -> Result<&str, String> {
+    if path.len() > MAX_PATH {
+        return Err(format!("needs a path of {} bytes; a need is at most 4 KiB", path.len()));
+    }
+    if path.contains('\\') {
+        return Err(format!("needs {path}, which isn't a /data path with /"));
+    }
+    match path.strip_prefix("/data/") {
+        Some(rest) if !rest.is_empty() && !rest.split('/').any(|part| part.is_empty() || part == "." || part == "..") => Ok(path),
+        _ => Err(format!("needs {path}, which isn't a file's path under /data")),
     }
 }
 
@@ -357,6 +394,50 @@ mod checks {
         found(&mut over, &mut cuts);
         assert_eq!((over.id.len(), over.label.chars().count(), over.data), (MAX_ID, MAX_LABEL, None));
         assert_eq!(cuts.0.len(), 3, "{cuts:?}");
+    }
+
+    /// The id cut's test vectors, the same as `fenix-tests`' (its
+    /// `tests::limits::ID_CUT_VECTORS`) and `WRITING_EXTENSIONS.md`'s: an
+    /// id at most 1 KiB is as it was; a longer one its start, then `#` and
+    /// the FNV-1a 64-bit hash of the whole in 16 lowercase hex digits.
+    #[test]
+    fn a_long_id_is_cut_to_a_prefix_and_a_hash_as_the_explorer_cuts_it() {
+        let shared = format!("tests/test_x.py::test_cases[{}", "a".repeat(1_100));
+        let vectors: [(String, usize, &str); 7] = [
+            ("a".repeat(1_023), 1_023, ""),
+            ("a".repeat(1_024), 1_024, ""),
+            ("a".repeat(1_025), 1_024, "#6a424025ce84288c"),
+            ("é".repeat(600), 1_023, "#0e3ffe7c6421a045"),
+            (format!("a{}", "😀".repeat(300)), 1_022, "#2056db1222d21dec"),
+            (format!("{shared}-one]"), 1_024, "#589a673077e12368"),
+            (format!("{shared}-two]"), 1_024, "#a9074c8a277a3a36"),
+        ];
+        for (id, len, end) in vectors {
+            let mut f = FoundTest { label: "t".into(), parent: Some(id.clone()), ..test(&id) };
+            let mut cuts = Cuts::default();
+            found(&mut f, &mut cuts);
+            assert_eq!((f.id.len(), f.id.ends_with(end), f.parent.as_deref() == Some(f.id.as_str())), (len, true, true), "{id:.40}");
+            assert_eq!(cuts.is_empty(), end.is_empty());
+            if !end.is_empty() {
+                assert!(id.starts_with(&f.id[..len - 17]));
+            }
+        }
+    }
+
+    /// A step's `needs` aren't cut or mended: one over 4 KiB, with a `\`,
+    /// or not a file under `/data` fails its step, with why.
+    #[test]
+    fn a_need_is_a_data_path_or_its_step_fails() {
+        assert_eq!(need("/data/lang-kit/tests/fenix_tests.py"), Ok("/data/lang-kit/tests/fenix_tests.py"));
+        let long = format!("/data/{}", "x".repeat(MAX_PATH));
+        assert!(need(&long).unwrap_err().contains("at most 4 KiB"));
+        assert!(need("\\data\\x.py").unwrap_err().contains("with /"));
+        assert!(need("/data/a\\b.py").is_err());
+        for bad in ["/data/", "/data", "/data/../x", "/data/a//b", "/project/x", "x.py"] {
+            assert!(need(bad).unwrap_err().contains("isn't a file's path under /data"), "{bad}");
+        }
+        let (plan, _) = planned(TestPlan { steps: vec![TestStep { command: Command { program: "x".into(), args: Vec::new(), cwd: None, env: Vec::new() }, label: "l".into(), covers: Vec::new(), needs: vec![long.clone()] }], list_after: false });
+        assert_eq!(plan.steps[0].needs, [long], "not cut: it fails its step");
     }
 
     #[test]

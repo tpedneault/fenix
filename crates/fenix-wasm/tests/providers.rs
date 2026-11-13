@@ -151,10 +151,11 @@ fn a_provider_scans_plans_reads_and_launches() {
     assert_eq!(args, ["--unit".to_string(), format!("{}/ids.txt", path(&p.data()))]);
     assert_eq!(env, [("FAKE".to_string(), format!("{}/x", path(&p.data())))]);
     assert_eq!((all.steps[0].step.label.as_str(), all.steps[0].step.covers.as_slice()), ("unit", &["unit".to_string()][..]));
-    assert_eq!(all.steps[0].needs, [Some(p.data().join("reporter.txt"))]);
+    assert_eq!(all.steps[0].needs, [Ok(p.data().join("reporter.txt"))]);
     assert!(all.steps[0].needs[0].as_ref().unwrap().is_file());
     assert_eq!(all.steps[1].needs.len(), 2);
-    assert!(all.steps[1].needs[0].as_ref().is_some_and(|n| !n.exists()) && all.steps[1].needs[1].is_none(), "{:?}", all.steps[1].needs);
+    assert!(all.steps[1].needs[0].as_ref().is_ok_and(|n| !n.exists()), "{:?}", all.steps[1].needs);
+    assert_eq!(all.steps[1].needs[1], Err("needs elsewhere/x, which isn't a file's path under /data".into()));
 
     // A run of a file and what's under it, and a test of another file: its
     // data given back as it was.

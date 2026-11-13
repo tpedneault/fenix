@@ -30,6 +30,9 @@ tokio = { version = "1", default-features = false }
 sha2 = "0.10"
 # What an extension may do; its HTTP, with Fenix's own client.
 fenix-extensions = { path = "../fenix-extensions" }
+# For `cut_id` alone: a long test id is cut the one way the test
+# explorer's model cuts it (sans-I/O, serde its only dependency).
+fenix-tests = { path = "../fenix-tests" }
 # The models a layer draws, read on the worker.
 fenix-model = { path = "../fenix-model" }
 # What `git-state` reads of the project's repository.

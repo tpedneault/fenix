@@ -605,9 +605,10 @@ pub struct PlannedStep {
     /// as `spawn`'s are, and its environment, `${data}` and `${tools}`
     /// filled in; or why it may not run.
     pub command: Result<(Checked, Env), String>,
-    /// Each of `step.needs` as a path of this machine's: none for one
-    /// that isn't a file's path under `/data`.
-    pub needs: Vec<Option<PathBuf>>,
+    /// Each of `step.needs` as a path of this machine's, or why it can't
+    /// be one (`test_limits::need`: over 4 KiB, with a `\`, not a file's
+    /// path under `/data`): such a step fails when it would start.
+    pub needs: Vec<Result<PathBuf, String>>,
 }
 
 /// How to debug a test (`tests-launch`), as Fenix would start it.
@@ -738,8 +739,26 @@ struct Optional {
     tests_launch: Export<(String, u64, FoundTest), Result<TestLaunch, String>>,
 }
 
-/// An export that answers, when the guest has it.
-type Export<Params, Answer> = Option<wasmtime::component::TypedFunc<Params, (Answer,)>>;
+/// An export that answers, when the guest has it with its type; else
+/// what its call answers: that the guest has no such export, or has one
+/// of another type.
+type Export<Params, Answer> = Result<wasmtime::component::TypedFunc<Params, (Answer,)>, String>;
+
+/// Export `name` of `instance` with the type 1.6 gives it, or why not:
+/// a guest built before 1.6 has none; one built on a draft of 1.6 (or
+/// by hand) may have it with another type, which is said as that, not
+/// as "before 1.6".
+fn export<T, Params, Answer>(store: &mut Store<T>, instance: &wasmtime::component::Instance, name: &str) -> Export<Params, Answer>
+where
+    Params: wasmtime::component::ComponentNamedList + wasmtime::component::Lower,
+    (Answer,): wasmtime::component::ComponentNamedList + wasmtime::component::Lift,
+{
+    match instance.get_typed_func::<Params, (Answer,)>(&mut *store, name) {
+        Ok(f) => Ok(f),
+        Err(_) if instance.get_func(&mut *store, name).is_some() => Err(wrong_export(name)),
+        Err(_) => Err(no_export(name)),
+    }
+}
 
 impl Optional {
     fn of(store: &mut Store<State>, instance: &wasmtime::component::Instance) -> Optional {
@@ -747,17 +766,18 @@ impl Optional {
             service_cancelled: instance.get_typed_func::<(u64,), ()>(&mut *store, "service-cancelled").ok(),
             agent_ask_progress: instance.get_typed_func::<(u64, String), ()>(&mut *store, "agent-ask-progress").ok(),
             key_scheme_changed: instance.get_typed_func::<(KeyScheme,), ()>(&mut *store, "key-scheme-changed").ok(),
-            tests_scan: instance.get_typed_func(&mut *store, "tests-scan").ok(),
-            tests_plan: instance.get_typed_func(&mut *store, "tests-plan").ok(),
-            tests_read: instance.get_typed_func(&mut *store, "tests-read").ok(),
-            tests_step_ended: instance.get_typed_func(&mut *store, "tests-step-ended").ok(),
-            tests_launch: instance.get_typed_func(&mut *store, "tests-launch").ok(),
+            tests_scan: export(store, instance, "tests-scan"),
+            tests_plan: export(store, instance, "tests-plan"),
+            tests_read: export(store, instance, "tests-read"),
+            tests_step_ended: export(store, instance, "tests-step-ended"),
+            tests_launch: export(store, instance, "tests-launch"),
         }
     }
 
-    /// Whether it can be a test provider: it scans and plans (1.6).
-    fn tests(&self) -> bool {
-        self.tests_scan.is_some() && self.tests_plan.is_some()
+    /// Why it can't be a test provider, when it can't: it scans and plans
+    /// (1.6), or this says why not, its scan's first.
+    fn why_no_tests(&self) -> Option<&str> {
+        self.tests_scan.as_ref().err().or(self.tests_plan.as_ref().err()).map(String::as_str)
     }
 }
 
@@ -765,6 +785,12 @@ impl Optional {
 /// no such export.
 fn no_export(export: &str) -> String {
     format!("it has no {export}: it was built for an extension API before 1.6, which has no test providers")
+}
+
+/// What a guest whose export has another type than 1.6's answers: built
+/// on a draft of 1.6, or by hand.
+fn wrong_export(export: &str) -> String {
+    format!("its {export} isn't API 1.6's (another type: built on a draft of 1.6?): rebuild it on the 1.6 crate")
 }
 
 /// Reads a secret, for `host.secret`; Fenix's keychain behind it.
@@ -1216,7 +1242,7 @@ impl State {
             .into_iter()
             .map(|step| {
                 let command = self.checked_with_env(&step.command);
-                let needs = step.needs.iter().map(|n| Some(n.replace('\\', "/")).filter(|n| n.starts_with("/data/")).and_then(|n| self.host_path(&n))).collect();
+                let needs = step.needs.iter().map(|n| test_limits::need(n).and_then(|n| self.host_path(n).ok_or_else(|| format!("needs {n}, which isn't a file's path under /data")))).collect();
                 PlannedStep { step, command, needs }
             })
             .collect();
@@ -3942,9 +3968,10 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let instance = linker.instantiate(&mut store, &component)?;
         let ext = Extension::new(&mut store, &instance)?;
         let optional = Optional::of(&mut store, &instance);
-        if !store.data().spec.test_providers.is_empty() && !optional.tests() {
+        if let (false, Some(why)) = (store.data().spec.test_providers.is_empty(), optional.why_no_tests()) {
             let names = store.data().spec.test_providers.join(", ");
-            sink(Event::Said(Source::Log(Level::Warn), format!("its manifest names test providers ({names}), but it has no tests-scan and tests-plan (it was built for an extension API before 1.6): they aren't offered")));
+            let said = if why.contains("isn't API 1.6's") { format!("its manifest names test providers ({names}), but {why}: they aren't offered") } else { format!("its manifest names test providers ({names}), but it has no tests-scan and tests-plan (it was built for an extension API before 1.6): they aren't offered") };
+            sink(Event::Said(Source::Log(Level::Warn), said));
         }
         ext.call_activate(&mut store)?.map_err(|e| wasmtime::format_err!("{e}"))?;
         Ok((store, ext, optional))
@@ -4080,35 +4107,35 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             // 1.6's, a test provider's: what it answers held to the
             // limits; a guest built before answers that it has none.
             Call::TestsScan { provider, path, text } => match &optional.tests_scan {
-                Some(f) => f.call(&mut *store, (provider, path, text)).map(|(found,)| {
+                Ok(f) => f.call(&mut *store, (provider, path, text)).map(|(found,)| {
                     let (found, cuts) = test_limits::scanned(found);
                     store.data_mut().say_cuts(cuts);
                     Ok(Reply::Scanned(found))
                 }),
-                None => Ok(Err(no_export("tests-scan"))),
+                Err(why) => Ok(Err(why.clone())),
             },
             Call::TestsPlan { provider, run, ask } => match &optional.tests_plan {
-                Some(f) => f.call(&mut *store, (provider, run, ask)).map(|(plan,)| Ok(Reply::Planned(plan.map(|p| store.data_mut().planned(p)).map_err(test_limits::error)))),
-                None => Ok(Err(no_export("tests-plan"))),
+                Ok(f) => f.call(&mut *store, (provider, run, ask)).map(|(plan,)| Ok(Reply::Planned(plan.map(|p| store.data_mut().planned(p)).map_err(test_limits::error)))),
+                Err(why) => Ok(Err(why.clone())),
             },
             Call::TestsRead { provider, run, step, lines } => match &optional.tests_read {
-                Some(f) => f.call(&mut *store, (provider, run, step, lines)).map(|(reports,)| {
+                Ok(f) => f.call(&mut *store, (provider, run, step, lines)).map(|(reports,)| {
                     let (reports, cuts) = test_limits::reports(reports);
                     store.data_mut().say_cuts(cuts);
                     Ok(Reply::Reports(reports))
                 }),
-                None => Ok(Err(no_export("tests-read"))),
+                Err(why) => Ok(Err(why.clone())),
             },
             Call::TestsStepEnded { provider, run, step, end } => match &optional.tests_step_ended {
-                Some(f) => f.call(&mut *store, (provider, run, step, end)).map(|(reports,)| {
+                Ok(f) => f.call(&mut *store, (provider, run, step, end)).map(|(reports,)| {
                     let (reports, cuts) = test_limits::reports(reports);
                     store.data_mut().say_cuts(cuts);
                     Ok(Reply::Reports(reports))
                 }),
-                None => Ok(Err(no_export("tests-step-ended"))),
+                Err(why) => Ok(Err(why.clone())),
             },
             Call::TestsLaunch { provider, run, test } => match &optional.tests_launch {
-                Some(f) => f.call(&mut *store, (provider, run, test)).map(|(launch,)| {
+                Ok(f) => f.call(&mut *store, (provider, run, test)).map(|(launch,)| {
                     let state = store.data_mut();
                     let launched = launch.map_err(test_limits::error).and_then(test_limits::launch).and_then(|(launch, cuts)| {
                         state.say_cuts(cuts);
@@ -4119,7 +4146,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                     });
                     Ok(Reply::Launched(launched))
                 }),
-                None => Ok(Err(no_export("tests-launch"))),
+                Err(why) => Ok(Err(why.clone())),
             },
         };
         drop(calling);
@@ -4220,6 +4247,28 @@ fn describe(e: &wasmtime::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A guest whose `tests-scan` has another type than 1.6's (a draft's)
+    /// is told so, not that it was built before 1.6; one with no
+    /// `tests-plan` is told it has none.
+    #[test]
+    fn a_tests_export_of_another_type_is_said_as_that() {
+        let engine = crate::engine(&crate::Options::default()).unwrap();
+        let wat = r#"(component
+            (core module $m (func (export "f") (param i32)))
+            (core instance $i (instantiate $m))
+            (func $f (param "path" u32) (canon lift (core func $i "f")))
+            (export "tests-scan" (func $f)))"#;
+        let component = wasmtime::component::Component::new(&engine, wat).unwrap();
+        let mut store = Store::new(&engine, ());
+        store.set_epoch_deadline(u64::MAX);
+        let instance = wasmtime::component::Linker::new(&engine).instantiate(&mut store, &component).unwrap();
+        let scan: Export<(String, String, String), Vec<FoundTest>> = export(&mut store, &instance, "tests-scan");
+        assert_eq!(scan.err(), Some(wrong_export("tests-scan")));
+        let plan: Export<(String, u64, TestAsk), Result<TestPlan, String>> = export(&mut store, &instance, "tests-plan");
+        assert_eq!(plan.err(), Some(no_export("tests-plan")));
+        assert!(wrong_export("tests-scan").contains("isn't API 1.6's"));
+    }
 
     /// A server on this machine that answers one request with `body`.
     fn serve_once(body: &'static [u8]) -> String {

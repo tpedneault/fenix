@@ -1894,6 +1894,7 @@ dependencies = [
  "fenix-extensions",
  "fenix-git",
  "fenix-model",
+ "fenix-tests",
  "image",
  "libc",
  "regex",
