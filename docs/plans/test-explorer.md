@@ -2,7 +2,7 @@
 
 - **Status:** planned, 13 November 2026, for the maintainer to review;
   revised the same day after the packs' review of it (§18). Recorded in
-  [ADR 0005](../adr/0005-test-providers.md). Nothing here is built.
+  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 3 are built (§20).
 - **Scope:** a page that lists a project's tests before anything has
   run, runs one, a file, a group, the failed or all of them, and shows
   each result as it ends: on the page, in the gutter, after the test's
@@ -20,7 +20,7 @@
   split; it keeps the first design's runner experiments (its §3 and
   appendix, the recorded outputs in fenix-extensions
   `plans/test-explorer-fixtures/`), and its §11 is the review of this
-  plan that §18 answers. Steps 1 and 2 are built (§20); the review of
+  plan that §18 answers. Steps 1 to 3 are built (§20); the review of
   them is §19.
 
 Paths are in this repository unless they say `fenix-extensions`. Every
@@ -1597,6 +1597,7 @@ they line up with Fenix's steps.
 | Q6 | Readers in Fenix for standard formats (JUnit XML, TAP, `go test -json`) | (a) no; (b) later, as a new export a plan can name; (c) in 1.6 | **(b) at most, later**: a pack's reader is short, and every runner's quirks are better in the pack. A ctest or Gradle provider might want JUnit; it can read it a line at a time, as a step of its own that prints the file, without parsing it whole in one call. |
 | Q7 | Fenix's built-in `SPC p r` finder once the four packs ship | (a) keep as the fallback; (b) retire it | **(a)**: it's small, and it serves someone without the pack. |
 | Q8 | Does a run save the files it runs first? (F18) | (a) no, as a task and `SPC p r` don't; the head says which were unsaved, and a test the run didn't see goes back to what it was (§8.4); (b) `tests.save_before_run`, `ask`, `always` or `never`, as `agents.save_before_prompt` is (`schema.rs:492`); (c) always save the selection's files | **(a)** for 1.6: it's what every door does today, and `editor.auto_save` (`schema.rs:422`) already serves who wants saving. (b) is a setting and no API, so it can come in a minor if the head's line proves to be read too late. |
+| Q9 | What "trusted" means for what runs without a key (§12): automatic listings and run on save run where `project_is_trusted` allows, which is `Verdict::Nothing` (a project naming no programs, a fresh clone) as well as `Trusted`, as for the lens's programs (`app/code_lens.rs:648-655`). A save in a never-trusted repository can then run `cargo test` or `pytest` (`build.rs`, `conftest.py`) with `tests.on_save` on | (a) as now: `Nothing` counts, as for lenses; (b) only `Trusted`: a project's own "may run tests on its own" decision (`SPC p y`), asked once; (c) (b) for run on save, (a) for listings | To be ruled before step 8 ("trust gating checked"). Step 3 keeps (a), pinned by `what_runs_without_a_key_runs_only_in_a_trusted_project`; (b) changes one function (`tests_trusted`). Raised by the review of step 3, S4 |
 
 ## 17. Risks
 
@@ -1943,3 +1944,213 @@ for want of 1.98.0. `build.ps1` builds them and `counter`, and no longer
 `hello` and `keys`: those are kept as built on older APIs (1.2's WIT,
 the 1.5 crate) to show those still run, and `hello` doesn't build on the
 current WIT since 1.5 added an export it lacks.
+
+### Step 3, Fenix runs providers
+
+**Where it is.** `crates/fenix-gui/src/app/tests_host.rs`, in three
+layers:
+
+- *Plain functions*, tested alone: the API's records to the model's and
+  back (`model_found`, `api_found`, `model_reports`, `api_ask`); every
+  path a provider gives mapped to the project's relative form
+  (`model_path`: `/project/...`, relative to the project in a scan and
+  to the step's folder in a report, a full path; `\` or `/`; a drive in
+  any case on Windows) and back to `/project/<path>` (`guest_path`); an
+  ask held to its bytes (`capped_ask`); a step's command line counted
+  as Rust builds it for `CreateProcessW` (`command_line`); escape codes
+  taken out (`without_escapes`); the batches (`Batch`); a step's end
+  (`step_end`).
+- *State*, `TestsHost` (the `App`'s `tests`): one `ProjectTests` per
+  project root -- its `fenix_tests::Model` (every one drawing on the
+  host's one `RunIds`), its providers, the plan under way's steps as
+  the provider gave them (command and `needs`, beside what the model
+  keeps), the one call out for its run, the step under way (`StepRun`:
+  its `TaskRunner`, its lines waiting, a `tests-read` out or not, how its
+  process ended, why Fenix stopped it), *Test output*, its first scans,
+  a run on save due. Across projects: the calls out by token with what
+  each is for (`CallFor`), the replies and step events waiting, what
+  each provider said of each project, the extensions with no provider's
+  exports.
+- *The pump* (`tests_pump`): replies and step events applied, then each
+  project driven a step (`tests_drive`): a failed step's end, else a
+  batch of its lines to `tests-read`, else its end once its process has
+  ended, else a step not started told `stopped`, else `Model::next` --
+  `Plan` asked, `Step` started, `NotStarted` queued, `Ended` written to
+  *Test output* and the results file. Replies re-enter through
+  `tests_reply` (from `wasm_host`'s `Pending::Tests`), step events
+  through `tests_step_event` (`FenixUserEvent::TestsStep`, or an inbox
+  without an event loop); each queues and pumps, and a pump re-entered
+  returns, the outer loop taking what was queued. *The tick*
+  (`tests_tick`, from `plan_wake`) does what's due by the clock: an open
+  file's scan, a run on save, a run's timeout, a first scan's next file.
+
+**Its hooks elsewhere**: in `app.rs` the module, the field, the event
+and its handler, the tick in `plan_wake` and a save in `after_saved`
+(19 lines); in `wasm_host.rs` `Pending::Tests`, its end and a stopped
+extension's answer, `test-provider-set`, an extension ready, stopped,
+started again or switched off, `Spec::test_providers` from the
+manifest, and three small accessors (34 lines); seven commands in
+`commands.rs`. Elsewhere: `fenix-tasks`' `OutputLine.cut` (below) and
+`fake_runner` (feature `fake-runner`, with the binary
+`fake-test-runner`); the settings in `fenix-config`. Nothing in
+`fenix-tests` or `fenix-wasm` changed: what the host needed was there.
+
+**Where the plan was silent, or read so:**
+
+- **An ask's bytes**: 16 MiB, the cap answers have (`MAX_ANSWER`). Past
+  it, whole fill-ins are left out, the last first, then the provider is
+  asked `run-all` -- coarser, never fewer, as past 10,000 records. In the
+  host, from the ask's own shape (a record whose `parent` is in the ask
+  is a fill-in), not in the model.
+- **The 16 MiB answer cap** was already the worker's (`test_limits`'
+  `within`, on every scan and report list): the host relies on it.
+- **One project**: `stale_call` is unchanged. The host asks an
+  extension about project P only when its instance runs in P; a scan or
+  a plan for the project you're in restarts one running elsewhere
+  there first; anything else for another project isn't asked (a plan
+  then stops its provider's turn, "can't be asked"). A run of the old
+  instance is stopped as after a trap by the restart itself, wherever it
+  was, but for the project the restart is for.
+- **Which providers a project has**: those whose markers are at its
+  top, and one whose language or `scan` names a file of it that's
+  opened.
+- **A call that fails** (a trap, a deadline, a stopped extension) is its
+  provider stopped, as after a trap. One that fails with "it has no
+  tests-..." or "isn't API 1.6's" also makes the extension no provider
+  until Fenix restarts or it's reinstalled: its providers leave every
+  model, and its output page says so once.
+- **How a step ended**: a stop or a timeout is what its end says,
+  whatever its process did meanwhile; `TaskRunner`'s own failure (a pipe
+  that couldn't be read, cleanup past two seconds) is `failed("its
+  output couldn't be read: ...")`.
+- **A first scan** runs at each start of a provider's extension in its
+  project, through the project's ignores as Search's walk (the `ignore`
+  crate with Search's options; `fenix-gui` gains it, already in the
+  lock), skipping files open in a buffer (scanned from it), 200 files'
+  scans to the model at a time. A remote project has no walk, and its
+  runs and listings say they aren't available yet. The cap reached is
+  said on the provider's output page and kept (`scanned_of`) for the
+  page.
+- **A file changed on disk** isn't rescanned unless it's open (Fenix's
+  disk poll reloads its buffer, which is rescanned) or opened: Fenix has
+  no watch on a project's other files. This differs from §7.1.
+- **Run on save**: the files saved in the second before it each asked
+  as a file selection, the first replacing a waiting run, the rest
+  joining it.
+- ***Test output*** is one buffer per project, begun again at each run's
+  first action; `tests.output` opens it in the focused pane (beside the
+  page with step 4). Each step's line is its command line and label;
+  the run's end says its counts, or why it stopped, and the files with
+  unsaved edits. `Enter` on a place in it resolves as Task Output's
+  fallback does, against the project, not the step's folder.
+- **`tests.enabled` turned off** while a run goes stops it. No setting
+  of step 3 is per project.
+- **A results file** is read when the project's model is made (its
+  first provider), written after every run's end, through
+  `fenix_storage::write`.
+- **Commands** registered, with no keys: `tests.run_here`, `run_file`,
+  `run_all`, `run_failed`, `run_last`, `stop`, `output`. `tests.open` and
+  `tests.debug_here` wait for their steps.
+
+**`cut`**: `fenix-tasks`' pipe reader now cuts a line past 64 KiB only
+when a byte past it that isn't its end comes, at a character's start,
+marking every piece but the last; a line of exactly 64 KiB (before
+`\n`, `\r\n` or its stream's end) was cut before, with an empty line
+after it, and is whole now.
+
+**The tree kill**, tested on both platforms with bounded waits: the
+app test `a_stop_kills_the_steps_tree_and_puts_its_tests_back` (the
+runner's `child` holds the pipes and lives two minutes; after a stop
+it's gone within ten seconds, `OpenProcess`/`WaitForSingleObject` on
+Windows, `kill(pid, 0)` and `/proc` on Unix); `fenix-tasks`'
+`tests/fake_runner.rs` the same through `TaskRunner` alone; and
+`tree.rs` gains the Windows test it lacked, `ProcessTree` over the
+harness's own fixture, no shell.
+
+**`fake-test-runner`** is `fenix_tasks::fake_runner`. `cargo test -p
+fenix-gui` doesn't build a dependency's binary, so the app's tests run
+the same code as their harness (`--ignored --exact ... --`, as the
+other fixtures are), through a test-only `program_for`.
+
+**Measured**: 100,000 lines through the provider guest, read in 196
+batches, in about 1.3 s in a debug build on Linux.
+
+**Not tested in the app**: `list-after`. The guest's `run-all` always
+has a step whose `needs` aren't there, so its listing after never comes;
+the model's own tests hold it, and the host does nothing of its own for
+it. A provider that traps is tested at its plan, the guest trapping in
+every export.
+
+**For the steps after**: `tests_page_opened`, `tests_list`,
+`tests_replace` and `scanned_of` are there for the page; the model's
+`problems`, `marks` and `test_at` for the file; `Model::run_id` and
+`request_build` are untouched, but `tests-launch` has no `CallFor` yet
+and a `Reply::Launched` would be taken as a failed call; the run's end
+(`tests_run_ended`) is where the notification and `last_task` go.
+
+**After the review of step 3.** Fixed, each with a test:
+
+- *Falling behind* (M1) counts what the lines waiting cost -- their text
+  and each line's own size -- and at most 1,024 batches of them, so a
+  runner's empty lines aren't free (`empty_lines_count_toward_falling_behind`).
+- *A start is a start* (M2): an extension that starts again makes its
+  first scans again (`a_restarted_extension_scans_the_project_again`).
+- *Switched off* (S1): an extension not installed is never asked, and the
+  open files forget its providers (`nothing_is_asked_of_an_extension_switched_off`).
+- *One project, several spellings* (S2): roots are canonicalized once
+  each (cached, no file system call per frame), every other spelling met
+  -- the one a file was opened by, the instance's `/project` -- kept as an
+  alias, a path under any of them the project's; a step's folder is
+  canonicalized as it starts (`a_project_reached_through_a_symlink_has_its_files`,
+  Unix).
+- *Exit* (S3): `exiting` cancels every step and waits up to two seconds
+  for its tree to be killed and the results written; dropped alone, a
+  `TaskRunner` only asks its thread, and on Linux Fenix was gone first
+  (`fenix_exiting_kills_a_steps_tree`). So §6.1's "what the runner
+  started dies with it" holds when Fenix exits too.
+- *Fail closed* (S5): a model is made with its automatic listings shut,
+  then set from trust at once (`what_runs_without_a_key_runs_only_in_a_trusted_project`,
+  which also pins today's trust gating, Q9).
+- *The UI thread* (S6): trust looked at once in two seconds, or when a
+  file of the project's `.fenix` is saved (`a_projects_trust_is_looked_at_once_a_while`);
+  a buffer over 1 MiB of characters isn't copied for a scan; the
+  results file read on a thread when the model is made, applied when it
+  comes (a run's end waits for it before writing), and written by one
+  writer thread in turn.
+- *Off mid-run* (S7): the run is stopped once and driven to its end, its
+  steps told `stopped`; then nothing more (`turning_the_explorer_off_ends_its_run`).
+- *First scans* (S8): the cap counts the files scanned, those open
+  (scanned from their buffers) among them (`a_first_scans_cap_counts_what_was_scanned`);
+  a walk waiting on its thread has the tick wake within 20 ms
+  (`a_walk_waiting_wakes_the_loop`); a walk let go stops its thread
+  mid-tree (`a_walk_let_go_stops`); a walk's scan is marked out before
+  it's sent.
+- On Windows a step runs with `NoDefaultCurrentDirectoryInExePath=1`,
+  so a `.cmd` shim's `cmd.exe` doesn't look in the project first for
+  what it runs (one line in the step's spawn).
+
+Left for the step that owns each, from the same review:
+
+- **Step 4**: *Test output*'s `Enter` resolves against the project, not
+  the step's folder (a step in `/data` or a sub-crate jumps wrong);
+  `output_lines` counts a cut line's pieces as lines, so trimming past
+  16 MiB drops more than it counted (cosmetic); `tests_replace`,
+  `tests_list` and `tests_page_opened` need the `tests.enabled` gate when
+  the page calls them; `list-after` gets its app test with the page's
+  listing.
+- **Step 5**: `/project/../x.rs` is held "as given", a full path naming a
+  `/project` folder: treat it as no place, never open it; a verbatim
+  path (`\\?\C:\...`) is normalized after the project test, not before;
+  a symlink inside the project to a file outside it counts as the
+  project's (canonicalize before marks or a jump); `set_unsaved(rel,
+  true)` isn't cleared when a dirty buffer is closed unsaved; a file
+  changed on disk and not open isn't rescanned (a watch, or the disk
+  poll, before the gutter relies on it).
+- **Step 6**: `Reply::Launched` needs its `CallFor::Launch`; today it
+  would be taken as a failed call and stop the provider.
+- **Step 8**: the timeout counts by `SystemTime`, so a clock step can end
+  a run early or late (`Instant` for the timeout; the model's stamps can
+  stay wall time); an open file seen before a provider's extension was
+  installed isn't scanned until reopened; `ids_sorted_by_path` each wake
+  (cheap today); Q9, what "trusted" means; `C:foo` (drive-relative) reads
+  as `C:/foo`.

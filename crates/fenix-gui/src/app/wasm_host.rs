@@ -66,6 +66,8 @@ enum Pending {
     /// A file it opens itself, told it's opened (`opened`): a page it opens
     /// or brings forward meanwhile is that file's.
     Opened(PathBuf),
+    /// The test explorer's call, by its token (`tests_host`).
+    Tests(u64),
     /// Nothing to do with its end but report a failure.
     Other,
 }
@@ -830,6 +832,7 @@ impl App {
             worker.detach();
         }
         self.code_serving_stopped(ext, "it was switched off");
+        self.tests_extension_gone(ext, "its extension was switched off", true);
         self.forget_code_lsp_sessions(ext);
         let mine = |key: &(String, PathBuf)| key.0 == ext;
         // The servers it gave, by project: those start again without it.
@@ -1042,6 +1045,8 @@ impl App {
         // (`code_focus_changed`, `code_call`).
         spec.project = self.code_project();
         spec.events = ext.manifest.contributes.events.clone();
+        // Its test providers, the ones `test-provider-set` may name.
+        spec.test_providers = ext.manifest.contributes.test_providers.iter().map(|p| p.id.clone()).collect();
         spec.tools_dir = if cfg!(test) { None } else { fenix_storage::paths::tools_dir() };
         self.wasm.projects.insert(ext.id.clone(), spec.project.clone());
         spec.settings = settings;
@@ -1488,6 +1493,11 @@ impl App {
         }).collect();
         self.note_output(ext, why.into());
         self.wasm.stale.remove(ext);
+        // Its test provider's run under way stops as after a trap; the new
+        // instance is never asked about it (test explorer, §6.4).
+        let name = self.wasm.installed.iter().find(|e| e.id == ext).map_or(ext.to_string(), |e| e.name.clone());
+        let there = self.code_project().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "another project".into());
+        self.tests_extension_gone(ext, &format!("{name} started again in {there}"), false);
         // Let go, not waited for: one still loading or in a call would hold
         // the UI thread until it's done.
         if let Some(worker) = self.wasm.workers.remove(ext) {
@@ -1596,6 +1606,7 @@ impl App {
                 match pending {
                     Pending::Command(_) => self.set_error(format!("{why} -- SPC h l has what it said; it starts again with Fenix")),
                     Pending::Serve(call) => self.code_answered(ext, call, Err(why)),
+                    Pending::Tests(token) => self.tests_reply(ext, token, Err(why)),
                     _ => {}
                 }
             }
@@ -2550,6 +2561,7 @@ impl App {
                     static UP: std::sync::Once = std::sync::Once::new();
                     UP.call_once(|| crate::profile::launch_mark("extensions ready"));
                 }
+                self.tests_extension_ready(&ext);
                 for (what, ticks, pending) in self.wasm.queued.remove(&ext).unwrap_or_default() {
                     self.code_call(&ext, what, ticks, pending);
                 }
@@ -2589,6 +2601,7 @@ impl App {
                 // to answer later.
                 self.code_serving_stopped(&ext, &why);
                 self.mark_code_pages(&ext, |p| p.stopped = Some(why.clone()));
+                self.tests_extension_gone(&ext, &why, false);
                 self.wasm.focus_told.remove(&ext);
                 self.wasm.layers.forget(&ext);
                 self.forget_code_lsp_sessions(&ext);
@@ -2645,6 +2658,7 @@ impl App {
                 self.note_output(ext, format!(" error  {command}: {why}"));
                 self.set_error(format!("{command}: {why}"));
             }
+            (Pending::Tests(token), result) => self.tests_reply(ext, token, result),
             _ => {}
         }
     }
@@ -2943,7 +2957,7 @@ impl App {
             Request::AgentProvide { id, program } => self.agents_provided(ext, &id, program),
             // A test provider's runner (API 1.6): the test explorer, which
             // isn't here yet, keeps it.
-            Request::TestProviderSet { .. } => {}
+            Request::TestProviderSet { provider, runner, problem } => self.tests_provider_set(ext, &provider, &runner, problem.as_deref()),
             Request::DebugAdapter { languages, program } => {
                 let Some(root) = self.wasm.projects.get(ext).cloned().flatten() else { return self.note_output(ext, "-- debug-adapter-set: it has no project".into()) };
                 let key = (ext.to_string(), root);
@@ -3925,6 +3939,24 @@ impl App {
         for (ext, event) in events {
             self.apply_wasm_event(ext, event);
         }
+    }
+
+    /// The test explorer's call `call` to extension `ext`, its end handed
+    /// back as `tests_reply(token)`: the extension's own deadline, and
+    /// started first if need be, as an event's.
+    pub(super) fn tests_call(&mut self, ext: &str, call: Call, token: u64) {
+        self.code_call(ext, call, COMMAND_TICKS, Pending::Tests(token));
+    }
+
+    /// The project extension `ext`'s instance runs in (its `/project`),
+    /// when one has been started; none when it hasn't.
+    pub(super) fn code_instance_project(&self, ext: &str) -> Option<Option<PathBuf>> {
+        self.wasm.workers.contains_key(ext).then(|| self.wasm.projects.get(ext).cloned().flatten())
+    }
+
+    /// The project an extension started now would work in.
+    pub(super) fn code_project_now(&self) -> Option<PathBuf> {
+        self.code_project()
     }
 
     /// Whether extension `ext` is up and taking calls.
