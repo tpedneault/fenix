@@ -1,4 +1,4 @@
-// Fenix's extension API, 1.4. An extension is a component of the
+// Fenix's extension API, 1.6. An extension is a component of the
 // `extension` world: Fenix calls its exports, and it calls Fenix through
 // `host`, each call checked against the permissions its manifest asks
 // for (`[permissions]`).
@@ -46,7 +46,11 @@
 // the exports `service-cancelled` and `agent-ask-progress` (world
 // `extension`; `extension-base` is what every 1.x extension has). 1.3
 // added `notify-with` and `notify-dismiss`: notifications, as toasts. 1.4
-// added `compose-with-ask`: a compose pane the agent can write.
+// added `compose-with-ask`: a compose pane the agent can write. 1.5 added
+// `editor-keys` and `key-for`, and the export `key-scheme-changed`: the
+// key scheme. 1.6 added test providers: `test-provider-set`, and the
+// exports `tests-scan`, `tests-plan`, `tests-read`, `tests-step-ended` and
+// `tests-launch`, with the types only they use.
 //
 // The package keeps version 1.0.0 across 1.x: what a 1.x adds is in the
 // same package, so a guest built for 1.0 still names the interfaces it
@@ -1119,6 +1123,233 @@ interface types {
         /// pytest, Jest, Vitest, `go test -v`).
         tests: option<tuple<u32, u32>>,
     }
+
+    // Test providers (1.6): a language pack says how its runner finds,
+    // runs and reports tests; Fenix runs the commands and keeps the
+    // results. Used only by `test-provider-set` and the `tests-*` exports
+    // of world `extension`. These types never change within 1.x. The §
+    // references are to docs/plans/test-explorer.md; what a pack author
+    // needs of it is in docs/WRITING_EXTENSIONS.md, "Test providers".
+
+    /// What a test provider found: a test, or a group of them, from a
+    /// file's text (`tests-scan`), its runner's listing, or a run
+    /// (`test-report.found`). A `found` for an id Fenix has already is
+    /// merged with it (§4). 1.6.
+    record found-test {
+        /// The provider's own name for it, the same in what it scans, lists
+        /// and reads from a run: `orbit/lib tests::adds`,
+        /// `tests/test_basic.py::test_cases[negative]`,
+        /// `example.com/orbit TestTable/negative_one`. Unique among its
+        /// provider's. One over 1 KiB is cut, the same way wherever it
+        /// comes: its first bytes up to 1,007, back to a character's start,
+        /// then `#` and the FNV-1a 64-bit hash of the whole id's UTF-8 as 16
+        /// lowercase hex digits; Fenix gives it back so, and the provider
+        /// names it to its runner by its `data`. A `parent`, a `covers` id
+        /// and a report's id are cut the same way.
+        id: string,
+        /// The group it's in, by id: none for one at its provider's top.
+        /// Given back, the one Fenix put it under: none when Fenix put it at
+        /// the top (its parent never found).
+        parent: option<string>,
+        /// What the page calls it: `adds`, `negative`, `orbit (lib)`. At
+        /// most 256 characters.
+        label: string,
+        kind: test-kind,
+        /// Its file: `/project/<path>`; or relative, to the project in a
+        /// scan's answer and to its step's folder in a run's or a listing's
+        /// report; or a full path of the project's machine. In a scan's
+        /// answer, none for a test or case is the file scanned. Given back,
+        /// `/project/<path>` with `/` for a file of the project, whatever
+        /// form it came in, and a full path for one outside it.
+        path: option<string>,
+        /// Its first line, and its last when it knows: from 0, as a
+        /// problem's (`problem`). Given back, with `path`, from the first
+        /// of its scan, its listing and a run that gives a path or a line:
+        /// a scan's may be of unsaved text.
+        line: option<u32>,
+        end-line: option<u32>,
+        /// Left out by its source (`#[ignore = "slow"]`, `@skip`,
+        /// `test.skip`): why, or "" when it doesn't say.
+        skip: option<string>,
+        /// Its cases are found only by running it: a `test.each`, a
+        /// `parametrize` the scan saw, a Go test that calls `t.Run`.
+        template: bool,
+        /// The provider's own, at most 4 KiB: never shown, given back as it
+        /// was wherever Fenix gives this node back (`test-ask.run`,
+        /// `tests-launch`). What its runner calls it when the id can't say
+        /// (a pytest id over 1 KiB, a describe named `a > b`). It can come
+        /// back none: one over 4 KiB isn't kept, nor any past 16 MiB of a
+        /// provider's, nor across a restart until a scan, listing or run
+        /// gives it again; a source that gave none, when the one that gave
+        /// it has dropped the node. A provider names a node by its id when
+        /// its `data` is none; a node whose id was cut and whose `data`
+        /// isn't kept is never given back for itself (§4, "Review of steps
+        /// 1 and 2").
+        data: option<string>,
+    }
+
+    /// What a node of the tree is (`found-test`).
+    enum test-kind { group, file, suite, test, case }
+
+    /// What Fenix asks a provider for (`tests-plan`).
+    variant test-ask {
+        /// Its runner's listing of every test it can find in the project.
+        discover,
+        /// These, as Fenix has them now: tests, cases, and groups (all
+        /// under them). After each `file` or `suite` asked comes its
+        /// fill-in: every node Fenix has under it, suites included, so each
+        /// one's `parent` is in the ask, while the ask stays within 10,000
+        /// records; a fill-in is whole or left out, and one asked with
+        /// nothing after it is planned by its runner's own filter for it
+        /// (`geo::`, a file's path). A record whose `parent` is in the ask
+        /// is a fill-in; one whose `parent` isn't was asked for itself.
+        /// Never more than 10,000 records: a larger selection is asked as
+        /// their parents.
+        run(list<found-test>),
+        /// Every test.
+        run-all,
+    }
+
+    /// What runs, in order (`tests-plan`).
+    record test-plan {
+        steps: list<test-step>,
+        /// Its listing costs little once this plan has run (it built what
+        /// the listing builds: cargo's `--list` after `cargo test`), so
+        /// Fenix lists it after, as an automatic listing (§7.1). Ignored in
+        /// a listing's own plan.
+        list-after: bool,
+    }
+
+    /// One command of a plan.
+    record test-step {
+        /// Held to `permissions.process`, as `spawn`'s are; `${data}` and
+        /// `${tools}` in its args and env are filled in. Run as it is: no
+        /// shell between. Its command line, as Windows quotes it, at most
+        /// 32,766 characters (§6.5).
+        command: command,
+        /// What the page says while it runs: `orbit (lib)`, `tests/`. At
+        /// most 256 characters.
+        label: string,
+        /// The ids it runs, when it knows them: a group's, a file's or a
+        /// suite's stands for everything Fenix has under it. Empty: it
+        /// claims nothing of its own; what of the ask no step names is the
+        /// plan's, judged when the plan's last step has ended (§8.5).
+        /// Ignored in a listing.
+        covers: list<string>,
+        /// Files under `/data` its command reads (a reporter, a config, a
+        /// file of ids written for this run): each must be there when the
+        /// step starts. For a remote project each is copied to the
+        /// project's machine before the step, every time, keeping its path
+        /// below `/data` (§8.6).
+        needs: list<string>,
+    }
+
+    /// A line of a step's output (`tests-read`).
+    record test-line {
+        /// As UTF-8, what wasn't replaced by U+FFFD; colour codes taken out.
+        text: string,
+        stderr: bool,
+        /// The line went on past 64 KiB: the rest is the next line of the
+        /// same stream (lines of the other may come between, and a later
+        /// call). Every piece but the last is cut; a line of 64 KiB or less,
+        /// at a stream's end too, never is.
+        cut: bool,
+    }
+
+    /// How a step ended (`tests-step-ended`).
+    variant test-step-end {
+        /// Its program ended: its exit code, none for a signal (Linux). On
+        /// Windows a code is the process's 32 bits read as signed: a crash's
+        /// NTSTATUS (`0xC0000005`) is negative.
+        exited(option<s32>),
+        /// Stopped: by you, by a run that replaced it, by its provider
+        /// starting again, or never started because the run was stopped
+        /// before it.
+        stopped,
+        /// It ran past `tests.timeout_minutes`, and was stopped.
+        timed-out,
+        /// It couldn't start, or its output couldn't be read: why.
+        failed(string),
+    }
+
+    /// How a test ended (`test-ended`).
+    enum test-outcome { passed, failed, skipped, errored }
+
+    /// A place in a file: from 0, columns in characters.
+    record test-location {
+        /// `/project/<path>`; relative, to the step's folder; or a full
+        /// path of the project's machine (`C:\src\orbit\src\lib.rs`).
+        path: string,
+        line: u32,
+        column: option<u32>,
+    }
+
+    /// A test that ended. The last `ended` for an id in a run is its
+    /// result (§4).
+    record test-ended {
+        id: string,
+        outcome: test-outcome,
+        /// How long it took, when its runner says.
+        duration-ms: option<f64>,
+        /// One line: a failure's message, a skip's reason, why it errored.
+        message: option<string>,
+        /// Where it failed: the assertion, the panic, the deepest frame in
+        /// the project.
+        at: option<test-location>,
+        /// All of it: the diff, the traceback, what it printed.
+        text: option<string>,
+    }
+
+    /// What a test printed, or the run did (`id` none).
+    record test-output {
+        id: option<string>,
+        text: string,
+    }
+
+    /// What didn't build or load: never a test's failure. What's under it
+    /// and has no result in this run yet is errored with it.
+    record test-broken {
+        /// The group or file that didn't: none for all the step covers.
+        id: option<string>,
+        message: string,
+        at: option<test-location>,
+    }
+
+    /// A process that died, and what it held (`test-report.crashed`).
+    record test-crash {
+        /// The group whose process it was (a test binary's target, a Go
+        /// package): what's under it and has no result in this run yet is
+        /// errored with it. None: all the step covers that has none.
+        id: option<string>,
+        /// What it said: `its binary crashed: SIGABRT`.
+        message: string,
+    }
+
+    /// What a provider read in its runner's output (`tests-read`,
+    /// `tests-step-ended`). Fenix applies them in order.
+    variant test-report {
+        /// A test or group: from a listing, or found in a run.
+        found(found-test),
+        /// A test started, by id.
+        started(string),
+        ended(test-ended),
+        output(test-output),
+        broken(test-broken),
+        /// A process died.
+        crashed(test-crash),
+    }
+
+    /// How to debug a test (`tests-launch`).
+    variant test-launch {
+        /// This launch, now.
+        launch(launch-config),
+        /// These first -- a build that says where the test's binary is --
+        /// read as a run's are, as the run `tests-launch` was asked with:
+        /// its steps' `tests-read` and `tests-step-ended` carry that run.
+        /// Then `tests-launch` is asked again, once, with the same run, if
+        /// every step exited 0 and nothing was `broken` or `crashed` (§11).
+        build-first(test-plan),
+    }
 }
 
 interface host {
@@ -1624,6 +1855,19 @@ interface host {
     /// its tools folder. It's offered beside Fenix's own on the agents
     /// page (`SPC a`) while the extension runs; none takes it away.
     agent-provide: func(id: string, cmd: option<command>) -> result<_, string>;
+
+    /// What its test provider `provider` (`[[contributes.test_providers]]`)
+    /// is in its project now: the runner it uses (`cargo nextest`, at most
+    /// 256 characters), and why it can't run tests there when it can't
+    /// (`pytest isn't installed in .venv`, at most 4 KiB). `runner` empty
+    /// with no `problem`: it has nothing to run in this project, and isn't
+    /// shown or asked there until a later call says otherwise. A call that
+    /// says what Fenix has already changes nothing; one that changes it has
+    /// Fenix list the project's tests again, as an automatic listing (§7.1).
+    /// Fenix keeps what it said for the project until Fenix exits, across
+    /// the extension stopping and starting again; it calls at each start
+    /// all the same, since it isn't told what Fenix has. 1.6.
+    test-provider-set: func(provider: string, runner: string, problem: option<string>) -> result<_, string>;
 }
 
 /// What every 1.x extension has: Fenix calls these in it.
@@ -1728,8 +1972,8 @@ world extension-base {
     export agent-turn-ended: func(turn: agent-turn);
 }
 
-/// An extension: what Fenix calls in it. What 1.2 added is called only
-/// when the extension has it, so one built before still runs.
+/// An extension: what Fenix calls in it. What 1.2 and later added is
+/// called only when the extension has it, so one built before still runs.
 world extension {
     include extension-base;
     use types.{key-scheme};
@@ -1747,4 +1991,22 @@ world extension {
     /// writes it, when it asked with `"stream": true`: all of it each
     /// time, not what's new. 1.2.
     export agent-ask-progress: func(call: u64, text: string);
+
+    use types.{found-test, test-ask, test-plan, test-line, test-step-end, test-report, test-launch};
+
+    /// The tests in file `path` (`/project/<path>`, with `/`), whose text
+    /// is `text`, as it's open or on disk: read, nothing run. The answer
+    /// replaces the file's last scan: an empty one drops its tests, so a
+    /// scanner that can't read half-typed text answers what it last read
+    /// well. 1.6.
+    export tests-scan: func(provider: string, path: string, text: string) -> list<found-test>;
+    /// What to run for `ask`, as run `run`. 1.6.
+    export tests-plan: func(provider: string, run: u64, ask: test-ask) -> result<test-plan, string>;
+    /// Lines of the output of step `step` of run `run`, in order. 1.6.
+    export tests-read: func(provider: string, run: u64, step: u32, lines: list<test-line>) -> list<test-report>;
+    /// Step `step` of run `run` ended: what its reader still had. 1.6.
+    export tests-step-ended: func(provider: string, run: u64, step: u32, end: test-step-end) -> list<test-report>;
+    /// How to debug test `test`, for run `run`: a run of its own, which a
+    /// `build-first` plan runs as, and the second ask carries. 1.6.
+    export tests-launch: func(provider: string, run: u64, test: found-test) -> result<test-launch, string>;
 }

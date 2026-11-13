@@ -89,6 +89,7 @@ own fields.
 
 | `page_key_press` | On a page that takes more keys: one `page_key` doesn't take -- PageUp, PageDown, Shift with a key that has a name, Ctrl, Alt or the Windows key with others (Ctrl+Z, Ctrl+Shift+Z, Ctrl+A, Ctrl+S) -- with its modifiers, Shift among them. Fenix keeps its own chords (Ctrl+Q, the font's size, Ctrl+O and Ctrl+I, Ctrl+Tab and Ctrl+PageUp/PageDown, Ctrl+\\, Alt+X, and standard keys' Ctrl+K and Ctrl+Shift+P) and the leader. |
 | `key_scheme_changed` | API 1.5. You switched between Vim keys and standard keys: a hint that names a key (`key_for`) can be drawn again. |
+| `tests_scan`, `tests_plan`, `tests_read`, `tests_step_ended`, `tests_launch` | API 1.6. For one of its test providers: see [Test providers](#test-providers). |
 | `page_mouse` | On a page that takes the mouse: a press (its button, and `clicks` 2 for a double click), a drag to another cell, the release, the wheel -- at a cell: its line, its column in characters as `Cells` count them, and the cell (a wide character two). The wheel then doesn't scroll the page. |
 
 These are functions of their own, not `Event`s: what a later 1.x adds
@@ -614,6 +615,279 @@ Command::new("node").arg("${tools}/js-debug/src/dapDebugServer.js");
 `find_program` looks in its tools folder too, a few folders down, so a
 release that unpacks into a versioned folder is found.
 
+## Test providers
+
+API 1.6. Fenix's test explorer lists a project's tests before anything
+has run, runs one, a file, a group, the failed or all of them, and shows
+each result as it ends: on its page, in the gutter, after the test's
+line, and as a problem at the assertion. The page, the results, the
+keys, stopping a run and the debugger's hand-off are Fenix's. What a
+language pack gives is how its runner finds, runs and reports tests: it
+is a **test provider**.
+
+A provider never starts a run itself. Fenix asks it what to run and gets
+commands back; Fenix runs them (killing a step's whole process tree when
+it's stopped, on Windows as on Linux) and gives the provider their
+output, a batch of lines at a time, and the provider says what it read.
+The explorer that calls a provider is being built in the nightly: a
+provider can be written and tested against the API now.
+
+```toml
+[engine]
+fenix = ">=1.6, <2"
+api = "1.6"                    # test providers need 1.6
+
+[[contributes.test_providers]]
+id = "rust"                    # its own name (rust, for fenix.rust), or one
+                               # starting with it: rust.nextest
+name = "cargo test"            # shown until tests::provider says otherwise
+languages = ["rust"]           # open files of these are scanned, and their
+                               # tests run from any door
+markers = ["Cargo.toml"]       # projects it serves: one holding one of these
+                               # at its top
+scan = ["src/**/*.rs", "tests/**/*.rs"]
+                               # files scanned when they aren't open: names
+                               # or paths below the project; none: only open
+                               # files and its listing
+```
+
+A provider needs `languages`, `markers` or both; `scan` is optional, and
+its walk leaves out what the project ignores (`.gitignore`, hidden
+folders), so `test_*.py` is enough. Its commands are held to
+`permissions.process` as `spawn`'s are, and it reads the project with
+`filesystem = "project-read"`: nothing new to ask for. It's started as
+a pack's other contributions start it, and when the tests page opens in
+a project its markers match.
+
+Fenix calls five methods of `Extension` for it, each with the provider's
+`id` (`fenix_extension_api::tests` has the types; a crate with a `mod
+tests` of its own imports them by name, `use
+fenix_extension_api::tests::{Found, Report}`, or the module under another
+name, `use fenix_extension_api::tests as provider`):
+
+| Method | When | What it returns |
+|---|---|---|
+| `tests_scan(provider, path, text)` | a file of its languages is opened, 500 ms after typing pauses, saved; its `scan` files when it starts in a project | the tests in that text, read and nothing run: `Vec<Found>`. It replaces that file's last scan. |
+| `tests_plan(provider, run, ask)` | a listing (`Ask::Discover`: every test its runner can find), or a run (`Ask::Run(found)`, `Ask::RunAll`) | a `Plan`: its `Step`s in order, each a `Command`, a `label`, the ids it `covers`, the files under `/data` it `needs`; `list_after` when its listing is cheap once this has run (cargo's `--list` after `cargo test`). Or `Err(why)`. |
+| `tests_read(provider, run, step, lines)` | each batch of a step's output, in order | what it read: `Vec<Report>`. |
+| `tests_step_ended(provider, run, step, end)` | once for every step, after its last line: `StepEnd::Exited(code)`, `Stopped`, `TimedOut`, `Failed(why)` (`Stopped` too for one that never started) | what its reader still had. |
+| `tests_launch(provider, run, test)` | a test is to be debugged | `Launch::Launch(config)`, a launch as `debug::launches` gives one; or `Launch::BuildFirst(plan)`, a build read as a run is, after which it's asked once more. Or `Err(why)`. The build runs as run `run`: its steps' calls carry it, and so does the second `tests_launch`. |
+
+- **A `Found`** is a test or a group: an `id` of the provider's own --
+  the same in what it scans, lists and reads from a run (`orbit/lib
+  tests::adds`, pytest's node id) -- its `parent` by id, a `label`, a
+  `Kind` (`Group`, `File`, `Suite`, `Test`, `Case`), its `path`, `line`
+  and `end_line` (from 0), `skip` when its source leaves it out,
+  `template` when its cases are only found by running it, and `data` of
+  its own, never shown and given back as it was wherever Fenix gives the
+  node back (`Ask::Run`, `tests_launch`). A scan's path is the
+  project's (`/project/<path>`, or relative to it); a report's may be
+  relative to its step's `cwd`, or a full path. Fenix matches by id
+  alone, and never by name: a case of a template it recognises is the
+  provider's to report, as a `Found` with the template as `parent`,
+  before its result.
+- **An `Ask::Run`** holds the nodes picked, as Fenix has them, in the
+  page's order, and after each `File` or `Suite` its *fill-in*: every
+  node Fenix has under it, suites included, so a runner whose filter is
+  a substring can name them exactly. A `Group` (a target, a package) is
+  asked as itself. A fill-in is whole or left out: the ask is at most
+  10,000 records, the nodes picked counted first, then each fill-in in
+  the page's order while it fits (a later, smaller one may still fit).
+  A `File` or `Suite` with nothing after it is run by the runner's own
+  filter for it, which runs at least what's under it. To tell a fill-in
+  from the next node picked, look at `parent`: **a record whose
+  `parent` is the id of a record in the ask is part of a fill-in; one
+  whose `parent` isn't was picked**. No id needs reading.
+- **A `Report`** is `Found` (from a listing, or found in a run),
+  `Started(id)`, `Ended` (its `Outcome`: `Passed`, `Failed`, `Skipped`,
+  `Errored`; `duration_ms`, a one-line `message`, the place `at` it
+  failed, and all its `text`), `Output` (what a test printed, or the
+  run with no id), `Broken` (what didn't build or load: never a test's
+  failure) or `Crashed` (a process died, and what it held: what's under
+  its `id` and has no result in the run yet is errored). Fenix applies
+  them in order; a test's last `Ended` in a run is its result.
+- **A step's `covers`**: a group's, file's or suite's id stands for all
+  under it. Empty, it claims nothing: what of the ask no step names is
+  judged when the plan's last step has ended. A plan of no steps has its
+  whole ask judged at once: each test without a result is errored "the
+  run ended without a result for it". A step Fenix couldn't start ends
+  `StepEnd::Failed(why)`, its tests errored with why, and the plan goes
+  on to its next step.
+- **`Broken` and `Crashed`** error what's under their `id` -- all the
+  step covers when it's `None`, or names a node Fenix doesn't have --
+  that has **no result in this run yet**: a test that ended earlier, in
+  this step or another, keeps its result. A later `Ended` replaces the
+  error. A template whose cases have results needs no `Ended` of its
+  own: it isn't counted, and its row shows its cases' state; report one
+  only when the runner gives one (Go's parent test).
+- **`tests::provider(id, runner, problem)`** says what the provider is
+  in this project: the runner it found (`cargo nextest`), and why it
+  can't run tests here when it can't (`pytest isn't installed in
+  .venv`). `runner` "" and no problem: it has nothing to run in this
+  project, and isn't shown or asked there. A call that changes what Fenix
+  had lists the tests again; one that doesn't changes nothing. Fenix
+  keeps it for the project until Fenix exits, across the extension
+  starting again; call it at each start all the same, and on a change.
+
+**What Fenix gives back.** A node in an `Ask::Run`, and the `test` given
+to `tests_launch`, is the node as Fenix has it, merged from its scan,
+its listing and a run (in that order of preference):
+
+- its `path` is `/project/<path>` with `/` for a file of the project,
+  whatever form it came in (relative, `\`, a full path), and a full path
+  for one outside it; its `line` and `end_line` come with that path, from
+  the first of the three that gives a path or a line -- a scan's may be
+  of text not yet saved;
+- its `parent` is the one Fenix put it under: `None` for one Fenix put
+  at the top because its parent was never found;
+- its `data` is as the provider gave it, or `None`: one over 4 KiB isn't
+  kept, nor any past 16 MiB of the provider's, nor across a restart
+  until a scan, a listing or a run gives it again, nor when only a source
+  that gave none still has the node. A provider names a node by its `id`
+  when its `data` is `None`, so an id of 1 KiB or less must be enough to
+  run it;
+- its `id` is cut when it was over 1 KiB (below). Fenix never gives a
+  node whose id was cut and whose `data` isn't kept for itself: an ask
+  has its nearest ancestor that can be named instead, a fill-in holding
+  one is left out, and it isn't debugged.
+
+**An id over 1 KiB** is cut the same way wherever it comes -- a scan, a
+listing, a report's id, a `parent`, a step's `covers` -- so it still
+matches, and two that share their first KiB stay two. A provider that
+compares the ids Fenix gives back with its own cuts its own the same
+way:
+
+1. An id of at most 1,024 bytes (UTF-8) is as it is.
+2. Otherwise: take its first 1,007 bytes, moved back to the start of a
+   character if that falls inside one; then `#`; then the FNV-1a 64-bit
+   hash of the whole id's bytes (offset basis `0xcbf29ce484222325`, prime
+   `0x100000001b3`: for each byte, xor then multiply, wrapping) as 16
+   lowercase hex digits. The result is 1,021 to 1,024 bytes; cutting it
+   again changes nothing.
+
+| The id | Its length | Cut, it ends with |
+|---|---|---|
+| `a` × 1,023 | 1,023 | not cut |
+| `a` × 1,024 | 1,024 | not cut |
+| `a` × 1,025 | 1,025 | `#6a424025ce84288c` (1,024 in all) |
+| `é` × 600 | 1,200 | `#0e3ffe7c6421a045` (its prefix 1,006 bytes, 1,023 in all) |
+| `a` then `😀` × 300 | 1,201 | `#2056db1222d21dec` (its prefix 1,005 bytes, 1,022 in all) |
+| `tests/test_x.py::test_cases[`, `a` × 1,100, `-one]` | 1,133 | `#589a673077e12368` |
+| the same with `-two]` | 1,133 | `#a9074c8a277a3a36` |
+
+The empty string's hash is `cbf29ce484222325`, `a`'s `af63dc4c8601ec8c`.
+
+**A scan's answer** replaces the file's last one: what it leaves out
+goes from the file, and an empty answer drops all the file's tests (a
+test that comes back keeps its result, shown stale). A scanner that
+can't read half-typed text should answer what it last read well from
+that file, not nothing.
+
+What Fenix promises: calls come one at a time, as its other calls do,
+with its deadline (`limits.call_ms`). Run ids are unique while Fenix
+runs, a listing's too. For each step, `tests_read` in output order, then
+exactly one `tests_step_ended`; step *n* + 1's first call comes after
+step *n*'s end. Lines are UTF-8 (what wasn't is U+FFFD), with colour
+codes and a trailing `\r` taken out; a line past 64 KiB comes in pieces,
+each but the last `cut`, each piece's rest the next line *of the same
+stream* (a line of the other stream, and a call's end, may come
+between); a line of 64 KiB or less, at a stream's end too, is never
+`cut`. Fenix never calls on a timer: a step that
+prints nothing is waiting. A stop kills the step's tree at once; a call
+under way ends and its reports count; then `tests_step_ended(Stopped)`.
+An instance is only ever asked about its own project.
+
+What a provider may not do:
+
+- run a shell: a step's program is one its manifest lists, run as it is
+  (`sh`, `cmd` or `pwsh` only if it lists them, and the store shows it);
+- name another provider's ids, or report for a run that isn't its own;
+- take more than a few milliseconds a call: a call holds a batch, never
+  a whole run. Work that takes longer is a step.
+
+The limits, both ways. A string over its limit is cut and a list's rest
+left out, said once on its output page (`SPC h l`); a `data` over its
+limit isn't kept. Only a step fails instead: one whose command line is
+over its limit, or whose `needs` aren't there when it would start.
+
+| What | At most |
+|---|---|
+| A call's answer, in all | 16 MiB |
+| `tests_scan`'s answer | 10,000 `Found` |
+| A `Found` | `id` and `parent` 1 KiB, cut as above; `label` 256 characters; `path` 4 KiB; `skip` 1 KiB; `data` 4 KiB (one over isn't kept) |
+| An `Ask::Run` (Fenix's) | 10,000 records |
+| A `Plan` | 256 steps; 10,000 ids in all its `covers`; 32 `needs` a step, each a file's path under `/data` with `/` of at most 4 KiB (one that isn't fails its step), 16 MiB of files in all |
+| A step's `command` | its command line as Windows quotes it 32,766 characters, on every platform (a `.cmd` or `.bat` on Windows, 8,191): split a long selection into steps; its `env` 64 KiB; its `label` 256 characters |
+| A `tests_read` (Fenix's) | 512 lines and 256 KiB |
+| Reports | 10,000 a call; `message` 4 KiB; `text` and an `Output`'s text 64 KiB, their ends kept; a place's `path` 4 KiB |
+| `tests_plan`'s and `tests_launch`'s `Err` | 4 KiB |
+| A launch | 1 MiB, its attributes included: one over isn't started |
+| `tests::provider` | `runner` 256 characters; `problem` 4 KiB |
+
+A made-up runner, `fake-test-runner`, that marks tests with `# test
+name` and says `PASS name` or `FAIL name message`:
+
+```rust
+use fenix_extension_api::tests::{Ask, Ended, Found, Kind, Line, Outcome, Plan, Report, Step, StepEnd};
+use fenix_extension_api::{export, Command, Extension};
+
+#[derive(Default)]
+struct Pack;
+
+impl Extension for Pack {
+    fn tests_scan(&mut self, _provider: &str, path: &str, text: &str) -> Vec<Found> {
+        let file = path.trim_start_matches("/project/").to_string();
+        let mut found = vec![Found { id: file.clone(), label: file.clone(), kind: Kind::File, path: Some(path.into()), ..Found::default() }];
+        for (n, line) in text.lines().enumerate() {
+            if let Some(name) = line.strip_prefix("# test ") {
+                found.push(Found { id: format!("{file}::{name}"), parent: Some(file.clone()), label: name.into(), line: Some(n as u32), ..Found::default() });
+            }
+        }
+        found
+    }
+
+    fn tests_plan(&mut self, _provider: &str, _run: u64, ask: Ask) -> Result<Plan, String> {
+        let ids: Vec<String> = match ask {
+            Ask::Run(found) => found.into_iter().filter(|f| f.kind != Kind::File).map(|f| f.id).collect(),
+            Ask::Discover => vec!["--list".into()],
+            Ask::RunAll => Vec::new(),
+        };
+        let step = Step { command: Command::new("fake-test-runner").args(ids), label: "tests".into(), covers: Vec::new(), needs: Vec::new() };
+        Ok(Plan { steps: vec![step], list_after: false })
+    }
+
+    fn tests_read(&mut self, _provider: &str, _run: u64, _step: u32, lines: Vec<Line>) -> Vec<Report> {
+        lines.iter().filter_map(|line| {
+            let (word, rest) = line.text.split_once(' ')?;
+            let (id, message) = rest.split_once(' ').map_or((rest, None), |(id, m)| (id, Some(m.to_string())));
+            let outcome = match word { "PASS" => Outcome::Passed, "FAIL" => Outcome::Failed, _ => return None };
+            Some(Report::Ended(Ended { id: id.into(), outcome, duration_ms: None, message, at: None, text: None }))
+        }).collect()
+    }
+
+    fn tests_step_ended(&mut self, _provider: &str, _run: u64, _step: u32, _end: StepEnd) -> Vec<Report> {
+        Vec::new() // a reader that held lines back gives them here
+    }
+}
+
+export!(Pack);
+```
+
+A real reader keeps what it needs per `(run, step)` -- a line cut at 64
+KiB to join to the next line of the same stream, a result held until its
+text is whole -- made at the step's first `tests_read` and dropped at
+its `tests_step_ended`.
+
+Every extension built on the 1.6 crate exports the five, with defaults
+(nothing found, "no tests here"); only its manifest makes it a provider.
+One may keep `api = "1.5"`, and runs on Fenix 1.5, when its component
+doesn't import `test-provider-set`: when **no code reachable from its
+exports calls `tests::provider`**, even behind a condition that never
+holds at run time. What's linked counts, not what runs: a call the
+compiler can't prove unreachable is imported, and Fenix 1.5 refuses the
+component. Fenix's own test (`fenix-wasm/tests/f15.rs`) checks exactly
+this for 1.6 on 1.5.
+
 ## Forges
 
 An extension can be a code-review forge (GitHub, GitLab) for Fenix's Git
@@ -1043,6 +1317,13 @@ languages = ["markdown"]       # Fenix's names for them
 id = "counter"                 # its own name, or one starting counter.
 name = "Counter Agent"
 login = "counter login"        # how to log in, for the agents page
+
+[[contributes.test_providers]]  # test providers it is (API 1.6)
+id = "counter"                 # its own name, or one starting counter.
+name = "counter test"          # what the tests page calls it
+languages = ["markdown"]       # files it scans when they're open
+markers = ["counter.toml"]     # projects it serves
+scan = ["tests/*.md"]          # files it scans when they aren't
 ```
 
 An extension that starts with Fenix (`on_startup = true`) and has a
@@ -1136,12 +1417,21 @@ on a Fenix that offers 1.M, N no more than M: a minor version only adds,
 and an extension that uses what one added says so (`api = "1.2"`).
 Nothing is removed or changed within 1.x: what a minor version adds is a
 new import, or a new export Fenix calls only when the extension has it,
-never a new case of `Event`. This Fenix offers 1.4: 1.1 added
+never a new case of `Event`. This Fenix offers 1.6: 1.1 added
 `git_state` and `last_task`; 1.2 added `service_progress`, the exports
 `service_cancelled` and `agent_ask_progress`, `agents::ask_with`, tools'
 classes, deadlines and toolsets, and agent resources and prompts; 1.3
 added notifications (`notify_with`, `notify_dismiss`); 1.4 added
-`compose_with_ask`. Its
+`compose_with_ask`; 1.5 added the key scheme (`key_scheme`, `key_for`,
+the export `key_scheme_changed`) and keymaps' `[[keys]]` chords; 1.6
+added test providers (`[[contributes.test_providers]]`,
+`tests::provider`, and the exports `tests_scan`, `tests_plan`,
+`tests_read`, `tests_step_ended` and `tests_launch`). An extension
+rebuilt on the 1.6 crate that uses nothing 1.6 added -- no code
+reachable from its exports calls `tests::provider` -- may keep `api =
+"1.5"`: Fenix 1.5 never looks for the exports it gains (see [Test
+providers](#test-providers)). That's tested for 1.6 on 1.5 only; a
+later minor will say so when it's tested too. Its
 definition is `crates/fenix-extension-api/wit/world.wit` (its package
 stays `fenix:extension@1.0.0` across 1.x, so what an older extension
 imports is still found).

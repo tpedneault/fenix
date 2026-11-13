@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "fenix-extension-api"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "chrono",
  "lsp-types",
@@ -1861,6 +1861,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-tests"
+version = "1.5.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fenix-vfs"
 version = "1.5.2"
 dependencies = [
@@ -1886,6 +1894,7 @@ dependencies = [
  "fenix-extensions",
  "fenix-git",
  "fenix-model",
+ "fenix-tests",
  "image",
  "libc",
  "regex",

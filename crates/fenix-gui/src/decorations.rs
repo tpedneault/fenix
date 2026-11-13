@@ -235,8 +235,8 @@ pub fn layout_line(text: &str, line_start: usize, decorations: &[&Decoration], s
         while hide.next_if(|(r, _, _)| r.start < col).is_some() {}
         if let Some((range, with, id)) = hide.next_if(|(r, _, _)| r.start == col) {
             let end = range.end.max(col + 1).min(len);
-            for c in col..end {
-                out.col_map[c] = vcol;
+            for slot in &mut out.col_map[col..end] {
+                *slot = vcol;
             }
             let from = vcol;
             push(&mut out, &mut vcol, with, Some(Role::Muted));

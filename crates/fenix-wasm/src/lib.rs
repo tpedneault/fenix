@@ -15,6 +15,7 @@ use std::time::Duration;
 pub use wasmtime;
 
 pub mod host;
+pub mod test_limits;
 
 /// What an extension's code runs as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

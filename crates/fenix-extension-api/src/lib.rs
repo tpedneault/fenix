@@ -81,6 +81,7 @@ pub mod lsp;
 pub mod run;
 pub mod socket;
 pub mod surface;
+pub mod tests;
 
 /// The chrono clock works with, for an extension's own use.
 pub use chrono;
@@ -230,6 +231,41 @@ pub trait Extension: Default + 'static {
     /// You switched between Vim keys and standard keys: hints that name a
     /// key ([`key_for`]) can be drawn again. API 1.5.
     fn key_scheme_changed(&mut self, _scheme: KeyScheme) {}
+
+    /// The tests in file `path` (`/project/<path>`, with `/`) of its test
+    /// provider `provider` (`[[contributes.test_providers]]`), whose text
+    /// is `text`, as it's open or on disk: read, nothing run. At most
+    /// 10,000. It replaces the file's last scan: an empty answer drops the
+    /// file's tests, so a scanner that can't read half-typed text answers
+    /// what it last read well. API 1.6.
+    fn tests_scan(&mut self, _provider: &str, _path: &str, _text: &str) -> Vec<tests::Found> {
+        Vec::new()
+    }
+
+    /// What to run for `ask`, as run `run`: the commands, in order. API 1.6.
+    fn tests_plan(&mut self, _provider: &str, _run: u64, _ask: tests::Ask) -> Result<tests::Plan, String> {
+        Err("no tests here".into())
+    }
+
+    /// Lines of the output of step `step` of run `run`, in order: what it
+    /// read in them. API 1.6.
+    fn tests_read(&mut self, _provider: &str, _run: u64, _step: u32, _lines: Vec<tests::Line>) -> Vec<tests::Report> {
+        Vec::new()
+    }
+
+    /// Step `step` of run `run` ended, after its last line: what its
+    /// reader still had. Every step gets one, `Stopped` for one that never
+    /// started. API 1.6.
+    fn tests_step_ended(&mut self, _provider: &str, _run: u64, _step: u32, _end: tests::StepEnd) -> Vec<tests::Report> {
+        Vec::new()
+    }
+
+    /// How to debug test `test` (as Fenix has it, its `data` included),
+    /// for run `run`. A [`tests::Launch::BuildFirst`] plan runs as that
+    /// run, and the second call carries the same `run`. API 1.6.
+    fn tests_launch(&mut self, _provider: &str, _run: u64, _test: tests::Found) -> Result<tests::Launch, String> {
+        Err("no debugging for tests here".into())
+    }
 }
 
 thread_local! {
@@ -336,6 +372,21 @@ macro_rules! export {
             }
             fn key_scheme_changed(scheme: $crate::KeyScheme) {
                 $crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::key_scheme_changed(e, scheme))
+            }
+            fn tests_scan(provider: String, path: String, text: String) -> Vec<$crate::bindings::fenix::extension::types::FoundTest> {
+                $crate::tests::exports::found($crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::tests_scan(e, &provider, &path, &text)))
+            }
+            fn tests_plan(provider: String, run: u64, ask: $crate::bindings::fenix::extension::types::TestAsk) -> Result<$crate::bindings::fenix::extension::types::TestPlan, String> {
+                $crate::tests::exports::plan($crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::tests_plan(e, &provider, run, ask.into())))
+            }
+            fn tests_read(provider: String, run: u64, step: u32, lines: Vec<$crate::bindings::fenix::extension::types::TestLine>) -> Vec<$crate::bindings::fenix::extension::types::TestReport> {
+                $crate::tests::exports::reports($crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::tests_read(e, &provider, run, step, $crate::tests::exports::lines(lines))))
+            }
+            fn tests_step_ended(provider: String, run: u64, step: u32, end: $crate::bindings::fenix::extension::types::TestStepEnd) -> Vec<$crate::bindings::fenix::extension::types::TestReport> {
+                $crate::tests::exports::reports($crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::tests_step_ended(e, &provider, run, step, end.into())))
+            }
+            fn tests_launch(provider: String, run: u64, test: $crate::bindings::fenix::extension::types::FoundTest) -> Result<$crate::bindings::fenix::extension::types::TestLaunch, String> {
+                $crate::tests::exports::launch($crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::tests_launch(e, &provider, run, test.into())))
             }
         }
 
@@ -2014,7 +2065,7 @@ pub mod agents {
 }
 
 #[cfg(test)]
-mod tests {
+mod checks {
     use super::*;
 
     #[test]
