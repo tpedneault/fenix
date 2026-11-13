@@ -961,6 +961,24 @@ impl App {
         self.leader_places.borrow_mut().get_or_insert_with(|| std::rc::Rc::new(leader_places())).clone()
     }
 
+    /// Whether command `id` belongs to a feature that's off, and so isn't
+    /// offered at all -- not in the palette, the leader, nor `SPC h b`:
+    /// the test explorer's while `tests.enabled` is off. It still answers,
+    /// to say it's off.
+    pub(super) fn command_hidden(&self, id: &str) -> bool {
+        id.starts_with("tests.") && !self.tests_enabled()
+    }
+
+    /// Whether the leader key `next`, after `path`, goes into a group
+    /// that's off: `SPC T` with the test explorer off -- unless keys of
+    /// your own are under it (keybindings.toml), which stay yours.
+    pub(super) fn leader_hidden(&self, path: &[fenix_keymap::KeyPress], next: fenix_keymap::KeyPress) -> bool {
+        if next != fenix_keymap::KeyPress::char('T') || path != [fenix_keymap::KeyPress::char(' ')] || self.tests_enabled() {
+            return false;
+        }
+        !self.places().iter().any(|(id, (keys, _, _))| !id.starts_with("tests.") && (keys == "SPC T" || keys.starts_with("SPC T ")))
+    }
+
     /// Why command `id` can't run here, when that's plain without asking
     /// anything slow: XML's commands outside XML, a debug session's
     /// without one.
@@ -985,7 +1003,7 @@ impl App {
         let mut rows: Vec<(i64, String, i64, fenix_picker::Candidate<String>)> = self
             .commands
             .iter()
-            .filter(|c| c.id != "commands.palette")
+            .filter(|c| c.id != "commands.palette" && !self.command_hidden(&c.id))
             .map(|c| {
                 let area = command_area(&c.id);
                 let name = command_name(places.get(c.id.as_ref()).map(|p| p.2), &c.description);

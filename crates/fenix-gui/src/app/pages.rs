@@ -141,6 +141,8 @@ pub(super) enum PageModel {
     Welcome(Box<crate::welcome_page::WelcomePage>),
     /// `SPC h i`: another editor's settings, brought over (`import_host`).
     Import(Box<crate::import_page::ImportPage>),
+    /// `SPC T T`: a project's tests (`tests_host/page`).
+    Tests(Box<crate::tests_page::TestsPage>),
 }
 
 pub(super) struct PageState {
@@ -179,6 +181,7 @@ impl PageState {
             PageModel::Agent(p) => p.typing(),
             PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) | PageModel::Import(_) => false,
             PageModel::Notifications(p) => p.typing(),
+            PageModel::Tests(p) => p.typing(),
             PageModel::Code(c) => c.typing(),
             PageModel::Extensions(e) => e.typing(),
             PageModel::Git(g) => g.typing(),
@@ -215,6 +218,7 @@ impl PageState {
             PageModel::Agent(p) => p.filter.paste(text),
             PageModel::AgentReview(_) | PageModel::AgentUsage(_) | PageModel::Welcome(_) | PageModel::Import(_) => {}
             PageModel::Notifications(p) => p.paste(text),
+            PageModel::Tests(p) => p.paste(text),
             PageModel::Extensions(e) => e.paste(text),
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
@@ -423,6 +427,7 @@ impl App {
             Some(PageModel::Extensions(_)) => "*extensions*".to_string(),
             Some(PageModel::ExtensionOutput(_)) => "*extensions' output*".to_string(),
             Some(PageModel::Notifications(_)) => "*notifications*".to_string(),
+            Some(PageModel::Tests(p)) => format!("*tests: {}*", crate::page::fit(&crate::tests_page::clean(&p.name), 24)),
             Some(PageModel::Code(p)) => format!("*{}*", p.name()),
             Some(PageModel::Explorer(ExplorerTarget::Overlay, _)) => "*pick a folder*".to_string(),
             Some(PageModel::Search(p)) => {
@@ -539,6 +544,7 @@ impl App {
     /// own, or one it couldn't open again.
     pub(super) fn close_page_quietly(&mut self, id: BufferId) {
         self.forget_explorer_page(id);
+        self.tests_page_closing(id);
         self.pages.remove(&id);
         self.buffers.close(id);
         let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
@@ -638,6 +644,16 @@ impl App {
                 self.restale_page(id);
             }
         }
+        // The tests page: its head counted again if its model changed, and
+        // what it says beside, before it's borrowed to be laid out.
+        let tests_notes = match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Tests(p)) if self.pages.get(&id).is_some_and(|s| s.stale || s.cols != cols || s.laid_rows != s.rows) => {
+                let root = p.root.clone();
+                self.tests_shown(&root);
+                Some(self.tests_page_notes(&root))
+            }
+            _ => None,
+        };
         let reading = self.reading_precompute(id, cols, false);
         if reading.as_ref().is_some_and(|r| r.laid_out()) {
             self.reading_ask(id);
@@ -651,7 +667,7 @@ impl App {
             state.stale = true;
         }
         // A preview is laid out for the pane's height too.
-        let height_matters = matches!(state.model, PageModel::Preview(_) | PageModel::Search(_));
+        let height_matters = matches!(state.model, PageModel::Preview(_) | PageModel::Search(_) | PageModel::Tests(_));
         if !state.stale && state.cols == cols && !(height_matters && state.laid_rows != state.rows) {
             return;
         }
@@ -674,6 +690,13 @@ impl App {
             PageModel::Extensions(e) => crate::extensions_page::layout(e, cols),
             PageModel::ExtensionOutput(o) => crate::extension_output::layout(o, cols),
             PageModel::Notifications(p) => crate::notifications_page::layout(p, cols),
+            PageModel::Tests(p) => {
+                let notes = tests_notes.unwrap_or_default();
+                // `self.tests` and `self.pages` are apart: the page is
+                // laid out from its project's model.
+                let tests = &self.tests;
+                App::tests_page_layout_with(tests, p, notes, cols, rows)
+            }
             PageModel::AgentUsage(p) => crate::agent_usage_page::layout(p, cols),
             PageModel::Welcome(p) => crate::welcome_page::layout(p, cols),
             PageModel::Import(p) => crate::import_page::layout(p, cols),
@@ -881,6 +904,11 @@ impl App {
             PageModel::Notifications(p) => {
                 let action = p.key(key);
                 self.notifications_page_action(id, action);
+            }
+            PageModel::Tests(p) => {
+                let model = self.tests.projects.get(&p.root).map(|project| &project.model);
+                let action = p.key(key, model);
+                self.tests_page_action(id, action);
             }
             PageModel::AgentUsage(p) => {
                 let action = p.key(key);

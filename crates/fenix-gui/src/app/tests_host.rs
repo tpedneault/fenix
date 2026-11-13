@@ -34,6 +34,10 @@
 //! - **The tick** (`App::tests_tick`, from `plan_wake`): what's due by
 //!   the clock -- a buffer's scan once typing pauses, a run on save, a
 //!   run's timeout, the next file of a first scan -- and the pump.
+//! - **The page's host** (`page`, step 4): `tests.open`, the tests page's
+//!   actions, its head counted at most ten times a second, the modeline's
+//!   item, and *Test output* beside the page; the page itself is
+//!   `crate::tests_page`.
 //!
 //! # Where it meets the rest of Fenix
 //!
@@ -470,54 +474,8 @@ pub(crate) fn resolved(program: &str) -> String {
     std::env::split_paths(&path).map(|dir| dir.join(program)).find(|p| p.is_file()).map_or_else(|| program.to_string(), |p| p.to_string_lossy().into_owned())
 }
 
-/// `text` with its terminal escape codes taken out (§6.4 "Lines"): CSI
-/// sequences (colours, `ESC [ ... m`) and OSC ones (`ESC ] ... BEL`),
-/// and any other two-character escape.
-pub(crate) fn without_escapes(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(['\u{1b}', '\u{9b}']) {
-        return std::borrow::Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let csi = match c {
-            '\u{9b}' => true,
-            '\u{1b}' => match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    true
-                }
-                Some(']') => {
-                    chars.next();
-                    // To BEL, or ESC `\`.
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                Some(_) => {
-                    chars.next();
-                    continue;
-                }
-                None => continue,
-            },
-            c => {
-                out.push(c);
-                continue;
-            }
-        };
-        if csi {
-            for c in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&c) {
-                    break;
-                }
-            }
-        }
-    }
-    std::borrow::Cow::Owned(out)
-}
+/// Escape codes are taken out of a line as the page cleans what it draws.
+pub(crate) use crate::tests_page::without_escapes;
 
 /// A batch of a step's output as the provider is given it (§6.4
 /// "Lines"), each line's stream and `cut` as the supervisor read them,
@@ -730,6 +688,16 @@ pub(crate) struct ProjectTests {
     output_lines: VecDeque<usize>,
     output_bytes: usize,
     output_dropped: u64,
+    /// Its last line has no end yet (a cut line's first pieces): the next
+    /// text goes on it, not on a line of its own.
+    output_partial: bool,
+    /// Where each step's lines begin, counted from the run's first line
+    /// (those dropped included), and the step's folder: what a place on
+    /// one of its lines is relative to (`Enter`, step 4).
+    output_steps: Vec<(u64, PathBuf)>,
+    /// The head and the modeline's item, as counted at a revision of the
+    /// model, at most ten times a second (step 4, `page.rs`).
+    shown: Option<page::Shown>,
     /// First scans to make, and the one under way.
     walks: VecDeque<(ProviderId, String)>,
     walk: Option<Walk>,
@@ -805,8 +773,16 @@ pub(crate) struct TestsHost {
     /// Fenix's state folder for results files, in place of the real one
     /// (tests).
     pub(crate) state_dir: Option<PathBuf>,
+    /// The tests pages closed this session, per project: `SPC T T` opens
+    /// one again as it was (§7.6).
+    views: HashMap<PathBuf, crate::tests_page::TestsPage>,
+    /// A tests page has been opened: what turning the explorer off closes.
+    page_shown: bool,
     #[cfg(test)]
     pub(crate) program_for: Option<ProgramFor>,
+    /// What the page's `y` copied, in tests (no clipboard there).
+    #[cfg(test)]
+    pub(crate) copied: Option<String>,
     /// Added to the clock, in tests: a timeout without waiting for it.
     #[cfg(test)]
     pub(crate) skew_ms: u64,
@@ -838,7 +814,7 @@ enum Reach {
 }
 
 impl App {
-    fn tests_enabled(&self) -> bool {
+    pub(super) fn tests_enabled(&self) -> bool {
         self.config.bool_value("tests.enabled") == Some(true)
     }
 
@@ -954,6 +930,9 @@ impl App {
                 output_lines: VecDeque::new(),
                 output_bytes: 0,
                 output_dropped: 0,
+                output_partial: false,
+                output_steps: Vec::new(),
+                shown: None,
                 walks: VecDeque::new(),
                 walk: None,
                 scanned_of: HashMap::new(),
@@ -1649,6 +1628,9 @@ impl App {
             prefix.extend(args);
             let args = prefix;
             self.tests_output_line(root, &format!("$ {program} {}    ({label})", args.join(" ")));
+            let project = self.tests.projects.get_mut(root).expect("a project");
+            let at = project.output_dropped + project.output_lines.len().saturating_sub(1) as u64;
+            project.output_steps.push((at, cwd.clone()));
             for (need, given) in planned.needs.iter().zip(&planned.step.needs) {
                 match need {
                     Err(why) => return Err(why.clone()),
@@ -1915,9 +1897,11 @@ impl App {
         };
         let project = self.tests.projects.get_mut(root).expect("a project");
         project.output = Some(buffer);
-        project.output_lines = header.lines().map(|l| l.len() + 1).collect();
+        project.output_lines = header.split_inclusive('\n').map(str::len).collect();
         project.output_bytes = header.len();
         project.output_dropped = 0;
+        project.output_partial = !header.is_empty() && !header.ends_with('\n');
+        project.output_steps.clear();
     }
 
     fn tests_output_line(&mut self, root: &Path, line: &str) {
@@ -1935,8 +1919,15 @@ impl App {
         }
         let project = self.tests.projects.get_mut(root).expect("a project");
         let buffer = project.output.expect("made");
-        for line in text.split_inclusive('\n') {
-            project.output_lines.push_back(line.len());
+        // A line of the buffer is one length, however many pieces of it
+        // came: so trimming drops the lines it counted (§20, step 3's
+        // review).
+        for piece in text.split_inclusive('\n') {
+            match project.output_lines.back_mut() {
+                Some(last) if project.output_partial => *last += piece.len(),
+                _ => project.output_lines.push_back(piece.len()),
+            }
+            project.output_partial = !piece.ends_with('\n');
         }
         project.output_bytes += text.len();
         let Some(ob) = self.buffers.get_mut(buffer) else { return };
@@ -2056,19 +2047,21 @@ impl App {
         }
     }
 
-    /// `tests.output`: the project's *Test output*.
+    /// `tests.output`: the project's *Test output*, beside its tests page
+    /// when that's shown, else in the focused pane.
     pub(crate) fn tests_output(&mut self) {
-        let Some((root, _)) = self.tests_here() else { return };
-        match self.tests.projects.get(&root).and_then(|p| p.output).filter(|b| self.buffers.get(*b).is_some()) {
-            Some(buffer) => self.open_buffer_in_focused_pane(buffer),
-            None => self.set_message("no test output yet in this project"),
-        }
+        let Some(root) = self.tests_page_root() else { return };
+        let page = self.find_page(|m| matches!(m, PageModel::Tests(p) if p.root == root));
+        self.tests_output_beside(&root, page);
     }
 
     /// `selection` run in the project at `root` in place of the run going
     /// (§4: "by a run that replaces it"), whose step is stopped at once.
-    #[cfg_attr(not(test), allow(dead_code))] // the page's and the doors' (steps 4 and 7)
+    #[cfg_attr(not(test), allow(dead_code))] // the doors' (step 7)
     pub(crate) fn tests_replace(&mut self, root: &Path, selection: Selection) -> fenix_tests::Requested {
+        if !self.tests_enabled() {
+            return fenix_tests::Requested::Nothing;
+        }
         let project = self.tests_project(root);
         let answer = project.model.request(selection, fenix_tests::Mode::Replace);
         if answer == fenix_tests::Requested::Replaces {
@@ -2079,17 +2072,21 @@ impl App {
     }
 
     /// A listing of the project at `root`'s providers, asked for (the
-    /// page's `u`, step 4).
-    #[cfg_attr(not(test), allow(dead_code))] // the page's (step 4)
+    /// page's `u`).
     pub(crate) fn tests_list(&mut self, root: &Path) {
+        if !self.tests_enabled() {
+            return;
+        }
         self.tests_project(root).model.list(None);
         self.tests_pump();
     }
 
-    /// The tests page opened in the project at `root` (step 4): the
-    /// first time, its providers are listed, as an automatic listing.
-    #[cfg_attr(not(test), allow(dead_code))] // the page's (step 4)
+    /// The tests page opened in the project at `root`: the first time,
+    /// its providers are listed, as an automatic listing.
     pub(crate) fn tests_page_opened(&mut self, root: &Path) {
+        if !self.tests_enabled() {
+            return;
+        }
         self.tests_project(root).model.page_opened();
         self.tests_pump();
     }
@@ -2148,5 +2145,6 @@ fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>, cap: us
     rx
 }
 
+mod page;
 #[cfg(test)]
 mod tests;

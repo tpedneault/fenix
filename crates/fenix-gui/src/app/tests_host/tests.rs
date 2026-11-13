@@ -826,3 +826,287 @@ fn a_walk_waiting_wakes_the_loop() {
     let wake = p.app.tests_tick(Instant::now());
     assert!(wake.is_some_and(|w| w <= Instant::now() + WALK_POLL), "{wake:?}");
 }
+
+// The page (step 4).
+
+impl Project {
+    /// The tests page, made if it isn't, laid out at `cols` by `rows` as a
+    /// frame would, its head counted from the model as it is now.
+    fn page_at(&mut self, cols: usize, rows: usize) -> String {
+        let id = self.app.find_page(|m| matches!(m, PageModel::Tests(_))).expect("the tests page");
+        let pane = self.app.pane_showing(id).unwrap_or_else(|| self.app.focused_pane_id());
+        // Past the tenth of a second the head waits for.
+        self.app.tests_views_due(Instant::now() + Duration::from_secs(1));
+        self.app.note_page_rows(id, rows);
+        self.app.restale_page(id);
+        self.app.ensure_page_layout(id, pane, cols);
+        self.app.pages[&id].page.text.clone()
+    }
+
+    fn page(&mut self) -> String {
+        self.page_at(100, 30)
+    }
+
+    /// The tests page's buffer, and the pane showing it, focused.
+    fn focus_page(&mut self) -> BufferId {
+        let id = self.app.find_page(|m| matches!(m, PageModel::Tests(_))).expect("the tests page");
+        let pane = self.app.pane_showing(id).expect("shown");
+        self.app.windows_mut().focus(pane);
+        id
+    }
+
+    /// Keys typed on the page, a character each.
+    fn keys(&mut self, keys: &str) {
+        self.focus_page();
+        for c in keys.chars() {
+            let key = match c {
+                '\n' => KeyPress::named(fenix_keymap::NamedKey::Enter),
+                '\t' => KeyPress::named(fenix_keymap::NamedKey::Tab),
+                '\u{1b}' => KeyPress::named(fenix_keymap::NamedKey::Escape),
+                c => KeyPress::char(c),
+            };
+            assert!(self.app.page_key(key), "{c:?} is the page's");
+        }
+    }
+
+    /// `j` until the focused row's text is `label`.
+    fn focus_row(&mut self, label: &str) {
+        self.keys("gg");
+        for _ in 0..40 {
+            if self.focused_is(label) {
+                return;
+            }
+            self.keys("j");
+        }
+        panic!("no row {label}:\n{}", self.page());
+    }
+
+    fn focused_is(&self, label: &str) -> bool {
+        let Some(id) = self.app.find_page(|m| matches!(m, PageModel::Tests(_))) else { return false };
+        let Some(PageModel::Tests(page)) = self.app.pages.get(&id).map(|s| &s.model) else { return false };
+        match page.focus {
+            Some(fenix_tests::Item::Node(n)) => self.model().node(n).is_some_and(|n| n.found().label == label),
+            _ => false,
+        }
+    }
+}
+
+/// The page end to end, with the provider guest and `fake-test-runner`:
+/// `SPC T T` opens it on the project's tests; `r` runs the focused file,
+/// results come into the tree and the head; a group holding a failure
+/// opens; `h` and `l` fold; the filter narrows; `Enter` goes to a test's
+/// line beside the page; `o` opens *Test output* beside it; `x` stops a
+/// run, the head saying so; closed and opened again, it's as it was.
+#[test]
+fn the_page_runs_folds_filters_goes_to_a_test_stops_and_shows_the_output() {
+    let state = tempfile::tempdir().unwrap();
+    let a = "# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! err FAIL a.fake::fails a.fake:2 two and two\n";
+    let b = "# test slow\n#! wait\n";
+    let mut p = Project::new(&[("a.fake", a), ("b.fake", b)], "a.fake", state.path());
+    p.until("the first scan", |p| p.has("a.fake::fails") && p.has("b.fake::slow"));
+    let file = p.app.focused_buffer_id();
+    p.app.run_cmd("tests.open");
+    let page = p.app.focused_buffer_id();
+    assert!(matches!(p.app.pages.get(&page).map(|s| &s.model), Some(PageModel::Tests(_))), "the page, in the focused pane");
+    assert!(p.app.page_title(page).starts_with("*tests: "));
+    p.until("the page's first listing", |p| p.tests().run.is_none() && p.listings() == 1);
+    let text = p.page();
+    assert!(text.starts_with(" Tests  ") && text.contains("? 3") && text.contains("▸ a.fake") && text.contains("▸ b.fake"), "two files, closed, never run:\n{text}");
+    assert!(!p.app.modeline_text().contains("tests "), "nothing to say yet");
+
+    // `r` on a.fake.
+    p.focus_row("a.fake");
+    p.keys("r");
+    p.until("the run", |p| p.model().last_run().is_some_and(|e| matches!(e.kind, fenix_tests::RunKind::Tests(_))));
+    let text = p.page();
+    assert!(text.contains("✓ 1  ✗ 1  ? 1") && text.contains("▾ a.fake") && text.contains("fails") && text.contains("✓ 3.0 ms"), "the results, the failure's file opened:\n{text}");
+    p.app.status_message = None;
+    assert!(p.app.modeline_text().contains("✗ 1 test"), "the modeline's item: {}", p.app.modeline_text());
+    p.focus_row("fails");
+    let text = p.page();
+    assert!(text.contains("✗ failed") && text.contains("two and two") && text.contains("at a.fake:3"), "its details:\n{text}");
+    p.keys("y");
+    assert_eq!(p.app.tests.copied.as_deref(), Some("fails\na.fake:3\ntwo and two"));
+
+    // Folding: `h` to the file, `h` closes it, `l` opens it.
+    p.keys("h");
+    assert!(p.focused_is("a.fake"));
+    p.keys("h");
+    assert!(p.page().contains("▸ a.fake"));
+    p.keys("l");
+    assert!(p.page().contains("▾ a.fake"));
+
+    // The filter.
+    p.keys("/add\n");
+    let text = p.page();
+    assert!(text.contains("adds") && !text.contains("fails") && !text.contains("b.fake"), "{text}");
+    p.keys("\u{1b}");
+    assert!(p.page().contains("b.fake"), "Esc clears it");
+
+    // `Enter` on a test: its line, beside the page.
+    p.focus_row("fails");
+    p.keys("\n");
+    assert_eq!(p.app.windows().window_count(), 2, "beside the page");
+    assert_eq!(p.app.focused_buffer_id(), file);
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 1, "on the test's line");
+    assert!(p.app.pane_showing(page).is_some(), "the page stays");
+
+    // `o`: Test output, beside the page, in the pane there.
+    p.keys("o");
+    let output = p.tests().output.unwrap();
+    assert_eq!(p.app.focused_buffer_id(), output);
+    assert_eq!(p.app.windows().window_count(), 2);
+    assert!(p.app.pane_showing(page).is_some());
+
+    // `x` stops a run going; the head says so.
+    p.focus_row("b.fake");
+    p.keys("r");
+    p.until("the step", Project::step_running);
+    let text = p.page();
+    assert!(text.contains("running 0 of 1") && text.contains("x stops it"), "{text}");
+    p.app.status_message = None;
+    assert!(p.app.modeline_text().contains("tests 0/1"), "{}", p.app.modeline_text());
+    p.keys("x");
+    p.until("the stop", |p| p.tests().run.is_none());
+    assert!(p.page().contains("stopped "), "{}", p.page());
+
+    // Closed, and opened again: as it was.
+    p.keys("2");
+    p.keys("q");
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_none());
+    p.app.run_cmd("tests.open");
+    let text = p.page();
+    assert!(text.contains("fails") && !text.contains("b.fake"), "on the Failed tab still:\n{text}");
+}
+
+/// A place on a line of *Test output* is relative to the folder of the
+/// step that printed it: a listing's step runs in the provider's `/data`,
+/// so `Enter` on its `notes.txt:2` opens the extension's file, not one of
+/// the project's (§20, left for step 4). Lines trimmed past 16 MiB are
+/// counted as the buffer's lines, a cut line's pieces as one.
+#[test]
+fn enter_on_test_output_goes_to_a_place_in_its_steps_folder() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n"), ("notes.txt", "the project's\n")], "a.fake", state.path());
+    let data = p.app.wasm.installed[0].dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("fake-list.txt"), "out see notes.txt:2:1\nout FOUND a.fake::listed a.fake\n").unwrap();
+    std::fs::write(data.join("notes.txt"), "one\nthe provider's\n").unwrap();
+    p.scanned("a.fake::one");
+    let root = p.root.clone();
+    p.app.tests_list(&root);
+    p.until("the listing", |p| p.listings() == 1);
+    p.app.run_cmd("tests.output");
+    let output = p.tests().output.unwrap();
+    assert_eq!(p.app.focused_buffer_id(), output);
+    let line = p.output().lines().position(|l| l.contains("see notes.txt:2:1")).unwrap_or_else(|| panic!("{}", p.output()));
+    let at = p.app.open().buffer.line_start_char(line);
+    p.app.focused_buffer_and_cursor_mut().1.char_idx = at;
+    assert!(p.app.task_output_open_location_at_cursor());
+    let opened = p.app.open().buffer.path().map(refactor::identity).unwrap();
+    assert_eq!(opened, refactor::identity(&data.join("notes.txt")), "the step's folder's");
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 1);
+    // The header's line (no step's) is the project's.
+    assert_eq!(p.app.tests_output_base(output, 0), Some(root.clone()));
+
+    // Pieces of one line are one line of the count.
+    p.app.tests_output_reset(&root, "-- head --\n");
+    p.app.tests_output_text(&root, "a piece, ");
+    p.app.tests_output_text(&root, "its rest\nnext\n");
+    assert_eq!(p.tests().output_lines.len(), 3, "{:?}", p.tests().output_lines);
+    assert_eq!(p.output().lines().count(), 3);
+}
+
+/// With `tests.enabled` off nothing of the page exists: `SPC T` isn't
+/// offered and does nothing, `tests.open` says the explorer is off, the
+/// palette and `SPC h b` don't list the explorer's commands, the
+/// modeline has no item; turned off with the page open, the page goes.
+/// On, `SPC T` is offered with its keys, with Vim's leader and
+/// standard keys' `Ctrl+K` alike.
+#[test]
+fn with_the_explorer_off_nothing_of_the_page_exists() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n")], "a.fake", state.path());
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let t = KeyPress::char('T');
+    let hints = |app: &App| app.which_key_pending().map(|w| w.hints.iter().map(|h| h.key).collect::<Vec<_>>()).unwrap_or_default();
+    p.app.press("SPC");
+    assert!(!hints(&p.app).contains(&t), "SPC T isn't offered");
+    p.app.press("T");
+    assert!(!p.app.leader_matcher.is_pending(), "and isn't a group");
+    p.app.run_cmd("tests.open");
+    assert!(p.app.status_message.as_ref().is_some_and(|m| m.text.contains("tests.enabled")));
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_none() && p.app.tests.projects.is_empty());
+    assert!(!p.app.command_candidates().iter().any(|c| c.payload.starts_with("tests.")), "not in the palette");
+    p.app.open_bindings_picker();
+    let listed = match &p.app.active_picker {
+        Some(ActivePicker::Bindings(s)) => s.visible_rows(0, s.len()).any(|(_, c)| c.payload.starts_with("tests.")),
+        _ => panic!("the bindings picker"),
+    };
+    assert!(!listed, "nor in SPC h b");
+    p.app.picker_cancel();
+    p.app.status_message = None;
+    assert!(!p.app.modeline_text().contains("tests"), "{}", p.app.modeline_text());
+    assert_eq!(p.app.tests_views_due(Instant::now()), (false, None), "nothing to do per wake");
+
+    // On: SPC T and its keys.
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    p.app.press("SPC");
+    assert!(hints(&p.app).contains(&t));
+    p.app.press("T");
+    assert!(p.app.leader_matcher.is_pending());
+    let under: Vec<char> = hints(&p.app).into_iter().filter_map(|k| match k.code { fenix_keymap::KeyCode::Char(c) => Some(c), _ => None }).collect();
+    for key in ['T', 't', 'f', 'a', 'F', 'l', 'k', 'o'] {
+        assert!(under.contains(&key), "SPC T {key}: {under:?}");
+    }
+    p.app.press("T");
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_some(), "SPC T T opens it");
+    assert!(p.app.command_candidates().iter().any(|c| c.payload == "tests.open" && c.label.starts_with("Tests ›")), "the palette files them under Tests");
+    // Standard keys: Ctrl+K T T.
+    p.app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+    p.app.sync_key_policy();
+    p.app.press("C-k");
+    p.app.press("T");
+    assert!(p.app.leader_matcher.is_pending() && p.app.leader_matcher.label() == Some("tests"), "Ctrl+K T is the tests group");
+    p.app.press("Esc");
+
+    // Turned off with the page open: it goes.
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    assert!(p.app.tests_views_due(Instant::now()).0);
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_none(), "closed");
+    p.app.status_message = None;
+    assert!(!p.app.modeline_text().contains("tests"), "{}", p.app.modeline_text());
+}
+
+/// The page's colours in a dark and a light theme: a pass, a failure and
+/// what's muted are each their own, and read on the page.
+#[test]
+fn the_pages_marks_read_in_a_dark_and_a_light_theme() {
+    let state = tempfile::tempdir().unwrap();
+    let a = "# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! err FAIL a.fake::fails a.fake:2 two and two\n";
+    let mut p = Project::new(&[("a.fake", a)], "a.fake", state.path());
+    p.scanned("a.fake::fails");
+    p.app.tests_run_file();
+    p.until("the run", Project::ended);
+    p.app.run_cmd("tests.open");
+    let is_light = |t: &crate::theme::Theme| crate::theme::luminance_of(t.bg) > 0.5;
+    let dark = crate::theme::all().iter().find(|t| !is_light(t) && t.name != "TempleOS").unwrap();
+    let light = crate::theme::all().iter().find(|t| is_light(t) && t.name != "TempleOS").unwrap();
+    for theme in [*dark, *light] {
+        p.app.theme = theme;
+        let text = p.page();
+        let id = p.focus_page();
+        let ranges = p.app.page_highlights(id, 0, 30);
+        let buffer = p.app.buffers.get(id).unwrap().buffer.text();
+        let color_of = |needle: &str| {
+            let at = buffer.find(needle).unwrap_or_else(|| panic!("{needle} in\n{text}"));
+            ranges.iter().find(|(r, _)| r.start <= at && at < r.end).map(|(_, c)| *c).unwrap_or_else(|| panic!("{needle} uncoloured"))
+        };
+        let (pass, fail) = (color_of("✓ 3.0 ms"), color_of("✗ failed"));
+        assert_ne!(pass, fail, "{}", theme.name);
+        for c in [pass, fail] {
+            let ratio = crate::theme::contrast_of(glyphon_to_rgba(c), theme.bg);
+            assert!(ratio >= 3.0, "{}: {c:?} on its page: {ratio:.2}:1", theme.name);
+        }
+    }
+}

@@ -2181,7 +2181,7 @@ impl App {
         let yours: HashMap<String, Option<&'static str>> = keymap::user_keys().into_iter().filter(|u| u.command.is_some()).map(|u| (u.keys, u.replaced)).collect();
         let describe = |id: &str| self.commands().get(id).map(|c| c.description.to_string()).unwrap_or_default();
         let text = |seq: &[KeyPress]| seq.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
-        let mut rows: Vec<(String, String)> = keymap::leader_trie().bindings().into_iter().map(|(seq, id)| (text(&seq), id.to_string())).collect();
+        let mut rows: Vec<(String, String)> = keymap::leader_trie().bindings().into_iter().filter(|(_, id)| !self.command_hidden(id)).map(|(seq, id)| (text(&seq), id.to_string())).collect();
         let contexts = self.local_contexts();
         if !contexts.is_empty() {
             rows.extend(keymap::local_trie(&contexts).bindings().into_iter().map(|(seq, id)| (format!("SPC m {}", text(&seq)), id.to_string())));
@@ -10639,6 +10639,7 @@ impl App {
         // An extension's page: it's told it's gone.
         self.code_page_closed(id);
         self.forget_explorer_page(id);
+        self.tests_page_closing(id);
         self.rename_mode.remove(&id);
         self.pages.remove(&id);
         self.buffers.close(id);
@@ -11057,6 +11058,9 @@ impl App {
             .as_ref()
             .filter(|s| s.buffer == buffer)
             .map(|s| s.cwd.clone())
+            // A test run's *Test output*: the folder of the step the line
+            // is in.
+            .or_else(|| self.tests_output_base(buffer, line))
             .unwrap_or_else(|| self.integration_root());
         let path = base.join(&found.path);
         if !path.is_file() {
@@ -17229,6 +17233,13 @@ impl App {
                 self.leader_uses = self.leader_uses.saturating_add(1);
                 KeyPress::char(' ')
             };
+            // A group that's off (the test explorer's `SPC T`) is as
+            // unbound as a key that isn't there.
+            if self.leader_hidden(self.leader_matcher.path(), fed) {
+                self.leader_matcher.cancel();
+                self.wake_caret();
+                return;
+            }
             if let Step::Matched(&id) = self.leader_matcher.feed(fed) {
                 if !carets::keeps_carets(id) {
                     self.clear_carets();
@@ -18478,7 +18489,7 @@ impl App {
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
         let feature_indicators: String = self.code_statuses().concat();
-        let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.agents_usage_segment() + &self.notifications_segment();
+        let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.agents_usage_segment() + &self.tests_segment() + &self.notifications_segment();
         let git_indicator = self.chrome_git_segment();
         let remote_indicator = self.remote_indicator();
         let search_indicator = match self.search_count() {
@@ -23607,6 +23618,14 @@ impl App {
         // The test explorer: scans once typing pauses, runs on save, a
         // run's timeout, a project's first scan.
         let wait_until = match self.tests_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // Its page and the modeline's item, at most ten times a second
+        // while its model changes.
+        let (tests_drawn, tests_due) = self.tests_views_due(now);
+        needs_redraw |= tests_drawn;
+        let wait_until = match tests_due {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
@@ -31317,7 +31336,8 @@ configure_board stm32
         app.note_command_run("file.save");
         app.open_command_palette();
         let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
-        assert_eq!(state.len(), app.commands().iter().count() - 1, "every command but the palette");
+        let offered = app.commands().iter().filter(|c| !app.command_hidden(&c.id)).count();
+        assert_eq!(state.len(), offered - 1, "every command but the palette, and a feature's that's off");
         let rows: Vec<String> = state.visible_rows(0, 3).map(|(_, c)| c.label.clone()).collect();
         assert!(rows[0].starts_with("Files › Save") && rows[0].ends_with("file.save"), "{rows:?}");
         assert!(rows[1].contains("window.split_vertical"), "{rows:?}");

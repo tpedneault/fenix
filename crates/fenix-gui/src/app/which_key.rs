@@ -85,7 +85,9 @@ impl App {
             (path, title, local.pending_hints(), Source::Local)
         } else if self.leader_matcher.is_pending() {
             let title = self.leader_matcher.label().unwrap_or("leader").to_string();
-            (self.leader_matcher.path().to_vec(), title, self.leader_matcher.pending_hints(), Source::Leader)
+            let path = self.leader_matcher.path().to_vec();
+            let hints = self.leader_matcher.pending_hints().into_iter().filter(|h| !self.leader_hidden(&path, h.key)).collect();
+            (path, title, hints, Source::Leader)
         } else {
             let path = self.vim.pending_path();
             let title = self.vim.pending_label().map(str::to_string).unwrap_or_else(|| {
