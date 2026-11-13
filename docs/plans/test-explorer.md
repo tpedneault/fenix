@@ -1597,7 +1597,7 @@ they line up with Fenix's steps.
 | Q6 | Readers in Fenix for standard formats (JUnit XML, TAP, `go test -json`) | (a) no; (b) later, as a new export a plan can name; (c) in 1.6 | **(b) at most, later**: a pack's reader is short, and every runner's quirks are better in the pack. A ctest or Gradle provider might want JUnit; it can read it a line at a time, as a step of its own that prints the file, without parsing it whole in one call. |
 | Q7 | Fenix's built-in `SPC p r` finder once the four packs ship | (a) keep as the fallback; (b) retire it | **(a)**: it's small, and it serves someone without the pack. |
 | Q8 | Does a run save the files it runs first? (F18) | (a) no, as a task and `SPC p r` don't; the head says which were unsaved, and a test the run didn't see goes back to what it was (§8.4); (b) `tests.save_before_run`, `ask`, `always` or `never`, as `agents.save_before_prompt` is (`schema.rs:492`); (c) always save the selection's files | **(a)** for 1.6: it's what every door does today, and `editor.auto_save` (`schema.rs:422`) already serves who wants saving. (b) is a setting and no API, so it can come in a minor if the head's line proves to be read too late. |
-| Q9 | What "trusted" means for what runs without a key (§12): automatic listings and run on save run where `project_is_trusted` allows, which is `Verdict::Nothing` (a project naming no programs, a fresh clone) as well as `Trusted`, as for the lens's programs (`app/code_lens.rs:648-655`). A save in a never-trusted repository can then run `cargo test` or `pytest` (`build.rs`, `conftest.py`) with `tests.on_save` on | (a) as now: `Nothing` counts, as for lenses; (b) only `Trusted`: a project's own "may run tests on its own" decision (`SPC p y`), asked once; (c) (b) for run on save, (a) for listings | To be ruled before step 8 ("trust gating checked"). Step 3 keeps (a), pinned by `what_runs_without_a_key_runs_only_in_a_trusted_project`; (b) changes one function (`tests_trusted`). Raised by the review of step 3, S4 |
+| Q9 | What "trusted" means for what runs without a key (§12): automatic listings and run on save run where `project_is_trusted` allows, which is `Verdict::Nothing` (a project naming no programs, a fresh clone) as well as `Trusted`, as for the lens's programs (`app/code_lens.rs:648-655`). A save in a never-trusted repository can then run `cargo test` or `pytest` (`build.rs`, `conftest.py`) with `tests.on_save` on | (a) as now: `Nothing` counts, as for lenses; (b) only `Trusted`: a project's own "may run tests on its own" decision (`SPC p y`), asked once; (c) (b) for run on save, (a) for listings | To be ruled before step 8 ("trust gating checked"). Step 3 keeps (a), pinned by `what_runs_without_a_key_runs_only_in_a_trusted_project`; (b) changes one function (`tests_trusted`). Raised by the review of step 3, S4. **To rule with it** (the review of steps 4 to 6, S6): `SPC T d` in a project that isn't trusted starts what its provider's `tests-launch` names at once -- a `build-first` plan, the launch's `program` (held to no `permissions.process`: `checked_launch` maps only `/project/...` and `/data/...`, a `debugServer` any local port) and its `preLaunchTask`, a task of that project -- with no picker in between, where `SPC u u` has you pick a launch from a list. Options: (a) as now, a key is an explicit act (§12); (b) say the program on the modeline and ask once per untrusted project; (c) hold `program` to `permissions.process` or the project's and `/data`'s files there. Step 6 keeps (a) |
 
 ## 17. Risks
 
@@ -2551,11 +2551,9 @@ without it ("it has no tests-launch: ...", tested in `fenix-wasm` with
 A build's timeout is the run's (step 3's test of it), not tested again
 here.
 
-**Noticed, not changed**: starting a debug session moves an empty
-`.fenix/project.ini` into `.fenix/settings.toml` and, the file being
-empty, leaves neither: a project marked only by that file isn't one
-after. The app tests here keep a `settings.toml`; it's the settings'
-migration's (`settings_host.rs`), not the explorer's.
+**Noticed**: starting a debug session ran the settings' migration of
+`.fenix/project.ini`, which deleted an empty one: fixed on its own (see
+below, after the review).
 
 **For step 7**: `debug_test` (the `debug` toolset) can call
 `tests_debug(root, node, None)` after `test_at` for its `path` and
@@ -2565,3 +2563,67 @@ not), or a session started. The control channel's `fenix/tests*` can
 read the same two fields for a debug's state. The run's end
 (`tests_run_ended`) is still where the notification and `last_task` go;
 a build's end returns before them, so a debug's build is neither.
+
+**After the review of steps 4 to 6.** Fixed, each with a test:
+
+- *Off leaves what isn't the explorer's* (M1): whether `SPC T` and a key
+  under it are there is decided from the leader's trie as it is -- yours
+  and the extensions' keys too -- not from one key per command
+  (`places()`, whose pick between keys of a command was the HashMap's):
+  a prefix is off when everything bound from it runs a hidden command
+  (`leader_hidden_with`). A key of yours under `SPC T` keeps the group,
+  runs, and the which-key menu there shows it alone, with its count
+  (`off_spc_t_is_decided_by_whats_bound_under_it_and_yours_stay`).
+- *One rule, every place* (S1): `command_hidden` is the explorer's own
+  commands (`tests_host::COMMANDS`, a test holds it to the registry's
+  `tests.*`), not any `tests.` an extension names; `leader_offered`
+  filters hints and counts. The keys' page, `SPC h k`, `fenix/commands`
+  and which-key ask it, as the palette, `SPC h b` and the leader did
+  (`off_the_explorer_is_offered_nowhere`).
+- *Native separators* (M2): `fenix-wasm`'s `host_path` joins a guest
+  path's parts one at a time, so `/project/target/fake-bin` is
+  `C:\p\target\fake-bin` on Windows, not `C:\p\target/fake-bin`
+  (`a_test_built_first_is_debugged_with_what_its_build_said` compares the
+  string; `providers.rs` builds its expected path a part at a time). It
+  also drops `.` parts and the trailing separator `/project` had.
+- *A group opened for a failure stays open* (S3): what's shown open
+  because it held a failure is remembered as opened, so the row you're
+  on doesn't vanish when it passes
+  (`a_group_opened_for_a_failure_stays_open_when_it_passes`).
+- *The mark's own cell* (S5): a click left of the text's padding (the Git
+  bar, a breakpoint's square) puts the cursor there as before; only one
+  on the mark's cell runs its test
+  (`only_a_click_on_the_marks_own_cell_runs_its_test`).
+- *The blame and a problem's colour* (S2): step 5's move of a problem's
+  colour from the row's first cell to the line number's is a fix for
+  everyone with blame shown, explorer or not: its own CHANGELOG line, and
+  `with_the_blame_shown_a_problems_colour_is_on_the_line_number`.
+- *Docs* (S4): CHANGELOG and `tests.enabled`'s description (and so
+  CONFIGURATION.md) say debugging is in and *Debug test* is on the right
+  click.
+- *`project.ini`* (the review's N1, on master): fixed in its own commit;
+  the tests here no longer keep a `settings.toml` for it.
+
+Not changed: S6, ruled with Q9 (§16).
+
+Left for the step that owns each, from the same review:
+
+- **Step 7**: `tests_debug` and `tests_request` say what happened only on
+  the modeline; `debug_test` and `run_tests` want a result back (started,
+  waits, refused and why) rather than reading `ProjectTests::debug` and
+  `debug_said` after. A missing export is told by its error's text (`it
+  has no tests-launch`, `isn't API 1.6's`): a typed error from
+  `fenix-wasm` before more callers depend on it. The lens's *Debug* must
+  keep the lens's trusted-project rule (§9.5), which `tests_debug` doesn't
+  apply. `SPC T k` stops the run going and lets go a debug waiting behind
+  it, one key for two: the notification says both. The right click's
+  *Debug test* shows for an extension in `no_launch`, and on a group's
+  line, where it then says it isn't a test.
+- **Step 8**: bidi and zero-width characters (U+202E, U+200B) aren't
+  cleaned from labels and messages (`tests_page::clean`); a failure with
+  no `at` shows twice on its test's line with the cursor there (the result
+  after the line and the problem's message); the text shifts a cell when
+  a file gains its first test or loses its last (reserve the cell for a
+  file a provider's `scan` names); `build.ps1` names Rust 1.98.0, and
+  1.100.0 rebuilds `provider.wasm` byte for byte; `place_path` gives
+  `root\src/lib.rs` on Windows (equal as a path, read so in a title).
