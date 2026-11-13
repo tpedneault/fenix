@@ -1,6 +1,7 @@
 # ADR 0005: The test explorer -- the surface in Fenix, runners in packs
 
-- **Status:** proposed 2026-11-13, for Fenix 1.6 and extension API 1.6
+- **Status:** proposed 2026-11-13, for Fenix 1.6 and extension API 1.6;
+  revised the same day after the packs' review of the plan (plan §18)
 - **Date:** 2026-11-13
 - **Plan:** [`docs/plans/test-explorer.md`](../plans/test-explorer.md)
 - **Builds on:** fenix-extensions' `plans/test-explorer.md`, the
@@ -72,12 +73,17 @@ files) given by packs (`WRITING_EXTENSIONS.md`, "Language packs").
    with `get_typed_func` as 1.2's and 1.5's are (`host.rs:660-675`); one
    import, `test-provider-set`; new records and variants only for them;
    no new case of `event`. The records don't change within 1.x: a later
-   need is a new export. A pack using it says `api = "1.6"` and doesn't
+   need is a new export. So they carry now what the packs' review of
+   five runners found missing: a node's data of the provider's own, a
+   plan's word that its listing is cheap after it, and a crash's scope
+   (plan §18). A pack using it says `api = "1.6"` and doesn't
    install on Fenix 1.5, whose users the registry keeps on the pack's
    release before (`fenix-extensions/src/registry.rs:158-168`).
 5. **Ids are the provider's** and stable across scan, listing and run.
    Fenix matches by id alone; a case's template is the provider's to
-   recognise, reported as a `found` with its parent.
+   recognise, reported as a `found` with its parent. A node may carry
+   `data` of the provider's own (what its runner calls it, when the id
+   can't say), which Fenix gives back and never shows or matches on.
 6. **One way per file.** Where a provider serves a file, `SPC p r`, the
    lenses (Fenix's and rust-analyzer's), the gutter and `run_test` go
    through the explorer; where none does, `SPC p r` and the lens keep
@@ -147,7 +153,15 @@ files) given by packs (`WRITING_EXTENSIONS.md`, "Language packs").
   and agent services aren't built. Go keeps `SPC m t` for `tidy`.
 - Test runs share the task pane's process supervision, so a stop is the
   same kill on Windows and Linux as a task's, and a test's leftover
-  children die with its step.
+  children die with its step. They share Windows' limits too: a step's
+  command line is held to `CreateProcessW`'s 32,766 characters on every
+  platform, so a provider splits a long selection itself.
+- Every extension rebuilt on the 1.6 API crate exports the five
+  functions. One that keeps `api = "1.5"` is read to start on Fenix 1.5
+  (a component imports only the functions it calls, and the new records
+  are types the 1.5 host never checks); step 2 tests it against 1.5's
+  world (plan §6.2). If it doesn't start, an extension rebuilt on the
+  1.6 crate needs `api = "1.6"`.
 - Every new door (`SPC p r`, the lens, `run_test`) has two paths, the
   explorer and the fallback, and both are tested.
 - The remote-projects plan's "API 1.6" (`docs/plans/remote-ssh.md:524`)
