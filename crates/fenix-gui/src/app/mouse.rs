@@ -102,6 +102,10 @@ pub(super) enum MenuAction {
     SelectAll,
     ToggleFold,
     Breakpoint,
+    /// The test the cursor is in run, or shown on the tests page (§9.1).
+    RunTest,
+    DebugTest,
+    ShowTest,
     AskAgent,
     Tab(TabAction, fenix_window::WindowId, BufferId),
 }
@@ -790,6 +794,12 @@ impl App {
         if ob.buffer.path().is_some() {
             items.push(item("Toggle breakpoint", key("debug.toggle_breakpoint"), MenuAction::Breakpoint));
         }
+        // On a test's lines, beside it (§9.1).
+        if self.tests_test_here().is_some() {
+            items.push(item("Run test", key("tests.run_here"), MenuAction::RunTest));
+            items.push(item("Debug test", key("tests.debug_here"), MenuAction::DebugTest));
+            items.push(item("Show in Tests", key("tests.open"), MenuAction::ShowTest));
+        }
         items.push(item("Ask the agent about this", key("agents.ask_selection"), MenuAction::AskAgent));
         items
     }
@@ -938,6 +948,9 @@ impl App {
             }
             MenuAction::ToggleFold => self.toggle_code_fold(),
             MenuAction::Breakpoint => self.debug_toggle_breakpoint(),
+            MenuAction::RunTest => self.tests_run_here(),
+            MenuAction::DebugTest => self.tests_debug_here(),
+            MenuAction::ShowTest => self.tests_show_here(),
             MenuAction::AskAgent => self.agents_ask_selection(),
             MenuAction::Tab(what, pane, buffer) => {
                 self.windows_mut().focus(pane);

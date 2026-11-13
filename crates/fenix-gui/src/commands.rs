@@ -162,14 +162,16 @@ impl CommandRegistry {
         registry.external("task.rerun_last", "Rerun the most recently run task", |app| app.rerun_last_task());
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
         registry.register("task.run_test_at_cursor", "Run the test the cursor is in", cmd_task_run_test_at_cursor);
-        // The test explorer's, with no keys yet (tests.enabled; SPC T is
-        // its page's step).
+        // The test explorer's, under SPC T, offered only while tests.enabled
+        // is on; off, each says so.
+        registry.register("tests.open", "Test explorer: the tests page -- this project's tests, their results and the run going", |ctx| ctx.app.tests_open());
         registry.register("tests.run_here", "Test explorer: run the test the cursor is in, through its file's test provider", |ctx| ctx.app.tests_run_here());
         registry.register("tests.run_file", "Test explorer: run this file's tests", |ctx| ctx.app.tests_run_file());
         registry.register("tests.run_all", "Test explorer: run all of this project's tests", |ctx| ctx.app.tests_run_all());
         registry.register("tests.run_failed", "Test explorer: run the tests that failed again", |ctx| ctx.app.tests_run_failed());
         registry.register("tests.run_last", "Test explorer: run the last test run again", |ctx| ctx.app.tests_run_last());
-        registry.register("tests.stop", "Test explorer: stop the test run", |ctx| ctx.app.tests_stop());
+        registry.register("tests.debug_here", "Test explorer: debug the test the cursor is in, built first if its provider says so", |ctx| ctx.app.tests_debug_here());
+        registry.register("tests.stop", "Test explorer: stop the test run, or a test's build to debug it", |ctx| ctx.app.tests_stop());
         registry.register("tests.output", "Test explorer: the last test run's output (Test output)", |ctx| ctx.app.tests_output());
         registry.external("dashboard.open", "Show Home, the start-up dashboard", |app| app.open_dashboard());
         registry.external("terminal.toggle", "Toggle the terminal panel", |app| app.toggle_terminal());

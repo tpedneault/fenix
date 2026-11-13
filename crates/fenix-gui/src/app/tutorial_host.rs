@@ -247,6 +247,7 @@ impl App {
             PageModel::AgentUsage(_) => "agent-usage".into(),
             PageModel::Welcome(_) => "welcome".into(),
             PageModel::Import(_) => "import-settings".into(),
+            PageModel::Tests(_) => "tests".into(),
         };
         Some((kind, None))
     }

@@ -5,6 +5,7 @@
 //! project's -- its declared kind, its Jira key -- lives in its own
 //! `.fenix/project.ini`, written here with `set_ini_value`.
 
+use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -137,14 +138,77 @@ pub fn reviewers(root: &Path) -> Option<Vec<String>> {
     })
 }
 
+/// Whether `key` in `[section]` of `project.ini` is one the move reads
+/// (`migrate_project_ini`): what it moves, or leaves for tools.json's own.
+fn moved_key(section: &str, key: &str, value: &str) -> bool {
+    match section {
+        "project" => key == "kind" || key == "jira",
+        "git" => key == "reviewers",
+        "monitor" => key == "baudrate",
+        "tasks" => key.starts_with("task") && value.split_once('|').is_some_and(|(_, c)| !c.trim().is_empty()),
+        "launch" => key == "program" || key == "args",
+        _ => false,
+    }
+}
+
 /// Moves a project's `.fenix/project.ini` into `.fenix/settings.toml`
 /// (its kind, Jira key, reviewers and serial monitor speed) and
 /// `.fenix/tools.json` (its tasks and debug launch, where that doesn't
-/// have them already), then deletes it. `None` when there's no
-/// `project.ini`; otherwise what moved.
+/// have them already). Nothing is lost, and the folder stays a project:
+/// once everything in it is moved it's deleted; what the move doesn't
+/// read (another section, another key, a line it can't parse) stays in
+/// it, with its comments, the moved keys taken out; one with nothing to
+/// move (empty, comments alone, only what it doesn't read) is left as it
+/// is. `None` when there's no `project.ini` or nothing in it to move;
+/// otherwise what moved.
 pub fn migrate_project_ini(root: &Path) -> Option<Result<Vec<String>, String>> {
     let ini = project_ini(root);
     let text = std::fs::read_to_string(&ini).ok()?;
+    // What of it the move reads, and what stays: the lines it doesn't,
+    // under their sections, with the comments.
+    let mut section = String::new();
+    let mut any = false;
+    let mut kept: Vec<(String, &str)> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = header.trim().to_string();
+            kept.push((section.clone(), line));
+            continue;
+        }
+        let read = !trimmed.starts_with(['#', ';']) && trimmed.split_once('=').is_some_and(|(k, v)| moved_key(&section, k.trim(), v.trim()));
+        if read {
+            any = true;
+        } else {
+            kept.push((section.clone(), line));
+        }
+    }
+    if !any {
+        return None;
+    }
+    // A section's header stays when something of it that isn't a comment
+    // or blank does.
+    let content = |l: &str| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with(['#', ';']) && !(t.starts_with('[') && t.ends_with(']'))
+    };
+    let rest: String = {
+        let live: HashSet<&str> = kept.iter().filter(|(_, l)| content(l)).map(|(s, _)| s.as_str()).collect();
+        let mut out = String::new();
+        let mut header_live = true;
+        for (sec, line) in &kept {
+            let t = line.trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                header_live = live.contains(sec.as_str());
+            }
+            if header_live || content(line) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    };
+    let rest_matters = kept.iter().any(|(_, l)| content(l));
     Some((|| {
         use fenix_storage::project_file::{set, Value};
         let mut moved = Vec::new();
@@ -203,7 +267,12 @@ pub fn migrate_project_ini(root: &Path) -> Option<Result<Vec<String>, String>> {
             tools.write(root)?;
             moved.push("tasks and launch (to tools.json)".to_string());
         }
-        std::fs::remove_file(&ini).map_err(|e| format!("{}: {e}", ini.display()))?;
+        if rest_matters {
+            // What it doesn't read stays where it was.
+            std::fs::write(&ini, rest).map_err(|e| format!("{}: {e}", ini.display()))?;
+        } else {
+            std::fs::remove_file(&ini).map_err(|e| format!("{}: {e}", ini.display()))?;
+        }
         Ok(moved)
     })())
 }
@@ -248,6 +317,31 @@ mod tests {
         assert_eq!((tools.tasks["Build"].executable.as_str(), tools.tasks["Build"].args.clone()), ("cargo", vec!["build".to_string(), "--release".to_string()]));
         assert_eq!(tools.launch.program, Some(PathBuf::from("target/debug/app")));
         assert!(migrate_project_ini(root).is_none(), "nothing left to move");
+    }
+
+    /// A `project.ini` with nothing the move reads is left as it is, so
+    /// a folder it alone marks stays a project; what the move doesn't read
+    /// stays in it, under its section, with its comments; the folder is a
+    /// project after (the review of steps 4 to 6, N1).
+    #[test]
+    fn project_ini_keeps_what_it_doesnt_move_and_the_folder_stays_a_project() {
+        for text in ["", "; just a comment\n", "[custom]\nx = 1\n"] {
+            let dir = crate::test_util::TempDir::new("migrate_nothing");
+            dir.write(".fenix/project.ini", text);
+            assert!(migrate_project_ini(dir.path()).is_none(), "{text:?}: nothing to move");
+            assert_eq!(std::fs::read_to_string(project_ini(dir.path())).unwrap(), text, "left as it is");
+            assert_eq!(crate::find_project_root(&dir.path().join("a.rs")).as_deref(), Some(dir.path()), "{text:?}: still a project");
+        }
+        let dir = crate::test_util::TempDir::new("migrate_some");
+        let root = dir.path();
+        dir.write(".fenix/project.ini", "; ours\n[lsp]\nrust = my-ra\n[project]\njira = FNX\nowner = ops\n[git]\nreviewers = jo\n[custom]\nx = 1\n");
+        let moved = migrate_project_ini(root).unwrap().unwrap();
+        assert_eq!(moved, ["Jira key", "reviewers"]);
+        assert_eq!(jira_key(root).as_deref(), Some("FNX"));
+        let left = std::fs::read_to_string(project_ini(root)).unwrap();
+        assert_eq!(left, "; ours\n[lsp]\nrust = my-ra\n[project]\nowner = ops\n[custom]\nx = 1\n", "what it doesn't read stays; [git] had only what moved");
+        assert!(migrate_project_ini(root).is_none(), "and isn't moved again");
+        assert_eq!(crate::find_project_root(&root.join("a.rs")).as_deref(), Some(root));
     }
 
     #[test]

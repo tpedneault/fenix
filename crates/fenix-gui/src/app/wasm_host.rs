@@ -1279,6 +1279,7 @@ impl App {
                 PageModel::AgentUsage(_) => named("agent-usage"),
                 PageModel::Welcome(_) => named("welcome"),
                 PageModel::Import(_) => named("import-settings"),
+                PageModel::Tests(_) => named("tests"),
                 // A listing in a pane and its preview are the explorer's.
                 PageModel::Explorer(..) | PageModel::Preview(_) => Focus::None,
             };

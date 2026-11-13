@@ -454,6 +454,58 @@ keys = "SPC p r"
 label = "run test at cursor"
 command = "task.run_test_at_cursor"
 
+# The test explorer (`tests_page`; docs/plans/test-explorer.md §7.4):
+# one group for every language a pack serves. Offered only while
+# `tests.enabled` is on: off, `SPC T` is as unbound as it was in 1.5.
+[[leader]]
+keys = "SPC T"
+group = "tests"
+
+[[leader]]
+keys = "SPC T T"
+label = "tests page"
+command = "tests.open"
+
+[[leader]]
+keys = "SPC T t"
+label = "run the test here"
+command = "tests.run_here"
+
+[[leader]]
+keys = "SPC T f"
+label = "run this file's"
+command = "tests.run_file"
+
+[[leader]]
+keys = "SPC T a"
+label = "run all"
+command = "tests.run_all"
+
+[[leader]]
+keys = "SPC T F"
+label = "run the failed again"
+command = "tests.run_failed"
+
+[[leader]]
+keys = "SPC T l"
+label = "run the last run again"
+command = "tests.run_last"
+
+[[leader]]
+keys = "SPC T d"
+label = "debug the test here"
+command = "tests.debug_here"
+
+[[leader]]
+keys = "SPC T k"
+label = "stop the run"
+command = "tests.stop"
+
+[[leader]]
+keys = "SPC T o"
+label = "the run's output"
+command = "tests.output"
+
 [[leader]]
 keys = "SPC s"
 group = "search"

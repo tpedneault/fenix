@@ -585,7 +585,7 @@ impl App {
         out.push_str("\n## The leader's groups\n\n| Keys | Group |\n|---|---|\n");
         let mut m = crate::keymap::leader_trie().matcher();
         m.feed(KeyPress::char(' '));
-        for hint in m.pending_hints().into_iter().filter(|h| h.group) {
+        for hint in self.leader_offered(&[KeyPress::char(' ')], m.pending_hints()).into_iter().filter(|h| h.group) {
             out.push_str(&format!("| `{leader} {}` | {} ({} keys) |\n", crate::keymap::describe_keypress(&hint.key), hint.label, hint.count));
         }
         out

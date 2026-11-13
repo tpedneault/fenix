@@ -34,6 +34,17 @@
 //! - **The tick** (`App::tests_tick`, from `plan_wake`): what's due by
 //!   the clock -- a buffer's scan once typing pauses, a run on save, a
 //!   run's timeout, the next file of a first scan -- and the pump.
+//! - **In the file** (`file`, step 5): the gutter's test column and its
+//!   marks for the lines drawn, a click on one, the right click's items,
+//!   a result after a test's line, failures as problems under
+//!   `fenix:#tests`, worked out when the model changes.
+//! - **Debugging a test** (`debug`, step 6): `tests-launch` asked, a
+//!   `build-first` plan run as the launch's run, `tests-launch` asked
+//!   again, and the debug session started from the launch it gives.
+//! - **The page's host** (`page`, step 4): `tests.open`, the tests page's
+//!   actions, its head counted at most ten times a second, the modeline's
+//!   item, and *Test output* beside the page; the page itself is
+//!   `crate::tests_page`.
 //!
 //! # Where it meets the rest of Fenix
 //!
@@ -76,6 +87,11 @@ const EXIT_WAIT: Duration = Duration::from_secs(2);
 /// the cap its answers have (`test_limits::MAX_ANSWER`), so an ask of
 /// 10,000 records of 10 KiB each can't fill a guest's memory.
 pub(crate) const ASK_BYTES: usize = test_limits::MAX_ANSWER;
+
+/// The test explorer's own commands: what `tests.enabled` off hides
+/// (`App::command_hidden`), and nothing else -- an extension's own
+/// `tests.coverage` stays offered.
+pub(crate) const COMMANDS: &[&str] = &["tests.open", "tests.run_here", "tests.run_file", "tests.run_all", "tests.run_failed", "tests.run_last", "tests.debug_here", "tests.stop", "tests.output"];
 
 // What's plain: records, paths, lines, command lines.
 
@@ -183,6 +199,15 @@ pub(crate) fn model_path(given: &str, root: &Path, base: &Path) -> String {
 /// project's.
 pub(crate) fn model_path_in(given: &str, roots: &[PathBuf], base: &Path) -> String {
     let slashed = given.replace('\\', "/");
+    // A verbatim path (`\\?\C:\...`, `\\?\UNC\server\...`) as the
+    // plain one it names, before it's looked for under the project.
+    let slashed = match slashed.strip_prefix("//?/") {
+        Some(rest) => match rest.strip_prefix("UNC/") {
+            Some(unc) => format!("//{unc}"),
+            None => rest.to_string(),
+        },
+        None => slashed,
+    };
     if slashed == "/project" || slashed.starts_with("/project/") {
         // A `..` out of the project is no file of it: as it was given.
         return lexical(&slashed["/project".len()..]).unwrap_or(slashed);
@@ -194,6 +219,23 @@ pub(crate) fn model_path_in(given: &str, roots: &[PathBuf], base: &Path) -> Stri
         }
     }
     fenix_lsp::normalize(PathBuf::from(&full)).to_string_lossy().into_owned()
+}
+
+/// A path as the model holds it, as a file on this machine (the gutter,
+/// problems, a jump): a file of the project under `root`, whatever it
+/// resolves to (a symlink inside the project to a file outside it is the
+/// project's); a full path as it is. None for a path held as given
+/// because it climbed out of the project (`/project/../x.rs`): no place,
+/// never opened.
+pub(crate) fn place_path(root: &Path, path: &str) -> Option<PathBuf> {
+    let slashed = path.replace('\\', "/");
+    if slashed == "/project" || slashed.starts_with("/project/") {
+        return None;
+    }
+    if is_full(&slashed) {
+        return Some(PathBuf::from(path));
+    }
+    lexical(&slashed).filter(|rel| !rel.is_empty()).map(|rel| root.join(rel))
 }
 
 /// A path as the model holds it, as Fenix gives it back to a provider
@@ -470,54 +512,8 @@ pub(crate) fn resolved(program: &str) -> String {
     std::env::split_paths(&path).map(|dir| dir.join(program)).find(|p| p.is_file()).map_or_else(|| program.to_string(), |p| p.to_string_lossy().into_owned())
 }
 
-/// `text` with its terminal escape codes taken out (§6.4 "Lines"): CSI
-/// sequences (colours, `ESC [ ... m`) and OSC ones (`ESC ] ... BEL`),
-/// and any other two-character escape.
-pub(crate) fn without_escapes(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(['\u{1b}', '\u{9b}']) {
-        return std::borrow::Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        let csi = match c {
-            '\u{9b}' => true,
-            '\u{1b}' => match chars.peek() {
-                Some('[') => {
-                    chars.next();
-                    true
-                }
-                Some(']') => {
-                    chars.next();
-                    // To BEL, or ESC `\`.
-                    while let Some(c) = chars.next() {
-                        if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                Some(_) => {
-                    chars.next();
-                    continue;
-                }
-                None => continue,
-            },
-            c => {
-                out.push(c);
-                continue;
-            }
-        };
-        if csi {
-            for c in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&c) {
-                    break;
-                }
-            }
-        }
-    }
-    std::borrow::Cow::Owned(out)
-}
+/// Escape codes are taken out of a line as the page cleans what it draws.
+pub(crate) use crate::tests_page::without_escapes;
 
 /// A batch of a step's output as the provider is given it (§6.4
 /// "Lines"), each line's stream and `cut` as the supervisor read them,
@@ -669,12 +665,14 @@ enum CallFor {
     Plan { root: PathBuf, run: RunId, provider: ProviderId },
     Read { root: PathBuf, tag: u64 },
     StepEnded { root: PathBuf, run: RunId, step: u32, end: fenix_tests::StepEnd, tag: Option<u64> },
+    /// `tests-launch` for a test to debug (step 6, `debug`).
+    Launch { root: PathBuf, run: RunId },
 }
 
 impl CallFor {
     fn root(&self) -> &Path {
         match self {
-            CallFor::Scan { root, .. } | CallFor::Plan { root, .. } | CallFor::Read { root, .. } | CallFor::StepEnded { root, .. } => root,
+            CallFor::Scan { root, .. } | CallFor::Plan { root, .. } | CallFor::Read { root, .. } | CallFor::StepEnded { root, .. } | CallFor::Launch { root, .. } => root,
         }
     }
 }
@@ -730,6 +728,19 @@ pub(crate) struct ProjectTests {
     output_lines: VecDeque<usize>,
     output_bytes: usize,
     output_dropped: u64,
+    /// Its last line has no end yet (a cut line's first pieces): the next
+    /// text goes on it, not on a line of its own.
+    output_partial: bool,
+    /// The failures published as problems under `fenix:#tests` (§9.3),
+    /// by file as the problems are keyed: what the next look replaces.
+    problems: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Where each step's lines begin, counted from the run's first line
+    /// (those dropped included), and the step's folder: what a place on
+    /// one of its lines is relative to (`Enter`, step 4).
+    output_steps: Vec<(u64, PathBuf)>,
+    /// The head and the modeline's item, as counted at a revision of the
+    /// model, at most ten times a second (step 4, `page.rs`).
+    shown: Option<page::Shown>,
     /// First scans to make, and the one under way.
     walks: VecDeque<(ProviderId, String)>,
     walk: Option<Walk>,
@@ -744,6 +755,10 @@ pub(crate) struct ProjectTests {
     restoring: Option<mpsc::Receiver<String>>,
     /// A run ended while it was being read: written once it's read.
     write_due: bool,
+    /// A test being got ready to debug (step 6), and what the page's
+    /// head says of the last one: building it, why it didn't build.
+    pub(crate) debug: Option<debug::Debugging>,
+    debug_said: Option<(String, crate::page::Role)>,
     /// How each run ended, in tests.
     #[cfg(test)]
     pub(crate) ended_runs: Vec<fenix_tests::RunEnd>,
@@ -782,6 +797,9 @@ pub(crate) struct TestsHost {
     /// The extensions that turned out to have no test provider's exports:
     /// not asked again while Fenix runs.
     no_tests: HashSet<String>,
+    /// The extensions that turned out to have no `tests-launch`: their
+    /// tests run, but aren't offered to debug (step 6).
+    no_launch: HashSet<String>,
     /// How many times each extension has been ready, and the last time
     /// its first scans were asked for.
     ready: HashMap<String, u64>,
@@ -790,6 +808,15 @@ pub(crate) struct TestsHost {
     /// kept until Fenix exits.
     said: HashMap<(PathBuf, ProviderId), (String, Option<String>)>,
     seen: HashMap<BufferId, Seen>,
+    /// Each open file's project and path there, by the path its buffer
+    /// has (step 5: the gutter's column, its marks, the menu): looked up
+    /// as a frame is drawn, never worked out then.
+    pub(crate) by_path: HashMap<PathBuf, (PathBuf, String)>,
+    /// What's shown of the tests in open files (step 5, `file`): each
+    /// buffer's results after its lines, and the settings they were
+    /// shown under.
+    inline: HashMap<BufferId, file::Inline>,
+    file_settings: Option<file::Settings>,
     /// The project an extension is being started again in for a call
     /// about it: its runs aren't the old instance's.
     restart_here: Option<PathBuf>,
@@ -805,8 +832,16 @@ pub(crate) struct TestsHost {
     /// Fenix's state folder for results files, in place of the real one
     /// (tests).
     pub(crate) state_dir: Option<PathBuf>,
+    /// The tests pages closed this session, per project: `SPC T T` opens
+    /// one again as it was (§7.6).
+    views: HashMap<PathBuf, crate::tests_page::TestsPage>,
+    /// A tests page has been opened: what turning the explorer off closes.
+    page_shown: bool,
     #[cfg(test)]
     pub(crate) program_for: Option<ProgramFor>,
+    /// What the page's `y` copied, in tests (no clipboard there).
+    #[cfg(test)]
+    pub(crate) copied: Option<String>,
     /// Added to the clock, in tests: a timeout without waiting for it.
     #[cfg(test)]
     pub(crate) skew_ms: u64,
@@ -838,7 +873,7 @@ enum Reach {
 }
 
 impl App {
-    fn tests_enabled(&self) -> bool {
+    pub(super) fn tests_enabled(&self) -> bool {
         self.config.bool_value("tests.enabled") == Some(true)
     }
 
@@ -954,6 +989,10 @@ impl App {
                 output_lines: VecDeque::new(),
                 output_bytes: 0,
                 output_dropped: 0,
+                output_partial: false,
+                output_steps: Vec::new(),
+                problems: HashMap::new(),
+                shown: None,
                 walks: VecDeque::new(),
                 walk: None,
                 scanned_of: HashMap::new(),
@@ -961,6 +1000,8 @@ impl App {
                 trusted: None,
                 restoring,
                 write_due: false,
+                debug: None,
+                debug_said: None,
                 #[cfg(test)]
                 ended_runs: Vec::new(),
             };
@@ -1160,6 +1201,7 @@ impl App {
         }
         if gone {
             self.tests.no_tests.remove(ext);
+            self.tests.no_launch.remove(ext);
             self.tests.said.retain(|(_, id), _| id.extension != ext);
         }
         self.tests_pump();
@@ -1169,6 +1211,7 @@ impl App {
     /// `Model::provider_stopped` says, and the host's side -- its step's
     /// tree killed, no call to it after.
     fn tests_provider_stopped(&mut self, root: &Path, ext: &str, why: &str) {
+        self.tests_debug_provider_stopped(root, ext, why);
         let Some(project) = self.tests.projects.get_mut(root) else { return };
         for provider in project.providers.iter().filter(|p| p.id.extension == ext) {
             project.model.provider_stopped(&provider.id, why);
@@ -1323,6 +1366,10 @@ impl App {
             project.walk = None;
             project.walks.clear();
             project.save_run = None;
+            if project.debug.take().is_some() {
+                project.model.drop_build();
+            }
+            project.debug_said = None;
         }
     }
 
@@ -1367,7 +1414,7 @@ impl App {
     /// the next is due.
     fn tests_scan_buffers(&mut self, now: Instant) -> Option<Instant> {
         let mut wake: Option<Instant> = None;
-        self.tests.seen.retain(|id, _| self.buffers.get(*id).is_some());
+        self.tests_forget_closed();
         for id in self.buffers.ids_sorted_by_path() {
             let Some(ob) = self.buffers.get(id) else { continue };
             if !ob.kind.tracks_unsaved_changes() {
@@ -1376,8 +1423,13 @@ impl App {
             let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { continue };
             let (edits, dirty) = (ob.buffer.edit_count(), ob.buffer.is_dirty());
             if self.tests.seen.get(&id).is_none_or(|s| s.path != path) {
+                // Renamed: what its old name had goes with it.
+                if let Some(old) = self.tests.seen.remove(&id) {
+                    self.tests_forget_seen(id, old);
+                }
                 let Some(root) = self.tests_root_of(&path) else { continue };
                 let rel = self.tests_rel(&root, &path);
+                self.tests.by_path.insert(path.clone(), (root.clone(), rel.clone()));
                 let specs: Vec<ProviderSpec> = self.tests_specs().into_iter().map(|(_, s)| s).filter(|s| s.scans(&root, &path)).collect();
                 let providers = specs.iter().map(|s| s.id.clone()).collect();
                 self.tests.seen.insert(id, Seen { path: path.clone(), root, rel, providers, scanned: None, changed: (edits, now), last_scan: None });
@@ -1425,6 +1477,33 @@ impl App {
             }
         }
         wake
+    }
+
+    /// The buffers closed since last looked, forgotten.
+    fn tests_forget_closed(&mut self) {
+        let gone: Vec<BufferId> = self.tests.seen.keys().copied().filter(|id| self.buffers.get(*id).is_none()).collect();
+        for id in gone {
+            if let Some(seen) = self.tests.seen.remove(&id) {
+                self.tests_forget_seen(id, seen);
+            }
+        }
+    }
+
+    /// What was known of buffer `id` as `seen` goes: its results after its
+    /// lines, its path's entry, and its file's unsaved edits -- a buffer
+    /// closed without saving leaves the file as it is on disk, which is
+    /// what a runner reads (§8.4), unless another buffer on it has edits.
+    fn tests_forget_seen(&mut self, id: BufferId, seen: Seen) {
+        self.tests_inline_clear(id);
+        if !self.tests.seen.values().any(|s| s.path == seen.path) {
+            self.tests.by_path.remove(&seen.path);
+        }
+        let still = self.tests.seen.iter().any(|(other, s)| s.root == seen.root && s.rel == seen.rel && self.buffers.get(*other).is_some_and(|ob| ob.buffer.is_dirty()));
+        if !still {
+            if let Some(project) = self.tests.projects.get_mut(&seen.root) {
+                project.model.set_unsaved(&seen.rel, false);
+            }
+        }
     }
 
     /// The first scans (§6.7, §7.1): one provider's at a time per project,
@@ -1591,6 +1670,7 @@ impl App {
                 }
             }
             fenix_tests::Action::Step { run, provider, step, label } => {
+                self.tests_debug_plan(root, run);
                 self.tests_run_started(root, run, now_ms);
                 self.tests_start_step(root, run, provider, step, &label);
             }
@@ -1620,8 +1700,9 @@ impl App {
         project.run = Some((run, now_ms));
         project.timed_out = false;
         let what = match project.model.summary().running {
-            Some(p) if p.tests => "tests",
-            _ => "a listing",
+            Some(p) if p.tests => "tests".to_string(),
+            Some(p) if p.build => format!("a build to debug {}", project.debug.as_ref().filter(|d| d.run == run).map_or("a test", |d| d.label.as_str())),
+            _ => "a listing".to_string(),
         };
         self.tests_output_reset(root, &format!("-- {what}, run {} --\n", run.0));
     }
@@ -1649,6 +1730,9 @@ impl App {
             prefix.extend(args);
             let args = prefix;
             self.tests_output_line(root, &format!("$ {program} {}    ({label})", args.join(" ")));
+            let project = self.tests.projects.get_mut(root).expect("a project");
+            let at = project.output_dropped + project.output_lines.len().saturating_sub(1) as u64;
+            project.output_steps.push((at, cwd.clone()));
             for (need, given) in planned.needs.iter().zip(&planned.step.needs) {
                 match need {
                     Err(why) => return Err(why.clone()),
@@ -1764,11 +1848,15 @@ impl App {
             (CallFor::StepEnded { run, step, end, tag, .. }, Reply::Reports(reports)) => {
                 let cwd = project.step.as_ref().filter(|s| Some(s.tag) == tag).map_or_else(|| root.clone(), |s| s.cwd.clone());
                 let reports = model_reports(reports, &roots, &cwd);
+                if let Some(debugging) = project.debug.as_mut().filter(|d| d.run == run) {
+                    debugging.step_ended(&end);
+                }
                 project.model.step_ended(run, step, end, reports);
                 if tag.is_some() && project.step.as_ref().map(|s| s.tag) == tag {
                     project.step = None;
                 }
             }
+            (CallFor::Launch { run, .. }, Reply::Launched(launched)) => self.tests_launched(&root, run, token, launched),
             (CallFor::Scan { .. }, _) => {}
             (what, reply) => {
                 let why = format!("it answered {what:?} with {reply:?}");
@@ -1779,6 +1867,10 @@ impl App {
 
     /// A call to `ext` that failed (`why`).
     fn tests_call_failed(&mut self, ext: &str, root: &Path, what: &CallFor, why: &str) {
+        // Debugging alone: the provider's runs aren't touched (step 6).
+        if let CallFor::Launch { run, .. } = what {
+            return self.tests_launch_failed(ext, root, *run, why);
+        }
         let no_exports = why.contains("it has no tests-") || why.contains("isn't API 1.6's");
         if no_exports {
             if self.tests.no_tests.insert(ext.to_string()) {
@@ -1869,8 +1961,10 @@ impl App {
 
     /// Stops the run in the project at `root`, `why`.
     fn tests_stop_in(&mut self, root: &Path, why: &str) -> bool {
-        let Some(project) = self.tests.projects.get_mut(root) else { return false };
-        let stopped = project.model.stop(why);
+        // A debug waiting its turn, or its provider's answer, goes too.
+        let let_go = self.tests_debug_let_go(root, why);
+        let Some(project) = self.tests.projects.get_mut(root) else { return let_go };
+        let stopped = project.model.stop(why) || let_go;
         Self::tests_halt(project, fenix_tests::StepEnd::Stopped);
         project.save_run = None;
         self.tests_pump();
@@ -1889,12 +1983,18 @@ impl App {
             (Some(fenix_tests::Halt::Stopped(why)), _) => format!("-- stopped: {why} --"),
             (Some(fenix_tests::Halt::TimedOut), _) => "-- timed out --".to_string(),
             (None, fenix_tests::RunKind::Listing { provider }) => format!("-- {} listed, in {} ms --", provider.provider, took),
+            (None, fenix_tests::RunKind::Build { .. }) if end.build_ok => format!("-- built, in {took} ms --"),
+            (None, fenix_tests::RunKind::Build { .. }) => format!("-- didn't build, in {took} ms --"),
             (None, _) => format!("-- {} passed, {} failed, {} errored, {} skipped, in {} ms --", end.passed, end.failed, end.errored, end.skipped, took),
         };
         let unsaved = (!end.unsaved.is_empty()).then(|| format!("-- {} had unsaved edits: the runner read them as last saved --", end.unsaved.join(", ")));
         self.tests_output_line(root, &said);
         if let Some(unsaved) = unsaved {
             self.tests_output_line(root, &unsaved);
+        }
+        if let fenix_tests::RunKind::Build { .. } = end.kind {
+            // Nothing of a build is a result to keep: on to the debugger.
+            return self.tests_built(root, &end);
         }
         if self.config.bool_value("tests.keep_results") != Some(false) {
             self.tests_write_results(root);
@@ -1915,9 +2015,11 @@ impl App {
         };
         let project = self.tests.projects.get_mut(root).expect("a project");
         project.output = Some(buffer);
-        project.output_lines = header.lines().map(|l| l.len() + 1).collect();
+        project.output_lines = header.split_inclusive('\n').map(str::len).collect();
         project.output_bytes = header.len();
         project.output_dropped = 0;
+        project.output_partial = !header.is_empty() && !header.ends_with('\n');
+        project.output_steps.clear();
     }
 
     fn tests_output_line(&mut self, root: &Path, line: &str) {
@@ -1935,8 +2037,15 @@ impl App {
         }
         let project = self.tests.projects.get_mut(root).expect("a project");
         let buffer = project.output.expect("made");
-        for line in text.split_inclusive('\n') {
-            project.output_lines.push_back(line.len());
+        // A line of the buffer is one length, however many pieces of it
+        // came: so trimming drops the lines it counted (§20, step 3's
+        // review).
+        for piece in text.split_inclusive('\n') {
+            match project.output_lines.back_mut() {
+                Some(last) if project.output_partial => *last += piece.len(),
+                _ => project.output_lines.push_back(piece.len()),
+            }
+            project.output_partial = !piece.ends_with('\n');
         }
         project.output_bytes += text.len();
         let Some(ob) = self.buffers.get_mut(buffer) else { return };
@@ -2056,19 +2165,21 @@ impl App {
         }
     }
 
-    /// `tests.output`: the project's *Test output*.
+    /// `tests.output`: the project's *Test output*, beside its tests page
+    /// when that's shown, else in the focused pane.
     pub(crate) fn tests_output(&mut self) {
-        let Some((root, _)) = self.tests_here() else { return };
-        match self.tests.projects.get(&root).and_then(|p| p.output).filter(|b| self.buffers.get(*b).is_some()) {
-            Some(buffer) => self.open_buffer_in_focused_pane(buffer),
-            None => self.set_message("no test output yet in this project"),
-        }
+        let Some(root) = self.tests_page_root() else { return };
+        let page = self.find_page(|m| matches!(m, PageModel::Tests(p) if p.root == root));
+        self.tests_output_beside(&root, page);
     }
 
     /// `selection` run in the project at `root` in place of the run going
     /// (§4: "by a run that replaces it"), whose step is stopped at once.
-    #[cfg_attr(not(test), allow(dead_code))] // the page's and the doors' (steps 4 and 7)
+    #[cfg_attr(not(test), allow(dead_code))] // the doors' (step 7)
     pub(crate) fn tests_replace(&mut self, root: &Path, selection: Selection) -> fenix_tests::Requested {
+        if !self.tests_enabled() {
+            return fenix_tests::Requested::Nothing;
+        }
         let project = self.tests_project(root);
         let answer = project.model.request(selection, fenix_tests::Mode::Replace);
         if answer == fenix_tests::Requested::Replaces {
@@ -2079,17 +2190,21 @@ impl App {
     }
 
     /// A listing of the project at `root`'s providers, asked for (the
-    /// page's `u`, step 4).
-    #[cfg_attr(not(test), allow(dead_code))] // the page's (step 4)
+    /// page's `u`).
     pub(crate) fn tests_list(&mut self, root: &Path) {
+        if !self.tests_enabled() {
+            return;
+        }
         self.tests_project(root).model.list(None);
         self.tests_pump();
     }
 
-    /// The tests page opened in the project at `root` (step 4): the
-    /// first time, its providers are listed, as an automatic listing.
-    #[cfg_attr(not(test), allow(dead_code))] // the page's (step 4)
+    /// The tests page opened in the project at `root`: the first time,
+    /// its providers are listed, as an automatic listing.
     pub(crate) fn tests_page_opened(&mut self, root: &Path) {
+        if !self.tests_enabled() {
+            return;
+        }
         self.tests_project(root).model.page_opened();
         self.tests_pump();
     }
@@ -2148,5 +2263,9 @@ fn walk_files(root: &Path, patterns: Vec<String>, open: HashSet<String>, cap: us
     rx
 }
 
+mod debug;
+mod file;
+pub(in crate::app) use file::TestCells;
+mod page;
 #[cfg(test)]
 mod tests;

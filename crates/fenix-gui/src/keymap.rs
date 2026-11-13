@@ -1059,6 +1059,46 @@ mod tests {
         assert_eq!(keymap_conflicts(), Vec::<String>::new());
     }
 
+    /// `SPC T` is the test explorer's group (plan test-explorer §7.4, Q3):
+    /// nothing else of Fenix's is under it, nothing shorter on its way
+    /// shadows a key of it, each of its keys runs its command, and it's
+    /// none of the uppercase groups fenix-extensions' packs take (`SPC A`,
+    /// `SPC C`, `SPC P`). With standard keys it's `Ctrl+K T`, and no
+    /// flavour can take `Ctrl+K` (a JetBrains-style one included).
+    #[test]
+    fn spc_t_is_the_test_explorers_and_clashes_with_nothing() {
+        let trie = leader_trie();
+        let t = [KeyPress::char(' '), KeyPress::char('T')];
+        let under: Vec<(Vec<KeyPress>, &str)> = trie.bindings().into_iter().filter(|(seq, _)| seq.starts_with(&t)).map(|(seq, id)| (seq, *id)).collect();
+        assert!(under.iter().all(|(_, id)| id.starts_with("tests.")), "{under:?}");
+        let expect = [("T", "tests.open"), ("t", "tests.run_here"), ("f", "tests.run_file"), ("a", "tests.run_all"), ("F", "tests.run_failed"), ("l", "tests.run_last"), ("d", "tests.debug_here"), ("k", "tests.stop"), ("o", "tests.output")];
+        assert_eq!(under.len(), expect.len(), "{under:?}");
+        for (key, id) in expect {
+            let mut m = trie.matcher();
+            m.feed(t[0]);
+            assert!(matches!(m.feed(t[1]), fenix_keymap::Step::Pending(_)), "SPC T is a group, never a command of its own");
+            assert_eq!(m.label(), Some("tests"));
+            match m.feed(KeyPress::char(key.chars().next().unwrap())) {
+                fenix_keymap::Step::Matched(found) => assert_eq!(*found, id, "SPC T {key}"),
+                _ => panic!("SPC T {key} runs nothing"),
+            }
+        }
+        // No leader key before 1.6 was under `SPC T`, and nothing in the
+        // default keymap is bound at `SPC T` itself.
+        assert!(default_keymap().leader.iter().filter(|e| e.keys == "SPC T" || e.keys.starts_with("SPC T ")).all(|e| e.command.as_deref().is_none_or(|c| c.starts_with("tests.")) && (e.keys != "SPC T" || e.command.is_none())));
+        // The packs' uppercase groups (their `keymaps/*.toml`) aren't it.
+        assert!(!['A', 'C', 'P'].contains(&'T'));
+        assert!(RESERVED_CHORDS.contains(&"C-k"));
+        let mut map = ChordMap::new();
+        let mut problems = Vec::new();
+        let flavour: &'static KeymapData = Box::leak(Box::new(toml::from_str("[[keys]]\nkeys = \"C-k\"\ncommand = \"tests.open\"\nscheme = \"standard\"\n").unwrap()));
+        lay_chords(&mut map, flavour, Some("jetbrains"), &|_| true, ChordSource::Extension, &mut problems);
+        assert_eq!(problems.len(), 1, "Ctrl+K is the leader's, whoever asks: {problems:?}");
+        // No chord of Fenix's runs the explorer's commands: the leader's
+        // keys are the same in both schemes (ADR 0004, decision 3).
+        assert!(default_keymap().keys.iter().all(|e| e.command.as_deref().is_none_or(|c| !c.starts_with("tests."))));
+    }
+
     #[test]
     fn describe_keypress_formats_plain_and_modified_chars() {
         assert_eq!(describe_keypress(&KeyPress::char('f')), "f");

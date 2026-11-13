@@ -51,7 +51,7 @@ impl ChromeGit {
 }
 
 /// How wide the blame column is, in cells.
-const BLAME_WIDTH: usize = 30;
+pub(super) const BLAME_WIDTH: usize = 30;
 
 /// A file's blame, one entry per line of the buffer as it was blamed.
 pub(super) struct Blame {
@@ -351,6 +351,13 @@ impl App {
             Some(path) if self.blames.get(path).is_some_and(|b| !b.lines.is_empty()) => BLAME_WIDTH,
             _ => 0,
         }
+    }
+
+    /// A blame of `lines` lines for the file at `path`, as if read (tests).
+    #[cfg(test)]
+    pub(in crate::app) fn test_blame(&mut self, path: &Path, lines: usize) {
+        let line = |i: usize| fenix_git::BlameLine { hash: format!("{i:07x}"), author: "Tess".into(), time: 0, summary: String::new() };
+        self.blames.insert(path.to_path_buf(), Blame { lines: (0..lines).map(line).collect(), edits: 0, loading: false });
     }
 
     /// The blame column's text for one line: the commit, author and age

@@ -176,7 +176,7 @@ fn guest(id: &str) -> crate::installed::CodeExtension {
     std::fs::copy(guests.join("provider.wasm"), staged.join("extension.wasm")).unwrap();
     let short = id.rsplit('.').next().unwrap();
     let manifest = fenix_extensions::Manifest::parse(&format!(
-        "[extension]\nid = \"{id}\"\nname = \"Provider\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.6\"\nfenix = \">=1.5, <2\"\n\n[permissions]\nprocess = [\"fake-test-runner\"]\nfilesystem = \"project-read\"\n\n[[contributes.test_providers]]\nid = \"{short}\"\nname = \"fake\"\nmarkers = [\"fake.toml\"]\nscan = [\"*.fake\"]\n"
+        "[extension]\nid = \"{id}\"\nname = \"Provider\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.6\"\nfenix = \">=1.5, <2\"\n\n[permissions]\nprocess = [\"fake-test-runner\"]\nfilesystem = \"project-read\"\n\n[[contributes.test_providers]]\nid = \"{short}\"\nname = \"fake\"\nmarkers = [\"fake.toml\"]\nscan = [\"*.fake\", \"*.py\"]\n"
     ))
     .unwrap();
     crate::installed::CodeExtension { id: id.into(), name: "Provider".into(), dir: staged, manifest }
@@ -225,6 +225,11 @@ impl Project {
             std::thread::sleep(Duration::from_millis(5));
             self.app.pump_wasm();
             self.app.tests_tick(Instant::now());
+            // A debug session's adapter, as the event loop hands it on.
+            let events: Vec<_> = self.app.dap_unread.iter().flat_map(|(generation, rx)| rx.try_iter().map(|e| (*generation, e)).collect::<Vec<_>>()).collect();
+            for (generation, event) in events {
+                self.app.handle_user_event(FenixUserEvent::Dap { generation, event });
+            }
         }
     }
 
@@ -825,4 +830,1067 @@ fn a_walk_waiting_wakes_the_loop() {
     p.app.tests_project(&root).walks.push_back((spec.id, EXT.into()));
     let wake = p.app.tests_tick(Instant::now());
     assert!(wake.is_some_and(|w| w <= Instant::now() + WALK_POLL), "{wake:?}");
+}
+
+// The page (step 4).
+
+impl Project {
+    /// The tests page, made if it isn't, laid out at `cols` by `rows` as a
+    /// frame would, its head counted from the model as it is now.
+    fn page_at(&mut self, cols: usize, rows: usize) -> String {
+        let id = self.app.find_page(|m| matches!(m, PageModel::Tests(_))).expect("the tests page");
+        let pane = self.app.pane_showing(id).unwrap_or_else(|| self.app.focused_pane_id());
+        // Past the tenth of a second the head waits for.
+        self.app.tests_views_due(Instant::now() + Duration::from_secs(1));
+        self.app.note_page_rows(id, rows);
+        self.app.restale_page(id);
+        self.app.ensure_page_layout(id, pane, cols);
+        self.app.pages[&id].page.text.clone()
+    }
+
+    fn page(&mut self) -> String {
+        self.page_at(100, 30)
+    }
+
+    /// The tests page's buffer, and the pane showing it, focused.
+    fn focus_page(&mut self) -> BufferId {
+        let id = self.app.find_page(|m| matches!(m, PageModel::Tests(_))).expect("the tests page");
+        let pane = self.app.pane_showing(id).expect("shown");
+        self.app.windows_mut().focus(pane);
+        id
+    }
+
+    /// Keys typed on the page, a character each.
+    fn keys(&mut self, keys: &str) {
+        self.focus_page();
+        for c in keys.chars() {
+            let key = match c {
+                '\n' => KeyPress::named(fenix_keymap::NamedKey::Enter),
+                '\t' => KeyPress::named(fenix_keymap::NamedKey::Tab),
+                '\u{1b}' => KeyPress::named(fenix_keymap::NamedKey::Escape),
+                c => KeyPress::char(c),
+            };
+            assert!(self.app.page_key(key), "{c:?} is the page's");
+        }
+    }
+
+    /// `j` until the focused row's text is `label`.
+    fn focus_row(&mut self, label: &str) {
+        self.keys("gg");
+        for _ in 0..40 {
+            if self.focused_is(label) {
+                return;
+            }
+            self.keys("j");
+        }
+        panic!("no row {label}:\n{}", self.page());
+    }
+
+    fn focused_is(&self, label: &str) -> bool {
+        let Some(id) = self.app.find_page(|m| matches!(m, PageModel::Tests(_))) else { return false };
+        let Some(PageModel::Tests(page)) = self.app.pages.get(&id).map(|s| &s.model) else { return false };
+        match page.focus {
+            Some(fenix_tests::Item::Node(n)) => self.model().node(n).is_some_and(|n| n.found().label == label),
+            _ => false,
+        }
+    }
+}
+
+/// The page end to end, with the provider guest and `fake-test-runner`:
+/// `SPC T T` opens it on the project's tests; `r` runs the focused file,
+/// results come into the tree and the head; a group holding a failure
+/// opens; `h` and `l` fold; the filter narrows; `Enter` goes to a test's
+/// line beside the page; `o` opens *Test output* beside it; `x` stops a
+/// run, the head saying so; closed and opened again, it's as it was.
+#[test]
+fn the_page_runs_folds_filters_goes_to_a_test_stops_and_shows_the_output() {
+    let state = tempfile::tempdir().unwrap();
+    let a = "# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! err FAIL a.fake::fails a.fake:2 two and two\n";
+    let b = "# test slow\n#! wait\n";
+    let mut p = Project::new(&[("a.fake", a), ("b.fake", b)], "a.fake", state.path());
+    p.until("the first scan", |p| p.has("a.fake::fails") && p.has("b.fake::slow"));
+    let file = p.app.focused_buffer_id();
+    p.app.run_cmd("tests.open");
+    let page = p.app.focused_buffer_id();
+    assert!(matches!(p.app.pages.get(&page).map(|s| &s.model), Some(PageModel::Tests(_))), "the page, in the focused pane");
+    assert!(p.app.page_title(page).starts_with("*tests: "));
+    p.until("the page's first listing", |p| p.tests().run.is_none() && p.listings() == 1);
+    let text = p.page();
+    assert!(text.starts_with(" Tests  ") && text.contains("? 3") && text.contains("▸ a.fake") && text.contains("▸ b.fake"), "two files, closed, never run:\n{text}");
+    assert!(!p.app.modeline_text().contains("tests "), "nothing to say yet");
+
+    // `r` on a.fake.
+    p.focus_row("a.fake");
+    p.keys("r");
+    p.until("the run", |p| p.model().last_run().is_some_and(|e| matches!(e.kind, fenix_tests::RunKind::Tests(_))));
+    let text = p.page();
+    assert!(text.contains("✓ 1  ✗ 1  ? 1") && text.contains("▾ a.fake") && text.contains("fails") && text.contains("✓ 3.0 ms"), "the results, the failure's file opened:\n{text}");
+    p.app.status_message = None;
+    assert!(p.app.modeline_text().contains("✗ 1 test"), "the modeline's item: {}", p.app.modeline_text());
+    p.focus_row("fails");
+    let text = p.page();
+    assert!(text.contains("✗ failed") && text.contains("two and two") && text.contains("at a.fake:3"), "its details:\n{text}");
+    p.keys("y");
+    assert_eq!(p.app.tests.copied.as_deref(), Some("fails\na.fake:3\ntwo and two"));
+
+    // Folding: `h` to the file, `h` closes it, `l` opens it.
+    p.keys("h");
+    assert!(p.focused_is("a.fake"));
+    p.keys("h");
+    assert!(p.page().contains("▸ a.fake"));
+    p.keys("l");
+    assert!(p.page().contains("▾ a.fake"));
+
+    // The filter.
+    p.keys("/add\n");
+    let text = p.page();
+    assert!(text.contains("adds") && !text.contains("fails") && !text.contains("b.fake"), "{text}");
+    p.keys("\u{1b}");
+    assert!(p.page().contains("b.fake"), "Esc clears it");
+
+    // `Enter` on a test: its line, beside the page.
+    p.focus_row("fails");
+    p.keys("\n");
+    assert_eq!(p.app.windows().window_count(), 2, "beside the page");
+    assert_eq!(p.app.focused_buffer_id(), file);
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 1, "on the test's line");
+    assert!(p.app.pane_showing(page).is_some(), "the page stays");
+
+    // `o`: Test output, beside the page, in the pane there.
+    p.keys("o");
+    let output = p.tests().output.unwrap();
+    assert_eq!(p.app.focused_buffer_id(), output);
+    assert_eq!(p.app.windows().window_count(), 2);
+    assert!(p.app.pane_showing(page).is_some());
+
+    // `x` stops a run going; the head says so.
+    p.focus_row("b.fake");
+    p.keys("r");
+    p.until("the step", Project::step_running);
+    let text = p.page();
+    assert!(text.contains("running 0 of 1") && text.contains("x stops it"), "{text}");
+    p.app.status_message = None;
+    assert!(p.app.modeline_text().contains("tests 0/1"), "{}", p.app.modeline_text());
+    p.keys("x");
+    p.until("the stop", |p| p.tests().run.is_none());
+    assert!(p.page().contains("stopped "), "{}", p.page());
+
+    // Closed, and opened again: as it was.
+    p.keys("2");
+    p.keys("q");
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_none());
+    p.app.run_cmd("tests.open");
+    let text = p.page();
+    assert!(text.contains("fails") && !text.contains("b.fake"), "on the Failed tab still:\n{text}");
+}
+
+/// A place on a line of *Test output* is relative to the folder of the
+/// step that printed it: a listing's step runs in the provider's `/data`,
+/// so `Enter` on its `notes.txt:2` opens the extension's file, not one of
+/// the project's (§20, left for step 4). Lines trimmed past 16 MiB are
+/// counted as the buffer's lines, a cut line's pieces as one.
+#[test]
+fn enter_on_test_output_goes_to_a_place_in_its_steps_folder() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n"), ("notes.txt", "the project's\n")], "a.fake", state.path());
+    let data = p.app.wasm.installed[0].dir.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("fake-list.txt"), "out see notes.txt:2:1\nout FOUND a.fake::listed a.fake\n").unwrap();
+    std::fs::write(data.join("notes.txt"), "one\nthe provider's\n").unwrap();
+    p.scanned("a.fake::one");
+    let root = p.root.clone();
+    p.app.tests_list(&root);
+    p.until("the listing", |p| p.listings() == 1);
+    p.app.run_cmd("tests.output");
+    let output = p.tests().output.unwrap();
+    assert_eq!(p.app.focused_buffer_id(), output);
+    let line = p.output().lines().position(|l| l.contains("see notes.txt:2:1")).unwrap_or_else(|| panic!("{}", p.output()));
+    let at = p.app.open().buffer.line_start_char(line);
+    p.app.focused_buffer_and_cursor_mut().1.char_idx = at;
+    assert!(p.app.task_output_open_location_at_cursor());
+    let opened = p.app.open().buffer.path().map(refactor::identity).unwrap();
+    assert_eq!(opened, refactor::identity(&data.join("notes.txt")), "the step's folder's");
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 1);
+    // The header's line (no step's) is the project's.
+    assert_eq!(p.app.tests_output_base(output, 0), Some(root.clone()));
+
+    // Pieces of one line are one line of the count.
+    p.app.tests_output_reset(&root, "-- head --\n");
+    p.app.tests_output_text(&root, "a piece, ");
+    p.app.tests_output_text(&root, "its rest\nnext\n");
+    assert_eq!(p.tests().output_lines.len(), 3, "{:?}", p.tests().output_lines);
+    assert_eq!(p.output().lines().count(), 3);
+}
+
+/// With `tests.enabled` off nothing of the page exists: `SPC T` isn't
+/// offered and does nothing, `tests.open` says the explorer is off, the
+/// palette and `SPC h b` don't list the explorer's commands, the
+/// modeline has no item; turned off with the page open, the page goes.
+/// On, `SPC T` is offered with its keys, with Vim's leader and
+/// standard keys' `Ctrl+K` alike.
+#[test]
+fn with_the_explorer_off_nothing_of_the_page_exists() {
+    let state = tempfile::tempdir().unwrap();
+    let mut p = Project::new(&[("a.fake", "# test one\n")], "a.fake", state.path());
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let t = KeyPress::char('T');
+    let hints = |app: &App| app.which_key_pending().map(|w| w.hints.iter().map(|h| h.key).collect::<Vec<_>>()).unwrap_or_default();
+    p.app.press("SPC");
+    assert!(!hints(&p.app).contains(&t), "SPC T isn't offered");
+    p.app.press("T");
+    assert!(!p.app.leader_matcher.is_pending(), "and isn't a group");
+    p.app.run_cmd("tests.open");
+    assert!(p.app.status_message.as_ref().is_some_and(|m| m.text.contains("tests.enabled")));
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_none() && p.app.tests.projects.is_empty());
+    assert!(!p.app.command_candidates().iter().any(|c| c.payload.starts_with("tests.")), "not in the palette");
+    p.app.open_bindings_picker();
+    let listed = match &p.app.active_picker {
+        Some(ActivePicker::Bindings(s)) => s.visible_rows(0, s.len()).any(|(_, c)| c.payload.starts_with("tests.")),
+        _ => panic!("the bindings picker"),
+    };
+    assert!(!listed, "nor in SPC h b");
+    p.app.picker_cancel();
+    p.app.status_message = None;
+    assert!(!p.app.modeline_text().contains("tests"), "{}", p.app.modeline_text());
+    assert_eq!(p.app.tests_views_due(Instant::now()), (false, None), "nothing to do per wake");
+
+    // On: SPC T and its keys.
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    p.app.press("SPC");
+    assert!(hints(&p.app).contains(&t));
+    p.app.press("T");
+    assert!(p.app.leader_matcher.is_pending());
+    let under: Vec<char> = hints(&p.app).into_iter().filter_map(|k| match k.code { fenix_keymap::KeyCode::Char(c) => Some(c), _ => None }).collect();
+    for key in ['T', 't', 'f', 'a', 'F', 'l', 'k', 'o'] {
+        assert!(under.contains(&key), "SPC T {key}: {under:?}");
+    }
+    p.app.press("T");
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_some(), "SPC T T opens it");
+    assert!(p.app.command_candidates().iter().any(|c| c.payload == "tests.open" && c.label.starts_with("Tests ›")), "the palette files them under Tests");
+    // Standard keys: Ctrl+K T T.
+    p.app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+    p.app.sync_key_policy();
+    p.app.press("C-k");
+    p.app.press("T");
+    assert!(p.app.leader_matcher.is_pending() && p.app.leader_matcher.label() == Some("tests"), "Ctrl+K T is the tests group");
+    p.app.press("Esc");
+
+    // Turned off with the page open: it goes.
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    assert!(p.app.tests_views_due(Instant::now()).0);
+    assert!(p.app.find_page(|m| matches!(m, PageModel::Tests(_))).is_none(), "closed");
+    p.app.status_message = None;
+    assert!(!p.app.modeline_text().contains("tests"), "{}", p.app.modeline_text());
+}
+
+/// The page's colours in a dark and a light theme: a pass, a failure and
+/// what's muted are each their own, and read on the page.
+#[test]
+fn the_pages_marks_read_in_a_dark_and_a_light_theme() {
+    let state = tempfile::tempdir().unwrap();
+    let a = "# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! err FAIL a.fake::fails a.fake:2 two and two\n";
+    let mut p = Project::new(&[("a.fake", a)], "a.fake", state.path());
+    p.scanned("a.fake::fails");
+    p.app.tests_run_file();
+    p.until("the run", Project::ended);
+    p.app.run_cmd("tests.open");
+    let is_light = |t: &crate::theme::Theme| crate::theme::luminance_of(t.bg) > 0.5;
+    let dark = crate::theme::all().iter().find(|t| !is_light(t) && t.name != "TempleOS").unwrap();
+    let light = crate::theme::all().iter().find(|t| is_light(t) && t.name != "TempleOS").unwrap();
+    for theme in [*dark, *light] {
+        p.app.theme = theme;
+        let text = p.page();
+        let id = p.focus_page();
+        let ranges = p.app.page_highlights(id, 0, 30);
+        let buffer = p.app.buffers.get(id).unwrap().buffer.text();
+        let color_of = |needle: &str| {
+            let at = buffer.find(needle).unwrap_or_else(|| panic!("{needle} in\n{text}"));
+            ranges.iter().find(|(r, _)| r.start <= at && at < r.end).map(|(_, c)| *c).unwrap_or_else(|| panic!("{needle} uncoloured"))
+        };
+        let (pass, fail) = (color_of("✓ 3.0 ms"), color_of("✗ failed"));
+        assert_ne!(pass, fail, "{}", theme.name);
+        for c in [pass, fail] {
+            let ratio = crate::theme::contrast_of(glyphon_to_rgba(c), theme.bg);
+            assert!(ratio >= 3.0, "{}: {c:?} on its page: {ratio:.2}:1", theme.name);
+        }
+    }
+}
+
+// The tests in the file (step 5).
+
+#[test]
+fn a_place_is_a_file_of_the_project_or_a_full_path_never_one_that_climbed_out() {
+    let root = Path::new(if cfg!(windows) { r"C:\src\orbit" } else { "/src/orbit" });
+    assert_eq!(place_path(root, "src/lib.rs"), Some(root.join("src/lib.rs")));
+    assert_eq!(place_path(root, r"src\lib.rs"), Some(root.join("src/lib.rs")));
+    assert_eq!(place_path(root, "/project/../x.rs"), None, "it climbed out of the project: no place, never opened");
+    assert_eq!(place_path(root, "/project"), None);
+    assert_eq!(place_path(root, ""), None);
+    let outside = if cfg!(windows) { r"C:\rust\lib\core.rs" } else { "/rust/lib/core.rs" };
+    assert_eq!(place_path(root, outside), Some(PathBuf::from(outside)));
+    // A verbatim path is the plain one it names, under the project or not.
+    let drive = Path::new("C:/src/orbit");
+    assert_eq!(model_path(r"\\?\C:\src\orbit\src\lib.rs", drive, drive), "src/lib.rs");
+    let share = Path::new("//server/share/orbit");
+    assert_eq!(model_path(r"\\?\UNC\server\share\orbit\a.rs", share, share), "a.rs");
+    assert_eq!(file::short_message("assertion failed:\n  two\tand two"), "assertion failed: two and two");
+    let cut = file::short_message(&"x".repeat(60));
+    assert!(cut.chars().count() == 48 && cut.ends_with('…'), "{cut}");
+}
+
+/// A file of `lines` lines, open and focused, in a project of its own,
+/// the explorer on; the model given `tests` (id, line) as a provider's
+/// scan of it, with no extension, and the buffer seen.
+fn served(lines: usize, tests: &[(&str, u32)]) -> (App, PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = refactor::identity(dir.path());
+    std::fs::create_dir_all(root.join(".fenix")).unwrap();
+    std::fs::write(root.join(".fenix/project.ini"), "").unwrap();
+    let text: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(root.join("a.fake"), text).unwrap();
+    let mut app = App::with_file(Some(root.join("a.fake").to_string_lossy().into_owned()));
+    app.project_root = Some(root.clone());
+    app.line_number_mode = LineNumberMode::Absolute;
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    let model = &mut app.tests_project(&root).model;
+    model.add_provider(&provider(), "fake");
+    model.scan(&provider(), "a.fake", tests.iter().map(|(id, line)| fenix_tests::Found::new(*id, None, *id, Kind::Test).at("a.fake", *line, None)).collect());
+    app.tests_tick(Instant::now());
+    (app, root, dir)
+}
+
+/// The model's tests all run, each given its report: as a host would,
+/// with one step and no runner.
+fn ran(model: &mut Model, reports: Vec<fenix_tests::Report>) {
+    assert_ne!(model.request(Selection::All, fenix_tests::Mode::Queue), fenix_tests::Requested::Nothing);
+    let mut reports = Some(reports);
+    let mut now = 1_000;
+    for _ in 0..100 {
+        now += 10;
+        match model.next(now) {
+            None => return,
+            Some(fenix_tests::Action::Plan { run, .. }) => model.planned(run, Ok(fenix_tests::Plan { steps: vec![fenix_tests::Step::new("all", &[])], list_after: false })),
+            Some(fenix_tests::Action::Step { run, step, .. }) => model.step_ended(run, step, fenix_tests::StepEnd::Exited(Some(0)), reports.take().unwrap_or_default()),
+            Some(_) => {}
+        }
+    }
+    panic!("the run never ended");
+}
+
+fn rows_of(app: &App, rows: usize) -> Vec<String> {
+    let gutter = app.gutter_chars(app.open());
+    let spans = app.content_spans(app.open(), 0, rows, gutter, None, &[], 0, &TabStops::Fixed(4), 0);
+    spans.iter().map(|(s, _)| s.as_str()).collect::<String>().split('\n').map(str::to_string).collect()
+}
+
+/// The test column's width and its cell beside the blame, the numbers,
+/// the fold column and a breakpoint, in every combination the gutter's
+/// own tests cover: one cell more, left of the numbers, only in a file
+/// with tests, only with line numbers, the explorer and `tests.gutter`
+/// on; a click on a mark runs it, a click beside it doesn't; a
+/// breakpoint drawn over the cell wins its line.
+#[test]
+fn the_test_column_is_one_cell_left_of_the_numbers_in_every_combination() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Tests {
+        Served,
+        Without,
+        ExplorerOff,
+        GutterOff,
+    }
+    for numbers in [LineNumberMode::Absolute, LineNumberMode::Relative, LineNumberMode::Off] {
+        for fold in [true, false] {
+            for blame in [false, true] {
+                for tests in [Tests::Served, Tests::Without, Tests::ExplorerOff, Tests::GutterOff] {
+                    for breakpoint in [false, true] {
+                        let what = format!("{numbers:?}, folds {fold}, blame {blame}, {tests:?}, breakpoint {breakpoint}");
+                        let (mut app, root, _dir) = served(12, if tests == Tests::Without { &[] } else { &[("a.fake::t", 4)] });
+                        app.line_number_mode = numbers;
+                        app.config.set_value("editor.fold_markers", Some(fenix_config::Value::Bool(fold)));
+                        let path = app.open().buffer.path().unwrap().to_path_buf();
+                        if blame {
+                            app.test_blame(&path, 12);
+                        }
+                        match tests {
+                            Tests::ExplorerOff => app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false))),
+                            Tests::GutterOff => app.config.set_value("tests.gutter", Some(fenix_config::Value::Bool(false))),
+                            _ => {}
+                        }
+                        if breakpoint {
+                            let at = app.open().buffer.line_start_char(4);
+                            app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+                            app.debug_toggle_breakpoint();
+                            app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+                        }
+                        let blame_w = if blame { git_editor::BLAME_WIDTH } else { 0 };
+                        let on = numbers != LineNumberMode::Off;
+                        let base = if on { 2 + 1 + blame_w + usize::from(fold) } else { blame_w };
+                        let column = on && tests == Tests::Served;
+                        let gutter = app.gutter_chars(app.open());
+                        assert_eq!(gutter, base + usize::from(column), "{what}");
+                        let row: Vec<char> = rows_of(&app, 12)[4].chars().collect();
+                        assert_eq!(row[gutter..].iter().collect::<String>(), "line 4", "{what}: the text starts where it did");
+                        let drawn = column && !(breakpoint && !blame);
+                        if column {
+                            assert_eq!(row[blame_w], if drawn { '?' } else { ' ' }, "{what}");
+                        }
+                        if on {
+                            let number: String = row[blame_w + usize::from(column)..gutter - 1 - usize::from(fold)].iter().collect();
+                            assert_eq!(number.trim_start(), if numbers == LineNumberMode::Relative { "4" } else { "5" }, "{what}: {number:?}");
+                            assert_eq!(number.len(), 2, "{what}: the numbers keep their width");
+                        }
+                        let pane = app.focused_pane_id();
+                        assert!(!app.tests_mark_click(pane, 4, blame_w + 1), "{what}: the number isn't the mark");
+                        assert!(!app.tests_mark_click(pane, 1, blame_w), "{what}: a line without a mark");
+                        assert_eq!(app.tests_mark_click(pane, 4, blame_w), drawn, "{what}");
+                        let asked = app.tests.projects.get(&root).and_then(|p| p.model.last_selection()).map(<[Selection]>::to_vec);
+                        assert_eq!(asked.is_some(), drawn, "{what}: {asked:?}");
+                        if drawn {
+                            assert_eq!(asked.unwrap(), [Selection::Nodes(vec![TestKey::new(&provider(), "a.fake::t")])]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Marks: the worst state of what starts on a line, in its colour, dimmed
+/// when stale; and the right click's items on a test's lines only.
+#[test]
+fn a_marks_state_colour_and_the_right_clicks_items() {
+    let (mut app, root, _dir) = served(12, &[("a.fake::ok", 1), ("a.fake::bad", 4)]);
+    let model = &mut app.tests.projects.get_mut(&root).unwrap().model;
+    let failed = fenix_tests::Ended { message: Some("two and two".into()), ..fenix_tests::Ended::new("a.fake::bad", Outcome::Failed) };
+    ran(model, vec![fenix_tests::Report::Ended(fenix_tests::Ended::new("a.fake::ok", Outcome::Passed)), fenix_tests::Report::Ended(failed)]);
+    let cells = app.tests_cells(app.open(), 0..=11).unwrap();
+    let role = |r| crate::app::pages::role_color(app.theme, r);
+    assert_eq!(cells.at(1).map(|c| (c.0, c.1)), Some(('✓', role(crate::page::Role::Good))));
+    assert_eq!(cells.at(4).map(|c| (c.0, c.1)), Some(('✗', role(crate::page::Role::Bad))));
+    assert!(cells.at(0).is_none() && cells.at(5).is_none());
+    let labels = |app: &App| app.text_menu_items().into_iter().map(|i| i.label).collect::<Vec<_>>();
+    assert!(!labels(&app).contains(&"Run test".to_string()), "line 1 of a.fake is in no test");
+    let at = app.open().buffer.line_start_char(4);
+    app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+    let items = labels(&app);
+    let after = items.iter().position(|l| l == "Toggle breakpoint").unwrap();
+    assert_eq!(&items[after + 1..after + 4], ["Run test", "Debug test", "Show in Tests"], "beside Toggle breakpoint, Debug test after Run test: {items:?}");
+    // Saved: stale, dimmed, its glyph kept.
+    let path = app.open().buffer.path().unwrap().to_path_buf();
+    app.tests_file_saved(&path);
+    let cells = app.tests_cells(app.open(), 0..=11).unwrap();
+    assert_eq!(cells.at(4).map(|c| (c.0, c.1)), Some(('✗', role(crate::page::Role::Muted))));
+    // Show in Tests: the page, on the test.
+    app.run_menu_action(crate::app::mouse::MenuAction::ShowTest);
+    let id = app.find_page(|m| matches!(m, PageModel::Tests(_))).expect("the tests page");
+    let Some(PageModel::Tests(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+    let bad = app.tests.projects[&root].model.find(&TestKey::new(&provider(), "a.fake::bad"));
+    assert_eq!(page.focus, bad.map(fenix_tests::Item::Node));
+}
+
+/// With `tests.enabled` off the file shows nothing of the explorer: no
+/// column and no width, no marks, no results after the lines, no
+/// problems, no menu items, a click on the cell does nothing; and what
+/// was shown goes at the next wake. Never turned on, nothing is kept to
+/// look at as a frame is drawn.
+#[test]
+fn with_the_explorer_off_the_file_shows_nothing_of_it() {
+    let mut never = App::with_file(None);
+    assert!(never.tests.by_path.is_empty() && never.tests.projects.is_empty());
+    assert!(never.tests_cells(never.open(), 0..=10).is_none());
+    assert_eq!(never.tests_views_due(Instant::now()), (false, None));
+
+    let (mut app, root, _dir) = served(12, &[("a.fake::bad", 4)]);
+    let failed = fenix_tests::Ended { message: Some("two and two".into()), ..fenix_tests::Ended::new("a.fake::bad", Outcome::Failed) };
+    ran(&mut app.tests.projects.get_mut(&root).unwrap().model, vec![fenix_tests::Report::Ended(failed)]);
+    app.tests_views_due(Instant::now() + Duration::from_secs(1));
+    let path = app.open().buffer.path().unwrap().to_path_buf();
+    let canonical = refactor::identity(&path);
+    let ours = |app: &App| app.diagnostics.for_path(&canonical).len();
+    let inline = |app: &App| app.wasm.decorations.get(&app.focused_buffer_id()).is_some_and(|sets| sets.iter().any(|(who, _)| who == file::TESTS_OWNER));
+    assert_eq!(ours(&app), 1);
+    assert!(inline(&app));
+    let with = app.gutter_chars(app.open());
+
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    assert_eq!(app.gutter_chars(app.open()), with - 1, "no column, no width");
+    assert!(app.tests_cells(app.open(), 0..=11).is_none());
+    assert!(!rows_of(&app, 12)[4].contains('✗'));
+    let at = app.open().buffer.line_start_char(4);
+    app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+    assert!(app.tests_test_here().is_none());
+    assert!(!app.text_menu_items().iter().any(|i| i.label == "Run test" || i.label == "Debug test" || i.label == "Show in Tests"));
+    assert!(!app.tests_mark_click(app.focused_pane_id(), 4, 0));
+    assert!(app.tests_views_due(Instant::now()).0, "a frame to take it away");
+    assert_eq!(ours(&app), 0, "no problems");
+    assert!(!inline(&app), "no results after the lines");
+    assert_eq!(app.tests_views_due(Instant::now()), (false, None), "then nothing, each wake");
+}
+
+/// What a frame costs with 10,000 tests in the project and 5,000 in the
+/// open file, a fifth of them failed: the column's width, its marks and
+/// the rows drawn, the test the cursor is in at each move; and the wake's
+/// work when the model changes (problems, the results after the lines).
+/// The marks cost the lines drawn: a frame at the file's end costs what
+/// one at its start does.
+#[test]
+fn a_frames_cost_with_5000_tests_in_the_file_is_the_lines_it_draws() {
+    let lines = 10_000usize;
+    let ids: Vec<String> = (0..5_000).map(|i| format!("a.fake::t{i}")).collect();
+    let tests: Vec<(&str, u32)> = ids.iter().enumerate().map(|(i, id)| (id.as_str(), (i * 2) as u32)).collect();
+    let (mut app, root, _dir) = served(lines, &tests);
+    {
+        let model = &mut app.tests.projects.get_mut(&root).unwrap().model;
+        model.scan(&provider(), "b.fake", (0..5_000).map(|i| fenix_tests::Found::new(format!("b.fake::t{i}"), None, "t", Kind::Test).at("b.fake", i, None)).collect());
+        let reports = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let outcome = if i % 5 == 0 { Outcome::Failed } else { Outcome::Passed };
+                fenix_tests::Report::Ended(fenix_tests::Ended { message: (outcome == Outcome::Failed).then(|| format!("assertion failed: {i}")), ..fenix_tests::Ended::new(id, outcome) })
+            })
+            .collect();
+        ran(model, reports);
+        assert_eq!(model.summary().counts.tests(), 10_000);
+    }
+    let started = Instant::now();
+    assert!(app.tests_in_files(std::slice::from_ref(&root)));
+    let wake = started.elapsed();
+
+    let frame = |app: &App, top: usize| {
+        let ob = app.open();
+        let gutter = app.gutter_chars(ob);
+        let spans = app.content_spans(ob, top, 60, gutter, None, &[], top, &TabStops::Fixed(4), 0);
+        assert_eq!(spans.iter().any(|(s, _)| s == "✗"), app.tests_enabled());
+    };
+    let time = |app: &App, top: usize| {
+        let started = Instant::now();
+        for _ in 0..100 {
+            frame(app, top);
+        }
+        started.elapsed() / 100
+    };
+    let (start, end) = (time(&app, 0), time(&app, lines - 70));
+    // The cursor moving: the test it's in, at every line of a screen.
+    let model = &app.tests.projects[&root].model;
+    let started = Instant::now();
+    for line in 5_000..5_060 {
+        assert!(model.test_at("a.fake", line).is_some());
+    }
+    let moves = started.elapsed() / 60;
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let off = time(&app, 0);
+    eprintln!("10,000 tests, 5,000 in the file: a frame's rows {start:?} at its start, {end:?} at its end, {off:?} with the explorer off; a cursor move's test_at {moves:?}; the wake after a run {wake:?}");
+    assert!(start < Duration::from_millis(20) && end < Duration::from_millis(20), "{start:?} {end:?}");
+    assert!(end < start * 4 + Duration::from_millis(1), "the file's end costs what its start does: {start:?} {end:?}");
+    assert!(moves < Duration::from_millis(5), "{moves:?}");
+    assert!(wake < Duration::from_secs(2), "{wake:?}");
+}
+
+impl Project {
+    /// A wake past the tenth of a second the views wait for.
+    fn wake(&mut self) {
+        std::thread::sleep(Duration::from_millis(120));
+        self.app.tests_views_due(Instant::now());
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        refactor::identity(&self.root.join(name))
+    }
+
+    /// The problems on file `name`: (source, line, message).
+    fn problems(&self, name: &str) -> Vec<(String, u32, String)> {
+        let mut out: Vec<(String, u32, String)> = self.app.diagnostics.for_path(&self.path(name)).into_iter().map(|d| (d.source.unwrap_or_default(), d.range.start.line, d.message)).collect();
+        out.sort();
+        out
+    }
+
+    /// The results after the lines of the focused buffer: (line, text, role).
+    fn inline(&self) -> Vec<(usize, String, crate::page::Role)> {
+        let ob = self.app.open();
+        let sets = self.app.wasm.decorations.get(&self.app.focused_buffer_id());
+        sets.into_iter()
+            .flatten()
+            .filter(|(who, _)| who == file::TESTS_OWNER)
+            .flat_map(|(_, set)| set.iter())
+            .filter_map(|d| match &d.look {
+                crate::decorations::Look::Text { text, role, .. } => Some((ob.buffer.line_col(&Cursor { char_idx: d.start, sticky_col: 0 }).0, text.clone(), *role)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn glyph(&self, line: usize) -> Option<char> {
+        self.app.tests_cells(self.app.open(), line..=line).and_then(|c| c.at(line)).map(|c| c.0)
+    }
+}
+
+/// The file end to end, with the provider guest and `fake-test-runner`: a
+/// click on a test's mark runs it; its failure is shown after its line,
+/// cleaned and cut, and is a problem at its place beside an extension's
+/// own for the same file, neither replacing the other; confirming it in
+/// the problems' list goes to its line; a run that passes clears it; an
+/// edit moves the marks with the file's next scan and leaves them as they
+/// were, and a save makes them stale: dimmed, the problem gone.
+#[test]
+fn a_failure_from_the_gutter_is_shown_at_its_line_and_as_a_problem_beside_an_extensions() {
+    let state = tempfile::tempdir().unwrap();
+    let long = "assertion failed: left == right, left: 2, right: 4, at the second try";
+    let failing = format!("# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! err FAIL a.fake::fails a.fake:1 {long}\n");
+    let passing = "# test adds\n# test fails\n#! out PASS a.fake::adds 3ms\n#! out PASS a.fake::fails 1ms\n";
+    let mut p = Project::new(&[("a.fake", &failing)], "a.fake", state.path());
+    // The jump below opens the file again, which moves an old
+    // `.fenix/project.ini` away: the project keeps a marker after it.
+    std::fs::write(p.root.join(".fenix/settings.toml"), "").unwrap();
+    p.scanned("a.fake::fails");
+    p.app.tests_tick(Instant::now());
+    assert!(p.app.tests_column(p.app.open()), "a file with tests has the column");
+    assert_eq!(p.glyph(1), Some('?'));
+    // An extension's own problem on the same file.
+    let canonical = p.path("a.fake");
+    let theirs = |message: &str| lsp_types::Diagnostic { range: lsp_types::Range::default(), severity: Some(lsp_types::DiagnosticSeverity::WARNING), source: Some("lint".into()), message: message.into(), ..Default::default() };
+    let key = LspKey { server: LspServer::Additional(super::super::wasm_host::problems_key("test.lint")), root: p.root.clone() };
+    p.app.publish_diagnostics(canonical.clone(), key.clone(), "test.lint", vec![theirs("unused")]);
+
+    // A click on its mark runs it.
+    let pane = p.app.focused_pane_id();
+    assert!(p.app.tests_mark_click(pane, 1, 0));
+    p.until("the run", Project::ended);
+    assert_eq!(p.state("a.fake::fails"), State::Failed);
+    p.wake();
+    assert_eq!(p.glyph(1), Some('✗'));
+    assert_eq!(p.glyph(0), Some('✓'));
+    let shown = format!(" ✗ {}…", &long[..47]);
+    assert_eq!(p.inline(), [(1, shown.clone(), crate::page::Role::Bad)], "after its line, cut at 48 characters");
+    let problems = p.problems("a.fake");
+    assert_eq!(problems.iter().map(|(_, l, m)| (*l, m.as_str())).collect::<Vec<_>>(), [(1, long), (0, "unused")], "both, neither in the other's place: {problems:?}");
+    let ours = p.app.diagnostics.for_path(&canonical).into_iter().find(|d| d.source.as_deref() != Some("lint")).unwrap();
+    let runner = crate::tests_page::clean(p.model().providers()[0].name);
+    assert_eq!((ours.severity, ours.code.clone(), ours.source.clone()), (Some(lsp_types::DiagnosticSeverity::ERROR), Some(lsp_types::NumberOrString::String("fails".into())), Some(runner)), "an error, its code the test's label, its source the runner");
+    // The extension sets its problems again: ours stay; and the other way.
+    p.app.publish_diagnostics(canonical.clone(), key.clone(), "test.lint", vec![theirs("unused again")]);
+    assert_eq!(p.problems("a.fake").len(), 2);
+
+    // The problems' list goes to it: ours first, an error.
+    p.app.picker_problems();
+    let Some(ActivePicker::Problems(list)) = &p.app.active_picker else { panic!("the problems' list") };
+    let rows: Vec<String> = list.visible_rows(0, list.len()).map(|(_, c)| c.label.clone()).collect();
+    assert!(rows.len() == 2 && rows[0].starts_with("error") && rows[0].contains("a.fake:2") && rows[0].contains("assertion failed") && rows[1].contains("unused again"), "{rows:?}");
+    let end = p.app.open().buffer.line_start_char(3);
+    p.app.test_set_cursor(Cursor { char_idx: end, sticky_col: 0 });
+    p.app.picker_confirm();
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 1, "at the failure's line");
+
+    // A run that passes clears it; theirs stays.
+    // The runner reads the file; the buffer keeps its text. Noted as
+    // Fenix's own write, so the save below isn't refused as a change made
+    // elsewhere.
+    std::fs::write(p.root.join("a.fake"), passing).unwrap();
+    let id = p.app.focused_buffer_id();
+    p.app.note_disk_state(id);
+    p.app.tests_run_file();
+    p.until("the passing run", |p| p.state("a.fake::fails") == State::Passed && p.tests().run.is_none());
+    p.wake();
+    assert_eq!(p.problems("a.fake"), [("lint".to_string(), 0, "unused again".to_string())]);
+    assert_eq!(p.inline(), [], "a passed test says nothing with tests.inline = failed");
+    assert_eq!(p.glyph(1), Some('✓'));
+    p.app.config.set_value("tests.inline", Some(fenix_config::Value::Text("all".into())));
+    p.wake();
+    assert_eq!(p.inline().iter().map(|(l, t, _)| (*l, t.clone())).collect::<Vec<_>>(), [(0, " ✓ 3.0 ms".to_string()), (1, " ✓ 1.0 ms".to_string())]);
+    p.app.config.set_value("tests.inline", Some(fenix_config::Value::Text("failed".into())));
+
+    // Failing again; then an edit above it: the marks move with the next
+    // scan, as they were, not stale.
+    std::fs::write(p.root.join("a.fake"), &failing).unwrap();
+    p.app.note_disk_state(id);
+    p.app.tests_run_file();
+    p.until("the failing run", |p| p.state("a.fake::fails") == State::Failed && p.tests().run.is_none());
+    p.wake();
+    assert_eq!(p.problems("a.fake").len(), 2);
+    p.app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+    let (buffer, cursor) = p.app.focused_buffer_and_cursor_mut();
+    buffer.insert_char(cursor, '\n');
+    p.until("the edit's scan", |p| p.model().node(p.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap()).unwrap().found().line == Some(2));
+    p.wake();
+    assert_eq!((p.glyph(1), p.glyph(2)), (Some('✓'), Some('✗')), "moved with the file");
+    let fails = p.model().node(p.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap()).unwrap();
+    assert!(!fails.stale(), "an edit doesn't make a result stale: the runner reads the file as saved");
+    assert_eq!(p.inline(), [(2, shown.clone(), crate::page::Role::Bad)]);
+
+    // Saved: stale, dimmed; the problem goes, the result stays after its
+    // line, muted; the extension's problem stays.
+    p.app.save();
+    p.wake();
+    let fails = p.model().node(p.model().find(&TestKey::new(&provider(), "a.fake::fails")).unwrap()).unwrap();
+    assert!(fails.stale());
+    assert_eq!(p.app.tests_cells(p.app.open(), 2..=2).and_then(|c| c.at(2)).map(|c| c.1), Some(crate::app::pages::role_color(p.app.theme, crate::page::Role::Muted)));
+    assert_eq!(p.problems("a.fake"), [("lint".to_string(), 0, "unused again".to_string())]);
+    assert_eq!(p.inline(), [(2, shown, crate::page::Role::Muted)]);
+
+    // An edit not saved, then the buffer closed without saving: the file
+    // has no unsaved edits any more (§8.4).
+    let (buffer, cursor) = p.app.focused_buffer_and_cursor_mut();
+    buffer.insert_char(cursor, 'x');
+    p.until("the unsaved edit seen", |p| p.model().is_unsaved("a.fake"));
+    p.app.buffers.close(id);
+    p.app.tests_tick(Instant::now());
+    assert!(!p.model().is_unsaved("a.fake"));
+    assert!(p.app.tests.by_path.is_empty() && p.app.tests.inline.is_empty());
+}
+
+// Debugging a test (step 6, `debug`).
+
+/// A debug adapter already listening, as a launch's `debugServer` names
+/// one (a recorded exchange's shape: `initialize`, `launch`, then
+/// `initialized` and `configurationDone`): it hands on `launch`'s
+/// arguments and answers what follows until Fenix lets it go.
+fn fake_adapter() -> (u16, mpsc::Receiver<serde_json::Value>) {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else { return };
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let write = |message: serde_json::Value| {
+            let body = message.to_string();
+            let _ = (&stream).write_all(format!("Content-Length: {}\r\n\r\n{body}", body.len()).as_bytes());
+        };
+        let mut seq = 1;
+        while let Some(frame) = read_lsp_frame(&mut reader) {
+            let asked: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            if asked["type"] != "request" {
+                continue;
+            }
+            let body = if asked["command"] == "initialize" { serde_json::json!({"supportsConfigurationDoneRequest": true}) } else { serde_json::json!({}) };
+            seq += 1;
+            write(serde_json::json!({"seq": seq, "type": "response", "request_seq": asked["seq"], "success": true, "command": asked["command"], "body": body}));
+            if asked["command"] == "launch" {
+                let _ = tx.send(asked["arguments"].clone());
+                seq += 1;
+                write(serde_json::json!({"seq": seq, "type": "event", "event": "initialized"}));
+            }
+        }
+    });
+    (port, rx)
+}
+
+impl Project {
+    /// A project of `files` whose provider's launches name an adapter
+    /// listening (`fake-debug.json`, which the guest's launches take).
+    fn debugging(files: &[(&str, &str)], focused: &str, state: &Path) -> (Project, mpsc::Receiver<serde_json::Value>) {
+        let (port, launches) = fake_adapter();
+        let json = format!("{{\"debugServer\": {port}}}");
+        let mut all: Vec<(&str, &str)> = files.to_vec();
+        all.push(("fake-debug.json", &json));
+        (Project::new(&all, focused, state), launches)
+    }
+
+    /// `launch`'s arguments, once the adapter has them.
+    fn launched(&mut self, launches: &mpsc::Receiver<serde_json::Value>) -> serde_json::Value {
+        let started = Instant::now();
+        loop {
+            if let Ok(arguments) = launches.try_recv() {
+                return arguments;
+            }
+            assert!(started.elapsed() < Duration::from_secs(120), "no launch: {:?}\n--- Test output ---\n{}", self.app.status_message.as_ref().map(|m| m.text.clone()), self.output());
+            std::thread::sleep(Duration::from_millis(5));
+            self.app.pump_wasm();
+            self.app.tests_tick(Instant::now());
+            let events: Vec<_> = self.app.dap_unread.iter().flat_map(|(generation, rx)| rx.try_iter().map(|e| (*generation, e)).collect::<Vec<_>>()).collect();
+            for (generation, event) in events {
+                self.app.handle_user_event(FenixUserEvent::Dap { generation, event });
+            }
+        }
+    }
+
+    fn said(&self) -> String {
+        self.app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+    }
+
+    fn debug_done(&self) -> bool {
+        self.tests().debug.is_none()
+    }
+
+    fn builds(&self) -> Vec<fenix_tests::RunEnd> {
+        self.tests().ended_runs.iter().filter(|e| matches!(e.kind, fenix_tests::RunKind::Build { .. })).cloned().collect()
+    }
+}
+
+/// `d` on the page, a test whose provider launches it now: the session
+/// starts from its launch, its paths and `${data}` Fenix's, its file open
+/// at its line beside the page, nothing built, and it isn't the project's
+/// last launch (`SPC u u` doesn't start it again). One its provider
+/// refuses says why and stops nothing: the provider runs tests after.
+#[test]
+fn a_test_is_debugged_from_the_launch_its_provider_gives() {
+    let state = tempfile::tempdir().unwrap();
+    let a = "\n\n# each launched\n# test plain\n#! out PASS a.py::plain 1ms\n";
+    let (mut p, launches) = Project::debugging(&[("a.py", a)], "a.py", state.path());
+    p.scanned("a.py::plain");
+    let file = p.app.focused_buffer_id();
+    p.app.run_cmd("tests.open");
+    p.until("the page's first listing", |p| p.tests().run.is_none() && p.listings() == 1);
+    assert!(p.page().contains("d debug"), "on the key strip:\n{}", p.page());
+    p.focus_row("launched");
+    p.keys("d");
+    let run = p.tests().debug.as_ref().expect("asked").run;
+    let launch = p.launched(&launches);
+    let data = p.app.wasm.installed[0].dir.join("data");
+    assert_eq!(launch["program"], serde_json::json!(data.join("fake-debugger")), "{launch}");
+    assert_eq!(launch["args"], serde_json::json!(["a.py::launched", format!("run {}", run.0)]));
+    assert_eq!(launch["env"]["AT"], serde_json::json!(data.to_string_lossy()), "${{data}} filled in");
+    assert_eq!(launch["data"], serde_json::json!("{\"template\":\"launched\"}"), "its attributes, its data given back");
+    assert!(launch.get("debugServer").is_none(), "not sent to the adapter");
+    assert!(p.app.debug_session.is_some());
+    assert_eq!(p.app.focused_buffer_id(), file, "its file, beside the page");
+    assert_eq!(p.app.open().buffer.line_col(&p.app.cursor()).0, 2, "at its line");
+    assert!(p.app.debug_last_launch.is_empty(), "not remembered: {:?}", p.app.debug_last_launch);
+    assert!(p.builds().is_empty() && p.debug_done());
+    p.app.debug_stop();
+    p.app.debug_session = None;
+
+    // A refusal: said, nothing stopped.
+    p.open("a.py");
+    let at = p.app.open().buffer.line_start_char(3);
+    p.app.test_set_cursor(Cursor { char_idx: at, sticky_col: 0 });
+    p.app.run_cmd("tests.debug_here");
+    assert!(p.tests().debug.is_some(), "{}", p.said());
+    p.until("the refusal", Project::debug_done);
+    assert_eq!(p.said(), "plain can't be debugged: a.py::plain can't be debugged");
+    assert!(p.app.debug_session.is_none());
+    p.app.tests_run_file();
+    p.until("a run after", |p| p.model().last_run().is_some());
+    assert_eq!(p.state("a.py::plain"), State::Passed, "its provider still runs");
+}
+
+/// `SPC T d` on a test its provider builds first: the plan runs as the
+/// run the first `tests-launch` was asked with, its output in *Test
+/// output*, read by the provider; then it's asked again with the same
+/// run, and the launch it gives names the binary its build said, as a
+/// `/project/...` path mapped to the project's. A second debug while one
+/// is building is refused; a build asked while a run goes waits for it.
+#[test]
+fn a_test_built_first_is_debugged_with_what_its_build_said() {
+    let state = tempfile::tempdir().unwrap();
+    let ok = "# test build_ok\n#! sleep 300\n#! out BUILT /project/target/fake-bin\n";
+    let slow = "# test slow\n#! sleep 1500\n#! out PASS slow.py::slow 1ms\n";
+    let (mut p, launches) = Project::debugging(&[("ok.py", ok), ("slow.py", slow)], "slow.py", state.path());
+    p.scanned("slow.py::slow");
+    p.open("ok.py");
+    p.scanned("ok.py::build_ok");
+    p.app.tests_request(&p.root.clone(), vec![Selection::File("slow.py".into())], "slow.py");
+    p.until("the run", Project::step_running);
+    p.app.tests_debug_here();
+    let run = p.tests().debug.as_ref().expect("asked").run;
+    p.until("the build waiting", |p| p.tests().debug.as_ref().is_some_and(|d| d.building));
+    assert!(p.said().contains("waits for the run going"), "{}", p.said());
+    p.app.tests_debug_here();
+    assert_eq!(p.said(), "already building build_ok -- SPC T k lets it go");
+    let launch = p.launched(&launches);
+    assert_eq!(p.state("slow.py::slow"), State::Passed, "the run going went first");
+    // As a string: a provider's `/project/...` comes with this machine's
+    // separators throughout, as a path written here would.
+    assert_eq!(launch["program"], serde_json::json!(p.root.join("target").join("fake-bin")), "{launch}");
+    assert_eq!(launch["cwd"].as_str().map(Path::new), Some(p.root.as_path()), "/project is the project");
+    assert_eq!(launch["args"], serde_json::json!(["ok.py::build_ok", "--exact"]));
+    let builds = p.builds();
+    assert_eq!(builds.len(), 1);
+    assert!(builds[0].build_ok && builds[0].run == run, "as the launch's run: {builds:?}");
+    let output = p.output();
+    assert!(output.contains(&format!("-- a build to debug build_ok, run {} --", run.0)) && output.contains("--build ok.py::build_ok") && output.contains("-- built, in "), "{output}");
+    assert!(p.app.debug_last_launch.is_empty());
+    assert!(p.debug_done() && p.tests().plan.is_none());
+    p.app.debug_stop();
+}
+
+/// A build that fails starts no session and says why, on the modeline
+/// and the page's head: the first `broken`'s message, else the step's
+/// end. A provider that asks to build twice is refused.
+#[test]
+fn a_build_that_fails_says_why_and_starts_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let bad = "# test build_bad\n#! out BROKEN bad.py bad.py didn't build: mismatched types\n#! exit 101\n";
+    let exits = "# test build_exits\n#! exit 3\n";
+    let twice = "# test build_twice\n";
+    let (mut p, _launches) = Project::debugging(&[("bad.py", bad), ("exits.py", exits), ("twice.py", twice)], "bad.py", state.path());
+    for (file, id) in [("exits.py", "exits.py::build_exits"), ("twice.py", "twice.py::build_twice"), ("bad.py", "bad.py::build_bad")] {
+        p.open(file);
+        p.scanned(id);
+    }
+    p.app.tests_debug_here();
+    p.until("the build", |p| p.builds().len() == 1 && p.debug_done());
+    assert_eq!(p.said(), "bad.py didn't build: mismatched types · o shows it");
+    assert!(!p.builds()[0].build_ok && p.app.debug_session.is_none());
+    assert!(p.output().contains("-- didn't build, in "), "{}", p.output());
+    let notes = p.app.tests_page_notes(&p.root.clone());
+    assert_eq!(notes.first().map(|n| n.0.as_str()), Some("bad.py didn't build: mismatched types · o shows it"), "the page's head");
+    assert_eq!(p.state("bad.py::build_bad"), State::Unknown, "a build has no results");
+
+    p.open("exits.py");
+    p.app.tests_debug_here();
+    p.until("the build", |p| p.builds().len() == 2 && p.debug_done());
+    assert_eq!(p.said(), "build_exits didn't build: its build exited 3 · o shows it");
+
+    p.open("twice.py");
+    p.app.tests_debug_here();
+    p.until("the second ask", |p| p.builds().len() == 3 && p.debug_done());
+    assert_eq!(p.said(), "build_twice can't be debugged: provider asked to build it twice");
+    assert!(p.app.debug_session.is_none());
+}
+
+/// A stop while a test's build runs kills its tree and starts nothing;
+/// one while its build waits for a run lets it go with the run. Turned
+/// off, nothing of it is left.
+#[test]
+fn a_stop_during_a_debugs_build_starts_nothing() {
+    let state = tempfile::tempdir().unwrap();
+    let slow = "# test build_slow\n#! child\n#! wait\n";
+    let (mut p, _launches) = Project::debugging(&[("slow.py", slow)], "slow.py", state.path());
+    p.scanned("slow.py::build_slow");
+    p.app.tests_debug_here();
+    let child = p.child();
+    assert!(p.model().summary().running.is_some_and(|r| r.build), "the head says building to debug…");
+    let notes = p.app.tests_page_notes(&p.root.clone());
+    assert_eq!(notes.first().map(|n| n.0.as_str()), Some("building build_slow to debug it -- o shows it, x stops it"));
+    p.app.run_cmd("tests.stop");
+    p.until("the build's end", |p| p.builds().len() == 1);
+    assert!(matches!(p.builds()[0].halted, Some(fenix_tests::Halt::Stopped(_))));
+    assert_eq!(p.said(), "build_slow isn't debugged: its build was stopped (stopped)");
+    assert!(p.debug_done() && p.app.debug_session.is_none());
+    assert!(fenix_tasks::fake_runner::gone_within(child, Duration::from_secs(10)), "the child outlived its build");
+
+    // The explorer turned off mid-build: stopped, then nothing.
+    p.app.tests_debug_here();
+    p.until("the second build", Project::step_running);
+    let child = p.child();
+    p.app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    p.until("the build's end", |p| p.builds().len() == 2);
+    assert!(p.debug_done() && p.app.debug_session.is_none());
+    assert!(fenix_tasks::fake_runner::gone_within(child, Duration::from_secs(10)));
+    p.app.tests_debug_here();
+    assert_eq!(p.said(), "the test explorer is off (tests.enabled)");
+    assert!(p.app.command_hidden("tests.debug_here"));
+    assert!(!p.app.text_menu_items().iter().any(|i| i.label == "Debug test"));
+}
+
+/// An extension whose component has no `tests-launch` is said once on
+/// its output page, and its tests aren't asked about again: they still
+/// run. (The provider guest has every export, so the worker's answer is
+/// given to the host as it would come.)
+#[test]
+fn a_provider_with_no_tests_launch_is_said_once_and_not_asked_again() {
+    let state = tempfile::tempdir().unwrap();
+    let (mut p, _launches) = Project::debugging(&[("a.py", "# test build_x\n#! out PASS a.py::build_x 1ms\n")], "a.py", state.path());
+    p.scanned("a.py::build_x");
+    p.app.tests_debug_here();
+    let token = p.tests().debug.as_ref().and_then(|d| d.asking).expect("asked");
+    let why = "it has no tests-launch: it was built for an extension API before 1.6, which had no test providers";
+    p.app.tests_reply(EXT, token, Err(why.into()));
+    assert!(p.debug_done());
+    assert_eq!(p.said(), format!("build_x can't be debugged: {why}"));
+    assert_eq!(p.app.extension_output_text().matches("its tests aren't offered to debug").count(), 1);
+    let calls = p.app.tests.calls.len();
+    p.app.tests_debug_here();
+    assert_eq!(p.said(), "build_x can't be debugged: provider has no tests-launch (said on its output page)");
+    assert_eq!(p.app.tests.calls.len(), calls, "not asked");
+    assert!(p.has("a.py::build_x"), "its tests stay");
+    p.app.tests_run_file();
+    p.until("a run", |p| p.model().last_run().is_some());
+    assert_eq!(p.state("a.py::build_x"), State::Passed);
+    assert_eq!(p.app.extension_output_text().matches("its tests aren't offered to debug").count(), 1, "said once");
+}
+
+// Off is off, and leaves what isn't the explorer's (the review of steps
+// 4 to 6, M1 and S1).
+
+/// With the explorer off, what decides whether `SPC T` and its keys are
+/// there is what's bound under it in the leader's trie: the explorer's
+/// keys alone, it's off; a key of yours or an extension's under it keeps
+/// the group, yours runs, and the explorer's keys there stay off (each
+/// of them, and the group's count). Not one key per command: a key of
+/// yours that runs a command bound elsewhere too (`SPC :`) counts.
+#[test]
+fn off_spc_t_is_decided_by_whats_bound_under_it_and_yours_stay() {
+    let mut app = App::with_file(None);
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let (spc, t) = (KeyPress::char(' '), KeyPress::char('T'));
+    let fenix: Vec<(Vec<KeyPress>, &&'static str)> = crate::keymap::leader_trie().bindings();
+    assert!(app.leader_hidden_with(&fenix, &[spc], t), "the explorer's keys alone: off");
+    let yours: &'static &'static str = Box::leak(Box::new("commands.palette"));
+    let mut with_yours = fenix.clone();
+    with_yours.push((vec![spc, t, KeyPress::char('z')], yours));
+    for _ in 0..20 {
+        assert!(!app.leader_hidden_with(&with_yours, &[spc], t), "yours keeps SPC T, every time");
+    }
+    assert!(!app.leader_hidden_with(&with_yours, &[spc, t], KeyPress::char('z')), "and runs");
+    assert!(app.leader_hidden_with(&with_yours, &[spc, t], KeyPress::char('t')), "the explorer's stay off");
+    let mut m = crate::keymap::leader_trie().matcher();
+    m.feed(spc);
+    let mut hints = m.pending_hints();
+    let explorer = hints.iter().find(|h| h.key == t).expect("SPC T in Fenix's leader").count;
+    assert_eq!(explorer, super::COMMANDS.len());
+    hints.iter_mut().filter(|h| h.key == t).for_each(|h| h.count += 1);
+    let offered = app.leader_offered_with(&with_yours, &[spc], hints);
+    assert_eq!(offered.iter().find(|h| h.key == t).map(|h| h.count), Some(1), "the group counts yours alone");
+    let hint = |c: char| fenix_keymap::Hint { key: KeyPress::char(c), label: "x", group: false, count: 0, section: None };
+    let under = vec![hint('t'), hint('z')];
+    let offered: Vec<KeyPress> = app.leader_offered_with(&with_yours, &[spc, t], under).into_iter().map(|h| h.key).collect();
+    assert_eq!(offered, [KeyPress::char('z')], "which-key under SPC T shows yours alone");
+    // On: nothing is hidden.
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    assert!(!app.leader_hidden_with(&fenix, &[spc], t));
+}
+
+/// Off, the explorer is in none of the places that offer commands or
+/// keys: the keys' page, `SPC h k`, `fenix/commands` (and, as before, the
+/// palette, `SPC h b`, which-key). Only its own commands are: another
+/// `tests.*` is someone else's.
+#[test]
+fn off_the_explorer_is_offered_nowhere() {
+    let mut app = App::with_file(None);
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(false)));
+    let sheet = app.keys_sheet_text();
+    assert!(!sheet.contains("`SPC T`") && !sheet.contains("| tests ("), "the keys' page:\n{sheet}");
+    app.describe_key_start();
+    for key in ["SPC", "T"] {
+        app.press(key);
+    }
+    let said = app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+    assert_eq!(said, "SPC T isn't bound", "SPC h k");
+    let listed = crate::app::control_host::control_commands(&app);
+    assert!(!listed.commands.iter().any(|c| c.id.starts_with("tests.")), "fenix/commands");
+    assert!(!app.command_hidden("tests.coverage"), "an extension's own tests.* isn't the explorer's");
+    for id in super::COMMANDS {
+        assert!(app.command_hidden(id));
+        assert!(app.commands().get(id).is_some(), "{id} is a command of Fenix's");
+    }
+    let registered: Vec<String> = app.commands().iter().map(|c| c.id.to_string()).filter(|id| id.starts_with("tests.")).collect();
+    assert_eq!(registered.len(), super::COMMANDS.len(), "every one of the explorer's commands is in COMMANDS: {registered:?}");
+
+    app.config.set_value("tests.enabled", Some(fenix_config::Value::Bool(true)));
+    assert!(app.keys_sheet_text().contains("tests ("));
+    assert!(crate::app::control_host::control_commands(&app).commands.iter().any(|c| c.id == "tests.debug_here"));
+}
+
+/// A click runs a test only on its mark's own cell: one left of the
+/// text's padding -- on the Git bar, where a breakpoint's square is --
+/// puts the cursor there as before (the review of steps 4 to 6, S5).
+#[test]
+fn only_a_click_on_the_marks_own_cell_runs_its_test() {
+    let (mut app, root, _dir) = served(12, &[("a.fake::bad", 4)]);
+    let asked = |app: &App| app.tests.projects[&root].model.summary().running.is_some() || app.tests.projects[&root].model.last_run().is_some() || !app.tests.projects[&root].ended_runs.is_empty();
+    let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+    let geometry = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+    let pane = app.focused_pane_id();
+    let rect = geometry.panes.iter().find(|(id, _)| *id == pane).unwrap().1;
+    let line_height = app.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+    let char_width = app.text.as_ref().map(|t| t.char_width()).unwrap_or(text::CHAR_WIDTH);
+    let content = pane_content_rect(rect, line_height, app.pane_has_breadcrumb(pane));
+    let y = content.y + text::PAD_TOP + line_height * 4.5;
+    app.handle_click_at((content.x + 2.0, y), 800.0, 600.0);
+    assert!(!asked(&app), "the Git bar's place runs nothing");
+    assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 4, "the cursor goes there, as before");
+    app.handle_click_at((content.x + text::PAD_LEFT + char_width * 0.5, y), 800.0, 600.0);
+    assert!(asked(&app), "the mark's cell runs it");
 }

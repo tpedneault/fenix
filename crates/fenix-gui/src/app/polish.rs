@@ -125,6 +125,7 @@ impl App {
         };
         let mut problem_lines: Vec<(usize, Severity)> = Vec::new();
         if let Some(ob) = self.buffers.get(view.buffer) {
+            let number_cell = if self.line_number_mode == LineNumberMode::Off { 0 } else { usize::from(self.blame_width(ob) > 0) + usize::from(self.tests_column(ob)) };
             let rope = ob.buffer.rope();
             let mut worst: HashMap<usize, (Severity, String)> = HashMap::new();
             for d in &diagnostics {
@@ -170,8 +171,9 @@ impl App {
                 }
                 let color = self.severity_color(*sev);
                 if view.gutter_chars > 0 && inline != "off" {
-                    // The line number takes the problem's colour.
-                    if let Some(first) = rows.get_mut(on.start).filter(|_| view.map.row(on.start).is_some_and(|r| r.first)).and_then(|cells| cells.first_mut()) {
+                    // The line number takes the problem's colour: the
+                    // cell after the blame and the test column's mark.
+                    if let Some(first) = rows.get_mut(on.start).filter(|_| view.map.row(on.start).is_some_and(|r| r.first)).and_then(|cells| cells.get_mut(number_cell)) {
                         first.1 = color;
                     }
                 }
@@ -669,6 +671,34 @@ y = zed
         let rows: Vec<String> = spans.iter().map(|s| s.0.as_str()).collect::<String>().split('\n').map(str::to_string).collect();
         assert_eq!(rows[3], "here    ■ na", "the message cut to the row's twelve columns: {rows:?}");
         assert_eq!(rows[1], "y = zed + ");
+    }
+
+    /// With the blame shown, a problem's colour goes on the line number,
+    /// not on the blame before it (a fix of 1.6, beside the test column's
+    /// cell, which sits between them when it's there).
+    #[test]
+    fn with_the_blame_shown_a_problems_colour_is_on_the_line_number() {
+        let mut app = with_problem("x = 1\ny = zed\n", 1, 4, 7);
+        app.line_number_mode = LineNumberMode::Absolute;
+        let path = app.open().buffer.path().unwrap().to_path_buf();
+        app.test_blame(&path, 2);
+        let grey = glyphon::Color::rgb(9, 9, 9);
+        let mut spans = join_rows(vec![
+            vec![("0000000 Tess ".to_string(), grey, false), (" 1 ".to_string(), grey, false), ("x = 1".to_string(), grey, false)],
+            vec![("0000001 Tess ".to_string(), grey, false), (" 2 ".to_string(), grey, false), ("y = zed".to_string(), grey, false)],
+        ]);
+        let buffer = app.focused_buffer_id();
+        let lines = vec![0, 1];
+        let map = super::super::rows::RowMap::lines(&lines, 0);
+        let (tab_lines, selection) = (HashSet::new(), Segments::new());
+        let vcol = |_line: usize, col: usize| col;
+        let pane = app.focused_pane_id();
+        let view = PaneView { buffer, map: &map, rows: 2, wrapped: false, gutter_chars: 16, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 0, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
+        app.polish_pane(&view, &mut spans, Instant::now());
+        let colour = |text: &str| spans.iter().find(|s| s.0 == text).map(|s| s.1);
+        assert_eq!(colour(" 2 "), Some(app.severity_color(Severity::Error)), "the number: {spans:?}");
+        assert_eq!(colour("0000001 Tess "), Some(grey), "not the blame");
+        assert_eq!(colour(" 1 "), Some(grey), "a line without one");
     }
 
     #[test]

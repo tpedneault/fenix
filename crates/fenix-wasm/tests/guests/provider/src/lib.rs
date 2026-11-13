@@ -15,6 +15,12 @@
 //!   one; `noplan` has no plan,
 //!   `denied` plans a program it may not run, `biglaunch` launches with
 //!   2 MiB of attributes.
+//! - Its launches: a test with `data` now; a case, and a test whose name
+//!   starts `build`, after a build (`fake-test-runner --build ID`) whose
+//!   `BUILT path` line names the binary the second ask launches (asked
+//!   again with no such line, it asks to build again). A launch's
+//!   attributes take `/project/fake-debug.json`'s when it's there (a
+//!   test's `debugServer`). Anything else can't be debugged.
 
 use std::collections::HashMap;
 
@@ -33,6 +39,8 @@ struct Provider {
     /// A reader per step of a run, made at its first batch, dropped at its
     /// end.
     readers: HashMap<(u64, u32), Reader>,
+    /// The runs it asked to build first, and the binary each build said.
+    built: HashMap<u64, Option<String>>,
 }
 
 fn trap(provider: &str) {
@@ -59,6 +67,12 @@ impl Provider {
         }
         let text = std::mem::take(&mut reader.pending) + &line.text;
         let (word, rest) = text.split_once(' ').unwrap_or((text.as_str(), ""));
+        if word == "BUILT" {
+            if let Some(built) = self.built.get_mut(&run) {
+                *built = Some(rest.to_string());
+            }
+            return Vec::new();
+        }
         let (id, more) = rest.split_once(' ').unwrap_or((rest, ""));
         let ended = |outcome, message: Option<String>, at: Option<Location>| Report::Ended(Ended { id: id.into(), outcome, duration_ms: None, message, at, text: Some(text.clone()) });
         match word {
@@ -209,14 +223,31 @@ impl Extension for Provider {
         if provider == "biglaunch" {
             return Ok(Launch::Launch(LaunchConfig::launch("big", &["fake"]).attributes(&fenix_extension_api::serde_json::json!({ "x": "a".repeat(2 << 20) }))));
         }
+        // A test's own attributes, from the project: an adapter listening.
+        let attributes = |mut base: fenix_extension_api::serde_json::Map<String, fenix_extension_api::serde_json::Value>| {
+            let extra = std::fs::read_to_string("/project/fake-debug.json").ok().and_then(|t| fenix_extension_api::serde_json::from_str::<fenix_extension_api::serde_json::Map<String, fenix_extension_api::serde_json::Value>>(&t).ok());
+            base.extend(extra.unwrap_or_default());
+            fenix_extension_api::serde_json::Value::Object(base)
+        };
+        let build = |id: &str| Plan { steps: vec![Step { command: Command::new("fake-test-runner").arg("--build").arg(id), label: "build".into(), covers: Vec::new(), needs: Vec::new() }], list_after: false };
+        // Asked again after its build: the binary it said, or another build.
+        if let Some(built) = self.built.remove(&run) {
+            return match built {
+                Some(binary) => Ok(Launch::Launch(LaunchConfig::launch(&test.label, &["fake"]).program(&binary).arg(test.id).arg("--exact").cwd("/project").attributes(&attributes(Default::default())))),
+                None => Ok(Launch::BuildFirst(build(&test.id))),
+            };
+        }
         match (test.kind, test.data) {
-            (Kind::Case, _) => Ok(Launch::BuildFirst(Plan {
-                steps: vec![Step { command: Command::new("fake-test-runner").arg("--build").arg(test.id), label: "build".into(), covers: Vec::new(), needs: Vec::new() }],
-                list_after: false,
-            })),
-            (_, Some(data)) => Ok(Launch::Launch(
-                LaunchConfig::launch(&test.label, &["fake"]).program("/data/fake-debugger").arg(test.id).arg(format!("run {run}")).env("AT", "${data}").attributes(&fenix_extension_api::serde_json::json!({ "data": data })),
-            )),
+            (Kind::Case, _) => Ok(Launch::BuildFirst(build(&test.id))),
+            (Kind::Test, None) if test.label.starts_with("build") => {
+                self.built.insert(run, None);
+                Ok(Launch::BuildFirst(build(&test.id)))
+            }
+            (_, Some(data)) => {
+                let mut base = fenix_extension_api::serde_json::Map::new();
+                base.insert("data".into(), data.into());
+                Ok(Launch::Launch(LaunchConfig::launch(&test.label, &["fake"]).program("/data/fake-debugger").arg(test.id).arg(format!("run {run}")).env("AT", "${data}").attributes(&attributes(base))))
+            }
             _ => Err(format!("{} can't be debugged", test.id)),
         }
     }

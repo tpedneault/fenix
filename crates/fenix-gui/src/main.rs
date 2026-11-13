@@ -31,6 +31,7 @@ mod extensions_page;
 mod explorer_page;
 mod preview_page;
 mod search_page;
+mod tests_page;
 mod page;
 mod project_doctor;
 mod project_hub;

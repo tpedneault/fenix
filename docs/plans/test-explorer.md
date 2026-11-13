@@ -2,7 +2,7 @@
 
 - **Status:** planned, 13 November 2026, for the maintainer to review;
   revised the same day after the packs' review of it (§18). Recorded in
-  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 3 are built (§20).
+  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 4 are built (§20).
 - **Scope:** a page that lists a project's tests before anything has
   run, runs one, a file, a group, the failed or all of them, and shows
   each result as it ends: on the page, in the gutter, after the test's
@@ -20,8 +20,8 @@
   split; it keeps the first design's runner experiments (its §3 and
   appendix, the recorded outputs in fenix-extensions
   `plans/test-explorer-fixtures/`), and its §11 is the review of this
-  plan that §18 answers. Steps 1 to 3 are built (§20); the review of
-  them is §19.
+  plan that §18 answers. Steps 1 to 4 are built (§20); the review of
+  steps 1 and 2 is §19.
 
 Paths are in this repository unless they say `fenix-extensions`. Every
 claim about what Fenix does today cites the tree at `b5c3765`.
@@ -1597,7 +1597,7 @@ they line up with Fenix's steps.
 | Q6 | Readers in Fenix for standard formats (JUnit XML, TAP, `go test -json`) | (a) no; (b) later, as a new export a plan can name; (c) in 1.6 | **(b) at most, later**: a pack's reader is short, and every runner's quirks are better in the pack. A ctest or Gradle provider might want JUnit; it can read it a line at a time, as a step of its own that prints the file, without parsing it whole in one call. |
 | Q7 | Fenix's built-in `SPC p r` finder once the four packs ship | (a) keep as the fallback; (b) retire it | **(a)**: it's small, and it serves someone without the pack. |
 | Q8 | Does a run save the files it runs first? (F18) | (a) no, as a task and `SPC p r` don't; the head says which were unsaved, and a test the run didn't see goes back to what it was (§8.4); (b) `tests.save_before_run`, `ask`, `always` or `never`, as `agents.save_before_prompt` is (`schema.rs:492`); (c) always save the selection's files | **(a)** for 1.6: it's what every door does today, and `editor.auto_save` (`schema.rs:422`) already serves who wants saving. (b) is a setting and no API, so it can come in a minor if the head's line proves to be read too late. |
-| Q9 | What "trusted" means for what runs without a key (§12): automatic listings and run on save run where `project_is_trusted` allows, which is `Verdict::Nothing` (a project naming no programs, a fresh clone) as well as `Trusted`, as for the lens's programs (`app/code_lens.rs:648-655`). A save in a never-trusted repository can then run `cargo test` or `pytest` (`build.rs`, `conftest.py`) with `tests.on_save` on | (a) as now: `Nothing` counts, as for lenses; (b) only `Trusted`: a project's own "may run tests on its own" decision (`SPC p y`), asked once; (c) (b) for run on save, (a) for listings | To be ruled before step 8 ("trust gating checked"). Step 3 keeps (a), pinned by `what_runs_without_a_key_runs_only_in_a_trusted_project`; (b) changes one function (`tests_trusted`). Raised by the review of step 3, S4 |
+| Q9 | What "trusted" means for what runs without a key (§12): automatic listings and run on save run where `project_is_trusted` allows, which is `Verdict::Nothing` (a project naming no programs, a fresh clone) as well as `Trusted`, as for the lens's programs (`app/code_lens.rs:648-655`). A save in a never-trusted repository can then run `cargo test` or `pytest` (`build.rs`, `conftest.py`) with `tests.on_save` on | (a) as now: `Nothing` counts, as for lenses; (b) only `Trusted`: a project's own "may run tests on its own" decision (`SPC p y`), asked once; (c) (b) for run on save, (a) for listings | To be ruled before step 8 ("trust gating checked"). Step 3 keeps (a), pinned by `what_runs_without_a_key_runs_only_in_a_trusted_project`; (b) changes one function (`tests_trusted`). Raised by the review of step 3, S4. **To rule with it** (the review of steps 4 to 6, S6): `SPC T d` in a project that isn't trusted starts what its provider's `tests-launch` names at once -- a `build-first` plan, the launch's `program` (held to no `permissions.process`: `checked_launch` maps only `/project/...` and `/data/...`, a `debugServer` any local port) and its `preLaunchTask`, a task of that project -- with no picker in between, where `SPC u u` has you pick a launch from a list. Options: (a) as now, a key is an explicit act (§12); (b) say the program on the modeline and ask once per untrusted project; (c) hold `program` to `permissions.process` or the project's and `/data`'s files there. Step 6 keeps (a) |
 
 ## 17. Risks
 
@@ -2154,3 +2154,476 @@ Left for the step that owns each, from the same review:
   installed isn't scanned until reopened; `ids_sorted_by_path` each wake
   (cheap today); Q9, what "trusted" means; `C:foo` (drive-relative) reads
   as `C:/foo`.
+
+### Step 4, the page
+
+**Where it is.** `crates/fenix-gui/src/tests_page.rs`, pure: the page's
+state (`TestsPage`: the tab, the filter, what's open, the focused row,
+where the tree and the details are scrolled), its keys (`TestsPage::key`
+gives an `Action`), and `layout`, from the project's `fenix_tests::Model`
+and the head as counted (`View`). Its tests (`tests_page/tests.rs`) are
+§7.2's two pictures as text, at 100×30 after a run and at 80×24 while
+one goes, every size from 40×10 to 140×50 checked to keep inside its
+pane, the keys, what's cleaned, and 10,000 tests. The host is
+`app/tests_host/page.rs`: `tests.open`, the page's actions, the head
+counted, the modeline's item, *Test output* beside the page and its
+`Enter`. `PageModel::Tests` in `pages.rs`, `tests` as its tutorial and
+focus name (`tutorial_host.rs`, `wasm_host.rs`), its title
+`*tests: <project>*`. `SPC T` in `default_keymap.toml`; `tests.open` in
+`commands.rs`.
+
+**The leader.** `SPC T T` `tests.open`, `SPC T t` `run_here`, `f`
+`run_file`, `a` `run_all`, `F` `run_failed`, `l` `run_last`, `k` `stop`,
+`o` `output`, the group named "tests"; `Ctrl+K T …` with standard keys,
+by the leader's chord, no chords of its own. `SPC T d` waits for
+`tests.debug_here` (step 6): a key bound to a command Fenix hasn't got
+would be dropped from the leader anyway, and the keymap's test that
+every command it names exists would fail. Checked: nothing else of
+Fenix's under `SPC T` or at it, each key resolving to its command, the
+packs' uppercase groups (`SPC A`, `C`, `P`) apart, `Ctrl+K` refused to
+a flavour (a JetBrains-style one included; fenix-extensions'
+`jetbrains-keys` binds no `C-k` and nothing of the explorer's), and
+`keymap_conflicts` empty (`spc_t_is_the_test_explorers_and_clashes_with_nothing`).
+
+**Off.** With `tests.enabled` off nothing of it is there: `SPC T` isn't
+in the which-key menu and does nothing (it's as unbound as in 1.5; the
+leader's matcher is let go at `SPC T`, `App::leader_hidden`, unless
+keys of your own are under it in keybindings.toml, which stay yours), the
+palette and `SPC h b` don't list the `tests.` commands
+(`App::command_hidden`), the modeline has no item, `tests.open` and the
+other commands say "the test explorer is off (tests.enabled)" when run
+by another way (your keybindings.toml, the control channel), and a page
+open when it's turned off is closed at the next wake, with what was
+kept of the pages. `tests_list`, `tests_page_opened` and `tests_replace`
+do nothing while it's off (step 3's review asked for the gate). Per
+frame, off, it costs one look at an empty map, and a look at the
+setting; a wake, the same (`with_the_explorer_off_nothing_of_the_page_exists`).
+
+**What a frame costs** (§7.5). The page is laid out to its pane's
+height, as the Extensions page is: only the tree's rows in view are
+written, so at 10,000 tests, all open, a layout is a pane's worth
+(`ten_thousand_tests_cost_what_is_in_view`). Its rows come from
+`Model::rows` and are worked out again only when the model's revision,
+the tab, the filter or what's open changes (`RowsKey`), never because
+a frame is drawn. `summary()` -- §19 counted its waiting run once a
+revision, but it still counts the run's results and copies the last
+run's files each call -- is called at most once a revision of the
+model and at most ten times a second while it changes
+(`tests_views_due`, from `plan_wake`, which also marks the page to be
+laid out then and asks for the next wake); the modeline's item reads
+what was counted. A key lays the page out at once. `n`, `N` and the
+filter walk the model on the key, the filter in one pass.
+
+**Where the plan was silent, or read so:**
+
+- **The page scrolls inside itself**: the head, the tabs and the keys
+  stay, the tree scrolls to keep the focused row in view, and the
+  details stay beside it (wide) or under it (narrow, a quarter of the
+  pane, at least three lines), scrolled with `J` and `K`, saying when
+  there's more (`o` has all of it).
+- **What else the head says** goes on a line of its own under it, at
+  most two: files with unsaved edits while a run goes (§8.4), a target
+  that didn't build while it goes, a project that isn't trusted ("not
+  listed on their own in a project that isn't trusted (SPC p y): u lists
+  them, running the project's runner", §12; the plan's wording names the
+  runner's command, which Fenix doesn't know before it plans), a
+  first scan stopped at its cap (`scanned_of`), and a provider that said
+  why it can't run (with `SPC p h`), on its row too. After a run, the
+  head's right says when and how long, `stopped HH:MM: why`, `timed
+  out`, or the first `broken`'s message with `o shows it`, in bad.
+- **What starts open**: a group holding a failure (§7.2), a provider's
+  row, and a provider's only top node, so a one-target or one-file
+  project shows its tests; the rest closed. `zM` and `zR` close and open
+  all, and what you open or close after stays as you left it.
+- **`Enter`** on a test or case opens its file at its line in the pane
+  beside the page (another pane, else one split off), the keyboard with
+  it, as the Search page's `Enter` does; on a group, file or suite it
+  folds or opens. A test found only in a run says it has no line.
+- **`o` and `SPC T o`** show *Test output* in the pane beside the page
+  when the page is shown, the keyboard with it, so `Enter` on a place
+  there goes to it; with no page shown, in the focused pane (step 3's).
+- **`y`** copies the test's label, its place (the failure's `at`, else
+  the test's line) and its message, escape codes out, on three lines.
+- **`n` / `N`** from a row that isn't a failure go to the next one among
+  the rows after it (before it), else the first (the last); from a
+  failure, the next in display order, round again. The failure's groups
+  are opened; on the Not run tab, it goes back to All.
+- **`d`** says debugging a test from the page isn't in Fenix yet, and
+  isn't on the key strip, until step 6.
+- **The modeline's item** is about the project of the tests page you're
+  on, else the project you're in. `✗ 3 tests` counts what's failed or
+  errored now, results kept from before a restart included (stale): a
+  restart doesn't forget what failed (Q4) until it passes. A listing
+  going says nothing there.
+- **`SPC T T`'s project**: the tests page's or *Test output*'s you're
+  on, else the focused file's, else the project you're in, else the last
+  one you were in a file of. It reopens the page on the tab, filter and
+  open groups it had (§7.6) because the page's state is kept per project
+  for the session when it's closed (by `q`, `SPC b k`, or replaced).
+- **Cleaning** (§19): a label, a provider's name and a message are one
+  row (`tests_page::clean`: escape codes out, every run of whitespace or
+  control characters one space); a failure's text and what a test
+  printed keep their indentation, a tab four spaces, other control
+  characters out. `without_escapes` moved from `tests_host` to
+  `tests_page`, the one both use.
+- **Colours**: passed in the good role, failed and errored in bad, what
+  runs in the accent, the rest muted, and every stale mark muted, read in
+  a dark and a light theme (`the_pages_marks_read_in_a_dark_and_a_light_theme`).
+
+**From step 3's review**, done:
+
+- *Test output*'s `Enter` resolves a place against the folder of the
+  step whose lines it's among (each step's first line and folder kept,
+  `output_steps`), else the project: a listing in the provider's `/data`
+  opens its file, not the project's of the same name
+  (`enter_on_test_output_goes_to_a_place_in_its_steps_folder`).
+- `output_lines` counts a cut line's pieces as the one line they make in
+  the buffer, so trimming past 16 MiB drops the lines it counted.
+- The `tests.enabled` gate on `tests_replace`, `tests_list` and
+  `tests_page_opened`.
+- `list-after` still has no app test: the guest's `run-all` always has
+  a step whose `needs` are refused (`elsewhere/x`), so it never lists
+  after, and building a changed guest needs the wasm toolchain this step
+  was built without. The model's tests hold it.
+
+**Tested only as text.** No window opens where this was built: the page
+was read as its laid-out text, spans and backgrounds, with the provider
+guest and `fake-test-runner` behind it (`the_page_runs_folds_filters_goes_to_a_test_stops_and_shows_the_output`),
+never drawn. How it looks drawn -- the focused row's background and
+rail, the hairline between the tree and the details, the tabs' chips --
+and how ten redraws a second feel while a run goes are for the nightly.
+
+**For the steps after**: step 5's gutter can mark its panes to redraw
+where `tests_views_due` restales the page, and should send `Enter`'s
+jump (`tests_go_to`) through the same normalising of a provider's path
+(`/project/../x`, `\\?\`) it gives marks; step 6 replaces
+`PageAction::Debug`'s message with the launch (and adds `SPC T d` and
+`d` on the key strip); step 7's doors ask as `PageAction::Run` does
+(`tests_request`, or `tests_replace` to replace the run going), the
+notification's *Show the failures* is `tests.open`, and the run's end
+(`tests_run_ended`) is still where the notification and `last_task` go.
+
+
+### Step 5, in the file
+
+**Where it is.** `crates/fenix-gui/src/app/tests_host/file.rs`: the
+gutter's test column (`tests_column`, `tests_cells`), a click on a mark
+(`tests_mark_click`), the right click's items (`tests_test_here`,
+`tests_show_here`), the results after a test's line
+(`tests_sync_inline`) and failures as problems (`tests_sync_problems`),
+both worked out in `tests_in_files`, which `tests_views_due` calls each
+wake with the projects whose model changed. Its hooks elsewhere:
+`gutter_chars` gains the cell and `push_gutter` draws it
+(`content_spans_decorated`, `rows.rs`' `row_content_spans`, each asking
+for the marks of the lines it draws); the click beside the fold
+marker's in `handle_click_at_inner`; a file read again from disk marked
+stale; two `MenuAction`s in `mouse.rs`; `TestsPage::show`; the three
+settings in `fenix-config` (`tests.problems`, `tests.inline`,
+`tests.gutter`, as §13 has them) and `docs/CONFIGURATION.md`;
+`Model::is_unsaved` in `fenix-tests`, a read of what the host said, for
+the test of a closed buffer. `TestsHost::by_path` keeps each open file's
+project and path there as its buffer is first seen, so nothing is worked
+out from a path as a frame is drawn.
+
+**The rules, where, and their tests** (all in `tests_host/tests.rs`):
+
+| Rule | Where | Test |
+|---|---|---|
+| One more cell, left of the numbers, in a file a provider found tests in; none in a file without; Git bar and breakpoints where they were | `tests_column`, `gutter_chars`, `push_gutter` | `the_test_column_is_one_cell_left_of_the_numbers_in_every_combination` (96 combinations: numbers absolute, relative, off; folds on, off; blame on, off; a file with tests, without, the explorer off, `tests.gutter` off; a breakpoint on the mark's line or not): the width, the cell's place, the numbers' width and value, the text's first column, and the hits |
+| The worst state's glyph in its colour, dimmed when stale | `tests_cells` (the model's `marks` for the lines drawn) | `a_marks_state_colour_and_the_right_clicks_items`; the end-to-end test after a save |
+| A click on a mark runs that test or group | `tests_mark_click`, `tests_run_node` | the combinations (the selection asked is the node's), and the end-to-end test (it runs, through the guest and `fake-test-runner`) |
+| The right click adds *Run test* and *Show in Tests* beside *Toggle breakpoint* | `text_menu_items`, `MenuAction::RunTest`, `ShowTest` | `a_marks_state_colour_and_the_right_clicks_items` (on a test's line only, right after *Toggle breakpoint*, no *Debug*; *Show in Tests* focuses the test on the page) |
+| After a test's first line, a failure's ` ✗ message` cut at 48 characters, in bad; with `all` a passed one's ` ✓ 3.0 ms`, muted | `tests_sync_inline` (decorations of Fenix's own, `fenix.tests`) | the end-to-end test: the cut, cleaned message at its line; nothing for a pass under `failed`; both times under `all` |
+| Failures as problems under `fenix:#tests` for the project, at `at`, else the test's line; source the runner, code the label; an error | `tests_sync_problems` | the end-to-end test: beside an extension's `<ext>:#problems` for the same file, each set again without touching the other; the problems' list (`code.problems`) has it first and goes to its line |
+| Cleared when the test runs again, when its file is saved, when it's gone, when `tests.problems` is off | the model's `problems()` (Decisions 19), published where they differ | the end-to-end test: a run that passes clears it, the extension's stays; a save clears it |
+| Stale: a save; a result from before a restart (Q4: kept, shown stale) | the model; the marks and the results after the lines muted, not hidden | the end-to-end test: after an edit (not stale, moved with the scan), after a save (stale, dimmed, the problem gone, the result after the line muted) |
+| With `tests.enabled` off: no column, no width, no marks, no results after the lines, no problems, no menu items, no click | `tests_file_of` (one look at an empty map or the setting), `tests_in_files_off` | `with_the_explorer_off_the_file_shows_nothing_of_it` |
+| A frame costs the lines it draws | `marks` for the lines drawn; the rest at most ten times a second | `a_frames_cost_with_5000_tests_in_the_file_is_the_lines_it_draws` |
+
+**Measured** (debug build, Linux; the test prints it): 10,000 tests in
+the project, 5,000 in the open file, a fifth of them failed. Sixty rows
+of the file's text with its gutter, 3.0 ms at the file's start and 3.2 ms
+at its end, 3.2 ms with the explorer off: the column and its marks cost
+nothing that shows beside the rows themselves. `test_at` at a cursor
+move, 1.1 ms (§19's linear pass, over the tests that start above the
+line). The wake after the run (problems for 1,000 failures, the results
+after the lines in view), 16 ms, once.
+
+**Where the plan was silent, or read so:**
+
+- **The column needs line numbers**, as the fold column does: it's one
+  more cell of theirs. With `editor.line_numbers` off there's none; the
+  results after the lines and the problems still say what failed.
+- **Where the cell is**: the gutter's first after the blame, so left of
+  the numbers, the numbers keeping their width. The debugger's square
+  and stop bar are drawn at the gutter's left edge (`text::PAD_LEFT`),
+  over that cell when there's no blame before it: on such a line the
+  breakpoint wins (§17's fallback, for that line only), the mark isn't
+  drawn and a click there isn't a run. With the blame shown, both are.
+- **When the column comes**: when the model has a test with a line in
+  the file -- from the first frame for a file the project's first scan
+  read before it was opened, a few milliseconds after the first frame
+  for one opened before its scan's answer. §9.1's "before the file is
+  first drawn" holds for the first, not always for the second.
+- **A problem's colour on the line number** now goes on the number: the
+  cell after the blame and the test's mark. It went on the row's first
+  cell, which with the blame shown was the blame's.
+- **The results after the lines** are one a line: the worst of what
+  starts there, as the gutter's mark, and only for a test or case with a
+  result of its own. An errored one says `!`, its glyph in the gutter,
+  where §9.2 wrote `✗` for both. The message is cleaned as the page's
+  are (`tests_page::clean`) and cut at 48 characters, `…` the 48th; an
+  empty one says `failed` or `errored`. A test queued or running says
+  nothing until it ends. A stale result stays, muted, as its mark does
+  (Q4); its problem is gone.
+- **Which lines get them**: those a pane shows and a hundred around them
+  (the last frame's, else each pane's scroll), worked out again when the
+  model changes, a setting changes, a file is opened, or a pane moves past
+  them -- so 5,000 tests in a file never mean 5,000 decorations. They move
+  with an edit at once (decorations' anchors) and are placed again at the
+  file's next scan.
+- **Problems' places**: `at` when it's a file of the project (a path the
+  model holds relative), else the test's own line; one the model holds
+  as given because it climbed out of the project (`/project/../x`) is no
+  place, so the test's line; a test whose own file is such a path has no
+  problem. Columns in UTF-16 units from the open buffer's line, the range
+  to the line's end; for a file not open, one character, published again
+  when it's opened. The message is cleaned, not cut. Keyed by the file's
+  canonical path, as the language servers' are, so a symlink inside the
+  project to a file outside it is that file (step 3's review, for step
+  5); a jump (`Enter` on the page, `tests_go_to`) opens `root/<path>`,
+  whatever it resolves to, through the same `place_path`.
+- **`\\?\` paths** (step 3's review): `model_path` takes a verbatim
+  prefix off (`\\?\C:\`, `\\?\UNC\server\`) before it looks for the
+  project, so a provider giving one is held as the project's relative
+  path.
+- **An edit and staleness**: an unsaved edit doesn't make a result stale
+  (the runner reads the file as saved, §8.4); the marks move with the
+  buffer's next scan, half a second after typing pauses. A problem at a
+  run's `at` stays at the line the run said until the save clears it. A
+  file changed on disk and read again by the disk poll is stale as after
+  a save, without a run on save (`tests_file_changed_on_disk`); a file
+  not open isn't rescanned (step 3's note), which the gutter doesn't
+  need: it only marks open files.
+- **A dirty buffer closed unsaved** clears its file's unsaved edits
+  (step 3's review), unless another buffer on the file has edits; a
+  buffer renamed forgets its old name's.
+- ***Show in Tests*** opens the tests page in the focused pane, as `SPC T
+  T` does, on the test, its groups opened; when the tab or the filter
+  hides it, the page goes back to All with no filter.
+- **The menu's keys** are `tests.run_here`'s and `tests.open`'s.
+
+**Tested only as text and numbers.** No window opens where this was
+built. The gutter was read as the rows' text and colours, its hits as
+cells (`tests_mark_click` at a column, as the click handler computes
+it from the pointer), the results after the lines as decorations,
+problems as the diagnostics kept and the problems' list's rows. That
+the breakpoint's square sits over the column's cell, and how the glyphs
+look in the gutter's font beside the numbers, is from reading the
+drawing code (`x = PAD_LEFT`), not seen; how the column, a breakpoint
+and a fold marker look together is for the nightly.
+
+**For the steps after**: step 6 adds *Debug test* after *Run test*
+(`MenuAction`, from `tests_test_here`, which gives the project and the
+node) and `SPC T d`; step 7's lenses can take a file's tests from
+`model.in_file` as the marks do, and the `fenix:#tests` problems are
+what `test_failures` can read back.
+
+### Step 6, debugging a test
+
+**Where it is.** `crates/fenix-gui/src/app/tests_host/debug.rs`: the
+command (`tests_debug_here`), the ask (`tests_debug`), the answers
+(`tests_launched`, `tests_launch_failed`), the build's steps put under
+way (`tests_debug_plan`) and its end (`tests_built`), the session started
+(`tests_debug_start`), a stop (`tests_debug_let_go`) and a provider
+stopping (`tests_debug_provider_stopped`). Per project, `ProjectTests`
+holds the test being got ready (`Debugging`: its run, provider, node,
+the page it was asked from, the call out, whether this is the second
+ask, the build's steps until its first step, how a step of it ended)
+and what the page's head says of it. Its hooks in `tests_host.rs`:
+`CallFor::Launch`, its reply and failure, the build's header and end
+in *Test output*, a build's end handed on before results are written,
+the stop, a provider stopped, the explorer off. Elsewhere: `tests_open_test`
+in `page.rs` (`Enter`'s jump, which the debug shares), `PageAction::Debug`,
+`d debug` on the key strip, *Debug test* (`MenuAction::DebugTest`) after
+*Run test*, `tests.debug_here` in `commands.rs`, `SPC T d` in
+`default_keymap.toml`, `Template::test` in `dap.rs` and its one use in
+`debug_start_from`. In `fenix-tests`: `Model::drop_build` and
+`Progress::build` (the page's head says "building to debug…", not
+"listing…"). The provider guest's launches learnt a build and a second
+ask (below).
+
+**The rules, where, and their tests** (in `tests_host/tests.rs` unless
+said):
+
+| Rule | Where | Test |
+|---|---|---|
+| `tests.debug_here`, `SPC T d`, `d` on the page (on the key strip), *Debug test* after *Run test* | `commands.rs`, `default_keymap.toml`, `tests_page.rs`, `mouse.rs` | `a_test_is_debugged_from_the_launch_its_provider_gives` (`d`, the strip); `a_marks_state_colour_and_the_right_clicks_items` (the menu's order); `spc_t_is_the_test_explorers_and_clashes_with_nothing` and `fenix_s_keymap_binds_nothing_twice` (`keymap.rs`); `a_build_to_debug_a_test_is_said_as_one` (`tests_page/tests.rs`, both sizes) |
+| A run id drawn before the first ask (`Model::run_id`); the node given back as Fenix has it, `/project/<path>`; one `can_be_named` refuses isn't asked | `tests_debug` | the launch-now test (its `args` carry the run); the build test (the build ran as that run) |
+| `launch`: started at once through `debug_start_from`, as an extension's launch (`Template::from_config`), no picker of launches, not remembered as the project's last | `tests_debug_start`, `Template::test` | `a_test_is_debugged_from_the_launch_its_provider_gives`: the adapter's `launch` has the program and `${data}` as Fenix's paths, the attributes with the test's `data`, no `debugServer`; `debug_last_launch` empty |
+| `build-first`: run as the launch's run (`request_build`), in *Test output*, read by the provider; asked again with the same run only when it built | `tests_launched`, `tests_debug_plan`, `tests_built` | `a_test_built_first_is_debugged_with_what_its_build_said`: the build's `RunEnd` has the launch's run and `build_ok`, *Test output* has `-- a build to debug build_ok, run N --`, its command and `-- built --`; the provider launches the binary its build's `BUILT` line named only on that run's second ask |
+| The paths in the launch | the worker's `checked_launch` (step 2): `program` and `cwd` as `/project/...` or `/data/...` are this machine's, as a step's folder is; `args`, `env` get `${data}` and `${tools}` | the build test: `/project/target/fake-bin` and `/project` came to the adapter as the project's; `providers.rs` (`fenix-wasm`) for `/data/...` |
+| A build that fails: no session; the modeline and the page's head say the first `broken`'s message, else the step's end, `· o shows it` | `tests_built`, `Debugging::step_ended`, `tests_page_notes` | `a_build_that_fails_says_why_and_starts_nothing`: `bad.py didn't build: mismatched types · o shows it` on both; `build_exits didn't build: its build exited 3 · o shows it` |
+| A second `build-first` is a refusal | `tests_launched` | the same test: `build_twice can't be debugged: provider asked to build it twice` |
+| A provider that refuses: its error said, nothing stopped | `tests_launched` | the launch-now test: the refusal said, and the provider runs the file's tests after |
+| A stop during the build: its tree killed, no session | `tests_stop_in` → the model's stop; `tests_built` | `a_stop_during_a_debugs_build_starts_nothing`: the `child` gone within ten seconds, `build_slow isn't debugged: its build was stopped (stopped)` |
+| A second debug while one is being got ready: refused, saying which | `tests_debug` | the build test: `already building build_ok -- SPC T k lets it go` |
+| A run already going: the build waits for it, and goes before a run waiting | the model (`request_build`) | the build test (the run going ends passed first, then the build); `a_build_waits_for_the_run_going_and_can_be_let_go` (`fenix-tests`) |
+| No `tests-launch` export: said once on the extension's output page, not asked again; its tests stay and run | `tests_launch_failed`, `TestsHost::no_launch` | `a_provider_with_no_tests_launch_is_said_once_and_not_asked_again` (the worker's answer handed to the host: see below) |
+| A `Reply::Launched` is the launch's answer, never a failed call | `tests_apply_reply` (`CallFor::Launch`) | every test above |
+| `tests.enabled` off: no command, key, menu item or page; a build going is stopped, a debug waiting let go, an answer that comes after ignored | `tests_here`, `command_hidden`, `tests_off`, `tests_launched` | `a_stop_during_a_debugs_build_starts_nothing` (off mid-build: stopped, its child gone, then the command says the explorer is off, is hidden, no menu item) |
+
+**Where the plan was silent, or read so:**
+
+- **Which file is focused** (§11.1, "opens the test's file at its line"):
+  from the page, the test's file at its line beside the page, as `Enter`;
+  from the file (`SPC T d`, the menu) the cursor stays where it is when
+  the focused file is the test's, so the session starts from the file you
+  were in. The file is opened when the launch comes, not when it's asked:
+  `debug_start_from` takes the adapter from the focused buffer's language
+  then, whatever was focused while the build ran. A test with no file or
+  line known starts from what's focused.
+- **One at a time per project.** A second debug while one is asked, waits
+  for its build or builds is refused, naming the first and that `SPC T k`
+  lets it go. One while a debug session runs is refused before anything is
+  asked or built: `debug_start_from` would refuse it after the build.
+- **A stop** (`SPC T k`, `x`) stops the build when it's the run going; a
+  debug still waiting for its provider's answer, or for its build's turn
+  behind another run, is let go too (`Model::drop_build`), so a stop
+  doesn't leave a build to start a moment later. The answer of a debug
+  let go is ignored.
+- **A run already going**: the plan's rule (§8.1) and the model's: the
+  build waits, saying so (`its build waits for the run going`), and goes
+  before a run waiting. A test run asked while a build goes waits for it,
+  as for any run.
+- **Trust**: debugging is asked for with a key or a click, so it runs as
+  a run does (§12): a `build-first` plan and a `preLaunchTask` run in a
+  project that isn't trusted. Nothing of it runs on its own.
+- **No `tests-launch` export**: a component may lack that one export
+  alone (the five are optional one by one). Step 3's rule for "it has no
+  tests-..." would have taken the extension's providers away; for
+  `tests-launch` it only stops debugging its tests (`no_launch`, until
+  Fenix restarts or the extension is reinstalled), said once on its output
+  page, and its tests still run. A call that fails otherwise (a trap, a
+  deadline) is said, and stops nothing of its own: the extension's stop
+  comes as its own event, as for a scan.
+- **A provider stopping** (a trap in a build's call, its extension started
+  again) lets the debug go, said, with its build if it waited.
+- **What a build's run leaves**: no results, nothing written to the results
+  file, not the page's last run (the model's `last` is a test run's).
+  *Test output* is begun again for it, as for any run, with `-- a build to
+  debug <test>, run N --` and `-- built --` or `-- didn't build --` at its
+  end. The page's head says "building to debug…" while it goes, and its
+  note line what's happening, then why it didn't build until the next
+  debug.
+- **The narrow key strip** (80 columns) lost `/ filter` for `d debug`: the
+  tabs' line says "/ to filter" at that size too.
+- **A launch that isn't a template** (`Template::from_config` refuses its
+  attributes) is said as the provider's refusal is. A `${pickProcess}` or
+  a launch variable with several choices still gets its picker, and the
+  launch picked is still not remembered (`Template::test` goes with it).
+
+**The provider guest**, rebuilt here: `wasm32-wasip2` is installed with
+Rust 1.100.0 (`build.ps1` names 1.98.0, which isn't; the build is the
+script's `cargo build --release --target wasm32-wasip2`, its target in
+the shared target folder). Its launches: a test with `data` now, as
+before; a case and, new, a test whose name starts `build` after a build
+(`fake-test-runner --build ID`), whose `BUILT path` line the reader keeps
+per run; asked again with that run, it launches that binary, `[id,
+"--exact"]` in `/project`; with no such line, it asks to build again.
+`/project/fake-debug.json`, when there, is merged into a launch's
+attributes, which is how the app tests give a launch the `debugServer`
+of their adapter. `providers.rs` checks the second ask and its run.
+
+**The adapter** in the app tests is one listening on a port, as a
+launch's `debugServer` names one (`fake_adapter`, the shape of the
+recorded exchanges and of `app.rs`' child-session test): it answers
+`initialize`, hands on `launch`'s arguments, sends `initialized` and
+answers the rest. So the session is started and its launch seen, as
+Fenix sends it; no real adapter ran, and no stop at a breakpoint in a
+test was seen.
+
+**Not tested with the guest**: a component with no `tests-launch` alone.
+The crate's `export!` gives all five, so the worker's answer for one
+without it ("it has no tests-launch: ...", tested in `fenix-wasm` with
+`keys.wasm`) is handed to the host's reply as it would come
+(`a_provider_with_no_tests_launch_is_said_once_and_not_asked_again`).
+A build's timeout is the run's (step 3's test of it), not tested again
+here.
+
+**Noticed**: starting a debug session ran the settings' migration of
+`.fenix/project.ini`, which deleted an empty one: fixed on its own (see
+below, after the review).
+
+**For step 7**: `debug_test` (the `debug` toolset) can call
+`tests_debug(root, node, None)` after `test_at` for its `path` and
+`line`, and answer at the first stop as `debug_start` does; what it needs
+back is `ProjectTests::debug` going to `None` with `debug_said` (why
+not), or a session started. The control channel's `fenix/tests*` can
+read the same two fields for a debug's state. The run's end
+(`tests_run_ended`) is still where the notification and `last_task` go;
+a build's end returns before them, so a debug's build is neither.
+
+**After the review of steps 4 to 6.** Fixed, each with a test:
+
+- *Off leaves what isn't the explorer's* (M1): whether `SPC T` and a key
+  under it are there is decided from the leader's trie as it is -- yours
+  and the extensions' keys too -- not from one key per command
+  (`places()`, whose pick between keys of a command was the HashMap's):
+  a prefix is off when everything bound from it runs a hidden command
+  (`leader_hidden_with`). A key of yours under `SPC T` keeps the group,
+  runs, and the which-key menu there shows it alone, with its count
+  (`off_spc_t_is_decided_by_whats_bound_under_it_and_yours_stay`).
+- *One rule, every place* (S1): `command_hidden` is the explorer's own
+  commands (`tests_host::COMMANDS`, a test holds it to the registry's
+  `tests.*`), not any `tests.` an extension names; `leader_offered`
+  filters hints and counts. The keys' page, `SPC h k`, `fenix/commands`
+  and which-key ask it, as the palette, `SPC h b` and the leader did
+  (`off_the_explorer_is_offered_nowhere`).
+- *Native separators* (M2): `fenix-wasm`'s `host_path` joins a guest
+  path's parts one at a time, so `/project/target/fake-bin` is
+  `C:\p\target\fake-bin` on Windows, not `C:\p\target/fake-bin`
+  (`a_test_built_first_is_debugged_with_what_its_build_said` compares the
+  string; `providers.rs` builds its expected path a part at a time). It
+  also drops `.` parts and the trailing separator `/project` had.
+- *A group opened for a failure stays open* (S3): what's shown open
+  because it held a failure is remembered as opened, so the row you're
+  on doesn't vanish when it passes
+  (`a_group_opened_for_a_failure_stays_open_when_it_passes`).
+- *The mark's own cell* (S5): a click left of the text's padding (the Git
+  bar, a breakpoint's square) puts the cursor there as before; only one
+  on the mark's cell runs its test
+  (`only_a_click_on_the_marks_own_cell_runs_its_test`).
+- *The blame and a problem's colour* (S2): step 5's move of a problem's
+  colour from the row's first cell to the line number's is a fix for
+  everyone with blame shown, explorer or not: its own CHANGELOG line, and
+  `with_the_blame_shown_a_problems_colour_is_on_the_line_number`.
+- *Docs* (S4): CHANGELOG and `tests.enabled`'s description (and so
+  CONFIGURATION.md) say debugging is in and *Debug test* is on the right
+  click.
+- *`project.ini`* (the review's N1, on master): fixed in its own commit;
+  the tests here no longer keep a `settings.toml` for it.
+
+Not changed: S6, ruled with Q9 (§16).
+
+Left for the step that owns each, from the same review:
+
+- **Step 7**: `tests_debug` and `tests_request` say what happened only on
+  the modeline; `debug_test` and `run_tests` want a result back (started,
+  waits, refused and why) rather than reading `ProjectTests::debug` and
+  `debug_said` after. A missing export is told by its error's text (`it
+  has no tests-launch`, `isn't API 1.6's`): a typed error from
+  `fenix-wasm` before more callers depend on it. The lens's *Debug* must
+  keep the lens's trusted-project rule (§9.5), which `tests_debug` doesn't
+  apply. `SPC T k` stops the run going and lets go a debug waiting behind
+  it, one key for two: the notification says both. The right click's
+  *Debug test* shows for an extension in `no_launch`, and on a group's
+  line, where it then says it isn't a test.
+- **Step 8**: bidi and zero-width characters (U+202E, U+200B) aren't
+  cleaned from labels and messages (`tests_page::clean`); a failure with
+  no `at` shows twice on its test's line with the cursor there (the result
+  after the line and the problem's message); the text shifts a cell when
+  a file gains its first test or loses its last (reserve the cell for a
+  file a provider's `scan` names); `build.ps1` names Rust 1.98.0, and
+  1.100.0 rebuilds `provider.wasm` byte for byte; `place_path` gives
+  `root\src/lib.rs` on Windows (equal as a path, read so in a title).

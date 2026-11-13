@@ -630,6 +630,37 @@ fn a_build_first_plan_runs_as_the_launchs_run() {
     assert_ne!(run, launch);
 }
 
+/// A debug launch's build asked while a run goes waits for it, and goes
+/// before a run waiting (§11); one let go before its turn never starts
+/// (step 6: a stop, the explorer turned off), and the page's head can
+/// tell a build from a listing.
+#[test]
+fn a_build_waits_for_the_run_going_and_can_be_let_go() {
+    let mut m = orbit();
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run: first, .. }) = m.next(0) else { panic!() };
+    let launch = m.run_id();
+    assert_eq!(m.request_build(launch, RUST, ADDS, plan(&[("build", &[])])), Requested::Waits);
+    assert_eq!(m.request(Selection::Nodes(vec![key(RUST, ADDS)]), Mode::Queue), Requested::Waits);
+    m.planned(first, Ok(plan(&[])));
+    let Some(Action::Ended(end)) = m.next(0) else { panic!() };
+    assert_eq!(end.run, first);
+    let Some(Action::Step { run, .. }) = m.next(0) else { panic!("the build first") };
+    assert_eq!(run, launch);
+    assert!(m.summary().running.is_some_and(|r| r.build && !r.tests));
+    m.step_ended(run, 0, StepEnd::Exited(Some(0)), Vec::new());
+    assert!(matches!(m.next(0), Some(Action::Ended(RunEnd { kind: RunKind::Build { .. }, build_ok: true, .. }))));
+
+    let launch = m.run_id();
+    let Some(Action::Plan { run: going, .. }) = m.next(0) else { panic!("the waiting run") };
+    m.request_build(launch, RUST, ADDS, plan(&[("build", &[])]));
+    assert!(m.drop_build());
+    assert!(!m.drop_build(), "only once");
+    m.planned(going, Ok(plan(&[])));
+    assert!(matches!(m.next(0), Some(Action::Ended(RunEnd { kind: RunKind::Tests(_), .. }))));
+    assert_eq!(m.next(0), None, "the build let go never starts");
+}
+
 /// "Review of steps 1 and 2", finding 7 (§8.5; Decisions 11): a
 /// `crashed` or `broken` with no id in a later step errors what of the
 /// step's scope has no result in the run: what passed in an earlier step

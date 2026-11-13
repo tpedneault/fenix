@@ -763,6 +763,9 @@ impl App {
         let theme = self.theme;
         let mut spans = Vec::new();
         let fold_marks = if gutter_chars > 0 { self.fold_marks(ob) } else { None };
+        // The test column's marks, for the lines these rows show only.
+        let shown = map.span();
+        let test_cells = if gutter_chars > 0 && !shown.is_empty() { self.tests_cells(ob, shown.start..=shown.end - 1) } else { None };
         let fold_ends: HashMap<usize, usize> = if collapsed_headers.is_empty() { HashMap::new() } else { self.fold_ranges_of(ob).into_iter().collect() };
         let visual_lines = ob.buffer.visual_line_count();
         // The line being drawn, once for all its rows, and how far into
@@ -792,7 +795,7 @@ impl App {
                 }
                 Some(row) if row.kind == RowKind::Text && row.line < visual_lines => {
                     if row.first {
-                        self.push_gutter(ob, row.line, true, gutter_chars, None, cursor_line, fold_marks.as_ref(), &mut spans);
+                        self.push_gutter(ob, row.line, true, gutter_chars, None, cursor_line, fold_marks.as_ref(), test_cells.as_ref(), &mut spans);
                     } else {
                         let blank = gutter_chars + row.indent;
                         if blank > 0 {
@@ -833,7 +836,7 @@ impl App {
                         spans.push((suffix.chars().take(room).collect(), theme.gutter_fg));
                     }
                 }
-                _ => self.push_gutter(ob, visual_lines, false, gutter_chars, None, cursor_line, fold_marks.as_ref(), &mut spans),
+                _ => self.push_gutter(ob, visual_lines, false, gutter_chars, None, cursor_line, fold_marks.as_ref(), test_cells.as_ref(), &mut spans),
             }
             if r + 1 < rows {
                 spans.push(("\n".to_string(), theme.fg));
