@@ -403,6 +403,17 @@ impl Model {
         dropped
     }
 
+    /// Lets go the run waiting, if one is: the explorer was turned off,
+    /// and what was asked before mustn't start on its own when it's turned
+    /// on again (the review of step 7, S2). Whether one was waiting.
+    pub fn drop_waiting(&mut self) -> bool {
+        let dropped = self.waiting.take().is_some();
+        if dropped {
+            self.revision_bump();
+        }
+        dropped
+    }
+
     /// Stops the run going (`x`, `SPC T k`): the step under way is
     /// stopped, those after it don't start, and its tests that hadn't
     /// ended go back to what they were (§4, §8.2). The host kills the

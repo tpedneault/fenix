@@ -168,7 +168,9 @@ impl App {
             return (false, None);
         }
         if !self.tests_enabled() {
-            // What the files showed of it goes too (step 5).
+            // What the files showed of it goes too (step 5), and the lenses
+            // that were its (step 7).
+            self.tests_lenses_off();
             let cleared = self.tests_in_files_off();
             if self.tests.page_shown {
                 self.tests_pages_off();
@@ -193,8 +195,11 @@ impl App {
             changed.push(root.clone());
         }
         // The files' marks, results after their lines and problems, from
-        // the same counting (step 5).
+        // the same counting (step 5); their lenses (step 7).
         let files = self.tests_in_files(&changed);
+        if !changed.is_empty() {
+            self.tests_lenses_due(Some(&changed));
+        }
         if changed.is_empty() {
             return (files, due);
         }
@@ -281,21 +286,21 @@ impl App {
                         (keys, model.provider(p).map(|v| crate::tests_page::clean(v.name)).unwrap_or_default())
                     }
                 };
-                self.tests_request(&root, vec![Selection::Nodes(keys)], &what);
+                let _ = self.tests_request(&root, vec![Selection::Nodes(keys)], &what);
             }
-            PageAction::RunAll => self.tests_request(&root, vec![Selection::All], "all the tests"),
-            PageAction::RunFailed => self.tests_request(&root, vec![Selection::Failed], "the failed"),
+            PageAction::RunAll => {
+                let _ = self.tests_request(&root, vec![Selection::All], "all the tests");
+            }
+            PageAction::RunFailed => {
+                let _ = self.tests_request(&root, vec![Selection::Failed], "the failed");
+            }
             PageAction::RunLast => match self.tests.projects.get(&root).and_then(|p| p.model.last_selection()).map(<[Selection]>::to_vec) {
-                Some(last) => self.tests_request(&root, last, "the last run"),
+                Some(last) => {
+                    let _ = self.tests_request(&root, last, "the last run");
+                }
                 None => self.set_error("no test run yet in this project"),
             },
-            PageAction::Stop => {
-                if self.tests_stop_in(&root, "stopped") {
-                    self.set_message("stopping the test run");
-                } else {
-                    self.set_message("no test run to stop");
-                }
-            }
+            PageAction::Stop => self.tests_stop_said(&root),
             PageAction::List => {
                 self.tests_list(&root);
                 self.set_message("listing the tests");
@@ -303,7 +308,9 @@ impl App {
             PageAction::Output => self.tests_output_beside(&root, Some(id)),
             PageAction::GoTo(node) => self.tests_go_to(id, &root, node),
             PageAction::Copy(node) => self.tests_copy_failure(&root, node),
-            PageAction::Debug(node) => self.tests_debug(&root, node, Some(id)),
+            PageAction::Debug(node) => {
+                let _ = self.tests_debug(&root, node, Some(id));
+            }
         }
         self.restale_page(id);
     }

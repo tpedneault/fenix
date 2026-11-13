@@ -369,7 +369,7 @@ fn a_plan_goes_on_past_a_step_that_failed_crashed_or_didnt_build() {
         p.scanned(&id);
     }
     let files: Vec<TestKey> = ["a.fake", "b.fake", "c.fake", "d.fake"].iter().map(|f| TestKey::new(&provider(), *f)).collect();
-    p.app.tests_request(&p.root.clone(), vec![Selection::Nodes(files)], "four files");
+    p.app.tests_request(&p.root.clone(), vec![Selection::Nodes(files)], "four files").unwrap();
     p.until("the run", Project::ended);
     assert_eq!(p.state("a.fake::one"), State::Passed);
     let long_test = p.result(&format!("b.fake::{}7", "n".repeat(900)));
@@ -546,7 +546,7 @@ fn a_provider_that_traps_stops_its_run() {
     p.app.tests_project(&root).model.add_provider(&trap, "trap");
     p.app.tests_project(&root).model.scan(&trap, "a.fake", vec![fenix_tests::Found::new("a.fake::one", None, "one", Kind::Test)]);
     p.app.tests.seen.clear();
-    p.app.tests_request(&root, vec![Selection::All], "all");
+    p.app.tests_request(&root, vec![Selection::All], "all").unwrap();
     p.until("the run", |p| p.model().last_run().is_some());
     assert!(matches!(p.last().halted, Some(fenix_tests::Halt::Stopped(_))), "{:?}", p.last());
     let node = p.model().find(&TestKey::new(&trap, "a.fake::one")).unwrap();
@@ -1679,7 +1679,7 @@ fn a_test_built_first_is_debugged_with_what_its_build_said() {
     p.scanned("slow.py::slow");
     p.open("ok.py");
     p.scanned("ok.py::build_ok");
-    p.app.tests_request(&p.root.clone(), vec![Selection::File("slow.py".into())], "slow.py");
+    p.app.tests_request(&p.root.clone(), vec![Selection::File("slow.py".into())], "slow.py").unwrap();
     p.until("the run", Project::step_running);
     p.app.tests_debug_here();
     let run = p.tests().debug.as_ref().expect("asked").run;
@@ -1785,8 +1785,10 @@ fn a_provider_with_no_tests_launch_is_said_once_and_not_asked_again() {
     p.scanned("a.py::build_x");
     p.app.tests_debug_here();
     let token = p.tests().debug.as_ref().and_then(|d| d.asking).expect("asked");
-    let why = "it has no tests-launch: it was built for an extension API before 1.6, which had no test providers";
-    p.app.tests_reply(EXT, token, Err(why.into()));
+    // Typed, as the worker gives it (step 7: no words read).
+    let missing = fenix_wasm::host::MissingExport { export: "tests-launch".into(), other_type: false };
+    let why = missing.to_string();
+    p.app.tests_reply(EXT, token, Ok(Reply::Missing(missing)));
     assert!(p.debug_done());
     assert_eq!(p.said(), format!("build_x can't be debugged: {why}"));
     assert_eq!(p.app.extension_output_text().matches("its tests aren't offered to debug").count(), 1);
@@ -1894,3 +1896,5 @@ fn only_a_click_on_the_marks_own_cell_runs_its_test() {
     app.handle_click_at((content.x + text::PAD_LEFT + char_width * 0.5, y), 800.0, 600.0);
     assert!(asked(&app), "the mark's cell runs it");
 }
+
+mod story;

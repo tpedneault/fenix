@@ -661,6 +661,23 @@ fn a_build_waits_for_the_run_going_and_can_be_let_go() {
     assert_eq!(m.next(0), None, "the build let go never starts");
 }
 
+/// A run waiting let go (the explorer turned off) never starts; the run
+/// going ends as it would.
+#[test]
+fn a_waiting_run_let_go_never_starts() {
+    let mut m = orbit();
+    m.request(Selection::All, Mode::Queue);
+    let Some(Action::Plan { run: going, .. }) = m.next(0) else { panic!() };
+    assert_eq!(m.request(Selection::Nodes(vec![key(RUST, ADDS)]), Mode::Queue), Requested::Waits);
+    assert!(m.summary().waiting.is_some());
+    assert!(m.drop_waiting());
+    assert!(!m.drop_waiting(), "only once");
+    assert!(m.summary().waiting.is_none());
+    m.planned(going, Ok(plan(&[])));
+    assert!(matches!(m.next(0), Some(Action::Ended(RunEnd { kind: RunKind::Tests(_), .. }))));
+    assert_eq!(m.next(0), None, "the run let go never starts");
+}
+
 /// "Review of steps 1 and 2", finding 7 (§8.5; Decisions 11): a
 /// `crashed` or `broken` with no id in a later step errors what of the
 /// step's scope has no result in the run: what passed in an earlier step

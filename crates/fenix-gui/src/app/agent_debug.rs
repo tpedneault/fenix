@@ -40,6 +40,12 @@ impl App {
         self.agent_calls.debug_stopped_at = Some(Instant::now());
     }
 
+    /// A session an agent asked for has started (`debug_test`, once its
+    /// test is built): it hears at the first stop, as `debug_start` does.
+    pub(in crate::app) fn agent_debug_wait_start(&mut self, reply: Sender<Reply>) {
+        self.agent_debug_wait(reply, START_WAIT);
+    }
+
     fn agent_debug_wait(&mut self, reply: Sender<Reply>, wait: Duration) {
         let stops_at = self.agent_calls.debug_stops;
         self.agent_calls.debug_waits.push(DebugWait { reply, until: Instant::now() + wait, stops_at });
@@ -51,7 +57,9 @@ impl App {
         if self.agent_calls.debug_waits.is_empty() {
             return;
         }
-        let ended = self.debug_session.as_ref().is_none_or(|s| s.ended);
+        // A session waiting on its `preLaunchTask` isn't over before it
+        // began (step 7's review, S3: `debug_test`, and `debug_start`).
+        let ended = self.debug_after_task.is_none() && self.debug_session.as_ref().is_none_or(|s| s.ended);
         let settled = self.debug_session.as_ref().is_some_and(|s| s.stopped_thread.is_some() && !s.call_stack.is_empty() && (!s.variables.is_empty() || self.agent_calls.debug_stopped_at.is_some_and(|at| now.duration_since(at) >= SETTLE)));
         let stops = self.agent_calls.debug_stops;
         let waits = std::mem::take(&mut self.agent_calls.debug_waits);
@@ -107,6 +115,12 @@ impl App {
         let stopped = self.debug_session.as_ref().is_some_and(|s| !s.ended && s.stopped_thread.is_some());
         let running = self.debug_session.as_ref().is_some_and(|s| !s.ended);
         let answer: Option<Result<Value, RpcError>> = match name {
+            // Through the test explorer (step 7): answered when its session
+            // starts, at the first stop, or with why it didn't.
+            "debug_test" => {
+                self.tests_agent_debug(&arguments, reply.clone());
+                None
+            }
             "debug_launches" => Some(self.agent_launches(&arguments).map(|(templates, project)| {
                 let mut names: Vec<Value> = templates.iter().map(|t| json!({ "name": t.name })).collect();
                 if project {

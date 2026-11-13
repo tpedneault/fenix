@@ -60,8 +60,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   as a problem, *Run test*, *Debug test* and *Show in Tests* on the right
   click. `SPC T d` (`d` on the page) debugs a test: its provider's launch
   starts at once, after a build when it asks for one (its output in *Test
-  output*); it isn't remembered as the project's last launch. `SPC p r`
-  and the lenses through the explorer aren't there yet. Off, nothing of
+  output*); it isn't remembered as the project's last launch. In a file
+  a provider serves, `SPC p r`, `SPC p T`, Fenix's own lens ("▶ Run test
+  | Debug") and rust-analyzer's run and debug lenses on a test go
+  through the explorer, as does agents' `run_test`; elsewhere they're as
+  before. A test run is `last_task`, extensions asking for `tasks` hear
+  `task-started` and `task-ended`, and it notifies once as
+  `notifications.tasks` says. Agents get `tests`, `test_failures`,
+  `run_tests` and `debug_test`; the control channel `fenix/tests`,
+  `fenix/tests.failures` and `fenix/tests.run`. Off, nothing of
   it is offered -- not on the leader, the keys' page, `SPC h k`, the
   palette nor `fenix/commands` -- and keys of yours under `SPC T` stay
   yours.

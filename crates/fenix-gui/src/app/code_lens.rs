@@ -117,6 +117,8 @@ pub(super) type LensTag = (Option<LspKey>, usize);
 
 /// The title of Fenix's own lens over a test.
 const RUN_TEST_TITLE: &str = "▶ Run test";
+/// Its *Debug*, beside it over a test the test explorer has (§9.5).
+const DEBUG_TEST_TITLE: &str = "Debug";
 
 /// Whether `session` offers lenses.
 pub(super) fn offers(session: &LspSession) -> bool {
@@ -213,8 +215,11 @@ impl App {
 
     /// Buffer `id`'s own "Run test" lenses, one over each test Fenix can
     /// run alone (`fenix_tasks::test_lines`), worked out again only after
-    /// an edit. None with `lsp.code_lens_tests` off, lenses off, or no
-    /// lens layout for the buffer.
+    /// an edit. In a file a test provider serves (the test explorer on),
+    /// "▶ Run test | Debug" over each test and group its provider found
+    /// instead (§9.5), worked out again when the explorer's model changes
+    /// too. None with `lsp.code_lens_tests` off, lenses off, or no lens
+    /// layout for the buffer.
     fn find_own_lenses(&mut self, id: BufferId) {
         let wanted = self.code_lens_on() && self.config.bool_value("lsp.code_lens_tests").unwrap_or(true) && self.lens_of.contains_key(&id);
         let Some(ob) = self.buffers.get(id).filter(|_| wanted) else {
@@ -222,27 +227,33 @@ impl App {
             return;
         };
         let edit_count = ob.buffer.edit_count();
-        if self.own_lenses.get(&id).is_some_and(|(at, _)| *at == edit_count) {
+        let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { return };
+        let revision = self.tests_lens_revision(&path);
+        if self.own_lenses.get(&id).is_some_and(|(at, rev, _)| *at == edit_count && *rev == revision) {
             return;
         }
-        let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { return };
-        let root = super::tool_sessions::root_for_path(&path);
-        let own = fenix_tasks::test_lines(&path, &ob.buffer.text(), &root)
-            .into_iter()
-            .map(|line| {
-                let at = lsp_types::Position { line: line as u32, character: 0 };
-                lsp_types::CodeLens {
-                    range: lsp_types::Range { start: at, end: at },
-                    command: Some(lsp_types::Command {
-                        title: RUN_TEST_TITLE.into(),
-                        command: lens::RUN_TEST.into(),
-                        arguments: Some(vec![serde_json::json!(path.to_string_lossy()), serde_json::json!(line + 1)]),
-                    }),
-                    data: None,
-                }
-            })
-            .collect();
-        self.own_lenses.insert(id, (edit_count, own));
+        let lens = |title: &str, command: &str, line: usize| {
+            let at = lsp_types::Position { line: line as u32, character: 0 };
+            lsp_types::CodeLens {
+                range: lsp_types::Range { start: at, end: at },
+                command: Some(lsp_types::Command { title: title.into(), command: command.into(), arguments: Some(vec![serde_json::json!(path.to_string_lossy()), serde_json::json!(line + 1)]) }),
+                data: None,
+            }
+        };
+        let own = match revision.and_then(|_| self.tests_lens_lines(&path)) {
+            Some(lines) => lines
+                .into_iter()
+                .flat_map(|(line, debug)| {
+                    let run = lens(RUN_TEST_TITLE, lens::RUN_TEST, line as usize);
+                    std::iter::once(run).chain(debug.then(|| lens(DEBUG_TEST_TITLE, lens::DEBUG_TEST, line as usize)))
+                })
+                .collect(),
+            None => {
+                let root = super::tool_sessions::root_for_path(&path);
+                fenix_tasks::test_lines(&path, &ob.buffer.text(), &root).into_iter().map(|line| lens(RUN_TEST_TITLE, lens::RUN_TEST, line)).collect()
+            }
+        };
+        self.own_lenses.insert(id, (edit_count, revision, own));
     }
 
     /// Whether buffer `id`'s lenses may be asked for and drawn: the
@@ -522,7 +533,7 @@ impl App {
             // Fenix's own "Run test", on a test's line where no server
             // offers to run it.
             let runs: HashSet<u32> = shown.iter().filter(|(_, l)| l.command.as_ref().is_some_and(|c| c.command.to_lowercase().contains("run") || c.title.contains('▶'))).map(|(_, l)| l.range.start.line).collect();
-            if let Some((_, own)) = self.own_lenses.get(&id) {
+            if let Some((_, _, own)) = self.own_lenses.get(&id) {
                 shown.extend(own.iter().enumerate().filter(|(_, l)| !runs.contains(&l.range.start.line)).map(|(i, l)| ((None, i), std::borrow::Cow::Borrowed(l))));
             }
             rows = lens::rows(shown.iter().map(|(tag, l)| (tag.clone(), l.as_ref())));
@@ -568,14 +579,14 @@ fn identity(lens: &lsp_types::CodeLens) -> LensIdentity {
 impl App {
     /// Buffer `buffer`'s lens `index` from `key` (`None`: Fenix's own) of
     /// `path`, as a pick: `None` if it isn't there.
-    fn lens_pick(&self, buffer: BufferId, key: &Option<LspKey>, path: &Path, index: usize) -> Option<LensPick> {
+    pub(super) fn lens_pick(&self, buffer: BufferId, key: &Option<LspKey>, path: &Path, index: usize) -> Option<LensPick> {
         let (generation, shown) = match key {
             Some(key) => {
                 let doc = self.lsp_sessions.get(key)?.lenses.get(path)?;
                 (doc.generation, doc.shown().nth(index)?.1.into_owned())
             }
             None => {
-                let (at, own) = self.own_lenses.get(&buffer)?;
+                let (at, _, own) = self.own_lenses.get(&buffer)?;
                 (*at, own.get(index)?.clone())
             }
         };
@@ -669,20 +680,26 @@ impl App {
         };
         let found = match &pick.key {
             Some(key) => self.lsp_sessions.get(key).and_then(|s| s.lenses.get(&pick.path)).and_then(|doc| same(doc.generation, doc.shown().map(|(_, l)| l.into_owned()).collect())),
-            None => self.own_lenses.get(&pick.buffer).and_then(|(at, own)| same(*at, own.clone())),
+            None => self.own_lenses.get(&pick.buffer).and_then(|(at, _, own)| same(*at, own.clone())),
         };
         let Some(index) = found else {
             self.set_error("not run: the lenses changed since; try again");
             return;
         };
         let Some(key) = &pick.key else {
-            // One of Fenix's own: the test at its line.
-            let Some(own) = self.own_lenses.get(&pick.buffer).and_then(|(_, own)| own.get(index)).cloned() else { return };
-            if let lens::Action::RunTest { path, line } = lens::action(&own, |_| false) {
-                let path = PathBuf::from(path);
-                if self.lens_may_start(&super::tool_sessions::root_for_path(&path)) {
-                    let _ = self.run_test_at(&path, line);
+            // One of Fenix's own: the test at its line, run (as `SPC p r`:
+            // through the test explorer where a provider serves the file)
+            // or debugged; a program starts only in a trusted project.
+            let Some(own) = self.own_lenses.get(&pick.buffer).and_then(|(_, _, own)| own.get(index)).cloned() else { return };
+            match lens::action(&own, |_| false) {
+                lens::Action::RunTest { path, line } => {
+                    let path = PathBuf::from(path);
+                    if self.lens_may_start(&super::tool_sessions::root_for_path(&path)) {
+                        let _ = self.run_test_at(&path, line);
+                    }
                 }
+                lens::Action::DebugTest { path, line } => self.tests_lens_debug(&PathBuf::from(path), line),
+                _ => {}
             }
             return;
         };
@@ -706,6 +723,20 @@ impl App {
             lens::Action::CargoRun(_) | lens::Action::CargoDebug(_) if !key.is_primary_for(fenix_syntax::LanguageId::Rust) => {
                 let command = code_lens.command.as_ref().map_or(String::new(), |c| c.command.clone());
                 self.set_error(format!("Fenix runs {command} only from rust-analyzer"));
+            }
+            // On a line the test explorer has a test at (a provider serves
+            // the file): that test, run or debugged through it (§2, §9.5),
+            // under the lens's rule (only in a trusted project).
+            lens::Action::CargoRun(ref runnable) | lens::Action::CargoDebug(ref runnable) if self.tests_ra_lens(&pick.path, code_lens.range.start.line, &runnable.cargo_args).is_some() => {
+                let (root, node) = self.tests_ra_lens(&pick.path, code_lens.range.start.line, &runnable.cargo_args).expect("just found");
+                if !self.lens_may_start(&root) {
+                    return;
+                }
+                if matches!(lens::action(&code_lens, |_| false), lens::Action::CargoDebug(_)) {
+                    let _ = self.tests_debug(&root, node, None);
+                } else {
+                    let _ = self.tests_door_run(&pick.path, &root, node);
+                }
             }
             lens::Action::CargoRun(runnable) => {
                 // Run where the server says, only inside its project: cargo
@@ -743,7 +774,10 @@ impl App {
                 self.set_error(format!("Fenix can't debug from a lens yet ({}): SPC u u starts the debugger", runnable.label));
             }
             // Fenix's own command, which no server's lens runs.
-            lens::Action::RunTest { .. } => self.set_error(format!("Fenix can't run {} ({})", code_lens.command.as_ref().map_or("", |c| c.title.as_str()), lens::RUN_TEST)),
+            lens::Action::RunTest { .. } | lens::Action::DebugTest { .. } => {
+                let (title, command) = code_lens.command.as_ref().map_or(("", ""), |c| (c.title.as_str(), c.command.as_str()));
+                self.set_error(format!("Fenix can't run {title} ({command})"));
+            }
             lens::Action::Unknown { title, command } => self.set_error(format!("Fenix can't run {title} ({command})")),
             lens::Action::Unresolved => self.set_message("that lens is still being worked out"),
         }

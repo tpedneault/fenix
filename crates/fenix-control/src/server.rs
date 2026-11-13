@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    code, method, AgentCaller, Call, CaptureParams, NotifyParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
+    code, method, AgentCaller, Call, CaptureParams, NotifyParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError, TestsParams, TestsRunParams,
     CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
 };
 
@@ -25,6 +25,11 @@ pub struct ServerInfo {
     /// is `-32601`, even a method this crate knows, so a client that
     /// checks the list is never told one thing and served another.
     pub capabilities: Vec<String>,
+    /// Of those, the ones withheld now: not listed, and `-32601`, as if
+    /// this build hadn't them. The editor sets it as it runs (the test
+    /// explorer's methods while `tests.enabled` is off), so a hello says
+    /// what's answered at that moment.
+    pub withheld: std::sync::Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 impl ServerInfo {
@@ -34,7 +39,14 @@ impl ServerInfo {
             version: version.into(),
             pid,
             capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            withheld: Default::default(),
         }
+    }
+
+    /// The methods it answers now: its capabilities, less those withheld.
+    pub fn offered(&self) -> Vec<String> {
+        let withheld = self.withheld.read().map(|w| w.clone()).unwrap_or_default();
+        self.capabilities.iter().filter(|c| !withheld.contains(c)).cloned().collect()
     }
 }
 
@@ -200,7 +212,7 @@ impl Session<'_> {
                 format!("send {} first", method::HELLO),
             ));
         }
-        if !self.info.capabilities.iter().any(|c| c == method) {
+        if !self.info.offered().iter().any(|c| c == method) {
             return Err(RpcError::new(
                 code::METHOD_NOT_FOUND,
                 format!("no method {method}"),
@@ -239,6 +251,21 @@ impl Session<'_> {
             method::SELECTION => Call::Selection,
             method::TASKS => Call::Tasks,
             method::TASKS_RUN => Call::TasksRun(params),
+            method::TESTS => Call::Tests(params_of(params)?),
+            method::TESTS_FAILURES => {
+                let failures: TestsParams = params_of(params)?;
+                if failures.state.is_some() {
+                    return Err(RpcError::invalid_params("fenix/tests.failures takes path alone: its state is failed or errored"));
+                }
+                Call::TestsFailures(failures)
+            }
+            method::TESTS_RUN => {
+                let run: TestsRunParams = params_of(params)?;
+                if run.is_empty() {
+                    return Err(RpcError::invalid_params("say what to run: tests, path, failed or all"));
+                }
+                Call::TestsRun(run)
+            }
             method::AGENT_COMMAND => Call::AgentCommand(params),
             method::BUFFER_READ => Call::BufferRead(params),
             method::LSP => Call::Lsp(params),
@@ -282,7 +309,7 @@ impl Session<'_> {
             protocol: PROTOCOL,
             version: self.info.version.clone(),
             pid: self.info.pid,
-            capabilities: self.info.capabilities.clone(),
+            capabilities: self.info.offered(),
         };
         Ok(serde_json::to_value(result).expect("plain data serializes"))
     }

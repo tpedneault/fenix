@@ -193,7 +193,7 @@ impl App {
         }
         let Some(n) = self.tests.projects.get(root).and_then(|p| p.model.node(node)) else { return };
         let (key, what) = (n.key(), crate::tests_page::clean(&n.found().label));
-        self.tests_request(root, vec![Selection::Nodes(vec![key])], &what);
+        let _ = self.tests_request(root, vec![Selection::Nodes(vec![key])], &what);
     }
 
     /// The test the cursor is in (§9.4), in the focused file, with its

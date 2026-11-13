@@ -191,7 +191,8 @@ pub type Reply = Result<Value, RpcError>;
 /// keeps one open doesn't hold up the next. Each request the editor has
 /// to answer goes to it as `FenixUserEvent::Control`.
 pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUserEvent>) {
-    let info = ServerInfo::new(env!("CARGO_PKG_VERSION"), std::process::id());
+    let mut info = ServerInfo::new(env!("CARGO_PKG_VERSION"), std::process::id());
+    info.withheld = withheld();
     std::thread::spawn(move || loop {
         let stream = match listener.accept() {
             Ok(stream) => stream,
@@ -210,6 +211,14 @@ pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUser
             let _ = fenix_control::serve(stream, writer, &info, |call| ask_editor(&proxy, call));
         });
     });
+}
+
+/// The control methods withheld now, which the editor keeps as it runs
+/// (`App::tests_tick`: the test explorer's while `tests.enabled` is off).
+/// Withheld from the start: the explorer is off until the settings say.
+pub fn withheld() -> std::sync::Arc<std::sync::RwLock<Vec<String>>> {
+    static WITHHELD: std::sync::OnceLock<std::sync::Arc<std::sync::RwLock<Vec<String>>>> = std::sync::OnceLock::new();
+    WITHHELD.get_or_init(|| std::sync::Arc::new(std::sync::RwLock::new(crate::app::TESTS_METHODS.iter().map(|m| m.to_string()).collect()))).clone()
 }
 
 /// Hands `call` to the UI thread and waits for its answer.

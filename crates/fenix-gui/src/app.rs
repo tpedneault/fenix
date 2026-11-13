@@ -94,6 +94,7 @@ mod welcome_host;
 mod import_host;
 mod wasm_host;
 mod tests_host;
+pub(crate) use tests_host::TESTS_METHODS;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
 mod reading_host;
@@ -5410,7 +5411,7 @@ pub struct App {
     /// Each buffer's rows of lenses, by line: what a click on one runs.
     lens_rows: HashMap<BufferId, std::collections::BTreeMap<usize, fenix_lsp::code_lens::LensRow<code_lens::LensTag>>>,
     /// Fenix's own "Run test" lenses, by buffer, as of an edit count.
-    own_lenses: HashMap<BufferId, (u64, Vec<lsp_types::CodeLens>)>,
+    own_lenses: HashMap<BufferId, (u64, Option<u64>, Vec<lsp_types::CodeLens>)>,
     /// The lens under the pointer: its buffer, its row's line, its columns.
     lens_hover: Option<(fenix_window::WindowId, usize, std::ops::Range<usize>)>,
     /// A test's seam: every pane that could wrap goes by rows (at
@@ -10763,7 +10764,8 @@ impl App {
         self.wasm.task_owner(root, task).unwrap_or_else(|| "Fenix".to_string())
     }
 
-    /// `SPC p r`: the test the cursor is in, run in Task Output.
+    /// `SPC p r`: the test the cursor is in, run in Task Output -- or
+    /// through the test explorer where a provider serves the file.
     pub(crate) fn run_test_at_cursor(&mut self) {
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
             self.set_error("no file here -- SPC p r runs the test the cursor is in");
@@ -10780,8 +10782,21 @@ impl App {
     /// read from the file's open buffer when it has one, unsaved edits and
     /// all. The task's name (`test ledger::tests::adds`) when it started;
     /// why not when it didn't, also shown in the modeline. `SPC p T` runs
-    /// it again.
+    /// it again. With `tests.enabled` on, a file a test provider serves
+    /// goes through the explorer instead (`tests_door`): the test's label
+    /// when it's asked.
     pub(crate) fn run_test_at(&mut self, path: &Path, line: usize) -> Result<String, String> {
+        // Through the test explorer where a provider serves the file, as
+        // `SPC T t` (plan test-explorer.md §2, Q2); else as it always was
+        // (Q7).
+        match self.tests_door(path, line.saturating_sub(1) as u32) {
+            tests_host::Door::Test { root, node } => return self.tests_door_run(path, &root, node).map(|(what, _)| what),
+            tests_host::Door::NotATest(why) => {
+                self.set_error(why.clone());
+                return Err(why);
+            }
+            tests_host::Door::Fallback => {}
+        }
         let text = match self.buffer_id_for_lsp_path(path).and_then(|id| self.buffers.get(id)) {
             Some(ob) => ob.buffer.text(),
             None => match std::fs::read_to_string(path) {
@@ -10829,6 +10844,10 @@ impl App {
     /// session.
     pub(crate) fn rerun_last_task(&mut self) {
         let root = self.integration_root();
+        // `SPC p r`'s test run, when it went through the test explorer.
+        if self.tests_rerun_door(&root) {
+            return;
+        }
         let Some(task) = self.project_last_tasks.get(&root).cloned() else {
             self.set_error("no task has been run yet for this project".to_string());
             return;
@@ -10885,6 +10904,11 @@ impl App {
         task.command = spec.executable.clone();
         task.args = spec.args.clone();
         self.project_last_tasks.insert(root.clone(), task.clone());
+        // A debug session's `preLaunchTask` isn't what `SPC p t` or `SPC p
+        // r` ran: `SPC p T` keeps a door's test run (step 7's review, S3).
+        if self.debug_after_task.as_ref().is_none_or(|(name, _)| *name != task.name) {
+            self.tests_task_ran(&root);
+        }
         self.quickfix.clear();
         self.search.quickfix_page = None;
         self.quickfix_index = None;
@@ -37167,7 +37191,7 @@ name = \"orbit\"
 
     /// A running, initialized server for `path`'s project, serving
     /// `languages` and offering `capabilities`.
-    fn install_server(app: &mut App, path: &Path, server: LspServer, name: &str, languages: &[&str], capabilities: lsp_types::ServerCapabilities) -> LspKey {
+    pub(in crate::app) fn install_server(app: &mut App, path: &Path, server: LspServer, name: &str, languages: &[&str], capabilities: lsp_types::ServerCapabilities) -> LspKey {
         let key = LspKey { server, root: tool_sessions::lsp_root_for_path(path) };
         if let LspServer::Additional(name) = &key.server {
             let additional = fenix_project::tools::AdditionalServer { name: name.clone(), languages: languages.iter().map(|l| l.to_string()).collect(), executable: name.clone(), ..Default::default() };
@@ -37180,18 +37204,18 @@ name = \"orbit\"
         key
     }
 
-    fn capabilities(json: serde_json::Value) -> lsp_types::ServerCapabilities {
+    pub(in crate::app) fn capabilities(json: serde_json::Value) -> lsp_types::ServerCapabilities {
         serde_json::from_value(json).unwrap()
     }
 
     /// The one pending request `key` has, and its id.
-    fn only_pending(app: &App, key: &LspKey) -> (i64, PendingLspRequest) {
+    pub(in crate::app) fn only_pending(app: &App, key: &LspKey) -> (i64, PendingLspRequest) {
         let pending = &app.lsp_sessions[key].pending;
         assert_eq!(pending.len(), 1, "{pending:?}");
         pending.iter().map(|(id, p)| (*id, p.clone())).next().unwrap()
     }
 
-    fn answer(app: &mut App, key: &LspKey, id: i64, result: serde_json::Value) {
+    pub(in crate::app) fn answer(app: &mut App, key: &LspKey, id: i64, result: serde_json::Value) {
         let generation = app.lsp_sessions[key].generation;
         app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Response { id, result: Ok(result) });
     }
@@ -37848,7 +37872,7 @@ name = \"orbit\"
         assert!(app.lsp_sessions[&key].pending.is_empty() && app.semantic_wake().is_none(), "tried, until an edit");
     }
 
-    fn lens_capabilities() -> lsp_types::ServerCapabilities {
+    pub(in crate::app) fn lens_capabilities() -> lsp_types::ServerCapabilities {
         capabilities(serde_json::json!({"textDocumentSync": 2, "codeLensProvider": {"resolveProvider": true}}))
     }
 
@@ -38099,6 +38123,12 @@ name = \"orbit\"
         app.run_cmd("code.lens");
         assert_eq!(said_now(&app), "Fenix can't run ▶ Run test (fenix.runTest)");
         assert!(app.task_session.is_none());
+        // Its debug command too, said as itself, as an unknown one was
+        // before there was one (step 7's review, N1).
+        let own = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Debug", "command": "fenix.debugTest", "arguments": ["/elsewhere/t.rs", 1]}});
+        let (_dir, mut app, _key) = lensed("lens_debug_own_from_server", serde_json::json!([own]));
+        app.run_cmd("code.lens");
+        assert_eq!(said_now(&app), "Fenix can't run Debug (fenix.debugTest)");
         let other = serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "command": {"title": "Peek", "command": "editor.peek"}});
         let (_dir, mut app, _key) = lensed("lens_unknown", serde_json::json!([other]));
         app.run_cmd("code.lens");

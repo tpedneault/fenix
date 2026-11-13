@@ -169,6 +169,9 @@ fn hello_reports_the_version_pid_and_capabilities() {
             "fenix/selection",
             "fenix/tasks",
             "fenix/tasks.run",
+            "fenix/tests",
+            "fenix/tests.failures",
+            "fenix/tests.run",
             "fenix/agentCommand",
             "fenix/buffer.read",
             "fenix/lsp",
@@ -717,4 +720,80 @@ fn a_client_without_a_thread_calls_as_itself() {
     input.extend(frame(r#"{"jsonrpc":"2.0","id":2,"method":"fenix/agent.wait","params":{"since":0}}"#));
     let (_, calls) = exchange(&input);
     assert_eq!(calls, vec![Call::Agent { method: "wait".into(), caller: fenix_control::AgentCaller { client: "t".into(), thread: None }, params: json!({ "since": 0 }) }]);
+}
+
+/// `fenix/tests*`: their params typed and checked before the editor is
+/// asked; a run that names nothing, or failures asked by state, refused.
+#[test]
+fn the_test_explorers_methods_take_typed_params() {
+    let mut input = frame(HELLO);
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":2,"method":"fenix/tests"}"#));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":3,"method":"fenix/tests","params":{"path":"src/lib.rs","state":"failed"}}"#));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":4,"method":"fenix/tests.failures","params":{"path":"a.py"}}"#));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":5,"method":"fenix/tests.failures","params":{"state":"passed"}}"#));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":6,"method":"fenix/tests.run","params":{"tests":[{"provider":"rust","id":"a::b"}],"failed":true}}"#));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":7,"method":"fenix/tests.run","params":{}}"#));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":8,"method":"fenix/tests.run","params":{"every":true}}"#));
+    let (replies, calls) = exchange(&input);
+    let codes: Vec<(Value, Value)> = replies.iter().map(|r| (r["id"].clone(), r["error"]["code"].clone())).collect();
+    assert_eq!(
+        codes,
+        vec![
+            (json!(1), Value::Null),
+            (json!(2), Value::Null),
+            (json!(3), Value::Null),
+            (json!(4), Value::Null),
+            (json!(5), json!(code::INVALID_PARAMS)),
+            (json!(6), Value::Null),
+            (json!(7), json!(code::INVALID_PARAMS)),
+            (json!(8), json!(code::INVALID_PARAMS)),
+        ]
+    );
+    use fenix_control::{TestRef, TestsParams, TestsRunParams};
+    assert_eq!(
+        calls,
+        vec![
+            Call::Tests(TestsParams::default()),
+            Call::Tests(TestsParams { path: Some("src/lib.rs".into()), state: Some("failed".into()) }),
+            Call::TestsFailures(TestsParams { path: Some("a.py".into()), state: None }),
+            Call::TestsRun(TestsRunParams { tests: Some(vec![TestRef { provider: "rust".into(), id: "a::b".into() }]), path: None, failed: true, all: false }),
+        ]
+    );
+    assert!(CAPABILITIES.contains(&method::TESTS) && CAPABILITIES.contains(&method::TESTS_FAILURES) && CAPABILITIES.contains(&method::TESTS_RUN));
+}
+
+/// Methods withheld as the editor runs (the test explorer's, while it's
+/// off) aren't in a hello and are `-32601` -- before their params are
+/// read, so a malformed one isn't told otherwise -- and come back when
+/// they're no longer withheld, on a connection made after.
+#[test]
+fn withheld_methods_are_neither_listed_nor_answered() {
+    let info = info();
+    *info.withheld.write().unwrap() = vec![method::TESTS.into(), method::TESTS_FAILURES.into(), method::TESTS_RUN.into()];
+    let run = |info: &ServerInfo| {
+        let mut input = frame(HELLO);
+        input.extend(frame(r#"{"jsonrpc":"2.0","id":2,"method":"fenix/tests.run","params":{}}"#));
+        input.extend(frame(r#"{"jsonrpc":"2.0","id":3,"method":"fenix/tests"}"#));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut output = Vec::new();
+        let _ = serve(Cursor::new(input), &mut output, info, editor(Arc::clone(&calls)));
+        let mut cursor = Cursor::new(output);
+        let mut replies: Vec<Value> = Vec::new();
+        while let Some(body) = fenix_rpc::read_message(&mut cursor).unwrap() {
+            replies.push(serde_json::from_slice(&body).unwrap());
+        }
+        let calls = calls.lock().unwrap().clone();
+        (replies, calls)
+    };
+    let (replies, calls) = run(&info);
+    let listed: Vec<String> = serde_json::from_value(replies[0]["result"]["capabilities"].clone()).unwrap();
+    assert!(!listed.iter().any(|m| m.starts_with("fenix/tests")), "{listed:?}");
+    assert_eq!(listed.len(), CAPABILITIES.len() - 3);
+    assert_eq!((replies[1]["error"]["code"].clone(), replies[2]["error"]["code"].clone()), (json!(code::METHOD_NOT_FOUND), json!(code::METHOD_NOT_FOUND)));
+    assert!(calls.is_empty());
+    info.withheld.write().unwrap().clear();
+    let (replies, calls) = run(&info);
+    assert_eq!(replies[0]["result"]["capabilities"], json!(CAPABILITIES));
+    assert_eq!(replies[1]["error"]["code"], json!(code::INVALID_PARAMS), "its params read now");
+    assert_eq!(calls, vec![Call::Tests(fenix_control::TestsParams::default())]);
 }

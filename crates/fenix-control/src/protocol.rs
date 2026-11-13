@@ -33,6 +33,9 @@ pub mod method {
     pub const SELECTION: &str = "fenix/selection";
     pub const TASKS: &str = "fenix/tasks";
     pub const TASKS_RUN: &str = "fenix/tasks.run";
+    pub const TESTS: &str = "fenix/tests";
+    pub const TESTS_FAILURES: &str = "fenix/tests.failures";
+    pub const TESTS_RUN: &str = "fenix/tests.run";
     pub const AGENT_COMMAND: &str = "fenix/agentCommand";
     pub const BUFFER_READ: &str = "fenix/buffer.read";
     pub const LSP: &str = "fenix/lsp";
@@ -70,6 +73,9 @@ pub const CAPABILITIES: &[&str] = &[
     method::SELECTION,
     method::TASKS,
     method::TASKS_RUN,
+    method::TESTS,
+    method::TESTS_FAILURES,
+    method::TESTS_RUN,
     method::AGENT_COMMAND,
     method::BUFFER_READ,
     method::LSP,
@@ -387,6 +393,53 @@ pub struct AgendaTask {
     pub elapsed_minutes: i64,
 }
 
+/// `fenix/tests`' params, and `fenix/tests.failures`' (`path` alone).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestsParams {
+    /// One file's tests: a path of the project's, or a full one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Only those in this state: `passed`, `failed`, `errored`,
+    /// `skipped`, `not_run`, `queued`, `running`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// A test as `fenix/tests` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestRef {
+    /// Its provider's id (`rust`), or `extension:provider` when two
+    /// extensions have one of that id.
+    pub provider: String,
+    pub id: String,
+}
+
+/// `fenix/tests.run`'s params: what to run, one or more of them, run as
+/// one request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestsRunParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tests: Option<Vec<TestRef>>,
+    /// A file's tests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Those whose last result failed or errored.
+    #[serde(default)]
+    pub failed: bool,
+    #[serde(default)]
+    pub all: bool,
+}
+
+impl TestsRunParams {
+    /// Whether it names nothing to run.
+    pub fn is_empty(&self) -> bool {
+        self.tests.as_ref().is_none_or(Vec::is_empty) && self.path.is_none() && !self.failed && !self.all
+    }
+}
+
 /// `fenix/agenda.clockIn`'s params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -439,6 +492,13 @@ pub enum Call {
     Tasks,
     /// `{ "name": string }`: runs a project task (agents' write tools).
     TasksRun(Value),
+    /// The project's tests, as the test explorer has them (`fenix/tests`).
+    Tests(TestsParams),
+    /// Its failed and errored tests (`fenix/tests.failures`).
+    TestsFailures(TestsParams),
+    /// Starts a test run, when `agents.mcp.fenix_write` lets it
+    /// (`fenix/tests.run`).
+    TestsRun(TestsRunParams),
     /// `{ "id": string }`: runs a Fenix command for an agent, when
     /// `agents.mcp.fenix_write` lets it.
     AgentCommand(Value),

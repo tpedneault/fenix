@@ -795,9 +795,13 @@ impl App {
             items.push(item("Toggle breakpoint", key("debug.toggle_breakpoint"), MenuAction::Breakpoint));
         }
         // On a test's lines, beside it (§9.1).
-        if self.tests_test_here().is_some() {
+        if let Some((root, node)) = self.tests_test_here() {
             items.push(item("Run test", key("tests.run_here"), MenuAction::RunTest));
-            items.push(item("Debug test", key("tests.debug_here"), MenuAction::DebugTest));
+            // Only where it then debugs: a test or case, of an extension
+            // with tests-launch (step 6's review, done in step 7).
+            if self.tests_debuggable(&root, node) {
+                items.push(item("Debug test", key("tests.debug_here"), MenuAction::DebugTest));
+            }
             items.push(item("Show in Tests", key("tests.open"), MenuAction::ShowTest));
         }
         items.push(item("Ask the agent about this", key("agents.ask_selection"), MenuAction::AskAgent));
