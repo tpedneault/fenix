@@ -157,11 +157,13 @@ files) given by packs (`WRITING_EXTENSIONS.md`, "Language packs").
   command line is held to `CreateProcessW`'s 32,766 characters on every
   platform, so a provider splits a long selection itself.
 - Every extension rebuilt on the 1.6 API crate exports the five
-  functions. One that keeps `api = "1.5"` is read to start on Fenix 1.5
-  (a component imports only the functions it calls, and the new records
-  are types the 1.5 host never checks); step 2 tests it against 1.5's
-  world (plan §6.2). If it doesn't start, an extension rebuilt on the
-  1.6 crate needs `api = "1.6"`.
+  functions. One that keeps `api = "1.5"` starts on Fenix 1.5 only when
+  no code reachable from an export calls `tests::provider`, even behind
+  a condition that never holds: a component imports every function its
+  code can reach, and the 1.5 host has no `test-provider-set` to give.
+  Step 2 tests both: a 1.6-built guest that calls nothing new starts on
+  1.5's world, and one that calls it is refused (plan §6.2, §19). An
+  extension whose code can reach the call needs `api = "1.6"`.
 - Every new door (`SPC p r`, the lens, `run_test`) has two paths, the
   explorer and the fallback, and both are tested.
 - The remote-projects plan's "API 1.6" (`docs/plans/remote-ssh.md:524`)
