@@ -2,7 +2,7 @@
 
 - **Status:** planned, 13 November 2026, for the maintainer to review;
   revised the same day after the packs' review of it (§18). Recorded in
-  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 3 are built (§20).
+  [ADR 0005](../adr/0005-test-providers.md). Steps 1 to 4 are built (§20).
 - **Scope:** a page that lists a project's tests before anything has
   run, runs one, a file, a group, the failed or all of them, and shows
   each result as it ends: on the page, in the gutter, after the test's
@@ -20,8 +20,8 @@
   split; it keeps the first design's runner experiments (its §3 and
   appendix, the recorded outputs in fenix-extensions
   `plans/test-explorer-fixtures/`), and its §11 is the review of this
-  plan that §18 answers. Steps 1 to 3 are built (§20); the review of
-  them is §19.
+  plan that §18 answers. Steps 1 to 4 are built (§20); the review of
+  steps 1 and 2 is §19.
 
 Paths are in this repository unless they say `fenix-extensions`. Every
 claim about what Fenix does today cites the tree at `b5c3765`.
@@ -2154,3 +2154,152 @@ Left for the step that owns each, from the same review:
   installed isn't scanned until reopened; `ids_sorted_by_path` each wake
   (cheap today); Q9, what "trusted" means; `C:foo` (drive-relative) reads
   as `C:/foo`.
+
+### Step 4, the page
+
+**Where it is.** `crates/fenix-gui/src/tests_page.rs`, pure: the page's
+state (`TestsPage`: the tab, the filter, what's open, the focused row,
+where the tree and the details are scrolled), its keys (`TestsPage::key`
+gives an `Action`), and `layout`, from the project's `fenix_tests::Model`
+and the head as counted (`View`). Its tests (`tests_page/tests.rs`) are
+§7.2's two pictures as text, at 100×30 after a run and at 80×24 while
+one goes, every size from 40×10 to 140×50 checked to keep inside its
+pane, the keys, what's cleaned, and 10,000 tests. The host is
+`app/tests_host/page.rs`: `tests.open`, the page's actions, the head
+counted, the modeline's item, *Test output* beside the page and its
+`Enter`. `PageModel::Tests` in `pages.rs`, `tests` as its tutorial and
+focus name (`tutorial_host.rs`, `wasm_host.rs`), its title
+`*tests: <project>*`. `SPC T` in `default_keymap.toml`; `tests.open` in
+`commands.rs`.
+
+**The leader.** `SPC T T` `tests.open`, `SPC T t` `run_here`, `f`
+`run_file`, `a` `run_all`, `F` `run_failed`, `l` `run_last`, `k` `stop`,
+`o` `output`, the group named "tests"; `Ctrl+K T …` with standard keys,
+by the leader's chord, no chords of its own. `SPC T d` waits for
+`tests.debug_here` (step 6): a key bound to a command Fenix hasn't got
+would be dropped from the leader anyway, and the keymap's test that
+every command it names exists would fail. Checked: nothing else of
+Fenix's under `SPC T` or at it, each key resolving to its command, the
+packs' uppercase groups (`SPC A`, `C`, `P`) apart, `Ctrl+K` refused to
+a flavour (a JetBrains-style one included; fenix-extensions'
+`jetbrains-keys` binds no `C-k` and nothing of the explorer's), and
+`keymap_conflicts` empty (`spc_t_is_the_test_explorers_and_clashes_with_nothing`).
+
+**Off.** With `tests.enabled` off nothing of it is there: `SPC T` isn't
+in the which-key menu and does nothing (it's as unbound as in 1.5; the
+leader's matcher is let go at `SPC T`, `App::leader_hidden`, unless
+keys of your own are under it in keybindings.toml, which stay yours), the
+palette and `SPC h b` don't list the `tests.` commands
+(`App::command_hidden`), the modeline has no item, `tests.open` and the
+other commands say "the test explorer is off (tests.enabled)" when run
+by another way (your keybindings.toml, the control channel), and a page
+open when it's turned off is closed at the next wake, with what was
+kept of the pages. `tests_list`, `tests_page_opened` and `tests_replace`
+do nothing while it's off (step 3's review asked for the gate). Per
+frame, off, it costs one look at an empty map, and a look at the
+setting; a wake, the same (`with_the_explorer_off_nothing_of_the_page_exists`).
+
+**What a frame costs** (§7.5). The page is laid out to its pane's
+height, as the Extensions page is: only the tree's rows in view are
+written, so at 10,000 tests, all open, a layout is a pane's worth
+(`ten_thousand_tests_cost_what_is_in_view`). Its rows come from
+`Model::rows` and are worked out again only when the model's revision,
+the tab, the filter or what's open changes (`RowsKey`), never because
+a frame is drawn. `summary()` -- §19 counted its waiting run once a
+revision, but it still counts the run's results and copies the last
+run's files each call -- is called at most once a revision of the
+model and at most ten times a second while it changes
+(`tests_views_due`, from `plan_wake`, which also marks the page to be
+laid out then and asks for the next wake); the modeline's item reads
+what was counted. A key lays the page out at once. `n`, `N` and the
+filter walk the model on the key, the filter in one pass.
+
+**Where the plan was silent, or read so:**
+
+- **The page scrolls inside itself**: the head, the tabs and the keys
+  stay, the tree scrolls to keep the focused row in view, and the
+  details stay beside it (wide) or under it (narrow, a quarter of the
+  pane, at least three lines), scrolled with `J` and `K`, saying when
+  there's more (`o` has all of it).
+- **What else the head says** goes on a line of its own under it, at
+  most two: files with unsaved edits while a run goes (§8.4), a target
+  that didn't build while it goes, a project that isn't trusted ("not
+  listed on their own in a project that isn't trusted (SPC p y): u lists
+  them, running the project's runner", §12; the plan's wording names the
+  runner's command, which Fenix doesn't know before it plans), a
+  first scan stopped at its cap (`scanned_of`), and a provider that said
+  why it can't run (with `SPC p h`), on its row too. After a run, the
+  head's right says when and how long, `stopped HH:MM: why`, `timed
+  out`, or the first `broken`'s message with `o shows it`, in bad.
+- **What starts open**: a group holding a failure (§7.2), a provider's
+  row, and a provider's only top node, so a one-target or one-file
+  project shows its tests; the rest closed. `zM` and `zR` close and open
+  all, and what you open or close after stays as you left it.
+- **`Enter`** on a test or case opens its file at its line in the pane
+  beside the page (another pane, else one split off), the keyboard with
+  it, as the Search page's `Enter` does; on a group, file or suite it
+  folds or opens. A test found only in a run says it has no line.
+- **`o` and `SPC T o`** show *Test output* in the pane beside the page
+  when the page is shown, the keyboard with it, so `Enter` on a place
+  there goes to it; with no page shown, in the focused pane (step 3's).
+- **`y`** copies the test's label, its place (the failure's `at`, else
+  the test's line) and its message, escape codes out, on three lines.
+- **`n` / `N`** from a row that isn't a failure go to the next one among
+  the rows after it (before it), else the first (the last); from a
+  failure, the next in display order, round again. The failure's groups
+  are opened; on the Not run tab, it goes back to All.
+- **`d`** says debugging a test from the page isn't in Fenix yet, and
+  isn't on the key strip, until step 6.
+- **The modeline's item** is about the project of the tests page you're
+  on, else the project you're in. `✗ 3 tests` counts what's failed or
+  errored now, results kept from before a restart included (stale): a
+  restart doesn't forget what failed (Q4) until it passes. A listing
+  going says nothing there.
+- **`SPC T T`'s project**: the tests page's or *Test output*'s you're
+  on, else the focused file's, else the project you're in, else the last
+  one you were in a file of. It reopens the page on the tab, filter and
+  open groups it had (§7.6) because the page's state is kept per project
+  for the session when it's closed (by `q`, `SPC b k`, or replaced).
+- **Cleaning** (§19): a label, a provider's name and a message are one
+  row (`tests_page::clean`: escape codes out, every run of whitespace or
+  control characters one space); a failure's text and what a test
+  printed keep their indentation, a tab four spaces, other control
+  characters out. `without_escapes` moved from `tests_host` to
+  `tests_page`, the one both use.
+- **Colours**: passed in the good role, failed and errored in bad, what
+  runs in the accent, the rest muted, and every stale mark muted, read in
+  a dark and a light theme (`the_pages_marks_read_in_a_dark_and_a_light_theme`).
+
+**From step 3's review**, done:
+
+- *Test output*'s `Enter` resolves a place against the folder of the
+  step whose lines it's among (each step's first line and folder kept,
+  `output_steps`), else the project: a listing in the provider's `/data`
+  opens its file, not the project's of the same name
+  (`enter_on_test_output_goes_to_a_place_in_its_steps_folder`).
+- `output_lines` counts a cut line's pieces as the one line they make in
+  the buffer, so trimming past 16 MiB drops the lines it counted.
+- The `tests.enabled` gate on `tests_replace`, `tests_list` and
+  `tests_page_opened`.
+- `list-after` still has no app test: the guest's `run-all` always has
+  a step whose `needs` are refused (`elsewhere/x`), so it never lists
+  after, and building a changed guest needs the wasm toolchain this step
+  was built without. The model's tests hold it.
+
+**Tested only as text.** No window opens where this was built: the page
+was read as its laid-out text, spans and backgrounds, with the provider
+guest and `fake-test-runner` behind it (`the_page_runs_folds_filters_goes_to_a_test_stops_and_shows_the_output`),
+never drawn. How it looks drawn -- the focused row's background and
+rail, the hairline between the tree and the details, the tabs' chips --
+and how ten redraws a second feel while a run goes are for the nightly.
+
+**For the steps after**: step 5's gutter can mark its panes to redraw
+where `tests_views_due` restales the page, and should send `Enter`'s
+jump (`tests_go_to`) through the same normalising of a provider's path
+(`/project/../x`, `\\?\`) it gives marks; step 6 replaces
+`PageAction::Debug`'s message with the launch (and adds `SPC T d` and
+`d` on the key strip); step 7's doors ask as `PageAction::Run` does
+(`tests_request`, or `tests_replace` to replace the run going), the
+notification's *Show the failures* is `tests.open`, and the run's end
+(`tests_run_ended`) is still where the notification and `last_task` go.
+
