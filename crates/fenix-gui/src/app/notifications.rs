@@ -274,6 +274,12 @@ impl App {
             self.notice_server_install(program);
             return;
         }
+        // One of your settings, on the settings page (Fenix's own: an
+        // extension's notification can't carry it).
+        if let Some(key) = command.strip_prefix("setting:") {
+            self.open_settings_page(crate::settings_page::Scope::You, Some(key));
+            return;
+        }
         if let Some(path) = command.strip_prefix("open:") {
             let (path, line) = match path.rsplit_once(':') {
                 Some((p, l)) if l.parse::<usize>().is_ok() => (p, l.parse::<usize>().ok()),

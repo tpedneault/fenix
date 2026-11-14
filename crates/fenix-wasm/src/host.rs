@@ -669,6 +669,12 @@ pub enum Event {
     Finished { call: u64, result: Result<Reply, String> },
     /// It stopped -- it couldn't load, or a call trapped -- and why.
     Stopped(String),
+    /// What it ran that's no call of Fenix's -- a timer, an HTTP event, a
+    /// language server's message -- returned, having changed a setting of
+    /// its own in it: told so that Fenix may start it again for that only
+    /// once it's done. (A call says so with `Finished`, activating with
+    /// `Ready`.)
+    HandlerReturned,
 }
 
 /// What Fenix asks of an extension.
@@ -1231,6 +1237,10 @@ struct State {
     /// What its test provider's answers had over a limit, said once each
     /// (`test_limits::Cuts`).
     cuts_said: HashSet<&'static str>,
+    /// It changed a setting of its own (`setting-set`) in what's running
+    /// now: told when that's over (`Event::HandlerReturned`) if nothing
+    /// else says so.
+    set_a_setting: bool,
 }
 
 impl State {
@@ -2176,6 +2186,7 @@ impl fenix::extension::host::Host for State {
                 None => settings.remove(&key),
             };
         }
+        self.set_a_setting = true;
         self.ask(Request::SettingSet { key, value });
         Ok(())
     }
@@ -3985,7 +3996,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let state = State {
             wasi: wasi.build(), table: ResourceTable::new(), limits, sink: sink.clone(), spec, jobs: back, next: 0, processes: HashMap::new(), timers: HashMap::new(), git_read: None, found: Vec::new(), lsp_out: HashMap::new(),
             sockets: HashMap::new(), surfaces: HashMap::new(), given: Vec::new(), restoring: None, listed: Vec::new(), scratches: HashSet::new(), requests: HashMap::new(),
-            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(),
+            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(), set_a_setting: false,
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -4004,7 +4015,8 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         Ok((store, ext, optional))
     })();
     let mut running = match started {
-        Ok(running) => {
+        Ok(mut running) => {
+            running.0.data_mut().set_a_setting = false;
             sink(Event::Ready);
             Some(running)
         }
@@ -4177,10 +4189,13 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             },
         };
         drop(calling);
+        let set_a_setting = std::mem::take(&mut store.data_mut().set_a_setting);
         match result {
             Ok(said) => {
-                if let Some(call) = call {
-                    sink(Event::Finished { call, result: said });
+                match call {
+                    Some(call) => sink(Event::Finished { call, result: said }),
+                    None if set_a_setting => sink(Event::HandlerReturned),
+                    None => {}
                 }
             }
             // A trap: this call's over, and so is the extension.

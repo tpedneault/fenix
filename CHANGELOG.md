@@ -164,9 +164,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - An extension changing a setting of its own that names a folder of its
   (the MIB extension's `mib.roots`) gets that folder right away: it
-  starts again once the command it changed it in is done, as when you
-  change it on the settings page, rather than when Fenix next starts.
-  The extensions that read the setting read it anew.
+  starts again once what it changed it in is done, as when you change it
+  on the settings page, rather than when Fenix next starts. A
+  notification says so each time ("Hello now reads /srv/mibs/OPS
+  (mib.roots)", with the setting a key away), the folder isn't made if
+  it isn't there, and the extensions that read the setting read it anew.
+  Neither it nor one sharing the folder starts again more than three
+  times a minute for it. An extension's folder permission now reads
+  "Read and change the folders your X setting names -- it may change
+  that setting itself, if it's one of its own".
 - Opening a project from before 1.5 no longer deletes its
   `.fenix/project.ini` when there's nothing in it to move (empty, or
   comments alone), which left a folder that file alone marked no longer a

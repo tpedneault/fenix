@@ -254,10 +254,13 @@ pub(crate) struct WasmHost {
     /// start again once the call they changed it in has returned, and the
     /// setting that did it.
     pub(crate) restart_when_idle: HashMap<String, String>,
-    /// When each last started again for a setting it changed itself: one
-    /// that changes it again each time it starts isn't started again for
-    /// ever.
-    self_restarts: HashMap<String, Vec<std::time::Instant>>,
+    /// When each last started again for a setting an extension changed
+    /// (`setting-set`, its own or another's it shares a folder with): one
+    /// that changes it again and again doesn't start them again for ever.
+    setting_restarts: HashMap<String, Vec<std::time::Instant>>,
+    /// The settings an extension set itself (`setting-set`) since you last
+    /// set them: a folder one names isn't made, only given if it's there.
+    pub(crate) set_by_extension: HashSet<String>,
     /// The extensions that wait for their files (`Activation::waits_for`),
     /// and the projects already looked at for them and found not to be
     /// theirs.
@@ -840,6 +843,9 @@ impl App {
         if let Some(worker) = self.wasm.workers.remove(ext) {
             worker.detach();
         }
+        // Switched on again, it starts as it is then: nothing waits for it.
+        self.wasm.restart_when_idle.remove(ext);
+        self.wasm.setting_restarts.remove(ext);
         self.code_serving_stopped(ext, "it was switched off");
         self.tests_extension_gone(ext, "its extension was switched off", true);
         self.forget_code_lsp_sessions(ext);
@@ -985,7 +991,7 @@ impl App {
         }
         // A folder's setting reads as where the folder is, set or not: an
         // extension names its files to Fenix and the others by it.
-        let folders = self.code_folders(ext);
+        let folders = self.code_folders_making(ext, false);
         for (name, path) in &ext.manifest.permissions.folders {
             let key = path.trim().strip_prefix("${setting:").and_then(|rest| rest.split_once('}')).map(|(key, _)| key);
             if let (Some(key), Some((_, dir))) = (key, folders.iter().find(|(n, _)| n == name)) {
@@ -2462,6 +2468,14 @@ impl App {
     /// Extension `ext`'s folders (`permissions.folders`), where your
     /// settings put them now; one that's not set isn't there.
     fn code_folders(&self, ext: &CodeExtension) -> Vec<(String, PathBuf)> {
+        self.code_folders_making(ext, true)
+    }
+
+    /// `code_folders`, making a folder that isn't there (`make`) -- as it
+    /// starts, for one you named or its own in Fenix's data folder, never
+    /// for one only an extension named (`set_by_extension`) -- or not, to
+    /// see where they are.
+    fn code_folders_making(&self, ext: &CodeExtension, make: bool) -> Vec<(String, PathBuf)> {
         let project = self.wasm.projects.get(&ext.id).cloned().flatten().or_else(|| self.code_project());
         let mut many = Vec::new();
         let mut one: Vec<(String, PathBuf)> = ext
@@ -2473,7 +2487,8 @@ impl App {
                 // `${setting:key}`, and after `|`, where it is when that's
                 // not set: `data:<name>`, a folder in Fenix's data folder.
                 let (path, fallback) = path.split_once('|').map_or((path.as_str(), None), |(p, f)| (p, Some(f.trim())));
-                let set = match path.trim().strip_prefix("${setting:").and_then(|k| k.strip_suffix('}')) {
+                let named_by = path.trim().strip_prefix("${setting:").and_then(|k| k.strip_suffix('}'));
+                let set = match named_by {
                     Some(key) => {
                         // The project's own, for a setting a project may
                         // set (`mib.roots`), else yours.
@@ -2505,7 +2520,8 @@ impl App {
                 };
                 // Made the first time, as Fenix 1.x made the notebook's:
                 // a folder that isn't there can't be given to it.
-                if !dir.is_dir() {
+                let theirs = named_by.is_some_and(|key| self.wasm.set_by_extension.contains(key)) && !set.trim().is_empty();
+                if make && !theirs && !dir.is_dir() {
                     if let Err(e) = std::fs::create_dir_all(&dir) {
                         eprintln!("fenix: couldn't make {} for {}: {e}", dir.display(), ext.id);
                     }
@@ -2534,28 +2550,45 @@ impl App {
     /// or, for one that reads it only as it starts, or a folder of its
     /// that moved, starts again in the running editor (#40).
     pub(crate) fn code_setting_changed(&mut self, key: &str) {
+        // Yours now: a folder it names is made as it starts.
+        self.wasm.set_by_extension.remove(key);
         self.code_setting_changed_by(key, None);
     }
 
-    /// `code_setting_changed`, for a change `by` made itself
-    /// (`setting-set`), whose folders were `folders_before`: it starts
-    /// again only if a folder of its moved or it reads the setting only as
-    /// it starts, and only once the call it's in has returned
-    /// (`code_restart_if_idle`); it isn't told what it did.
-    fn code_setting_changed_by(&mut self, key: &str, by: Option<(&str, Vec<(String, PathBuf)>)>) {
+    /// `code_setting_changed`, for a change extension `by` made itself
+    /// (`setting-set`), when the folders of those that name the setting
+    /// were `before`: those whose folders moved, or that read it only as
+    /// they start, start again -- each once it's in no call (`code_restart_if_idle`),
+    /// `by` never from inside what it set it in, and none more than a few
+    /// times a minute. `by` isn't told what it did; you are, when it gave
+    /// itself a folder.
+    fn code_setting_changed_by(&mut self, key: &str, by: Option<(&str, HashMap<String, Vec<(String, PathBuf)>>)>) {
         let moved = |e: &CodeExtension| e.manifest.permissions.folders.values().any(|p| p.contains(&format!("${{setting:{key}}}")));
         let restarted = self.code_restarted_by(key).into_iter().map(|e| e.id.clone()).collect::<Vec<_>>();
-        let starting_again: Vec<String> = self.wasm.installed.iter().filter(|e| (moved(e) || restarted.contains(&e.id)) && self.wasm.workers.contains_key(&e.id)).map(|e| e.id.clone()).collect();
+        let starting_again: Vec<CodeExtension> = self.wasm.installed.iter().filter(|e| (moved(e) || restarted.contains(&e.id)) && self.wasm.workers.contains_key(&e.id)).cloned().collect();
         for ext in starting_again {
-            match &by {
-                Some((setter, before)) if *setter == ext => {
-                    let Some(own) = self.wasm.installed.iter().find(|e| e.id == ext).cloned() else { continue };
-                    if restarted.contains(&ext) || self.code_folders(&own) != *before {
-                        self.wasm.restart_when_idle.insert(ext.clone(), key.to_string());
-                        self.code_restart_if_idle(&ext);
-                    }
+            let Some((setter, before)) = &by else {
+                self.restart_code_extension_saying(&ext.id, &format!("-- {key} changed: starting again to apply it"));
+                continue;
+            };
+            let was = before.get(&ext.id).cloned().unwrap_or_default();
+            let now = self.code_folders_making(&ext, false);
+            if *setter == ext.id {
+                // What it gave itself: said, until you've seen it.
+                for (name, dir) in now.iter().filter(|f| !was.contains(f)) {
+                    let summary = format!("{} now reads {} ({key})", ext.name, fenix_vfs::display(dir));
+                    let body = format!("It changed {key}, a setting of its own, and its {name} folder with it. Change it back on the settings page.");
+                    self.notify(crate::notify::Request::new(ext.id.clone(), summary).body(body).urgency(crate::notify::Urgency::Critical).action("Open the setting", format!("setting:{key}")));
                 }
-                _ => self.restart_code_extension_saying(&ext, &format!("-- {key} changed: starting again to apply it")),
+            }
+            if !restarted.contains(&ext.id) && now == was {
+                continue;
+            }
+            self.wasm.restart_when_idle.insert(ext.id.clone(), key.to_string());
+            // It's still in what it set it in: `Finished`, `Ready` or
+            // `HandlerReturned` says when that's over.
+            if *setter != ext.id {
+                self.code_restart_if_idle(&ext.id);
             }
         }
         // Its owner, and those that may read it (`permissions.settings`).
@@ -2585,20 +2618,22 @@ impl App {
     }
 
     /// How many times in a minute an extension starts again for settings
-    /// it changed itself before it's left to apply them when it next starts.
+    /// an extension changed before it's left to apply them when it next
+    /// starts.
     const SELF_RESTARTS_A_MINUTE: usize = 3;
 
-    /// Extension `ext`, waiting to start again for a setting it changed
-    /// (`restart_when_idle`): started again now if it's in no call -- never
-    /// from inside the one it changed it in, which has returned by the time
-    /// its `Finished` (or, while it starts, its `Ready`) comes.
+    /// Extension `ext`, waiting to start again for a setting an extension
+    /// changed (`restart_when_idle`): started again now if it's in no call
+    /// of Fenix's. The one that changed it is asked only once what it
+    /// changed it in is over -- its `Finished`, `Ready`, or for a timer's, a
+    /// reply's or a language server's, `HandlerReturned`.
     pub(crate) fn code_restart_if_idle(&mut self, ext: &str) {
         if !self.wasm.restart_when_idle.contains_key(ext) || !matches!(self.wasm.status.get(ext), Some(Status::Ready)) || self.wasm.calls.keys().any(|(e, _)| e == ext) {
             return;
         }
         let Some(key) = self.wasm.restart_when_idle.remove(ext) else { return };
         let now = std::time::Instant::now();
-        let times = self.wasm.self_restarts.entry(ext.to_string()).or_default();
+        let times = self.wasm.setting_restarts.entry(ext.to_string()).or_default();
         times.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
         let recent = times.len();
         if recent >= Self::SELF_RESTARTS_A_MINUTE {
@@ -2654,6 +2689,7 @@ impl App {
                 self.code_call_finished(&ext, pending, result);
                 self.code_restart_if_idle(&ext);
             }
+            Event::HandlerReturned => self.code_restart_if_idle(&ext),
             Event::Stopped(why) => {
                 // It starts afresh, folders and all, when it's next used.
                 self.wasm.restart_when_idle.remove(&ext);
@@ -3976,14 +4012,16 @@ impl App {
             }
             return;
         }
-        let folders_before = self.code_folders(&own);
+        let names = |e: &&CodeExtension| e.manifest.permissions.folders.values().any(|p| p.contains(&format!("${{setting:{key}}}")));
+        let before: HashMap<String, Vec<(String, PathBuf)>> = self.wasm.installed.iter().filter(names).map(|e| (e.id.clone(), self.code_folders_making(e, false))).collect();
         self.config.set_value(key, value);
         if let Err(e) = self.config.save() {
             self.set_error(format!("couldn't save settings.toml: {e}"));
         }
+        self.wasm.set_by_extension.insert(key.to_string());
         // As a change on the settings page: what reads it reads it anew,
         // and a folder it names moves -- for it, once this call is done.
-        self.code_setting_changed_by(key, Some((ext, folders_before)));
+        self.code_setting_changed_by(key, Some((ext, before)));
     }
 
     /// One of its secrets kept or taken away (`secret-set`): in the
@@ -4774,6 +4812,108 @@ pub(crate) mod tests {
         set_own(&mut app, "hello.folder", &ops.to_string_lossy());
         pump_until(&mut app, |a| a.wasm.calls.is_empty());
         assert!(app.wasm.restart_when_idle.is_empty() && readys(&app) == 2, "the same folder: nothing to start again for");
+    }
+
+    fn notes_about(app: &App, text: &str) -> usize {
+        app.notifications.history().iter().filter(|n| n.summary.contains(text)).count()
+    }
+
+    /// Giving itself a folder is never silent: a notification that stays,
+    /// once a change, naming the folder and the setting, and opening it;
+    /// none for the same value again, nor for a setting that names none.
+    #[test]
+    fn a_folder_it_gives_itself_is_said_once_a_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        folder_keeper(&mut app, dir.path());
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+        let ops = dir.path().join("ops");
+        std::fs::create_dir_all(&ops).unwrap();
+        let said = format!("Hello now reads {} (hello.folder)", fenix_vfs::display(&ops));
+        set_own(&mut app, "hello.folder", &ops.to_string_lossy());
+        assert_eq!(notes_about(&app, &said), 1);
+        let note = app.notifications.history().iter().find(|n| n.summary == said).unwrap();
+        assert_eq!(note.actions.first().map(|a| a.command.as_str()), Some("setting:hello.folder"));
+        set_own(&mut app, "hello.folder", &ops.to_string_lossy());
+        set_own(&mut app, "hello.label", "OPS");
+        assert_eq!(notes_about(&app, "now reads"), 1, "not again for the same folder, nor for a setting that names none");
+    }
+
+    /// A folder it names itself that isn't there isn't made -- not as it
+    /// sets it, not as it starts again -- and so isn't given; the same one
+    /// set by you is made, as before.
+    #[test]
+    fn a_folder_it_names_itself_is_not_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        let ext = folder_keeper(&mut app, dir.path());
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+        let new = dir.path().join("made-by-it");
+        set_own(&mut app, "hello.folder", &new.to_string_lossy());
+        assert!(!new.exists(), "not as it sets it");
+        app.apply_wasm_event("test.hello".into(), Event::HandlerReturned);
+        assert!(said(&app, "-- hello.folder changed: starting again to apply it"));
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+        assert!(!new.exists(), "nor as it starts again");
+
+        app.config.set_path_value("hello.folder", Some(&new));
+        app.code_setting_changed("hello.folder");
+        assert!(new.is_dir(), "yours is made as it starts");
+        assert_eq!(app.code_folders(&ext), [("notes".to_string(), new.clone())]);
+    }
+
+    /// Set in what's no call of Fenix's -- a timer, a reply, a language
+    /// server's message -- it doesn't start again from inside that: only
+    /// when the worker says it's over (`HandlerReturned`).
+    #[test]
+    fn set_in_a_handler_it_starts_again_only_once_that_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        folder_keeper(&mut app, dir.path());
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+        set_own(&mut app, "hello.folder", &dir.path().join("a").to_string_lossy());
+        assert!(!said(&app, "starting again") && app.wasm.restart_when_idle.contains_key("test.hello"), "no call in flight, and still not from inside its handler");
+        app.apply_wasm_event("test.hello".into(), Event::HandlerReturned);
+        assert!(said(&app, "-- hello.folder changed: starting again to apply it"));
+    }
+
+    /// Switched off with a start-again waiting: nothing's left waiting, and
+    /// switched on again it starts once.
+    #[test]
+    fn switching_it_off_forgets_a_start_again_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        folder_keeper(&mut app, dir.path());
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.wasm.status.get("test.hello") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+        set_own(&mut app, "hello.folder", &dir.path().join("a").to_string_lossy());
+        assert!(app.wasm.restart_when_idle.contains_key("test.hello"));
+        app.unload_code_extension("test.hello");
+        assert!(app.wasm.restart_when_idle.is_empty() && app.wasm.setting_restarts.is_empty());
+    }
+
+    /// Another that shares the folder setting (as CCSDS shares mib.roots)
+    /// starts again when it changes, but not for ever: past a few times a
+    /// minute it's left to apply it when it next starts.
+    #[test]
+    fn one_sharing_the_folder_starts_again_a_few_times_not_for_ever() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        folder_keeper(&mut app, dir.path());
+        let mut sharer = hello("[permissions]\nfolders = { notes = \"${setting:hello.folder}\" }\n");
+        sharer.id = "test.sharer".into();
+        app.wasm.installed.push(sharer);
+        app.start_code_extension("test.sharer");
+        for i in 0..=App::SELF_RESTARTS_A_MINUTE {
+            pump_until(&mut app, |a| a.wasm.status.get("test.sharer") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+            set_own(&mut app, "hello.folder", &dir.path().join(format!("s{i}")).to_string_lossy());
+        }
+        pump_until(&mut app, |a| a.wasm.status.get("test.sharer") == Some(&Status::Ready) && a.wasm.calls.is_empty());
+        assert_eq!(app.extension_output_text().matches("-- hello.folder changed: starting again to apply it").count(), App::SELF_RESTARTS_A_MINUTE);
+        assert!(said(&app, "-- hello.folder changed again: not starting again, it has 3 times in a minute"), "{}", app.extension_output_text());
     }
 
     /// It can't give itself a folder through a setting its manifest's

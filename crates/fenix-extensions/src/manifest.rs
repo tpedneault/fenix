@@ -496,9 +496,14 @@ impl Permissions {
         if self.agents {
             out.push("Ask your coding agents, and read what they answer".into());
         }
+        // Where a setting names them, it may be its own: the extension can
+        // change it (`setting-set`), so the line says so.
         for (name, path) in &self.folders {
-            let setting = path.strip_prefix("${setting:").and_then(|k| k.strip_suffix('}')).unwrap_or(path);
-            out.push(format!("Read and change your {name} folder ({setting})"));
+            let (path, _) = path.split_once('|').unwrap_or((path, ""));
+            match path.trim().strip_prefix("${setting:").and_then(|k| k.strip_suffix('}')) {
+                Some(setting) => out.push(format!("Read and change the folders your {setting} setting names ({name}) -- it may change that setting itself, if it's one of its own")),
+                None => out.push(format!("Read and change {} ({name})", path.trim())),
+            }
         }
         for name in &self.settings {
             out.push(format!("Read your {name}.* settings"));
@@ -1627,6 +1632,10 @@ namespaces = [\"issues\"]
         let m = Manifest::parse(&text("\n[permissions]\nsound = true\neditor = \"read\"\n\n[contributes]\nevents = [\"changed\", \"focus\"]\n")).unwrap();
         assert_eq!(m.contributes.events, ["changed", "focus"]);
         assert!(m.permissions.sound && m.permissions.lines().contains(&"Play sounds".to_string()));
+        let f = Manifest::parse(&(sample("acme.notes", "1.0.0", "none") + "\n[permissions]\nfolders = { notes = \"${setting:notes.folder}|data:notes\", logs = \"/var/log/acme\" }\n")).unwrap();
+        let lines = f.permissions.lines();
+        assert!(lines.contains(&"Read and change the folders your notes.folder setting names (notes) -- it may change that setting itself, if it's one of its own".to_string()), "{lines:?}");
+        assert!(lines.contains(&"Read and change /var/log/acme (logs)".to_string()), "{lines:?}");
         assert!(Manifest::parse(&text("\n[contributes]\nevents = [\"changed\"]\n")).unwrap_err().contains("editor = \"read\""));
         assert!(Manifest::parse(&text("\n[contributes]\nevents = [\"focus\"]\n")).is_ok(), "focus needs nothing");
         // `view`, the lines a pane shows -- its files' only with
