@@ -136,6 +136,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A folder of SCOS-2000 MIB tables (`vdf.dat`, `ccf.dat`, `pcf.dat`, ...)
+  is no longer a project of its own. A MIB folder in a repository is
+  part of the repository's project: its files are that project's, and
+  `SPC p` (tasks, the doctor, finding in the project, the explorer,
+  settings) acts on the repository. It isn't listed under the
+  repository in the project hub any more, and if you had added it to
+  your projects, it's taken off the list once, when Fenix first starts
+  (Fenix says which). A MIB folder with nothing around it is in no
+  project, as any other folder is; if you added it to your projects it
+  stays there, and opens as the folder you chose. Nothing in the
+  folders changes, and a MIB made with the SCOS-2000 MIB template is
+  still its own project. MIB is no longer a kind of project: one that
+  says `kind = "mib"` is shown as a plain project (`DIR`). Until the MIB
+  extension finds MIB folders inside a project by itself, list yours in
+  the project's `mib.roots` (`SPC k ,`).
 - Release candidates are dropped from the release process in favour of
   the nightly ([how releases work](docs/RELEASING.md)), and the
   unreleased `updates.prereleases` setting with them, replaced by
