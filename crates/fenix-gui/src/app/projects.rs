@@ -83,16 +83,19 @@ impl App {
     }
 
     /// The kinds changed: the cache of each root's kind and the doctor's
-    /// health by it let go, and Home, the hub, the doctor, the settings
-    /// page and the explorer's header asked again. Nothing is written.
+    /// health by it let go, and Home, the hub (off the UI thread, what an
+    /// older fetch brings back dropped), the doctor, the settings page and
+    /// the explorer's header asked again. Nothing is written.
     fn project_kinds_changed(&mut self) {
+        self.kinds_generation += 1;
         self.project_kinds.borrow_mut().clear();
         self.project_health.clear();
         self.refresh_home_data(false);
+        // An open hub's kinds are looked for again off the UI thread: on a
+        // share, fifty projects' would hold the window up.
         let hubs: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::Hub(_))).map(|(id, _)| *id).collect();
         for id in hubs {
-            self.hub_reload(id);
-            self.hub_fetch(id);
+            self.hub_fetch_with(id, true);
         }
         let doctors: Vec<(BufferId, PathBuf)> = self.pages.iter().filter_map(|(id, s)| if let PageModel::Doctor(d) = &s.model { Some((*id, d.root.clone())) } else { None }).collect();
         for (id, root) in doctors {
@@ -169,7 +172,35 @@ mod tests {
         for (kind, color) in expected {
             assert_eq!(kind_color(kind, theme), color, "{kind:?}");
         }
-        assert_eq!(kind_color(ProjectKind::from_id("cobol").unwrap(), theme), theme.gutter_fg);
+        // A pack's kind in the role it names; once its pack is switched
+        // off, a handle still held to it is drawn as Other is.
+        let _kinds = crate::page::project_kinds_lock();
+        fenix_project::set_extension_kinds(vec![fenix_project::KindDef { id: "zig".into(), name: "Zig".into(), tag: "ZIG".into(), color: KindColor::Syntax("number"), markers: Vec::new(), main: Vec::new(), extension: Some("fenix.zig".into()) }]);
+        let zig = ProjectKind::from_id("zig").unwrap();
+        assert_eq!(kind_color(zig, theme), theme.syntax_number);
+        fenix_project::set_extension_kinds(Vec::new());
+        assert_eq!(kind_color(zig, theme), theme.gutter_fg);
+    }
+
+    /// The extensions' manifest reader and the kinds' registry hold packs
+    /// to the same lists: Fenix's markers by owner, tags, names, ids and
+    /// aliases, devices, format characters.
+    #[test]
+    fn the_manifest_and_the_registry_keep_the_same_rules() {
+        use fenix_extensions::manifest as m;
+        let ours: Vec<(&str, &str)> = fenix_project::FENIX_MARKERS.iter().map(|(marker, owner)| (*marker, owner.map_or("", |k| k.id()))).collect();
+        assert_eq!(ours, m::FENIX_MARKERS);
+        assert_eq!(fenix_project::FENIX_TAGS.as_slice(), m::FENIX_KIND_TAGS);
+        assert_eq!(fenix_project::FENIX_NAMES.as_slice(), m::FENIX_KIND_NAMES);
+        assert_eq!(fenix_project::FENIX_TAGS.to_vec(), ProjectKind::BUILT_IN.iter().map(|k| k.tag()).collect::<Vec<_>>());
+        assert_eq!(fenix_project::FENIX_NAMES.to_vec(), ProjectKind::BUILT_IN.iter().map(|k| k.label()).collect::<Vec<_>>());
+        assert_eq!(fenix_project::DEVICE_NAMES.as_slice(), m::DEVICE_NAMES);
+        assert_eq!(fenix_project::FORMAT_CHARACTERS, m::FORMAT_CHARACTERS);
+        let built_in: Vec<&str> = ProjectKind::BUILT_IN[..7].iter().map(|k| k.id()).collect();
+        assert_eq!(built_in, m::BUILT_IN_KINDS);
+        let reserved: Vec<&str> = ["other", "monorepo"].into_iter().chain(ProjectKind::aliases()).collect();
+        assert_eq!(reserved, m::RESERVED_KINDS);
+        assert_eq!(fenix_project::KindColor::ROLES.as_slice(), m::PROJECT_KIND_COLORS);
     }
 
     #[test]

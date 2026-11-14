@@ -5161,6 +5161,10 @@ pub struct App {
     /// Cleared when a project is created, the one time a kind can change
     /// under Fenix's own hands.
     project_kinds: RefCell<HashMap<PathBuf, fenix_project::ProjectKind>>,
+    /// How many times the extensions' project kinds changed this run: a
+    /// hub fetch says which it ran under, and what one from before the
+    /// last change sends back is dropped (`project_kinds_changed`).
+    kinds_generation: u64,
     /// The project pages open right now (wizard, hub, doctor, settings),
     /// by their buffer -- see `pages`.
     pages: HashMap<BufferId, pages::PageState>,
@@ -6389,6 +6393,7 @@ impl App {
             picker_scroll: 0,
             project_root,
             project_kinds: RefCell::new(HashMap::new()),
+            kinds_generation: 0,
             pages: HashMap::new(),
             project_meta: fenix_project::meta::ProjectMeta::load_or_default(default_project_meta_path()),
             project_health: HashMap::new(),

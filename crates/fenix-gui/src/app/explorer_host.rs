@@ -438,7 +438,9 @@ impl App {
         let Some(cwd) = self.explorer_state(target).map(|s| s.cwd.clone()) else { return };
         let project = (!is_unc(&cwd)).then(|| fenix_project::find_project_root(&cwd)).flatten().map(|root| explorer_page::Project {
             name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&root)),
-            kind: fenix_project::detect_kind(&root),
+            // The kind as everything else has it: cached, not looked for
+            // again at every move.
+            kind: self.project_kind_of(&root),
             root,
         });
         // A local read of `.git/HEAD`, not a `git` run: cheap enough for

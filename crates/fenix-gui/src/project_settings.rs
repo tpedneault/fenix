@@ -55,11 +55,15 @@ pub struct Settings {
     pub root: PathBuf,
     pub detected: ProjectKind,
     pub declared: Option<ProjectKind>,
-    /// A kind this project declared that no one declares now
-    /// (`kind = "java"` without the Java pack), once the cycler has seen
-    /// it: kept among its choices while the page is open, so `h` then `l`
-    /// comes back to it.
-    undeclared: Option<ProjectKind>,
+    /// What the project's settings declare when no one declares that kind
+    /// now (`kind = "java"` without the Java pack, a misspelt `pyhton`):
+    /// ignored for what the project is, kept as written. While it's there,
+    /// `h` and `l` only move among the choices -- `kept` the last -- and
+    /// nothing is written until Enter picks a kind.
+    pub kept: Option<String>,
+    /// Where `h` and `l` are among the choices while `kept` is there:
+    /// `None` on it.
+    choice: Option<usize>,
     pub group: String,
     pub pinned: bool,
     pub jira: String,
@@ -91,7 +95,8 @@ impl Settings {
             root,
             detected,
             declared: None,
-            undeclared: None,
+            kept: None,
+            choice: None,
             group: String::new(),
             pinned: false,
             jira: String::new(),
@@ -232,6 +237,7 @@ impl Settings {
                     self.pinned = !self.pinned;
                     return Action::SetPinned(self.pinned);
                 }
+                Some(Field::Kind) if key == Key::Enter && self.kept.is_some() => return self.confirm_kind(),
                 Some(Field::Kind) => return self.cycle_kind(true),
                 Some(field) if Self::is_text(&field) => {
                     let text = if key == Key::Char('c') || matches!(field, Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv) { String::new() } else { self.value(&field) };
@@ -275,20 +281,57 @@ impl Settings {
     }
 
     fn cycle_kind(&mut self, forward: bool) -> Action {
-        // "detect", then each kind declared now, then the one this
-        // project declares if no one else does -- so it's where the cycle
-        // starts, and only a deliberate change moves off it.
-        if self.declared.is_some_and(|k| !k.is_declared()) {
-            self.undeclared = self.declared;
-        }
+        // "detect", then each kind declared now.
         let mut options: Vec<Option<ProjectKind>> = std::iter::once(None).chain(ProjectKind::known().into_iter().map(Some)).collect();
-        if !options.contains(&self.undeclared) {
-            options.push(self.undeclared);
+        if self.kept.is_some() {
+            // Then the kept one, where the cycle starts: moving writes
+            // nothing (`confirm_kind`).
+            let count = options.len() + 1;
+            let at = self.choice.unwrap_or(count - 1);
+            let next = if forward { (at + 1) % count } else { (at + count - 1) % count };
+            self.choice = (next != count - 1).then_some(next);
+            self.note = self.choice.map(|_| "Enter sets the kind; until then the project's stays as it is".to_string());
+            return Action::None;
         }
         let at = options.iter().position(|o| *o == self.declared).unwrap_or(0);
         let next = if forward { (at + 1) % options.len() } else { (at + options.len() - 1) % options.len() };
-        self.declared = options[next];
+        self.declared = options.swap_remove(next);
         Action::SetKind(self.declared)
+    }
+
+    /// Enter on the kind while the project declares one no one declares:
+    /// a kind picked replaces it; "detect", or the kept one itself,
+    /// changes nothing -- the kept id is already ignored, and stays.
+    fn confirm_kind(&mut self) -> Action {
+        let picked = self.choice.take().and_then(|i| if i == 0 { None } else { ProjectKind::known().get(i - 1).copied() });
+        match picked {
+            Some(kind) => {
+                self.kept = None;
+                self.declared = Some(kind);
+                self.note = None;
+                Action::SetKind(Some(kind))
+            }
+            None => {
+                let kept = self.kept.clone().unwrap_or_default();
+                self.note = Some(format!("kind = \"{kept}\" stays: it's ignored until an extension declares {kept}"));
+                Action::None
+            }
+        }
+    }
+
+    /// What the kind's row shows: the kind, "detect: X", or the kept id,
+    /// and while `h`/`l` move off it, where they are.
+    fn kind_text(&self) -> (String, bool) {
+        let detect = |s: &Self| format!("detect: {}", s.detected.label());
+        match (&self.kept, self.choice) {
+            (Some(kept), None) => (format!("{kept} -- no extension declares this kind"), false),
+            (Some(_), Some(0)) => (detect(self), true),
+            (Some(_), Some(i)) => (ProjectKind::known().get(i - 1).map_or_else(|| detect(self), |k| k.label().to_string()), true),
+            (None, _) => match self.declared {
+                Some(k) => (k.label().to_string(), false),
+                None => (detect(self), false),
+            },
+        }
     }
 
     fn refuse(&mut self, field: Field, why: String) -> Action {
@@ -559,15 +602,10 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
             match &field {
                 Field::Kind => {
                     let room = (left + width).saturating_sub(value_x);
-                    let text = match settings.declared {
-                        Some(k) if !k.is_declared() => format!("‹ {} -- no installed extension knows this kind ›", k.id()),
-                        Some(k) => format!("‹ {} ›", k.label()),
-                        // "detect:" goes first when it's tight.
-                        None => {
-                            let full = format!("‹ detect: {} ›", settings.detected.label());
-                            if full.chars().count() <= room { full } else { format!("‹ {} ›", settings.detected.label()) }
-                        }
-                    };
+                    let (shown, pending) = settings.kind_text();
+                    let full = format!("‹ {shown} ›{}", if pending { "  Enter sets it" } else { "" });
+                    // "detect:" goes first when it's tight.
+                    let text = if full.chars().count() <= room { full } else { format!("‹ {} ›", shown.trim_start_matches("detect: ")) };
                     g.put(y, value_x, &fit(&text, room), Role::Title);
                 }
                 Field::Pinned => {
@@ -737,36 +775,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// `kind = "java"` with nothing declaring Java: shown by its id, said
-    /// to be unknown, and the cycle starts on it -- `h` then `l` comes
-    /// back to it, never to the first built-in.
+    /// `kind = "java"` with nothing declaring Java: shown as declared and
+    /// said to be unknown; `h` and `l` move without writing, and come back
+    /// to it; Enter on "detect" or on it writes nothing; Enter on a kind
+    /// writes that kind.
     #[test]
     fn a_kind_no_one_declares_is_kept_by_the_cycler() {
         let _kinds = crate::page::project_kinds_lock();
         let (mut s, root) = settings("unknown_kind", None);
-        let java = ProjectKind::from_id("java").unwrap();
-        s.declared = Some(java);
+        s.kept = Some("java".into());
         let text = layout(&s, 120).text;
-        assert!(text.contains("java -- no installed extension knows this kind"), "{text}");
+        assert!(text.contains("java -- no extension declares this kind"), "{text}");
         s.focus_on(&Field::Kind);
-        assert_eq!(s.key(Key::Char('h')), Action::SetKind(Some(ProjectKind::OTHER)));
-        assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(java)));
-        assert_eq!(s.key(Key::Char('l')), Action::SetKind(None), "past it, detect");
-        assert_eq!(s.key(Key::Char('h')), Action::SetKind(Some(java)));
-        // A page opened on a project declaring one of the known kinds
-        // offers no other.
-        let (mut s, root2) = settings("known_kind", None);
-        s.declared = Some(ProjectKind::RUST);
-        s.focus_on(&Field::Kind);
-        let mut seen = Vec::new();
-        for _ in 0..ProjectKind::BUILT_IN.len() + 1 {
-            if let Action::SetKind(k) = s.key(Key::Char('l')) {
-                seen.push(k);
-            }
-        }
-        assert!(!seen.contains(&Some(java)), "{seen:?}");
+        assert_eq!(s.key(Key::Char('h')), Action::None, "moving writes nothing");
+        assert!(layout(&s, 120).text.contains("Project ›  Enter sets it"), "{}", layout(&s, 120).text);
+        assert_eq!(s.key(Key::Char('l')), Action::None);
+        assert!(layout(&s, 120).text.contains("java -- no extension declares this kind"));
+        assert_eq!(s.key(Key::Char('l')), Action::None);
+        assert!(layout(&s, 120).text.contains("detect: Python ›  Enter sets it"));
+        assert_eq!(s.key(Key::Enter), Action::None, "detect: the kept id stays");
+        assert_eq!(s.kept.as_deref(), Some("java"));
+        assert!(s.note.as_deref().is_some_and(|n| n.contains("kind = \"java\" stays")));
+        assert_eq!(s.key(Key::Enter), Action::None, "on it: nothing");
+        assert_eq!(s.key(Key::Char('l')), Action::None);
+        assert_eq!(s.key(Key::Char('l')), Action::None);
+        assert_eq!(s.key(Key::Enter), Action::SetKind(Some(ProjectKind::PYTHON)), "a kind picked replaces it");
+        assert_eq!(s.kept, None);
+        // From then on, as ever: each move writes.
+        assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(ProjectKind::ARDUINO)));
         let _ = std::fs::remove_dir_all(root);
-        let _ = std::fs::remove_dir_all(root2);
     }
 
     #[test]

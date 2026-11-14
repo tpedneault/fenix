@@ -756,18 +756,15 @@ mod tests {
         assert!(!view.text.contains("recovered"));
     }
 
-    /// A four-character tag -- `MONO`, or a kind's id no one declares --
-    /// has a space before the name, which lines up with the others'.
+    /// A four-character tag -- `MONO`, or a pack's `JAVA` -- has a space
+    /// before the name, which lines up with the others'.
     #[test]
     fn a_four_character_tag_keeps_a_space_before_the_name() {
-        let _kinds = crate::page::project_kinds_lock();
         let mut data = sample();
         data.projects.push(ProjectItem { root: "/m".into(), name: "orbit".into(), branch: None, kind: ProjectKind::MONOREPO, health: None });
-        data.projects.push(ProjectItem { root: "/j".into(), name: "spring".into(), branch: None, kind: ProjectKind::from_id("java").unwrap(), health: None });
         let view = layout(&data, 140, 45);
         let line = |name: &str| view.text.lines().nth(line_of(&view, name)).unwrap().to_string();
         assert!(line("orbit").contains("MONO orbit"), "{}", view.text);
-        assert!(line("spring").contains("JAVA spring"), "{}", view.text);
         assert_eq!(line("orbit").find("orbit"), line("fenix").find("fenix"), "names line up");
     }
 

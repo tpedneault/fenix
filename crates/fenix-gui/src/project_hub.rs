@@ -646,11 +646,12 @@ mod tests {
         assert_eq!(hub.kind_filter, None, "past the last kind: all again");
     }
 
-    /// A kind no one declares is a filter of its own, after the declared
-    /// ones, and its rows carry its id as their tag.
+    /// A pack's kind is a filter of its own, after Fenix's, and its rows
+    /// carry its tag.
     #[test]
-    fn a_kind_no_one_declares_is_its_own_filter_after_the_rest() {
+    fn a_packs_kind_is_its_own_filter_after_fenixs() {
         let _kinds = crate::page::project_kinds_lock();
+        fenix_project::set_extension_kinds(vec![fenix_project::KindDef { id: "java".into(), name: "Java".into(), tag: "JAVA".into(), color: fenix_project::KindColor::DEFAULT, markers: vec!["pom.xml".into()], main: Vec::new(), extension: Some("fenix.java".into()) }]);
         let java = ProjectKind::from_id("java").unwrap();
         let mut projects = hub().projects;
         projects.insert(0, project("spring-app", java, None, false));
@@ -663,6 +664,7 @@ mod tests {
         }
         assert_eq!(hub.kind_filter, Some(java));
         assert_eq!(names(&hub), ["Projects/spring-app"]);
+        fenix_project::set_extension_kinds(Vec::new());
     }
 
     #[test]
