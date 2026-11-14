@@ -1436,7 +1436,23 @@ tm_time = \"cuc 4.2\""), "{profile}");
         assert_eq!(plan.files.iter().find(|f| f.path == "vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
         assert!(plan.steps.is_empty());
         assert_eq!(plan.hooks, [Hook::MibRoot { path: ".".into(), label: "mission-c".into() }]);
-        assert_eq!(plan.kind, ProjectKind::Mib);
+        assert_eq!(plan.kind, ProjectKind::Other, "a project like any other");
+    }
+
+    /// What the MIB template writes is a project of its own, by its
+    /// `.fenix/settings.toml` -- inside a repository too -- now that MIB
+    /// tables alone don't make one.
+    #[test]
+    fn the_mib_template_writes_a_project_even_inside_a_repository() {
+        let dir = crate::test_util::TempDir::new("mib_template");
+        dir.write(".git/HEAD", "ref: refs/heads/main\n");
+        let template = builtin_templates().into_iter().find(|t| t.id == "scos-mib").unwrap();
+        let answers = template.default_answers("mission-c");
+        let plan = template.plan("mission-c", dir.path(), &answers).unwrap();
+        plan.write_files().unwrap();
+        assert_eq!(crate::find_project_root(&plan.dir.join("ccf.dat")), Some(plan.dir.clone()));
+        assert_eq!(crate::detect_kind(&plan.dir), ProjectKind::Other);
+        assert_eq!(plan.file_to_open(), Some(plan.dir.join("vdf.dat")));
     }
 
     #[test]

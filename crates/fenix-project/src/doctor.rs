@@ -353,7 +353,7 @@ fn with_install(check: Check, probe: &dyn Probe, program: &str) -> Check {
 }
 
 /// Checks a feature adds for the kinds of project it knows (Fenix's
-/// Arduino, MIB and Tcl features); each looks at `Doctor::kind` itself.
+/// Arduino and Tcl features); each looks at `Doctor::kind` itself.
 pub type FeatureCheck = fn(&mut Doctor);
 
 /// Every check `root` (a project of `kind`) needs, in display order.
@@ -386,7 +386,7 @@ pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bo
             d.language_server("typescript-language-server");
         }
         // Their features' (`features`).
-        ProjectKind::Arduino | ProjectKind::Mib | ProjectKind::Tcl | ProjectKind::Monorepo | ProjectKind::Other => {}
+        ProjectKind::Arduino | ProjectKind::Tcl | ProjectKind::Monorepo | ProjectKind::Other => {}
     }
     for check in features {
         check(&mut d);

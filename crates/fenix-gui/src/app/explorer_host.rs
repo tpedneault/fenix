@@ -1705,8 +1705,10 @@ impl App {
                     self.settings_path_picked(&cwd);
                 }
                 // No-op during ordinary browsing (`SPC f j`/the sidebar) --
-                // `S` only means something while picking a project/MIB dir,
-                // or searching from a directory (`SPC f e`).
+                // `S` only means something while picking a folder (a
+                // project, the wizard's, a remote project, a setting's --
+                // `mib.roots` among them), or searching from a directory
+                // (`SPC f e`).
             }
         }
         // Nearly every action changes what the page shows -- a mark, the

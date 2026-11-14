@@ -1,6 +1,6 @@
 [template]
 name = "SCOS-2000 MIB"
-kind = "mib"
+kind = "other"
 group = "Mission"
 open = ["vdf.dat"]
 description = "An ICD 7.2 MIB database and nothing else: its tab-separated .dat tables, registered for SPC m lookups."
@@ -28,7 +28,7 @@ default = ["telecommands", "telemetry", "calibrations"]
 key = "register"
 label = "Register"
 default = true
-hint = "add it as a [mib] root in config.ini"
+hint = "list it as the project's MIB, by its label (mib.roots)"
 
 [[ask]]
 key = "pus"

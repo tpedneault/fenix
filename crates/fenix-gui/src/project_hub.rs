@@ -597,7 +597,7 @@ mod tests {
         Hub::new(vec![
             project("orbit-tools", ProjectKind::Python, None, true),
             project("blink-lab", ProjectKind::Arduino, Some("Class labs"), false),
-            project("mission-c", ProjectKind::Mib, Some("Mission ops"), false),
+            project("mission-c", ProjectKind::Other, Some("Mission ops"), false),
             project("servo-sweep", ProjectKind::Arduino, Some("Class labs"), false),
             project("report-gen", ProjectKind::Python, None, false),
         ])

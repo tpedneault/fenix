@@ -5,7 +5,7 @@
 //!
 //! ```ini
 //! [project]
-//! kind = mib
+//! kind = monorepo
 //! ```
 
 use std::path::Path;
@@ -14,8 +14,6 @@ use std::path::Path;
 pub enum ProjectKind {
     Python,
     Arduino,
-    /// An SCOS-2000 MIB workspace: `.dat` tables at the root or in `mib/`.
-    Mib,
     Rust,
     Tcl,
     Cpp,
@@ -29,21 +27,10 @@ pub enum ProjectKind {
     Other,
 }
 
-/// The tables that say "this directory is a MIB": its version table,
-/// telecommands, TM parameters and packets, calibrations. Any one is
-/// enough -- a TM-only database has no `ccf.dat`.
-const MIB_TABLES: &[&str] = &["vdf.dat", "ccf.dat", "pcf.dat", "pid.dat", "tpcf.dat", "caf.dat", "txf.dat"];
-
-/// Whether `dir` holds MIB tables itself (not in a `mib/` below it).
-pub(crate) fn holds_mib_tables(dir: &Path) -> bool {
-    MIB_TABLES.iter().any(|t| dir.join(t).is_file())
-}
-
 impl ProjectKind {
-    pub const ALL: [ProjectKind; 10] = [
+    pub const ALL: [ProjectKind; 9] = [
         ProjectKind::Python,
         ProjectKind::Arduino,
-        ProjectKind::Mib,
         ProjectKind::Rust,
         ProjectKind::Tcl,
         ProjectKind::Cpp,
@@ -58,7 +45,6 @@ impl ProjectKind {
         match self {
             ProjectKind::Python => "python",
             ProjectKind::Arduino => "arduino",
-            ProjectKind::Mib => "mib",
             ProjectKind::Rust => "rust",
             ProjectKind::Tcl => "tcl",
             ProjectKind::Cpp => "cpp",
@@ -77,6 +63,9 @@ impl ProjectKind {
             "rs" => Some(ProjectKind::Rust),
             "c++" | "c" | "cmake" => Some(ProjectKind::Cpp),
             "js" | "ts" | "javascript" | "typescript" => Some(ProjectKind::Node),
+            // A MIB was a kind of its own until 1.6: a project that still
+            // says so is a project like any other.
+            "mib" => Some(ProjectKind::Other),
             _ => None,
         })
     }
@@ -87,7 +76,6 @@ impl ProjectKind {
         match self {
             ProjectKind::Python => "PY",
             ProjectKind::Arduino => "INO",
-            ProjectKind::Mib => "MIB",
             ProjectKind::Rust => "RS",
             ProjectKind::Tcl => "TCL",
             ProjectKind::Cpp => "C++",
@@ -102,7 +90,6 @@ impl ProjectKind {
         match self {
             ProjectKind::Python => "Python",
             ProjectKind::Arduino => "Arduino",
-            ProjectKind::Mib => "SCOS-2000 MIB",
             ProjectKind::Rust => "Rust",
             ProjectKind::Tcl => "Tcl",
             ProjectKind::Cpp => "C/C++",
@@ -115,8 +102,8 @@ impl ProjectKind {
 }
 
 /// `root`'s kind: the one `.fenix/project.ini` declares, else the first
-/// detection that matches, most specific first -- a sketch or a MIB can
-/// live inside anything, so they're checked before the language manifests.
+/// detection that matches, most specific first -- a sketch can live
+/// inside anything, so it's checked before the language manifests.
 pub fn detect_kind(root: &Path) -> ProjectKind {
     declared_kind(root).unwrap_or_else(|| detect_kind_from_files(root))
 }
@@ -126,9 +113,6 @@ pub fn detect_kind(root: &Path) -> ProjectKind {
 pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
     if crate::root::is_sketch(root) || root.join("library.properties").is_file() {
         return ProjectKind::Arduino;
-    }
-    if holds_mib_tables(root) || holds_mib_tables(&root.join("mib")) {
-        return ProjectKind::Mib;
     }
     let has = |name: &str| root.join(name).exists();
     if has("Cargo.toml") {
@@ -174,7 +158,6 @@ pub fn main_file(root: &Path, kind: ProjectKind) -> Option<std::path::PathBuf> {
         ProjectKind::Node => vec![root.join("src/index.ts"), root.join("src/index.js"), root.join("index.ts"), root.join("index.js")],
         ProjectKind::Cpp => vec![root.join("src/main.cpp"), root.join("main.cpp"), root.join("src/main.c"), root.join("main.c")],
         ProjectKind::Tcl => vec![root.join("main.tcl")],
-        ProjectKind::Mib => ["ccf.dat", "pcf.dat", "vdf.dat"].iter().flat_map(|t| [root.join(t), root.join("mib").join(t)]).collect(),
         ProjectKind::Monorepo | ProjectKind::Other => Vec::new(),
     };
     candidates.into_iter().find(|p| p.is_file()).or_else(|| if kind == ProjectKind::Tcl { first_in(root, "tcl") } else { None })
@@ -237,9 +220,9 @@ mod tests {
             ("package.json", ProjectKind::Node),
             ("CMakeLists.txt", ProjectKind::Cpp),
             ("main.tcl", ProjectKind::Tcl),
-            ("mib/ccf.dat", ProjectKind::Mib),
-            ("pcf.dat", ProjectKind::Mib),
-            ("vdf.dat", ProjectKind::Mib),
+            ("mib/ccf.dat", ProjectKind::Other),
+            ("pcf.dat", ProjectKind::Other),
+            ("vdf.dat", ProjectKind::Other),
             (".projectile", ProjectKind::Other),
         ];
         for (file, kind) in cases {
@@ -268,9 +251,6 @@ mod tests {
         assert_eq!(main_file(&dir.path().join("py"), ProjectKind::Python), Some(dir.path().join("py/src/orbit/__init__.py")));
         dir.write("rs/src/lib.rs", "");
         assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Rust), Some(dir.path().join("rs/src/lib.rs")));
-        dir.write("db/vdf.dat", "");
-        dir.write("db/pcf.dat", "");
-        assert_eq!(main_file(&dir.path().join("db"), ProjectKind::Mib), Some(dir.path().join("db/pcf.dat")));
         assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Go), None);
     }
 
@@ -278,8 +258,26 @@ mod tests {
     fn a_declared_kind_wins_over_detection() {
         let dir = TempDir::new("kind_declared");
         dir.write("Cargo.toml", "");
-        dir.write(".fenix/project.ini", "[monitor]\nkind = rust\n[project]\n kind = MIB \n");
-        assert_eq!(detect_kind(dir.path()), ProjectKind::Mib);
+        dir.write(".fenix/project.ini", "[monitor]\nkind = rust\n[project]\n kind = Monorepo \n");
+        assert_eq!(detect_kind(dir.path()), ProjectKind::Monorepo);
+    }
+
+    /// A MIB is no kind of its own since 1.6: a project that declares one,
+    /// in `project.ini` or in `settings.toml`, loads as a project like any
+    /// other -- not as an unknown kind, not as its files' kind.
+    #[test]
+    fn a_project_declared_a_mib_is_a_project_like_any_other() {
+        let ini = TempDir::new("kind_mib_ini");
+        ini.write("vdf.dat", "OPS\tops\n");
+        ini.write("Cargo.toml", "");
+        ini.write(".fenix/project.ini", "[project]\nkind = mib\n");
+        assert_eq!(declared_kind(ini.path()), Some(ProjectKind::Other));
+        assert_eq!(detect_kind(ini.path()), ProjectKind::Other);
+
+        let toml = TempDir::new("kind_mib_toml");
+        toml.write(".fenix/settings.toml", "[project]\nkind = \"mib\"\n");
+        assert_eq!(declared_kind(toml.path()), Some(ProjectKind::Other));
+        assert_eq!(main_file(toml.path(), detect_kind(toml.path())), None);
     }
 
     #[test]

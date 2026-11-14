@@ -12,7 +12,6 @@ pub(super) fn kind_color(kind: ProjectKind, theme: &Theme) -> glyphon::Color {
     match kind {
         ProjectKind::Python => theme.syntax_type,
         ProjectKind::Arduino => rgba_to_glyphon(theme.mode_insert),
-        ProjectKind::Mib => theme.syntax_constant,
         ProjectKind::Rust => theme.syntax_string,
         ProjectKind::Tcl => theme.syntax_function,
         ProjectKind::Cpp => theme.syntax_keyword,

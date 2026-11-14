@@ -2205,6 +2205,39 @@ mod tests {
         assert!(b.0.is_dir(), "the folder itself is untouched");
     }
 
+    /// A MIB folder is no project of its own: one in a repository is the
+    /// repository's -- off the list (once), not among its subprojects,
+    /// and what a file of it is in -- while one you added that's in no
+    /// other project stays on the list as a folder like any other.
+    #[test]
+    fn a_mib_folder_is_in_the_project_around_it_not_one_of_its_own() {
+        let dir = Scratch::new("mib-folders");
+        let (repo, alone) = (dir.0.join("mission"), dir.0.join("alone"));
+        let ops = repo.join("ops");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&ops).unwrap();
+        std::fs::create_dir_all(&alone).unwrap();
+        std::fs::write(ops.join("vdf.dat"), "OPS\tops\n").unwrap();
+        std::fs::write(ops.join("ccf.dat"), "").unwrap();
+        std::fs::write(alone.join("pcf.dat"), "").unwrap();
+        let mut app = app_with(&[]);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        for root in [&alone, &repo, &ops] {
+            app.known_projects.add(root.clone());
+        }
+
+        assert_eq!(app.known_projects.drop_mib_folders_once(), std::slice::from_ref(&ops));
+        let hub: Vec<(PathBuf, fenix_project::ProjectKind)> = app.hub_projects().into_iter().map(|p| (p.root, p.kind)).collect();
+        assert_eq!(hub, [(repo.clone(), fenix_project::ProjectKind::Other), (alone.clone(), fenix_project::ProjectKind::Other)]);
+        assert!(fenix_project::workspace::subprojects(&repo).is_empty(), "not a subproject either");
+
+        app.open_file_from_picker(&ops.join("ccf.dat"));
+        assert_eq!(app.project_root.as_deref(), Some(repo.as_path()), "a file of it is the repository's");
+        app.open_project(alone.clone(), None, false);
+        app.open_file_from_picker(&alone.join("pcf.dat"));
+        assert_eq!(app.project_root.as_deref(), Some(alone.as_path()), "opened as a project, it's the folder you chose");
+    }
+
     #[test]
     fn the_doctor_checks_the_focused_project_and_runs_a_safe_fix() {
         let dir = Scratch::new("doctor");

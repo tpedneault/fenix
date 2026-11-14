@@ -32,9 +32,10 @@ pub fn set_extension_markers(markers: Vec<String>) {
 
 /// Walks up from `start` (a file or a directory -- a file's own directory
 /// is where the walk begins) looking for the closest ancestor containing
-/// any marker in `MARKERS`, or that is an Arduino sketch. Returns `None` if none is found all the way
-/// to the filesystem root -- callers treat that as "not in a known
-/// project," not an error. With none, the closest holding a language
+/// any marker in `MARKERS`, or that is an Arduino sketch. A folder of MIB
+/// tables is no marker: it's in the project around it. Returns `None` if
+/// none is found all the way to the filesystem root -- callers treat that
+/// as "not in a known project," not an error. With none, the closest holding a language
 /// pack's marker (`set_extension_markers`).
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let first = if start.is_dir() { start } else { start.parent()? };
@@ -44,7 +45,6 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
             || dir.join(".fenix/project.ini").is_file()
             || MARKERS.iter().any(|marker| dir.join(marker).exists())
             || is_sketch(dir)
-            || crate::kind::holds_mib_tables(dir)
     });
     if found.is_some() {
         return found.map(Path::to_path_buf);
@@ -91,12 +91,25 @@ mod tests {
         assert_eq!(find_project_root(&stray.join("scratch.ino")), Some(dir.path().to_path_buf()), "an .ino not named after its folder isn't a sketch");
     }
 
+    /// A folder of MIB tables is a folder like any other: in a
+    /// repository it's the repository's, alone it's in no project, and
+    /// only a `.fenix` of its own (the MIB template's) makes it one.
     #[test]
-    fn a_folder_of_mib_tables_is_a_project() {
+    fn a_folder_of_mib_tables_is_not_a_project_of_its_own() {
         let dir = TempDir::new("mib_marker");
-        fs::write(dir.path().join("vdf.dat"), b"M	m
-").unwrap();
-        assert_eq!(find_project_root(&dir.path().join("vdf.dat")), Some(dir.path().to_path_buf()));
+        let mib = dir.path().join("ops").join("mib");
+        fs::create_dir_all(&mib).unwrap();
+        fs::write(mib.join("vdf.dat"), b"OPS\tops\n").unwrap();
+        fs::write(mib.join("ccf.dat"), b"").unwrap();
+        assert_eq!(find_project_root(&mib.join("ccf.dat")), None, "alone, it's in no project");
+
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        assert_eq!(find_project_root(&mib.join("ccf.dat")), Some(dir.path().to_path_buf()), "in a repository, the repository's");
+        assert_eq!(find_project_root(&mib), Some(dir.path().to_path_buf()));
+
+        fs::create_dir_all(mib.join(".fenix")).unwrap();
+        fs::write(mib.join(".fenix").join("settings.toml"), b"[ccsds]\npus = \"c\"\n").unwrap();
+        assert_eq!(find_project_root(&mib.join("ccf.dat")), Some(mib.clone()), "with a .fenix of its own, a project");
     }
 
     /// A language pack's marker is a root only where nothing of Fenix's own
