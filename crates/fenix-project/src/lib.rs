@@ -22,6 +22,7 @@ pub use kind::{declared_kind, detect_kind, detect_kind_from_files, main_file, Ki
 pub use known::{plain_path, read_path_list, KnownProjects};
 pub use recent::RecentFiles;
 pub use root::{find_project_root, is_sketch, set_extension_markers};
+pub use kind::{extension_kind_notes, main_is_below, marker_is_a_name, set_extension_kinds, MAX_EXTENSION_KINDS, MAX_EXTENSION_MARKERS};
 
 pub mod template;
 pub mod tools;

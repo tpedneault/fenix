@@ -36,3 +36,13 @@ impl Drop for TempDir {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
+/// Held by every test that sets the extensions' project kinds or asks
+/// what's declared: the registry is the process's, and tests run side by
+/// side.
+pub static KINDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `KINDS`, whatever a test that panicked holding it left.
+pub fn kinds_lock() -> std::sync::MutexGuard<'static, ()> {
+    KINDS.lock().unwrap_or_else(|e| e.into_inner())
+}

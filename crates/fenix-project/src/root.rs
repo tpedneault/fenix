@@ -33,8 +33,15 @@ pub fn set_extension_markers(markers: Vec<String>) {
 /// Whether `dir` itself holds a language pack's marker
 /// (`set_extension_markers`).
 pub(crate) fn holds_pack_marker(dir: &Path) -> bool {
+    let markers = EXTENSION_MARKERS.read().unwrap_or_else(|e| e.into_inner());
+    crate::kind::with_kind_markers(|kinds| holds_one_of(dir, &markers, kinds))
+}
+
+/// Whether `dir` holds one of `contexts`' or `kinds`' markers (`{folder}`
+/// is its own name).
+fn holds_one_of(dir: &Path, contexts: &[String], kinds: &[String]) -> bool {
     let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    EXTENSION_MARKERS.read().unwrap_or_else(|e| e.into_inner()).iter().any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
+    contexts.iter().chain(kinds.iter().filter(|k| !contexts.contains(k))).any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
 }
 
 /// Walks up from `start` (a file or a directory -- a file's own directory
@@ -43,7 +50,9 @@ pub(crate) fn holds_pack_marker(dir: &Path) -> bool {
 /// tables is no marker: it's in the project around it. Returns `None` if
 /// none is found all the way to the filesystem root -- callers treat that
 /// as "not in a known project," not an error. With none, the closest holding a language
-/// pack's marker (`set_extension_markers`).
+/// pack's marker: its contexts' (`set_extension_markers`) or its project
+/// kinds' (`set_extension_kinds`) -- never nearer than one of Fenix's, so
+/// a kind's marker in a repository doesn't make a project of its own.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     let first = if start.is_dir() { start } else { start.parent()? };
     let found = first.ancestors().find(|dir| {
@@ -57,13 +66,7 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
         return found.map(Path::to_path_buf);
     }
     let markers = EXTENSION_MARKERS.read().unwrap_or_else(|e| e.into_inner());
-    first
-        .ancestors()
-        .find(|dir| {
-            let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            markers.iter().any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
-        })
-        .map(Path::to_path_buf)
+    crate::kind::with_kind_markers(|kinds| first.ancestors().find(|dir| holds_one_of(dir, &markers, kinds)).map(Path::to_path_buf))
 }
 
 #[cfg(test)]
@@ -124,6 +127,7 @@ mod tests {
     /// (One test sets the markers: they're global.)
     #[test]
     fn a_language_pack_s_marker_is_a_root_when_nothing_else_is() {
+        let _kinds = crate::test_util::kinds_lock();
         set_extension_markers(vec!["{folder}.csproj".into(), "global.json".into()]);
         let dir = TempDir::new("pack_marker");
         let app = dir.path().join("hello");
@@ -139,6 +143,39 @@ mod tests {
         fs::create_dir_all(dir.path().join(".git")).unwrap();
         assert_eq!(find_project_root(&app.join("Program.cs")), Some(dir.path().to_path_buf()));
         set_extension_markers(Vec::new());
+    }
+
+    /// A kind's markers find its project's top as a context's do, and
+    /// under the same rule: only where nothing of Fenix's is above (Q6).
+    #[test]
+    fn a_kinds_marker_is_a_root_when_nothing_else_is() {
+        let _kinds = crate::test_util::kinds_lock();
+        let kind = |id: &str, markers: &[&str]| crate::KindDef {
+            id: id.into(),
+            name: id.into(),
+            tag: "X".into(),
+            color: crate::KindColor::DEFAULT,
+            markers: markers.iter().map(|m| m.to_string()).collect(),
+            main: Vec::new(),
+            extension: Some("acme.x".into()),
+        };
+        crate::set_extension_kinds(vec![kind("gradle-x", &["build.gradle.kts"]), kind("node", &["deno.json"])]);
+        let dir = TempDir::new("kind_marker");
+        let app = dir.path().join("app");
+        fs::create_dir_all(app.join("src").join("main")).unwrap();
+        fs::write(app.join("build.gradle.kts"), b"").unwrap();
+        assert_eq!(find_project_root(&app.join("src").join("main").join("A.kt")), Some(app.clone()));
+        assert!(holds_pack_marker(&app));
+        let deno = dir.path().join("deno");
+        fs::create_dir_all(&deno).unwrap();
+        fs::write(deno.join("deno.json"), b"{}").unwrap();
+        assert_eq!(find_project_root(&deno.join("main.ts")), Some(deno.clone()), "a Fenix id's added marker too");
+        // In a repository, the repository is still the project.
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        assert_eq!(find_project_root(&app.join("src").join("main").join("A.kt")), Some(dir.path().to_path_buf()));
+        crate::set_extension_kinds(Vec::new());
+        fs::remove_dir_all(dir.path().join(".git")).unwrap();
+        assert!(!holds_pack_marker(&app));
     }
 
     #[test]
