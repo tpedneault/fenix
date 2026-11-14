@@ -138,7 +138,7 @@ and its answer comes to `handle` as an `Event` with that id.
 | `pick_many(title, items)` | A picker where Tab marks rows → `Event::PickedMany`. |
 | `compose(title, verb, initial, allow_empty)` | A pane to write in → `Event::Composed`. |
 | `compose_with_ask(title, verb, initial, allow_empty, ask, over_initial)` | API 1.4, with `permissions.agents`. The same pane, and `A` in Normal mode while it's empty has the agent answer `ask` into it, as it writes. With `over_initial`, `initial` is only a starting point (a template), and `A` writes over it until it's been touched. The answer isn't given to the extension: what comes back is what's in the pane when you send it. |
-| `here()` | With `editor = "read"`: the file you were in when you ran its command, the selection or the line, its project. |
+| `here()` | With `editor = "read"`: the file you were in when you ran its command, the selection or the line, its project. The project's `meta` has `("kind", id)` from Fenix 1.6 -- `rust`, a pack's `java`, `other` -- and its Jira key as `("jira", key)` when it has one; look a pair up by its name, and treat a missing `kind` as an older Fenix. |
 | `key_scheme()`, `key_for(command)` | API 1.5, no permission needed. How you edit (`KeyScheme::Vim` or `KeyScheme::Standard`, `editor.keys`), and the keys that run a command now, as the key menu writes them -- `gd` with Vim keys and `F12` with standard keys, `SPC g g` or `C-k g g`, yours over Fenix's -- for a hint that says which key to press: `format!("{} on a name opens its page", key_for("code.goto_definition").unwrap_or_default())`. |
 | `home(Some(&section))` | Its section on Home; a row picked there → `Event::HomePicked`. |
 | `set_setting(key, value)` | One of its own settings changed and saved, as a change on the settings page is: those that read it read it anew (it isn't told, it knows). A folder of its own that the setting names (`folders`) moves: once what it set it in has returned (a command, a timer, a reply, a language server's message), it starts again with the folder given, if it's there -- a folder it names isn't made -- and you're told it now reads that folder. A few times a minute at most, for it and for those that share the folder; past that, when it next starts. A `map` setting reads and writes as JSON, `[["key", "value"], ...]`. |
@@ -456,6 +456,67 @@ box: data, and a small code extension. What each part is:
 | A linter | Run it (on `file_saved`, which gives the file's path; or on `buffer_changed`) and `diagnostics::set` what it found. Or be a language server, or set one that lints (ruff's). |
 | Tasks | `project::tasks`: build, test, run, lint. |
 | Checks | `project::doctor`, a fix row running one of its commands (`.fix("install pyright", "python.install-server")`), which can install it -- `run_as_task` for a package manager, or a download, below. The servers, adapters and formatters it set are checked there too, found or not. |
+
+### Project kinds
+
+A pack says what kind of project it knows (Fenix 1.6), so a Java project
+is a `JAVA` project in the hub, on Home, in the modeline, the doctor and
+the settings page, as a Rust one is `RS`:
+
+```toml
+[[contributes.project_kinds]]
+id = "java"                     # what kind = "java" and templates say
+name = "Java"                   # the settings page, the doctor, the explorer
+tag = "JAVA"                    # in front of a project: 1 to 4 of A-Z 0-9 + # .
+color = "keyword"               # a theme role, below; constant when left out
+markers = ["pom.xml", "build.gradle", "build.gradle.kts"]
+main = ["src/main/java/Main.java"]
+```
+
+- **Detection** is a file existing at the project's top, nothing more:
+  no code of the extension runs, and no file is opened (a kind that
+  can't be told from names, Flutter's, is declared by the project). A
+  project's kind is the one it declares (`[project] kind`), else the
+  first of: an Arduino sketch, Rust, Python, Go, the extensions' kinds
+  (the machine's extensions first, then yours, each by id; each one's in
+  its order), JavaScript, C/C++, Tcl, else Other. So a Rails app with a
+  `package.json` is Ruby once the Ruby pack is installed.
+- **Markers** are file names at the top: at most 16, each 1 to 64 bytes,
+  no `/`, `\`, `..`, `*`, `?`, `[`, `]` or control character, not `.fenix`
+  in any case. `{folder}` (at most once, no other braces) is the
+  folder's own name: `{folder}.csproj`. A kind with none is only ever
+  declared (Kotlin: its projects' files are Java's). A kind's markers
+  also find a project's top where nothing of Fenix's is above it, as a
+  context's do -- never inside a repository, where the repository is
+  the project.
+- **`main`**: at most 8 paths below the project, `/` between parts, none
+  empty or `..`, `{folder}` allowed: what opening the project lands on
+  when you've had none of it open, the first that exists.
+- **`id`**: 1 to 24 characters, `a-z` first, then `a-z 0-9 - _`. Not
+  `other`, `monorepo`, or another name Fenix reads as one of its own
+  (`py`, `uv`, `ino`, `sketch`, `rs`, `c++`, `c`, `cmake`, `js`, `ts`,
+  `javascript`, `typescript`, `mib`). One of Fenix's ids (`python`,
+  `arduino`, `rust`, `tcl`, `cpp`, `node`, `go`) adds its markers to
+  Fenix's kind, in that kind's place, and nothing else: its `name`,
+  `tag`, `color` and `main` are ignored, and the Extensions page says
+  so. Several packs may add markers to one of Fenix's.
+- **`name`**: 1 to 32 characters, at least one visible, no control
+  character. **`tag`**: 1 to 4 of `A-Z 0-9 + # .`, at least one letter.
+  **`color`**: `keyword`, `string`, `function`, `type`, `number`,
+  `constant`, `attribute` or `variable` -- the theme's own syntax
+  colours, so a tag reads on every theme.
+- At most 8 kinds to an extension. A kind that breaks a rule is left
+  out, and its extension's details on the Extensions page say which
+  and why; the extension loads as before. An id another extension
+  declared first (by the order above) is that one's: yours is left out,
+  and said. Fenix takes at most 256 kinds and 256 distinct markers from
+  every extension together.
+- **No API**: Fenix reads the section, the extension's code never does.
+  A pack declaring kinds keeps `api = "1.5"`, and Fenix 1.5 and earlier
+  ignore the section. A template naming the pack's kind, though, is
+  refused by Fenix 1.5: such a pack needs `fenix = ">=1.6"`.
+- A project that declares a kind no installed extension knows keeps it:
+  it's shown by its id (`JAVA`), muted, until the pack is installed.
 
 A launch file is one configuration, offered by `SPC u u` in a project
 that has no launch configuration of its own (`.fenix/tools.json`'s
@@ -1324,6 +1385,14 @@ name = "counter test"          # what the tests page calls it
 languages = ["markdown"]       # files it scans when they're open
 markers = ["counter.toml"]     # projects it serves
 scan = ["tests/*.md"]          # files it scans when they aren't
+
+[[contributes.project_kinds]]   # project kinds it knows (Fenix 1.6, no API)
+id = "counter"                 # what kind = "counter" and templates say
+name = "Counter"               # the settings page, the doctor, the explorer
+tag = "CNT"                    # 1 to 4 of A-Z 0-9 + # .
+color = "number"               # a theme role; constant when left out
+markers = ["counter.toml"]     # files at its top; {folder} is its name
+main = ["src/main.md"]         # what it opens on, the first that exists
 ```
 
 An extension that starts with Fenix (`on_startup = true`) and has a

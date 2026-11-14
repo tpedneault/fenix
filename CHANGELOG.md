@@ -49,6 +49,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fenix 1.5, when no code reachable from its exports calls
   `tests::provider`. See
   [Writing extensions](docs/WRITING_EXTENSIONS.md#test-providers).
+- Language packs declare the kinds of project they know, in
+  `[[contributes.project_kinds]]`: an id, a name, a one-to-four-letter
+  tag, a theme colour, the files that mark one and the file it opens on.
+  With the Java pack installed a Maven project is `JAVA` in the hub, on
+  Home, in the modeline, the doctor and the settings page, as a Rust one
+  is `RS`; installed, updated, switched off or removed, the tags follow
+  without a restart. A pack's kinds come after Rust, Python and Go and
+  before JavaScript, C/C++ and Tcl, so a Rails or Laravel app with a
+  `package.json` is Ruby or PHP rather than JavaScript. A pack may add
+  markers to one of Fenix's own kinds (`deno.json` to JavaScript).
+  Detection only looks at which files exist -- no extension code runs,
+  no file is read -- and a project on another machine is never looked
+  at. The section needs no extension API: Fenix 1.5 ignores it. An
+  extension is told its project's kind as `("kind", id)` in `here()`'s
+  project `meta`. See
+  [Writing extensions](docs/WRITING_EXTENSIONS.md#project-kinds).
 - `tests.enabled`, off, on the settings page under Completion & LSP,
   with `tests.list_automatically`, `tests.on_save`, `tests.problems`,
   `tests.inline`, `tests.gutter`, `tests.timeout_minutes` and

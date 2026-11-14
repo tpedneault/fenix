@@ -1,8 +1,10 @@
 # Plan: project kinds from extensions
 
-- **Status:** planned, 14 November 2026, for the maintainer to review.
-  Recorded in [ADR 0006](../adr/0006-project-kinds.md). Nothing is built
-  yet; §13 is where each step writes what it changed from this plan.
+- **Status:** steps 1 and 2 built, 14 November 2026, on `kinds/impl`
+  (not merged), for the maintainer to review. Recorded in
+  [ADR 0006](../adr/0006-project-kinds.md). §13 says what was built
+  differently from this plan; §6.2 states the rules as built, which the
+  store's `xtask validate` holds packs to.
 - **Scope:** a language pack says what kind of project it knows -- an
   id, a name, a short tag, a colour, the files that mark one, a file to
   open first -- and Fenix names, colours and detects that kind as it
@@ -490,6 +492,50 @@ built-in's tier. **Not checked against `engine.api`**: the section is
 read by Fenix, not by the extension's code, so it isn't part of the
 extension API (§6.3).
 
+**The rules where the table above left room** (settled with the store's
+`xtask/src/kinds.rs` as step 2 was built; each is the strict reading,
+and Fenix and `xtask` hold to the same one):
+
+1. **One pack per id** is a store rule, and Fenix's ids are exempt:
+   several packs may add markers to `node`. For one of Fenix's ids a
+   declaration carries `id` and `markers` only. `xtask` refuses
+   `name`, `tag`, `color` or `main` there; Fenix **ignores them and
+   says so** on the Extensions page ("name, tag ignored -- it's one of
+   Fenix's own ..."), keeping the markers, since core's presentation
+   stays whatever the pack says. Fenix doesn't check an ignored `main`.
+2. **`main`**: no part empty -- `a//b` and a trailing `/` are refused --
+   as well as no `..` part, no `\`, not starting with `/`.
+3. **`{folder}`**: in `main`, any number of times, other braces not
+   looked at (it's a path Fenix only ever joins under the project). In
+   a marker, at most once, and no other `{` or `}`.
+4. **Not a `.fenix` file**: a marker equal to `.fenix` ignoring ASCII
+   case (`.FENIX` is the same folder on Windows and macOS). Names that
+   start with it are markers like any other: `.fenixignore`.
+5. **`name`**: 1 to 32 characters (not bytes), no control character,
+   and at least one that isn't whitespace. **Markers**: no control
+   character either; a marker given twice is looked for once (kept
+   once, not refused).
+6. **`tag`**: 1 to 4 characters of `A-Z 0-9 + # .`, at least one letter
+   (so ASCII, one byte and one cell each).
+7. **Fenix's ids, for templates and for what no pack may declare**: the
+   nine (`python`, `arduino`, `rust`, `tcl`, `cpp`, `node`, `go`,
+   `monorepo`, `other`) and their aliases (`py`, `uv`, `ino`, `sketch`,
+   `rs`, `c++`, `c`, `cmake`, `js`, `ts`, `javascript`, `typescript`),
+   in any case; `mib` remains an alias for `other`. Any other id is
+   taken only as written: `Java` is not an id, in a template, in
+   `[project] kind` or in a manifest.
+8. **`color`**: the eight roles of §2.5, by those names exactly.
+
+What `xtask` refuses Fenix leaves out, said, and loads the extension
+anyway: a manifest is untrusted input, and a bad kind is never why an
+extension or Fenix doesn't start. So in Fenix a bad entry, a typo in a
+field (`deny_unknown_fields`, per entry), the section in the wrong
+shape, kinds past the eighth, and a bundle's kinds are each left out
+with a line on the Extensions page saying which and why; the rest of the
+extension, and its other kinds, are as they were. Across every
+extension Fenix also takes at most 256 kinds and 256 distinct markers
+(§5), and an id a second extension declares is the first's (§2.4).
+
 What Fenix keeps: `ProjectKindContribution { id, name, tag, color,
 markers, main }` beside `TestProviderContribution`
 (`manifest.rs:586-612`), with `#[serde(deny_unknown_fields)]` as every
@@ -766,6 +812,101 @@ The implementers go ahead on the recommendations.
 
 Filled in as each step merges: what was built differently from this
 plan, and why.
+
+### Step 1: kinds as data
+
+- **`ProjectKind(u16)`** as §2.2 has it, constants `PYTHON` ... `OTHER`
+  at indices 0 to 8 and `ProjectKind::BUILT_IN` (their order) for `ALL`.
+  `Debug` prints the id. The nine are a table in `kind.rs` (id, tag,
+  name, `KindColor`, markers for `def()`, main files); detection and the
+  doctor keep their code, on the constants (`_ => {}` for the rest).
+- **`tag()` and `label()` return `&'static str`**, not `String`: the
+  text of a kind that isn't Fenix's is kept once for the run (a set of
+  leaked strings, bounded by the manifests' limits and the ids
+  interned), so callers didn't change and the modeline neither
+  allocates nor locks for Fenix's kinds; for an extension's it takes the
+  registry's read lock. `id()` likewise.
+- **The interner is bounded**: at most 4,096 ids a run, Fenix's
+  included; past that a new id is read as no kind, as a malformed one
+  is. A hostile settings file interns one id.
+- **`from_id`**: Fenix's ids and aliases in any case, as before; any
+  other id only as written (`Java` isn't one) -- §6.2's grammar, and
+  what `xtask` holds templates to. The template's error for what isn't
+  an id says the grammar.
+- **The cycler** keeps a declared kind no one declares among its
+  choices for as long as the page is open (latched the first time it's
+  seen), after the known kinds: with it only in the list while it's the
+  declared value, `h` then `l` couldn't come back to it.
+- **Unknown ids' tags** are the id upper-cased and cut to four,
+  whatever its characters (`my-kind` is `MY-K`).
+- Home's name and the line under it moved to the sixth cell; "Start
+  from" ranks after every group, Fenix's and the packs'.
+
+### Step 2: extensions declare kinds
+
+- **A bad declaration never refuses the manifest** (§6.2's last
+  paragraph): `Contributes::project_kinds` is a `ProjectKinds` of the
+  kinds kept and the lines saying what was left out, read entry by
+  entry. A bundle's kinds are left out and said rather than refusing
+  the bundle. The resolutions of §6.2's open points are written into
+  §6.2.
+- **Totals**: 256 kinds and 256 distinct markers from all extensions
+  together (the plan bounded a pack, not the sum). With 30 packs of 8
+  kinds and 16 markers each, all distinct, the cap holds and is said.
+- **The registry** (`fenix_project::set_extension_kinds`) takes the
+  kinds in detection order and returns whether anything changed; the
+  same kinds again change nothing, so the cache isn't cleared and
+  nothing is asked again. `extension_kind_notes()` has what it left
+  out (a second extension's id, past the totals). It also re-checks
+  every marker and main path itself (`marker_is_a_name`,
+  `main_is_below`), so the bound holds whoever calls it.
+- **Which extensions**: every switched-on one whose manifest reads and
+  `runs_in` this Fenix, data packs included (`installed::kind_extensions`),
+  the machine's first then yours, each by id. Set after
+  `code_extensions_installed` at start and in `extensions_switched`
+  (whatever `code_extensions_now` found), as §7 says.
+- **When they change** (`App::project_kinds_changed`): the kind cache
+  and the doctor's health cache (computed by kind) are cleared; Home's
+  data is gathered again; an open hub is rebuilt and fetched again (its
+  subprojects rescanned off the UI thread); open doctor pages take the
+  new kind and check again; the settings page's "detect" is worked out
+  again; the explorer's headers are asked again.
+- **Detection**: Fenix's own rules look as before (`exists`, the sketch
+  rule, the Tcl listing); markers from extensions are `is_file`, as a
+  context's are, each looked for once per folder however many kinds
+  name it. A marker's case is the file system's: `Path::is_file` on the
+  joined name, so `gemfile` is `Gemfile` on Windows' and macOS's
+  default file systems and not on Linux; `.fenix` is refused in any
+  case for that reason. `main` paths are joined a part at a time
+  (`Path::join`). With no extension, a folder costs exactly what it did
+  (14 looks at an empty one, pinned by a test).
+- **Remote roots**: `detect_kind`, `declared_kind` and `main_file` return
+  before touching the disk for a root `is_remote_text` calls remote
+  (counted: no look at all).
+- **Root finding** takes the kinds' markers (Fenix's ids' added ones
+  too) with the contexts', under the fallback rule; `holds_pack_marker`
+  (the MIB clean-up) sees them too.
+- **`ProjectKind::extension()` and `is_declared()`** were added for the
+  pages and tests; `KindDef` has `extension: Option<String>`.
+- **The Extensions page** shows a "Project kinds" section in an
+  installed extension's details (and its Markdown details): each kind
+  (`JAVA Java (java): pom.xml`, `node: adds deno.json`) and each line of
+  what was left out.
+- **`here()`'s `meta`** has `("kind", id)` from the cached kind, after
+  `("jira", key)`. No WIT change; `API` stays `1.6.0`, and nothing here
+  needs `engine.api = "1.6"` (a pack with `api = "1.5"`, WebAssembly or
+  data, has its kinds read: tested).
+- **Measured** (release build, Linux, a temporary folder; the
+  `measure_detection_with_thirty_extensions` test, `--ignored`): with no
+  extension, a hub of 50 projects listed with their kinds in 2.5 ms
+  (11 looks a project), `detect_kind` 7 µs, `find_project_root` for a
+  file in no project 8 folders deep 63 µs. With 30 extensions' kinds
+  (8 x 16 markers each, capped at 256): the hub 14.9 ms (190 looks a
+  project), `detect_kind` 128 µs, `find_project_root` 1.2 ms. The store's
+  packs have about 70 markers in all.
+- **The store's packs**: every declaration on fenix-extensions'
+  `kinds/declare` (14 packs and `fenix.cpp`'s added markers) loads in
+  Fenix with nothing left out.
 
 ## Appendix A. Every use of a project kind
 

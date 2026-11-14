@@ -95,6 +95,9 @@ comes from you, or is the default, `Enter` sets one for the project and
 `r` goes back to yours. Its first section, "Project & tasks", holds
 the rest of what's the project's own: its kind, group, pin and Jira key,
 and its tasks, language servers and debug launch (`.fenix/tools.json`).
+The kind (`[project] kind`) is one of Fenix's (`python`, `rust`, `node`,
+`monorepo`, ...) or any an extension declares (`java`); one no installed
+extension knows is kept as written and shown by its id.
 `p` switches the page between yours and the project's.
 
 **A project's programs wait for you.** `.fenix/tools.json` names
