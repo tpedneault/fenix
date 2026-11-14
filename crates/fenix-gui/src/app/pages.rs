@@ -237,8 +237,12 @@ pub enum PageEvent {
     Output { buffer: BufferId, generation: u64, line: String },
     Finished { buffer: BufferId, generation: u64, result: Result<(), String> },
     Checks { buffer: BufferId, generation: u64, checks: Vec<Check> },
-    HubInfo { buffer: BufferId, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
-    Subprojects { buffer: BufferId, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
+    /// `generation`: the kinds' (`App::kinds_generation`) it ran under.
+    HubInfo { buffer: BufferId, generation: u64, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
+    Subprojects { buffer: BufferId, generation: u64, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
+    /// The hub's projects' kinds, looked for again off the UI thread once
+    /// the extensions' kinds changed.
+    HubKinds { buffer: BufferId, generation: u64, kinds: Vec<(PathBuf, fenix_project::ProjectKind)> },
     GitSnapshot { buffer: BufferId, snapshot: Box<git_status::Snapshot> },
     GitDiff { buffer: BufferId, section: git_status::Section, path: String, diff: git_status::DiffState },
     GitDone { buffer: BufferId, label: String, result: Result<String, String> },
@@ -1076,7 +1080,20 @@ impl App {
                     }
                 }
             }
-            PageEvent::Subprojects { buffer, root, found } => {
+            PageEvent::Subprojects { generation, .. } | PageEvent::HubInfo { generation, .. } | PageEvent::HubKinds { generation, .. } if generation != self.kinds_generation => {}
+            PageEvent::HubKinds { buffer, kinds, .. } => {
+                let Some(state) = self.pages.get_mut(&buffer) else { return };
+                state.stale = true;
+                if let PageModel::Hub(h) = &mut state.model {
+                    for (root, kind) in kinds {
+                        self.project_kinds.borrow_mut().insert(root.clone(), kind);
+                        if let Some(p) = h.projects.iter_mut().find(|p| p.root == root) {
+                            p.kind = kind;
+                        }
+                    }
+                }
+            }
+            PageEvent::Subprojects { buffer, root, found, .. } => {
                 let Some(state) = self.pages.get_mut(&buffer) else { return };
                 state.stale = true;
                 if let PageModel::Hub(h) = &mut state.model {
@@ -1086,7 +1103,7 @@ impl App {
                     }
                 }
             }
-            PageEvent::HubInfo { buffer, root, git, health } => {
+            PageEvent::HubInfo { buffer, root, git, health, .. } => {
                 self.project_health.insert(root.clone(), health);
                 let Some(state) = self.pages.get_mut(&buffer) else { return };
                 state.stale = true;
@@ -1472,6 +1489,11 @@ impl App {
             return;
         };
         let dir = std::fs::canonicalize(&plan.dir).map(fenix_lsp::normalize).unwrap_or_else(|_| plan.dir.clone());
+        // A template naming a kind that isn't Fenix's: the project says so,
+        // unless its files do or it declares one itself.
+        if let Err(e) = plan.declare_kind() {
+            self.set_error(format!("couldn't declare the project's kind in .fenix/settings.toml: {e}"));
+        }
         self.project_kinds.borrow_mut().clear();
         for hook in &plan.hooks {
             match hook {
@@ -1502,6 +1524,22 @@ impl App {
     // --------------------------------------------------------------
     // The hub
     // --------------------------------------------------------------
+
+    /// The folders of MIB tables your projects held from before 1.6 that
+    /// are now in a project of yours around them, taken off the list once
+    /// (`KnownProjects::drop_mib_folders_once`) -- and said in a
+    /// notification that stays until it's seen, naming each and where it
+    /// is now, so no project just goes.
+    pub(super) fn drop_mib_folders_from_projects(&mut self, home: Option<&Path>) {
+        let dropped = self.known_projects.drop_mib_folders_once_from(home);
+        if dropped.is_empty() {
+            return;
+        }
+        let lines: Vec<String> = dropped.iter().map(|(folder, around)| format!("{} -- in {} now", fenix_vfs::display(folder), fenix_vfs::display(around))).collect();
+        let summary = if dropped.len() == 1 { "A folder of MIB tables left your projects".to_string() } else { format!("{} folders of MIB tables left your projects", dropped.len()) };
+        let body = format!("{}\nA MIB folder is part of the project around it now. The folders are untouched; SPC p a adds one back.", lines.join("\n"));
+        self.notify(crate::notify::Request::new("fenix", summary).body(body).urgency(crate::notify::Urgency::Critical).tag("fenix.mib-folders").action("Add a project", "project.add"));
+    }
 
     /// What the hub shows for each known project, before git and the
     /// doctor have reported in.
@@ -1547,7 +1585,7 @@ impl App {
 
     /// Rebuilds the hub's rows from the project list, keeping what git
     /// and the doctor already said and the selection where it was.
-    fn hub_reload(&mut self, id: BufferId) {
+    pub(super) fn hub_reload(&mut self, id: BufferId) {
         let fresh = self.hub_projects();
         let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
         let selected = hub.selected().map(|p| p.root.clone());
@@ -1576,23 +1614,36 @@ impl App {
 
     /// Git summaries and the doctor's quick pass for every project, off
     /// the UI thread, one project at a time.
-    fn hub_fetch(&mut self, id: BufferId) {
+    pub(super) fn hub_fetch(&mut self, id: BufferId) {
+        self.hub_fetch_with(id, false);
+    }
+
+    /// `hub_fetch`; with `kinds`, the registered projects' kinds are looked
+    /// for again first, on the same thread (the extensions' kinds
+    /// changed), and the rest checked by those. What it finds is dropped
+    /// if the kinds change again before it's back.
+    pub(super) fn hub_fetch_with(&mut self, id: BufferId, kinds: bool) {
         let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else { return };
         let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
             hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
         let probe = self.app_probe();
+        let generation = self.kinds_generation;
         self.page_spawn(move |send| {
             let info = |root: PathBuf, kind: fenix_project::ProjectKind| {
                 let git = fenix_project::vcs::git_summary(&root);
                 let checks = doctor::diagnose_with(&root, kind, &probe, false, &[]);
                 let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
-                send(PageEvent::HubInfo { buffer: id, root, git, health });
+                send(PageEvent::HubInfo { buffer: id, generation, root, git, health });
             };
+            let projects: Vec<(PathBuf, fenix_project::ProjectKind)> = if kinds { projects.into_iter().map(|(root, _)| { let kind = fenix_project::detect_kind(&root); (root, kind) }).collect() } else { projects };
+            if kinds {
+                send(PageEvent::HubKinds { buffer: id, generation, kinds: projects.clone() });
+            }
             // Every project's own row first, then what's inside each.
             let mut found_all = Vec::new();
             for (root, kind) in &projects {
                 let found = fenix_project::workspace::subprojects(root);
-                send(PageEvent::Subprojects { buffer: id, root: root.clone(), found: found.clone() });
+                send(PageEvent::Subprojects { buffer: id, generation, root: root.clone(), found: found.clone() });
                 info(root.clone(), *kind);
                 found_all.extend(found);
             }
@@ -1807,6 +1858,9 @@ impl App {
     pub(super) fn project_page_model(&self, root: &Path) -> Settings {
         let mut settings = Settings::new(root.to_path_buf(), fenix_project::detect_kind_from_files(root));
         settings.declared = fenix_project::declared_kind(root);
+        // Declared, but by no one now: kept as written, never written over
+        // but by picking a kind (`project_settings::Settings::kept`).
+        settings.kept = fenix_project::declared_id(root).filter(|_| settings.declared.is_none());
         settings.pinned = self.project_meta.is_pinned(root);
         settings.group = self.project_meta.group(root).unwrap_or_default().to_string();
         settings.jira = fenix_project::meta::jira_key(root).unwrap_or_default();
@@ -1906,6 +1960,213 @@ mod tests {
             app.known_projects.add(root.to_path_buf());
         }
         app
+    }
+
+    /// The process's project kinds are set by these tests one at a time,
+    /// and put back to none.
+    fn kinds_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::page::project_kinds_lock()
+    }
+
+    /// An installed extension `id` as `installed::kind_extensions` reads
+    /// it, declaring `kinds` (TOML).
+    fn pack(id: &str, kinds: &str) -> (String, fenix_extensions::Manifest) {
+        let text = format!("[extension]\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\nruntime = \"none\"\n\n[engine]\nfenix = \">=1.5, <2\"\n{kinds}");
+        (id.to_string(), fenix_extensions::Manifest::parse(&text).unwrap())
+    }
+
+    const RUBY: &str = "\n[[contributes.project_kinds]]\nid = \"ruby\"\nname = \"Ruby\"\ntag = \"RB\"\ncolor = \"constant\"\nmarkers = [\"Gemfile\", \"config.ru\"]\nmain = [\"config.ru\"]\n";
+
+    fn hub_rows(app: &mut App) -> String {
+        app.cmd_project_hub();
+        page_text(app)
+    }
+
+    /// A Ruby repository is Other until the Ruby pack is installed, Ruby
+    /// with it -- in the modeline, Home, the hub and the cache -- and
+    /// Other again once it's switched off or removed. A Rails app with a
+    /// `package.json` stays JavaScript throughout: a pack never changes a
+    /// kind Fenix gives. Nothing is written either way.
+    #[test]
+    fn a_packs_kind_comes_and_goes_with_it() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("pack-kinds");
+        let shop = dir.0.join("shop");
+        let rails = dir.0.join("rails");
+        std::fs::create_dir_all(shop.join(".git")).unwrap();
+        std::fs::create_dir_all(rails.join(".git")).unwrap();
+        for file in ["Gemfile", "config.ru"] {
+            std::fs::write(shop.join(file), "").unwrap();
+            std::fs::write(rails.join(file), "").unwrap();
+        }
+        std::fs::write(rails.join("package.json"), "{}").unwrap();
+        let mut app = app_with(&[&shop]);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        app.known_projects.add(rails.clone());
+        app.known_projects.add(shop.clone());
+        app.open_file_from_picker(&shop.join("Gemfile"));
+        app.refresh_home_data(false);
+        let node = fenix_project::ProjectKind::OTHER;
+        assert_eq!(app.focused_project_identity().map(|(k, _)| k), Some(node));
+        assert_eq!(app.home_data.projects[0].kind, node);
+        assert!(hub_rows(&mut app).contains("DIR  shop"));
+        assert!(hub_rows(&mut app).contains("JS   rails"));
+
+        app.project_kinds_now(&[pack("fenix.ruby", RUBY)]);
+        let ruby = fenix_project::ProjectKind::from_id("ruby").unwrap();
+        assert_eq!(app.focused_project_identity().map(|(k, _)| k), Some(ruby), "the modeline");
+        assert_eq!(app.home_data.projects[0].kind, ruby, "Home");
+        assert!(hub_rows(&mut app).contains("RB   shop"), "the hub");
+        assert!(hub_rows(&mut app).contains("JS   rails"), "Rails stays JavaScript");
+        assert_eq!(app.project_kinds.borrow().get(&shop), Some(&ruby), "the cache, filled again");
+        let id = app.focused_buffer_id();
+        app.close_page(id);
+        app.open_doctor(shop.clone());
+        assert!(page_text(&mut app).contains("RB "), "the doctor");
+
+        // Updated: what it declares now.
+        app.project_kinds_now(&[pack("fenix.ruby", &RUBY.replace("\"RB\"", "\"RUBY\""))]);
+        assert_eq!(ruby.tag(), "RUBY");
+        assert!(page_text(&mut app).contains("RUBY "), "an open doctor page names it again");
+
+        // Switched off, or removed: Other again.
+        app.project_kinds_now(&[]);
+        assert_eq!(app.focused_project_identity().map(|(k, _)| k), Some(node));
+        assert_eq!(app.home_data.projects[0].kind, node);
+        assert!(hub_rows(&mut app).contains("DIR  shop"));
+        assert!(!shop.join(".fenix").exists(), "nothing written to the project");
+        let stored = std::fs::read_to_string(dir.0.join("projects.json")).unwrap_or_default();
+        assert!(!stored.contains("kind") && !stored.contains("ruby"), "nor to the list: {stored}");
+    }
+
+    /// At start the session comes back, and a file given is opened,
+    /// before the extensions are read: what was drawn of a project then
+    /// is named again once they are, once -- the same kinds again clear
+    /// nothing -- and nothing is kept of the first guess.
+    #[test]
+    fn kinds_read_at_start_name_again_what_was_drawn_before() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("kinds-at-start");
+        let shop = dir.0.join("shop");
+        std::fs::create_dir_all(&shop).unwrap();
+        std::fs::write(shop.join("Gemfile"), "").unwrap();
+        // Opened at start: the hub and Home drawn with the files' kind.
+        let mut app = App::with_file(Some(shop.join("Gemfile").to_string_lossy().into_owned()));
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        app.known_projects.add(shop.clone());
+        app.refresh_home_data(false);
+        assert!(hub_rows(&mut app).contains("DIR  shop"));
+        assert_eq!(app.home_data.projects[0].kind, fenix_project::ProjectKind::OTHER);
+        // The extensions read, as `App::new` does next.
+        let exts = [pack("fenix.ruby", RUBY)];
+        app.project_kinds_now(&exts);
+        let ruby = fenix_project::ProjectKind::from_id("ruby").unwrap();
+        assert_eq!(app.home_data.projects[0].kind, ruby);
+        assert!(page_text(&mut app).contains("RB   shop"), "the open hub, named again");
+        assert_eq!(app.focused_project_identity(), None, "the hub is focused");
+        // Again with the same: the cache stays as it is.
+        app.project_kinds.borrow_mut().insert(PathBuf::from("/marker"), ruby);
+        app.project_kinds_now(&exts);
+        assert!(app.project_kinds.borrow().contains_key(Path::new("/marker")), "no change, nothing cleared");
+        assert!(!shop.join(".fenix").exists());
+        app.project_kinds_now(&[]);
+    }
+
+    /// `kind = "cobol"` where no extension knows COBOL: ignored -- the
+    /// project is what its files make it, Python, as on master -- and
+    /// kept: neither a visit to the settings page, a save of its tasks,
+    /// `h`/`l` on its kind, nor Enter on "detect" write anything over it.
+    /// Once a pack declaring COBOL is installed, it counts.
+    #[test]
+    fn a_declared_kind_no_extension_knows_survives_the_settings_page() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("cobol-kind");
+        std::fs::create_dir_all(dir.0.join(".fenix")).unwrap();
+        std::fs::write(dir.0.join(".fenix/settings.toml"), "[project]\nkind = \"cobol\"\n").unwrap();
+        std::fs::write(dir.0.join("pyproject.toml"), "").unwrap();
+        let mut app = app_with(&[&dir.0]);
+        assert_eq!(app.project_kind_of(&dir.0), fenix_project::ProjectKind::PYTHON);
+        let mut settings = app.project_page_model(&dir.0);
+        assert_eq!((settings.declared, settings.kept.as_deref()), (None, Some("cobol")));
+        let tools = settings.tools.clone();
+        app.project_page_action(dir.0.clone(), project_settings::Action::SaveTools(tools));
+        settings.focus_on_kind();
+        // Off it and back, then on to "detect": Enter there writes nothing.
+        for key in ['h', 'l', 'l'] {
+            let action = settings.key(crate::page::Key::Char(key));
+            app.project_page_action(dir.0.clone(), action);
+        }
+        let action = settings.key(crate::page::Key::Enter);
+        app.project_page_action(dir.0.clone(), action);
+        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"cobol\""));
+        // Reopened: still there, still kept.
+        assert_eq!(app.project_page_model(&dir.0).kept.as_deref(), Some("cobol"));
+        // `r` on the row removes it, and detection decides.
+        let mut again = app.project_page_model(&dir.0);
+        again.focus_on_kind();
+        let action = again.key(crate::page::Key::Char('r'));
+        app.project_page_action(dir.0.clone(), action);
+        assert_eq!(fenix_project::declared_id(&dir.0), None);
+        assert!(!std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap_or_default().contains("kind"));
+        std::fs::write(dir.0.join(".fenix/settings.toml"), "[project]\nkind = \"cobol\"\n").unwrap();
+        // A pack that knows it, installed: it counts.
+        app.project_kinds_now(&[pack("acme.cobol", "\n[[contributes.project_kinds]]\nid = \"cobol\"\nname = \"COBOL\"\ntag = \"CBL\"\ncolor = \"string\"\n")]);
+        let cobol = fenix_project::ProjectKind::from_id("cobol").unwrap();
+        assert_eq!((cobol.tag(), cobol.label(), app.project_kind_of(&dir.0)), ("CBL", "COBOL", cobol));
+        assert_eq!(app.project_page_model(&dir.0).declared, Some(cobol));
+        app.project_kinds_now(&[]);
+        assert_eq!(app.project_kind_of(&dir.0), fenix_project::ProjectKind::PYTHON);
+    }
+
+    /// What a hub fetch started before the kinds changed sends back is
+    /// dropped: it was checked under the old kinds.
+    #[test]
+    fn a_hub_fetch_from_before_the_kinds_changed_is_dropped() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("stale-hub");
+        let shop = dir.0.join("shop");
+        std::fs::create_dir_all(&shop).unwrap();
+        let mut app = app_with(&[&shop]);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        app.known_projects.add(shop.clone());
+        hub_rows(&mut app);
+        let id = app.focused_buffer_id();
+        let old = app.kinds_generation;
+        app.project_kinds_now(&[pack("fenix.ruby", RUBY)]);
+        assert_eq!(app.kinds_generation, old + 1);
+        app.project_health.clear();
+        let java = fenix_project::ProjectKind::NODE;
+        app.apply_page_event(PageEvent::HubKinds { buffer: id, generation: old, kinds: vec![(shop.clone(), java)] });
+        app.apply_page_event(PageEvent::HubInfo { buffer: id, generation: old, root: shop.clone(), git: None, health: (Health::Bad, 3) });
+        app.apply_page_event(PageEvent::Subprojects { buffer: id, generation: old, root: shop.clone(), found: vec![(shop.join("x"), java)] });
+        let Some(PageModel::Hub(hub)) = app.pages.get(&id).map(|s| &s.model) else { panic!("no hub") };
+        assert!(hub.projects.iter().all(|p| p.kind != java && p.health != Some((Health::Bad, 3)) && p.parent.is_none()));
+        assert!(!app.project_health.contains_key(&shop));
+        app.project_kinds_now(&[]);
+    }
+
+    /// What an extension is told of the project it's called in: its kind,
+    /// by id, beside its Jira key -- `other` for a project of no kind.
+    #[test]
+    fn here_says_the_projects_kind() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("here-kind");
+        std::fs::write(dir.0.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::write(dir.0.join("main.rs"), "").unwrap();
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&dir.0.join("main.rs"));
+        let meta = app.editor_where().0.project.unwrap().meta;
+        assert!(meta.contains(&("kind".to_string(), "rust".to_string())), "{meta:?}");
+        let other = Scratch::new("here-other");
+        std::fs::write(other.0.join(".projectile"), "").unwrap();
+        std::fs::write(other.0.join("notes.txt"), "").unwrap();
+        app.open_file_from_picker(&other.0.join("notes.txt"));
+        assert!(app.editor_where().0.project.unwrap().meta.contains(&("kind".to_string(), "other".to_string())));
+        app.project_kinds_now(&[pack("fenix.ruby", RUBY)]);
+        std::fs::write(other.0.join("Gemfile"), "").unwrap();
+        app.project_kinds.borrow_mut().clear();
+        assert!(app.editor_where().0.project.unwrap().meta.contains(&("kind".to_string(), "ruby".to_string())));
+        app.project_kinds_now(&[]);
     }
 
     /// The wizard open on `template`, pointed at `parent`, not registering.
@@ -2203,6 +2464,44 @@ mod tests {
         press(&mut app, "d");
         assert!(!app.known_projects.roots().contains(&b.0));
         assert!(b.0.is_dir(), "the folder itself is untouched");
+    }
+
+    /// A MIB folder is no project of its own: one in a repository is the
+    /// repository's -- off the list (once), not among its subprojects,
+    /// and what a file of it is in -- while one you added that's in no
+    /// other project stays on the list as a folder like any other.
+    #[test]
+    fn a_mib_folder_is_in_the_project_around_it_not_one_of_its_own() {
+        let dir = Scratch::new("mib-folders");
+        let (repo, alone) = (dir.0.join("mission"), dir.0.join("alone"));
+        let ops = repo.join("ops");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(&ops).unwrap();
+        std::fs::create_dir_all(&alone).unwrap();
+        std::fs::write(ops.join("vdf.dat"), "OPS\tops\n").unwrap();
+        std::fs::write(ops.join("ccf.dat"), "").unwrap();
+        std::fs::write(alone.join("pcf.dat"), "").unwrap();
+        let mut app = app_with(&[]);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        for root in [&alone, &repo, &ops] {
+            app.known_projects.add(root.clone());
+        }
+
+        app.drop_mib_folders_from_projects(None);
+        assert!(!app.known_projects.roots().contains(&ops));
+        let said = app.notifications.history().iter().map(|n| format!("{}\n{}", n.summary, n.body)).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("A folder of MIB tables left your projects") && said.contains(&format!("{} -- in {} now", fenix_vfs::display(&ops), fenix_vfs::display(&repo))), "{said}");
+        app.drop_mib_folders_from_projects(None);
+        assert_eq!(app.notifications.history().len(), 1, "once");
+        let hub: Vec<(PathBuf, fenix_project::ProjectKind)> = app.hub_projects().into_iter().map(|p| (p.root, p.kind)).collect();
+        assert_eq!(hub, [(repo.clone(), fenix_project::ProjectKind::OTHER), (alone.clone(), fenix_project::ProjectKind::OTHER)]);
+        assert!(fenix_project::workspace::subprojects(&repo).is_empty(), "not a subproject either");
+
+        app.open_file_from_picker(&ops.join("ccf.dat"));
+        assert_eq!(app.project_root.as_deref(), Some(repo.as_path()), "a file of it is the repository's");
+        app.open_project(alone.clone(), None, false);
+        app.open_file_from_picker(&alone.join("pcf.dat"));
+        assert_eq!(app.project_root.as_deref(), Some(alone.as_path()), "opened as a project, it's the folder you chose");
     }
 
     #[test]

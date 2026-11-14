@@ -5161,6 +5161,10 @@ pub struct App {
     /// Cleared when a project is created, the one time a kind can change
     /// under Fenix's own hands.
     project_kinds: RefCell<HashMap<PathBuf, fenix_project::ProjectKind>>,
+    /// How many times the extensions' project kinds changed this run: a
+    /// hub fetch says which it ran under, and what one from before the
+    /// last change sends back is dropped (`project_kinds_changed`).
+    kinds_generation: u64,
     /// The project pages open right now (wizard, hub, doctor, settings),
     /// by their buffer -- see `pages`.
     pages: HashMap<BufferId, pages::PageState>,
@@ -6171,6 +6175,14 @@ impl App {
         app.extensions_at_startup();
         // The extensions that run code, and their projects' markers.
         app.code_extensions_installed();
+        // The extensions' project kinds -- before anything is drawn, but
+        // after the session came back and a file given was opened, either
+        // of which may have named a project by its kind: named again.
+        app.project_kinds_now(&crate::installed::kind_extensions());
+        // A MIB folder inside another project, on your list from when one
+        // was a project of its own: taken off it, once (the packs'
+        // markers are known now, so what's a project is too).
+        app.drop_mib_folders_from_projects(dirs::home_dir().as_deref());
         // The file opened at start was given its project before the
         // packs' markers were known: again, now they are. Then those that
         // start with Fenix start, in it (or a moment later, after it, each
@@ -6381,6 +6393,7 @@ impl App {
             picker_scroll: 0,
             project_root,
             project_kinds: RefCell::new(HashMap::new()),
+            kinds_generation: 0,
             pages: HashMap::new(),
             project_meta: fenix_project::meta::ProjectMeta::load_or_default(default_project_meta_path()),
             project_health: HashMap::new(),

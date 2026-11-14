@@ -29,10 +29,10 @@ fn declares_workspace(file: &str, text: &str) -> bool {
 /// The manifests that make a workspace of each kind's projects.
 fn workspace_manifests(kind: ProjectKind) -> &'static [&'static str] {
     match kind {
-        ProjectKind::Rust => &["Cargo.toml"],
-        ProjectKind::Python => &["pyproject.toml"],
-        ProjectKind::Node => &["package.json", "pnpm-workspace.yaml"],
-        ProjectKind::Go => &["go.work"],
+        ProjectKind::RUST => &["Cargo.toml"],
+        ProjectKind::PYTHON => &["pyproject.toml"],
+        ProjectKind::NODE => &["package.json", "pnpm-workspace.yaml"],
+        ProjectKind::GO => &["go.work"],
         _ => &[],
     }
 }
@@ -43,13 +43,13 @@ fn workspace_manifests(kind: ProjectKind) -> &'static [&'static str] {
 /// itself. Never looks past the repository `root` is in.
 pub fn language_root(root: &Path) -> PathBuf {
     let kind = if root.join("Cargo.toml").is_file() {
-        ProjectKind::Rust
+        ProjectKind::RUST
     } else if root.join("pyproject.toml").is_file() {
-        ProjectKind::Python
+        ProjectKind::PYTHON
     } else if root.join("package.json").is_file() {
-        ProjectKind::Node
+        ProjectKind::NODE
     } else if root.join("go.mod").is_file() {
-        ProjectKind::Go
+        ProjectKind::GO
     } else {
         return root.to_path_buf();
     };
@@ -163,10 +163,10 @@ mod tests {
     #[test]
     fn a_new_project_knows_the_workspace_it_would_join() {
         let dir = monorepo();
-        assert_eq!(workspace_above(&dir.path().join("crates"), ProjectKind::Rust).as_deref(), Some(dir.path()));
-        assert_eq!(workspace_above(&dir.path().join("tools/pkgs"), ProjectKind::Python).as_deref(), Some(dir.path().join("tools").as_path()));
-        assert_eq!(workspace_above(&dir.path().join("labs"), ProjectKind::Arduino), None);
-        assert_eq!(workspace_above(&dir.path().join("crates"), ProjectKind::Python), None);
+        assert_eq!(workspace_above(&dir.path().join("crates"), ProjectKind::RUST).as_deref(), Some(dir.path()));
+        assert_eq!(workspace_above(&dir.path().join("tools/pkgs"), ProjectKind::PYTHON).as_deref(), Some(dir.path().join("tools").as_path()));
+        assert_eq!(workspace_above(&dir.path().join("labs"), ProjectKind::ARDUINO), None);
+        assert_eq!(workspace_above(&dir.path().join("crates"), ProjectKind::PYTHON), None);
     }
 
     #[test]
@@ -188,12 +188,12 @@ mod tests {
         assert_eq!(
             found,
             [
-                ("tools".to_string(), ProjectKind::Python),
-                ("web".to_string(), ProjectKind::Node),
-                ("crates/cli".to_string(), ProjectKind::Rust),
-                ("crates/core".to_string(), ProjectKind::Rust),
-                ("labs/Blink".to_string(), ProjectKind::Arduino),
-                ("tools/pkgs/decode".to_string(), ProjectKind::Python),
+                ("tools".to_string(), ProjectKind::PYTHON),
+                ("web".to_string(), ProjectKind::NODE),
+                ("crates/cli".to_string(), ProjectKind::RUST),
+                ("crates/core".to_string(), ProjectKind::RUST),
+                ("labs/Blink".to_string(), ProjectKind::ARDUINO),
+                ("tools/pkgs/decode".to_string(), ProjectKind::PYTHON),
             ]
         );
     }

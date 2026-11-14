@@ -4,23 +4,49 @@
 //! pages themselves (wizard, hub, doctor, settings) are in `pages`.
 
 use super::*;
-use fenix_project::ProjectKind;
+use fenix_project::{KindColor, ProjectKind};
 
 /// A kind's colour, taken from the theme's own syntax roles rather than
-/// fixed values, so a tag stays readable on a light theme too.
+/// fixed values, so a tag stays readable on a light theme too. A kind
+/// names its role (`KindColor`); a kind no one declares is muted, as
+/// Other is.
 pub(super) fn kind_color(kind: ProjectKind, theme: &Theme) -> glyphon::Color {
-    match kind {
-        ProjectKind::Python => theme.syntax_type,
-        ProjectKind::Arduino => rgba_to_glyphon(theme.mode_insert),
-        ProjectKind::Mib => theme.syntax_constant,
-        ProjectKind::Rust => theme.syntax_string,
-        ProjectKind::Tcl => theme.syntax_function,
-        ProjectKind::Cpp => theme.syntax_keyword,
-        ProjectKind::Node => theme.syntax_number,
-        ProjectKind::Go => theme.syntax_type,
-        ProjectKind::Monorepo => theme.fg,
-        ProjectKind::Other => theme.gutter_fg,
+    match kind.color() {
+        KindColor::Syntax(role) => match role {
+            "keyword" => theme.syntax_keyword,
+            "string" => theme.syntax_string,
+            "function" => theme.syntax_function,
+            "type" => theme.syntax_type,
+            "number" => theme.syntax_number,
+            "attribute" => theme.syntax_attribute,
+            "variable" => theme.syntax_variable,
+            _ => theme.syntax_constant,
+        },
+        KindColor::Insert => rgba_to_glyphon(theme.mode_insert),
+        KindColor::Fg => theme.fg,
+        KindColor::Muted => theme.gutter_fg,
     }
+}
+
+/// The project kinds the extensions `exts` declare (id and manifest, in
+/// the order their kinds are detected in: the machine's first, then
+/// yours, each by id), as `fenix_project::set_extension_kinds` takes
+/// them. What the manifest left out is already out
+/// (`fenix_extensions::manifest::ProjectKinds`).
+pub(crate) fn kind_defs(exts: &[(String, fenix_extensions::Manifest)]) -> Vec<fenix_project::KindDef> {
+    exts.iter()
+        .flat_map(|(id, manifest)| {
+            manifest.contributes.project_kinds.kinds.iter().map(move |k| fenix_project::KindDef {
+                id: k.id.clone(),
+                name: k.name.clone().unwrap_or_default(),
+                tag: k.tag.clone().unwrap_or_default(),
+                color: k.color.as_deref().and_then(KindColor::from_role).unwrap_or(KindColor::DEFAULT),
+                markers: k.markers.clone(),
+                main: k.main.clone(),
+                extension: Some(id.clone()),
+            })
+        })
+        .collect()
 }
 
 /// `PY orbit-tools · ` -- the modeline's project segment, drawn between
@@ -44,6 +70,64 @@ pub(crate) fn window_title(project: Option<&str>) -> String {
 }
 
 impl App {
+    /// The extensions' project kinds, from those switched on now (`exts`,
+    /// as `installed::kind_extensions` reads them): at start, before
+    /// anything is drawn but after the session came back, and whenever
+    /// extensions are installed, updated, switched or removed. When they
+    /// change, everything that named a project by its kind names it
+    /// again; the same kinds again change nothing.
+    pub(super) fn project_kinds_now(&mut self, exts: &[(String, fenix_extensions::Manifest)]) {
+        if fenix_project::set_extension_kinds(kind_defs(exts)) {
+            self.project_kinds_changed();
+        }
+    }
+
+    /// The kinds changed: the cache of each root's kind and the doctor's
+    /// health by it let go, and Home, the hub (off the UI thread, what an
+    /// older fetch brings back dropped), the doctor, the settings page and
+    /// the explorer's header asked again. Nothing is written.
+    fn project_kinds_changed(&mut self) {
+        self.kinds_generation += 1;
+        self.project_kinds.borrow_mut().clear();
+        self.project_health.clear();
+        self.refresh_home_data(false);
+        // An open hub's kinds are looked for again off the UI thread: on a
+        // share, fifty projects' would hold the window up.
+        let hubs: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::Hub(_))).map(|(id, _)| *id).collect();
+        for id in hubs {
+            self.hub_fetch_with(id, true);
+        }
+        let doctors: Vec<(BufferId, PathBuf)> = self.pages.iter().filter_map(|(id, s)| if let PageModel::Doctor(d) = &s.model { Some((*id, d.root.clone())) } else { None }).collect();
+        for (id, root) in doctors {
+            let kind = self.project_kind_of(&root);
+            let language = self.wasm.project_language(&root);
+            if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                d.kind = kind;
+                d.language = language;
+            }
+            self.doctor_check(id);
+        }
+        let mut explorers = vec![ExplorerTarget::Sidebar];
+        for state in self.pages.values_mut() {
+            match &mut state.model {
+                PageModel::UserSettings(page) => {
+                    if let Some(project) = page.project_page.as_mut() {
+                        project.detected = fenix_project::detect_kind_from_files(&project.root);
+                    }
+                }
+                PageModel::Explorer(target, _) => explorers.push(*target),
+                _ => continue,
+            }
+            state.stale = true;
+        }
+        for target in explorers {
+            self.explorer_header_facts(target);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Keeps the OS window's title on the focused buffer's project.
     /// Compared first: setting a title is a system call and a repaint
     /// of the title bar, and this runs every frame.
@@ -63,10 +147,60 @@ mod tests {
 
     #[test]
     fn the_modeline_segment_is_the_tag_then_the_name() {
-        let spans = modeline_project_spans(ProjectKind::Arduino, "blink-lab", theme::by_name("Visual Studio Dark").unwrap());
+        let spans = modeline_project_spans(ProjectKind::ARDUINO, "blink-lab", theme::by_name("Visual Studio Dark").unwrap());
         let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(text, "INO blink-lab · ");
         assert_eq!(spans[0].1, rgba_to_glyphon(theme::by_name("Visual Studio Dark").unwrap().mode_insert));
+    }
+
+    /// Fenix's kinds keep the colours they had, and a kind no one
+    /// declares is drawn as Other is.
+    #[test]
+    fn each_kind_keeps_its_colour() {
+        let theme = theme::by_name("Visual Studio Dark").unwrap();
+        let expected = [
+            (ProjectKind::PYTHON, theme.syntax_type),
+            (ProjectKind::ARDUINO, rgba_to_glyphon(theme.mode_insert)),
+            (ProjectKind::RUST, theme.syntax_string),
+            (ProjectKind::TCL, theme.syntax_function),
+            (ProjectKind::CPP, theme.syntax_keyword),
+            (ProjectKind::NODE, theme.syntax_number),
+            (ProjectKind::GO, theme.syntax_type),
+            (ProjectKind::MONOREPO, theme.fg),
+            (ProjectKind::OTHER, theme.gutter_fg),
+        ];
+        for (kind, color) in expected {
+            assert_eq!(kind_color(kind, theme), color, "{kind:?}");
+        }
+        // A pack's kind in the role it names; once its pack is switched
+        // off, a handle still held to it is drawn as Other is.
+        let _kinds = crate::page::project_kinds_lock();
+        fenix_project::set_extension_kinds(vec![fenix_project::KindDef { id: "zig".into(), name: "Zig".into(), tag: "ZIG".into(), color: KindColor::Syntax("number"), markers: Vec::new(), main: Vec::new(), extension: Some("fenix.zig".into()) }]);
+        let zig = ProjectKind::from_id("zig").unwrap();
+        assert_eq!(kind_color(zig, theme), theme.syntax_number);
+        fenix_project::set_extension_kinds(Vec::new());
+        assert_eq!(kind_color(zig, theme), theme.gutter_fg);
+    }
+
+    /// The extensions' manifest reader and the kinds' registry hold packs
+    /// to the same lists: Fenix's markers by owner, tags, names, ids and
+    /// aliases, devices, format characters.
+    #[test]
+    fn the_manifest_and_the_registry_keep_the_same_rules() {
+        use fenix_extensions::manifest as m;
+        let ours: Vec<(&str, &str)> = fenix_project::FENIX_MARKERS.iter().map(|(marker, owner)| (*marker, owner.map_or("", |k| k.id()))).collect();
+        assert_eq!(ours, m::FENIX_MARKERS);
+        assert_eq!(fenix_project::FENIX_TAGS.as_slice(), m::FENIX_KIND_TAGS);
+        assert_eq!(fenix_project::FENIX_NAMES.as_slice(), m::FENIX_KIND_NAMES);
+        assert_eq!(fenix_project::FENIX_TAGS.to_vec(), ProjectKind::BUILT_IN.iter().map(|k| k.tag()).collect::<Vec<_>>());
+        assert_eq!(fenix_project::FENIX_NAMES.to_vec(), ProjectKind::BUILT_IN.iter().map(|k| k.label()).collect::<Vec<_>>());
+        assert_eq!(fenix_project::DEVICE_NAMES.as_slice(), m::DEVICE_NAMES);
+        assert_eq!(fenix_project::FORMAT_CHARACTERS, m::FORMAT_CHARACTERS);
+        let built_in: Vec<&str> = ProjectKind::BUILT_IN[..7].iter().map(|k| k.id()).collect();
+        assert_eq!(built_in, m::BUILT_IN_KINDS);
+        let reserved: Vec<&str> = ["other", "monorepo"].into_iter().chain(ProjectKind::aliases()).collect();
+        assert_eq!(reserved, m::RESERVED_KINDS);
+        assert_eq!(fenix_project::KindColor::ROLES.as_slice(), m::PROJECT_KIND_COLORS);
     }
 
     #[test]

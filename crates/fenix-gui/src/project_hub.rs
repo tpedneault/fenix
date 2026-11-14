@@ -176,7 +176,9 @@ impl Hub {
                 kinds.push(p.kind);
             }
         }
-        kinds.sort_by_key(|k| ProjectKind::ALL.iter().position(|x| x == k));
+        // Declared kinds in their order, then those no one declares, by id.
+        let known = ProjectKind::known();
+        kinds.sort_by_key(|k| (known.iter().position(|x| x == k).unwrap_or(usize::MAX), k.id()));
         kinds
     }
 
@@ -572,7 +574,7 @@ mod tests {
     fn subprojects_sit_under_their_repository_and_bring_it_along_when_filtered() {
         let mut hub = hub();
         let mono = PathBuf::from("/work/report-gen");
-        hub.set_subprojects(&mono, vec![(mono.join("crates/core"), ProjectKind::Rust), (mono.join("tools"), ProjectKind::Python), (PathBuf::from("/work/orbit-tools"), ProjectKind::Python)]);
+        hub.set_subprojects(&mono, vec![(mono.join("crates/core"), ProjectKind::RUST), (mono.join("tools"), ProjectKind::PYTHON), (PathBuf::from("/work/orbit-tools"), ProjectKind::PYTHON)]);
         let rows = names(&hub);
         let at = rows.iter().position(|r| r == "Ungrouped/report-gen").unwrap();
         assert_eq!(&rows[at + 1..], ["Ungrouped/crates/core", "Ungrouped/tools"], "a registered one isn't repeated as a child");
@@ -589,17 +591,17 @@ mod tests {
         assert_eq!(hub.key(Key::Char('d')), Action::None);
         assert_eq!(hub.key(Key::Enter), Action::Open(mono.join("crates/core")));
         // Found again: replaced, not doubled.
-        hub.set_subprojects(&mono, vec![(mono.join("tools"), ProjectKind::Python)]);
+        hub.set_subprojects(&mono, vec![(mono.join("tools"), ProjectKind::PYTHON)]);
         assert_eq!(hub.projects.iter().filter(|p| p.parent.is_some()).count(), 1);
     }
 
     fn hub() -> Hub {
         Hub::new(vec![
-            project("orbit-tools", ProjectKind::Python, None, true),
-            project("blink-lab", ProjectKind::Arduino, Some("Class labs"), false),
-            project("mission-c", ProjectKind::Mib, Some("Mission ops"), false),
-            project("servo-sweep", ProjectKind::Arduino, Some("Class labs"), false),
-            project("report-gen", ProjectKind::Python, None, false),
+            project("orbit-tools", ProjectKind::PYTHON, None, true),
+            project("blink-lab", ProjectKind::ARDUINO, Some("Class labs"), false),
+            project("mission-c", ProjectKind::OTHER, Some("Mission ops"), false),
+            project("servo-sweep", ProjectKind::ARDUINO, Some("Class labs"), false),
+            project("report-gen", ProjectKind::PYTHON, None, false),
         ])
     }
 
@@ -635,13 +637,34 @@ mod tests {
     fn tab_cycles_the_kind_filter() {
         let mut hub = hub();
         hub.key(Key::Tab);
-        assert_eq!(hub.kind_filter, Some(ProjectKind::Python));
+        assert_eq!(hub.kind_filter, Some(ProjectKind::PYTHON));
         assert_eq!(names(&hub), ["Pinned/orbit-tools", "Projects/report-gen"].map(|s| s.replace("Projects", "Ungrouped")));
         hub.key(Key::Tab);
-        assert_eq!(hub.kind_filter, Some(ProjectKind::Arduino));
+        assert_eq!(hub.kind_filter, Some(ProjectKind::ARDUINO));
         hub.key(Key::Tab);
         hub.key(Key::Tab);
         assert_eq!(hub.kind_filter, None, "past the last kind: all again");
+    }
+
+    /// A pack's kind is a filter of its own, after Fenix's, and its rows
+    /// carry its tag.
+    #[test]
+    fn a_packs_kind_is_its_own_filter_after_fenixs() {
+        let _kinds = crate::page::project_kinds_lock();
+        fenix_project::set_extension_kinds(vec![fenix_project::KindDef { id: "java".into(), name: "Java".into(), tag: "JAVA".into(), color: fenix_project::KindColor::DEFAULT, markers: vec!["pom.xml".into()], main: Vec::new(), extension: Some("fenix.java".into()) }]);
+        let java = ProjectKind::from_id("java").unwrap();
+        let mut projects = hub().projects;
+        projects.insert(0, project("spring-app", java, None, false));
+        let mut hub = Hub::new(projects);
+        assert_eq!(hub.kinds(), [ProjectKind::PYTHON, ProjectKind::ARDUINO, ProjectKind::OTHER, java]);
+        let text = layout(&hub, 130).text;
+        assert!(text.contains("JAVA spring-app") && text.contains("JAVA 1"), "{text}");
+        for _ in 0..4 {
+            hub.key(Key::Tab);
+        }
+        assert_eq!(hub.kind_filter, Some(java));
+        assert_eq!(names(&hub), ["Projects/spring-app"]);
+        fenix_project::set_extension_kinds(Vec::new());
     }
 
     #[test]

@@ -1429,7 +1429,7 @@ mod tests {
     fn the_projects_own_section_is_shown_in_place_and_takes_the_keys() {
         let root = PathBuf::from("/p");
         let mut p = SettingsPage::new(Scope::Project { root: root.clone(), name: "fenix".into() }, snap());
-        p.project_page = Some(crate::project_settings::Settings::new(root, fenix_project::ProjectKind::Python));
+        p.project_page = Some(crate::project_settings::Settings::new(root, fenix_project::ProjectKind::PYTHON));
         p.key(Key::Tab);
         p.key(Key::Char('k'));
         p.key(Key::Enter);

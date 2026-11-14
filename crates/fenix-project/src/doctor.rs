@@ -352,8 +352,9 @@ fn with_install(check: Check, probe: &dyn Probe, program: &str) -> Check {
     }
 }
 
-/// Checks a feature adds for the kinds of project it knows (Fenix's
-/// Arduino, MIB and Tcl features); each looks at `Doctor::kind` itself.
+/// Checks a feature adds for the kinds of project it knows; each looks at
+/// `Doctor::kind` itself. Nothing passes one today: the Arduino and Tcl
+/// checks are their packs' doctor checks.
 pub type FeatureCheck = fn(&mut Doctor);
 
 /// Every check `root` (a project of `kind`) needs, in display order.
@@ -367,26 +368,28 @@ pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bo
     let mut d = Doctor { root, probe, deep, kind, checks: Vec::new() };
     let tools = ProjectTools::read(root);
     match kind {
-        ProjectKind::Python => python(&mut d, tools.as_ref().ok()),
-        ProjectKind::Rust => {
+        ProjectKind::PYTHON => python(&mut d, tools.as_ref().ok()),
+        ProjectKind::RUST => {
             d.program(Section::Toolchain, "cargo", Health::Bad, "install Rust from https://rustup.rs");
             d.language_server("rust-analyzer");
             rust_src(&mut d);
         }
-        ProjectKind::Cpp => {
+        ProjectKind::CPP => {
             d.program(Section::Toolchain, "cmake", Health::Warn, "install CMake to configure and build");
             d.language_server("clangd");
         }
-        ProjectKind::Go => {
+        ProjectKind::GO => {
             d.program(Section::Toolchain, "go", Health::Bad, "install Go from https://go.dev");
             d.language_server("gopls");
         }
-        ProjectKind::Node => {
+        ProjectKind::NODE => {
             d.program(Section::Toolchain, "node", Health::Bad, "install Node.js");
             d.language_server("typescript-language-server");
         }
-        // Their features' (`features`).
-        ProjectKind::Arduino | ProjectKind::Mib | ProjectKind::Tcl | ProjectKind::Monorepo | ProjectKind::Other => {}
+        // Arduino's and Tcl's checks are their packs' (the extensions'
+        // doctor checks); Monorepo, Other, an extension's kind and one no
+        // one declares have none of Fenix's.
+        _ => {}
     }
     for check in features {
         check(&mut d);
@@ -627,17 +630,17 @@ mod tests {
             ..Default::default()
         };
         // FakeProbe locates programs at /bin/<name>: not rustup's.
-        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&sysroot, "rustc"), true);
+        let checks = diagnose(dir.path(), ProjectKind::RUST, &probe(&sysroot, "rustc"), true);
         let src = find(&checks, "rust-src");
         assert_eq!(src.health, Health::Warn);
         assert!(src.fix.is_none() && src.detail.contains("put rustup's toolchain"), "{}", src.detail);
         let rustup_sysroot = dir.path().join(".rustup").join("toolchains").join("stable");
-        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&rustup_sysroot, "rustc"), true);
+        let checks = diagnose(dir.path(), ProjectKind::RUST, &probe(&rustup_sysroot, "rustc"), true);
         assert!(find(&checks, "rust-src").fix.as_ref().is_some_and(|f| f.label == "rustup component add rust-src"));
         dir.write("sysroot/lib/rustlib/src/rust/library/core/lib.rs", "");
-        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&sysroot, "rustc"), true);
+        let checks = diagnose(dir.path(), ProjectKind::RUST, &probe(&sysroot, "rustc"), true);
         assert!(!checks.iter().any(|c| c.label == "rust-src"), "the source is there");
-        assert!(!diagnose(dir.path(), ProjectKind::Rust, &probe(&rustup_sysroot, "rustc"), false).iter().any(|c| c.label == "rust-src"), "a quick pass runs nothing");
+        assert!(!diagnose(dir.path(), ProjectKind::RUST, &probe(&rustup_sysroot, "rustc"), false).iter().any(|c| c.label == "rust-src"), "a quick pass runs nothing");
     }
 
     #[test]
@@ -646,7 +649,7 @@ mod tests {
         dir.write("pyproject.toml", "[project]\nname='x'\n");
         dir.write("uv.lock", "");
         let probe = FakeProbe { programs: vec!["uv"], ..Default::default() };
-        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, true);
+        let checks = diagnose(dir.path(), ProjectKind::PYTHON, &probe, true);
         assert_eq!(find(&checks, "uv").detail, "1.2.3");
         let venv = find(&checks, ".venv");
         assert_eq!(venv.health, Health::Warn);
@@ -665,21 +668,21 @@ mod tests {
         let dir = TempDir::new("doctor_go");
         dir.write("go.mod", "module x\n");
         let probe = FakeProbe { programs: vec!["go"], ..Default::default() };
-        let checks = diagnose(dir.path(), ProjectKind::Go, &probe, false);
+        let checks = diagnose(dir.path(), ProjectKind::GO, &probe, false);
         let gopls = find(&checks, "gopls");
         assert_eq!(gopls.health, Health::Warn);
         let fix = gopls.fix.as_ref().expect("go is there, so go install is offered");
         assert_eq!(fix.label, "go install golang.org/x/tools/gopls@latest");
         assert!(!fix.safe, "installing is never safe");
         // No installer: what to do, with a link.
-        let checks = diagnose(dir.path(), ProjectKind::Rust, &FakeProbe::default(), false);
+        let checks = diagnose(dir.path(), ProjectKind::RUST, &FakeProbe::default(), false);
         let ra = find(&checks, "rust-analyzer");
         assert!(ra.fix.is_none() && ra.detail.contains("https://"), "{}", ra.detail);
         // Installed where rustup puts it, though not on PATH.
         let exe = if cfg!(windows) { "bin/rust-analyzer.exe" } else { "bin/rust-analyzer" };
         dir.write(exe, "");
         let probe = FakeProbe { tool_dirs: vec![dir.path().join("bin")], ..Default::default() };
-        let ra = diagnose(dir.path(), ProjectKind::Rust, &probe, false).into_iter().find(|c| c.label == "rust-analyzer").unwrap();
+        let ra = diagnose(dir.path(), ProjectKind::RUST, &probe, false).into_iter().find(|c| c.label == "rust-analyzer").unwrap();
         assert_eq!(ra.health, Health::Ok, "{}", ra.detail);
     }
 
@@ -690,7 +693,7 @@ mod tests {
         let exe = if cfg!(windows) { "bin/pyright-langserver.exe" } else { "bin/pyright-langserver" };
         dir.write(exe, "");
         let probe = FakeProbe { programs: vec!["uv"], tool_dirs: vec![dir.path().join("bin")], ..Default::default() };
-        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, false);
+        let checks = diagnose(dir.path(), ProjectKind::PYTHON, &probe, false);
         let lsp = find(&checks, "pyright-langserver");
         assert_eq!(lsp.health, Health::Warn);
         assert!(lsp.detail.contains("isn't on Fenix's PATH"), "{}", lsp.detail);
@@ -698,7 +701,7 @@ mod tests {
         assert!(fix.safe, "it only writes this project's tools.json");
         assert!(matches!(&fix.action, FixAction::Editor(EditorFix::UseLanguageServer { executable, .. }) if executable == &dir.path().join(exe)));
         dir.write(".fenix/tools.json", &serde_json::json!({"lsp": {"python": {"executable": dir.path().join(exe)}}}).to_string());
-        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, false);
+        let checks = diagnose(dir.path(), ProjectKind::PYTHON, &probe, false);
         let lsp = find(&checks, "pyright-langserver");
         assert_eq!(lsp.health, Health::Ok, "once pointed at, it's found");
         assert!(lsp.detail.starts_with("language server · "));
@@ -712,13 +715,13 @@ mod tests {
         dir.write(python, "");
         let mut probe = FakeProbe { programs: vec!["uv", "pyright-langserver"], ..Default::default() };
         probe.outputs.insert("uv sync --dry-run".into(), (true, "Resolved 3\n + rich==15.0\n - old==1\n".into()));
-        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, true);
+        let checks = diagnose(dir.path(), ProjectKind::PYTHON, &probe, true);
         assert_eq!(find(&checks, ".venv").detail, "behind uv.lock -- 2 package changes");
         probe.outputs.insert("uv sync --dry-run".into(), (true, "Would make no changes\n".into()));
-        let checks = diagnose(dir.path(), ProjectKind::Python, &probe, true);
+        let checks = diagnose(dir.path(), ProjectKind::PYTHON, &probe, true);
         assert_eq!(find(&checks, ".venv").health, Health::Ok);
         // A quick pass runs nothing.
-        let quick = diagnose(dir.path(), ProjectKind::Python, &probe, false);
+        let quick = diagnose(dir.path(), ProjectKind::PYTHON, &probe, false);
         assert_eq!(find(&quick, ".venv").detail, "present");
     }
 
@@ -728,7 +731,7 @@ mod tests {
         dir.write(".git/HEAD", "ref: refs/heads/trunk
 ");
         dir.write("crates/core/Cargo.toml", "[package]");
-        let checks = diagnose(&dir.path().join("crates/core"), ProjectKind::Rust, &FakeProbe::default(), false);
+        let checks = diagnose(&dir.path().join("crates/core"), ProjectKind::RUST, &FakeProbe::default(), false);
         let git = find(&checks, "git");
         assert_eq!(git.health, Health::Ok);
         assert!(git.detail.starts_with("trunk · part of the "), "{}", git.detail);
@@ -742,7 +745,7 @@ mod tests {
             {"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"]},
             {"name":"spell","executable":"bin/spell-ls","languages":["markdown"]}]}}"#);
         let probe = FakeProbe { programs: vec!["kiln"], ..Default::default() };
-        let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
+        let checks = diagnose(dir.path(), ProjectKind::OTHER, &probe, false);
         let kiln = find(&checks, "kiln (additional server)");
         assert_eq!(kiln.health, Health::Ok);
         assert!(kiln.detail.starts_with("rust, markdown"), "{}", kiln.detail);
@@ -750,7 +753,7 @@ mod tests {
         assert_eq!(spell.health, Health::Warn);
         assert!(spell.detail.contains("not found"), "{}", spell.detail);
         dir.write("bin/spell-ls", "");
-        let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
+        let checks = diagnose(dir.path(), ProjectKind::OTHER, &probe, false);
         assert_eq!(find(&checks, "spell (additional server)").health, Health::Ok, "a project-relative program is looked for in the project");
     }
 
@@ -759,7 +762,7 @@ mod tests {
         let dir = TempDir::new("doctor_adapters");
         dir.write(".fenix/tools.json", r#"{"dap":{"go":{"executable":"dlv","args":["dap"]},"rust":{"executable":"bin/codelldb"}}}"#);
         let probe = FakeProbe { programs: vec!["dlv"], ..Default::default() };
-        let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
+        let checks = diagnose(dir.path(), ProjectKind::OTHER, &probe, false);
         let dlv = find(&checks, "dlv");
         assert_eq!(dlv.health, Health::Ok);
         assert!(dlv.detail.starts_with("debug adapter for go"), "{}", dlv.detail);
@@ -773,7 +776,7 @@ mod tests {
         let dir = TempDir::new("doctor_tools");
         dir.write(".fenix/tools.json", "{\"typo\": 1}");
         dir.write(".git/HEAD", "ref: refs/heads/main\n");
-        let checks = diagnose(dir.path(), ProjectKind::Other, &FakeProbe::default(), false);
+        let checks = diagnose(dir.path(), ProjectKind::OTHER, &FakeProbe::default(), false);
         let tools = find(&checks, "tools.json");
         assert_eq!(tools.health, Health::Bad);
         assert_eq!(tools.location.as_ref().map(|(p, _)| p.ends_with("tools.json")), Some(true));

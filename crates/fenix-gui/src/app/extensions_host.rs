@@ -284,6 +284,7 @@ impl App {
         // has nothing more to put in use for this change.
         self.extensions_stamp = Some(extensions_stamps());
         self.code_extensions_now(crate::installed::code_extensions());
+        self.project_kinds_now(&crate::installed::kind_extensions());
         let problems = crate::keymap::reload_leader();
         self.leader_matcher = crate::keymap::leader_trie().matcher();
         if !problems.is_empty() {

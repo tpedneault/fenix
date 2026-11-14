@@ -117,6 +117,10 @@ pub struct InstalledRow {
     pub readme: Option<String>,
     pub changelog: Option<String>,
     pub screenshots: Vec<PathBuf>,
+    /// The project kinds it declares, a line each (`JAVA Java (java):
+    /// pom.xml`), and what of them is left out and why.
+    pub kinds: Vec<String>,
+    pub kind_notes: Vec<String>,
 }
 
 /// What the page knows of the registry.
@@ -847,6 +851,15 @@ fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bund
                 p.put(&format!("{latest} is in the registry -- u updates"), Role::Good, width);
             }
             common(&mut p, &r.id, &r.categories, r.runtime, &r.permissions, &r.dependencies);
+            if !r.kinds.is_empty() || !r.kind_notes.is_empty() {
+                p.heading("Project kinds");
+                for line in &r.kinds {
+                    p.put(line, Role::Text, width);
+                }
+                for note in &r.kind_notes {
+                    p.put(note, Role::Warn, width);
+                }
+            }
             versions(&mut p, listing(&r.id));
             p.picture = r.screenshots.first().cloned();
             if let Some(text) = &r.readme {
@@ -1273,6 +1286,13 @@ pub fn installed_details(e: &fenix_extensions::Installed, managed: bool, readme:
             if !carries.is_empty() {
                 out += &format!("- **Carries:** {}\n", carries.join(", "));
             }
+            let (kinds, notes) = crate::installed::kind_lines(&e.id, m);
+            if !kinds.is_empty() {
+                out += &format!("- **Project kinds:** {}\n", kinds.join("; "));
+            }
+            for note in notes {
+                out += &format!("- **Left out:** {note}\n");
+            }
         }
         Err(why) => out += &format!("# {}\n\nIts manifest can't be read: {why}\n\n- **Id:** `{}`\n- **Version:** {}\n", e.id, e.id, e.version),
     }
@@ -1597,6 +1617,24 @@ mod tests {
         std::fs::write(preview.join("screenshots/a.png"), "").unwrap();
         let md = available_details(&listing, &semver::Version::new(1, 0, 0), Some(&preview), &[]);
         assert!(md.contains("## Read me\n\n## Dawn") && md.contains("## Screenshots") && md.contains("a.png)"), "{md}");
+    }
+
+    /// The project kinds an extension declares are on its details, and
+    /// so is what of them was left out, and why.
+    #[test]
+    fn details_say_its_project_kinds_and_what_was_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = fenix_extensions::Manifest::parse("[extension]\nid = \"acme.java\"\nname = \"Java\"\nversion = \"1.0.0\"\nruntime = \"none\"\n\n[engine]\nfenix = \">=1.5, <2\"\n\n[[contributes.project_kinds]]\nid = \"java\"\nname = \"Java\"\ntag = \"JAVA\"\nmarkers = [\"pom.xml\"]\n\n[[contributes.project_kinds]]\nid = \"kotlin\"\nname = \"Kotlin\"\ntag = \"KT\"\n\n[[contributes.project_kinds]]\nid = \"node\"\nmarkers = [\"deno.json\"]\n\n[[contributes.project_kinds]]\nid = \"groovy\"\nname = \"Groovy\"\ntag = \"groovy\"\n").unwrap();
+        let e = fenix_extensions::Installed { id: "acme.java".into(), version: "1.0.0".into(), enabled: true, dependency: false, dir: dir.path().to_path_buf(), manifest: Ok(manifest) };
+        let md = installed_details(&e, false, None, None, &[], &[]);
+        for want in ["**Project kinds:** JAVA Java (java): pom.xml; KT Kotlin (kotlin), declared only; node: adds deno.json", "**Left out:** project kind groovy: tag \"groovy\""] {
+            assert!(md.contains(want), "{want:?} in {md}");
+        }
+        let mut p = page();
+        let (kinds, kind_notes) = crate::installed::kind_lines(&e.id, e.manifest.as_ref().unwrap());
+        p.installed = vec![InstalledRow { kinds, kind_notes, ..installed("acme.java", true, None) }];
+        let text = layout(&p, 140).text;
+        assert!(text.contains("PROJECT KINDS") && text.contains("JAVA Java (java): pom.xml") && text.contains("project kind groovy"), "{text}");
     }
 
     /// What a code extension may do is on its details before it's

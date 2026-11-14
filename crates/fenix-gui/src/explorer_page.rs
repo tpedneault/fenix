@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn the_breadcrumb_starts_at_the_project() {
-        let project = Project { name: "fenix".into(), root: PathBuf::from("/src/fenix"), kind: ProjectKind::Rust };
+        let project = Project { name: "fenix".into(), root: PathBuf::from("/src/fenix"), kind: ProjectKind::RUST };
         let names = |crumbs: Vec<(String, PathBuf)>| crumbs.into_iter().map(|(n, _)| n).collect::<Vec<_>>();
         let crumbs = breadcrumb(Path::new("/src/fenix/crates/gui"), Some(&project));
         assert_eq!(crumbs[1].1, PathBuf::from("/src/fenix/crates"), "each segment names its folder");

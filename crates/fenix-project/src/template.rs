@@ -216,7 +216,14 @@ pub struct Template {
     /// what `:project-new <id>` takes.
     pub id: String,
     pub name: String,
+    /// The kind it's shown with: the one it names when someone declares
+    /// it now, else Other -- a project of a kind no one knows is what its
+    /// files make it.
     pub kind: ProjectKind,
+    /// The kind it names, as an id (`kind_id`'s `normalize_id`): a
+    /// project made from it declares this one when it isn't Fenix's own
+    /// and its files don't say so (`Plan::declares`).
+    pub kind_id: String,
     pub group: String,
     pub description: String,
     /// Programs the template runs, for the wizard to look up before you
@@ -329,7 +336,11 @@ impl Template {
     /// and its `files/` tree as (forward-slash relative path, contents).
     pub fn parse(id: &str, toml_text: &str, files: &[(String, String)], origin: Origin) -> Result<Self, String> {
         let raw: RawTemplate = toml::from_str(toml_text).map_err(|e| format!("template.toml: {e}"))?;
-        let kind = ProjectKind::from_id(&raw.template.kind).ok_or_else(|| format!("unknown kind \"{}\"", raw.template.kind))?;
+        // Any kind id: one no installed extension declares loads, shown as
+        // Other, and the project it makes declares it. Only what isn't an
+        // id is refused.
+        let kind_id = ProjectKind::normalize_id(&raw.template.kind).ok_or_else(|| format!("unknown kind \"{}\" -- a kind's id is a-z first, then a-z 0-9 - _, at most 24", raw.template.kind))?;
+        let kind = ProjectKind::from_id(&kind_id).filter(|k| k.is_declared()).unwrap_or(ProjectKind::OTHER);
         let name_rule = match raw.template.name_rule.as_deref() {
             None | Some("any") => NameRule::Any,
             Some("sketch") => NameRule::Sketch,
@@ -387,6 +398,7 @@ impl Template {
             id: id.to_string(),
             name: raw.template.name,
             kind,
+            kind_id,
             group: raw.template.group.unwrap_or_else(|| "Yours".to_string()),
             description: raw.template.description,
             needs: raw.template.needs,
@@ -676,7 +688,8 @@ impl Template {
         }
 
         let open = self.open.iter().map(|p| ctx.text(p)).collect::<Result<_, _>>()?;
-        Ok(Plan { dir: parent.join(name), kind: self.kind, files, after_files, steps, hooks, open })
+        let declares = ProjectKind::from_id(&self.kind_id).filter(|k| k.is_builtin()).is_none().then(|| self.kind_id.clone());
+        Ok(Plan { dir: parent.join(name), kind: self.kind, declares, files, after_files, steps, hooks, open })
     }
 }
 
@@ -1069,6 +1082,11 @@ pub enum Hook {
 pub struct Plan {
     pub dir: PathBuf,
     pub kind: ProjectKind,
+    /// The kind it declares once made, when the template names one that
+    /// isn't Fenix's (`java`, or one no one knows): written unless the
+    /// project's files already make it that kind, or it declares one
+    /// itself (`Plan::declare_kind`).
+    pub declares: Option<String>,
     /// Written before the commands run.
     pub files: Vec<PlannedFile>,
     /// Written after them (and before git): `after = true` files and the
@@ -1081,6 +1099,18 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Once its files are written: declares `declares` in its
+    /// `.fenix/settings.toml`, unless the project already declares a kind,
+    /// or its files are of that kind. Whether it wrote.
+    pub fn declare_kind(&self) -> std::io::Result<bool> {
+        let Some(id) = &self.declares else { return Ok(false) };
+        if crate::declared_id(&self.dir).is_some() || ProjectKind::from_id(id).is_some_and(|k| k.is_declared() && crate::detect_kind_from_files(&self.dir) == k) {
+            return Ok(false);
+        }
+        crate::meta::set_kind_id(&self.dir, Some(id))?;
+        Ok(true)
+    }
+
     /// The first of `open` that exists now, else a README, else `None`.
     pub fn file_to_open(&self) -> Option<PathBuf> {
         self.open.iter().map(String::as_str).chain(["README.md"]).map(|p| self.dir.join(p)).find(|p| p.is_file())
@@ -1436,7 +1466,23 @@ tm_time = \"cuc 4.2\""), "{profile}");
         assert_eq!(plan.files.iter().find(|f| f.path == "vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
         assert!(plan.steps.is_empty());
         assert_eq!(plan.hooks, [Hook::MibRoot { path: ".".into(), label: "mission-c".into() }]);
-        assert_eq!(plan.kind, ProjectKind::Mib);
+        assert_eq!(plan.kind, ProjectKind::OTHER, "a project like any other");
+    }
+
+    /// What the MIB template writes is a project of its own, by its
+    /// `.fenix/settings.toml` -- inside a repository too -- now that MIB
+    /// tables alone don't make one.
+    #[test]
+    fn the_mib_template_writes_a_project_even_inside_a_repository() {
+        let dir = crate::test_util::TempDir::new("mib_template");
+        dir.write(".git/HEAD", "ref: refs/heads/main\n");
+        let template = builtin_templates().into_iter().find(|t| t.id == "scos-mib").unwrap();
+        let answers = template.default_answers("mission-c");
+        let plan = template.plan("mission-c", dir.path(), &answers).unwrap();
+        plan.write_files().unwrap();
+        assert_eq!(crate::find_project_root(&plan.dir.join("ccf.dat")), Some(plan.dir.clone()));
+        assert_eq!(crate::detect_kind(&plan.dir), ProjectKind::OTHER);
+        assert_eq!(plan.file_to_open(), Some(plan.dir.join("vdf.dat")));
     }
 
     #[test]
@@ -1456,11 +1502,39 @@ tm_time = \"cuc 4.2\""), "{profile}");
             (format!("{HEAD}[[run]]\nexec = \"x\"\nwhen = \"nope\"\n"), "isn't an ask"),
             (format!("{HEAD}typo = 1\n"), "unknown field"),
             (format!("{HEAD}[[ask]]\nkey = \"a\"\nlabel = \"A\"\n[[run]]\nexec = \"x\"\nargs = [\"-{{{{a...}}}}\"]\n"), "whole argument"),
-            ("[template]\nname = \"T\"\nkind = \"cobol\"\n".to_string(), "unknown kind"),
+            ("[template]\nname = \"T\"\nkind = \"Co Bol\"\n".to_string(), "unknown kind"),
         ];
         for (text, expected) in cases {
             let error = parse(&text).unwrap_err();
             assert!(error.contains(expected), "{error:?} should mention {expected:?}");
+        }
+    }
+
+    /// A template may name any kind id. One nobody declares loads, shown
+    /// as Other, and the project made from it declares that id; Fenix's
+    /// are read in any case and declare nothing. Only what isn't an id is
+    /// refused.
+    #[test]
+    fn a_template_names_any_kind_id() {
+        let _kinds = crate::test_util::kinds_lock();
+        for (kind, id, declares) in [("cobol", "cobol", Some("cobol")), ("Rust", "rust", None), ("ts", "node", None), ("mib", "other", None)] {
+            let template = parse(&format!("[template]\nname = \"T\"\nkind = \"{kind}\"\n")).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(template.kind_id, id);
+            let plan = template.plan("demo", Path::new("p"), &Answers::new()).unwrap();
+            assert_eq!(plan.declares.as_deref(), declares, "{kind}");
+        }
+        let cobol = parse("[template]\nname = \"T\"\nkind = \"cobol\"\n").unwrap();
+        assert_eq!(cobol.kind, ProjectKind::OTHER);
+        assert_eq!(ProjectKind::from_id("cobol"), None, "a template's kind isn't interned");
+        let dir = crate::test_util::TempDir::new("declares");
+        let plan = cobol.plan("made", dir.path(), &Answers::new()).unwrap();
+        std::fs::create_dir_all(&plan.dir).unwrap();
+        assert!(plan.declare_kind().unwrap());
+        assert_eq!(crate::declared_id(&plan.dir).as_deref(), Some("cobol"));
+        assert!(!plan.declare_kind().unwrap(), "it declares one already");
+        for bad in ["Java", "co bol", "c#", "", &"a".repeat(25)] {
+            let error = parse(&format!("[template]\nname = \"T\"\nkind = \"{bad}\"\n")).unwrap_err();
+            assert!(error.contains("unknown kind"), "{bad}: {error}");
         }
     }
 

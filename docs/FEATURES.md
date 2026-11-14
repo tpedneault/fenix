@@ -555,7 +555,7 @@ its extension. The rest is built into Fenix.
 - **Project hub** (`SPC p p`): every known project with its kind tag,
   branch, uncommitted changes and a health dot, pinned ones first, then
   by group. Typing filters (a folder path typed in adds it), `Tab`
-  filters by kind, and the right column previews the selected project's
+  filters by kind (the extensions' kinds included), and the right column previews the selected project's
   health, git state, linked Jira work and tasks. `Enter` opens it, `P`
   pins, `g` sets its group, `d d` removes it from the list (the folder
   is untouched), `c` creates a new one, `h` and `,` open its doctor and
@@ -607,7 +607,9 @@ its extension. The rest is built into Fenix.
   lists a project's subprojects (up to four levels down, skipping build
   and dependency folders) indented beneath it, and opening one doesn't
   add it to the list. A project created inside a Cargo or uv workspace
-  joins it.
+  joins it. A folder of MIB tables isn't a project of its own: it's part
+  of the project around it, and in no project when nothing around it
+  is one.
 - **Project doctor** (`SPC p h`): every check the project's kind needs --
   uv and whether the venv matches `uv.lock`, the language server (found
   even when installed off PATH), debugpy; `arduino-cli`, the board's
@@ -621,12 +623,19 @@ its extension. The rest is built into Fenix.
   project's kind, group, pin and Jira key. Commands are typed as one line
   (quotes group, backslashes stay literal); every edit is validated
   before it's written, `t` runs a task, `e` opens the raw JSON.
-- **Project identity**: every project has a kind (Python, Arduino, MIB,
-  Rust, Tcl, ...), detected from its files or declared as `[project]
-  kind = "..."` in `.fenix/settings.toml`. Its two- or three-letter tag
-  leads the modeline (`PY orbit-tools · decoder.py`) and Home's project
-  rows (with the doctor's health dot), and the window is titled after
-  the project.
+- **Project identity**: every project has a kind (Python, Arduino, Rust,
+  Tcl, ...), detected from its files or declared as `[project]
+  kind = "..."` in `.fenix/settings.toml`. Language packs add kinds of
+  their own (`[[contributes.project_kinds]]`) for what Fenix doesn't
+  recognise: with the Java pack installed a Maven project is `JAVA`
+  rather than `DIR`, and kinds come and go as packs are installed,
+  switched off or removed, without a restart. A pack never changes the
+  kind of a project Fenix recognises itself. Its tag, one to four
+  characters, leads the modeline (`PY orbit-tools · decoder.py`) and
+  Home's project rows (with the doctor's health dot), and the window is
+  titled after the project. A declared kind no installed extension knows
+  (`kind = "java"` without the Java pack) is kept as written, and the
+  project is what its files make it until the pack is installed.
 - **Files changing on disk**: every open file is checked against what's
   actually on disk a couple of times a second, and whenever the window
   regains focus. Both are needed -- focus catches editing in another
@@ -1775,9 +1784,10 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   the welcome's Mission pack): a project lists its MIB folders in its
   own settings (`mib.roots` in `.fenix/settings.toml`, paths relative to
   it), and everything MIB-related uses the MIBs of the project the
-  focused file is in -- a project that is a MIB (`.dat` tables at its
-  root or in `mib/`) needs nothing, and your own `mib.roots` apply in
-  one without its own. MIBs are read when first needed and again when
+  focused file is in -- a project with the `.dat` tables at its root or
+  in `mib/` needs nothing, and your own `mib.roots` apply in one without
+  its own. A MIB folder is never a project by itself: it's in the
+  project around it (the SCOS-2000 MIB template makes it one). MIBs are read when first needed and again when
   a `.dat` file changes.
   - **ICD issues and XTCE**: a MIB folder is read as the SCOS-2000
     Database Import ICD issue it follows -- 7.x (7.2) by default, or

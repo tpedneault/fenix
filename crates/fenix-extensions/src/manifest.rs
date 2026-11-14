@@ -496,9 +496,14 @@ impl Permissions {
         if self.agents {
             out.push("Ask your coding agents, and read what they answer".into());
         }
+        // Where a setting names them, it may be its own: the extension can
+        // change it (`setting-set`), so the line says so.
         for (name, path) in &self.folders {
-            let setting = path.strip_prefix("${setting:").and_then(|k| k.strip_suffix('}')).unwrap_or(path);
-            out.push(format!("Read and change your {name} folder ({setting})"));
+            let (path, _) = path.split_once('|').unwrap_or((path, ""));
+            match path.trim().strip_prefix("${setting:").and_then(|k| k.strip_suffix('}')) {
+                Some(setting) => out.push(format!("Read and change the folders your {setting} setting names ({name}) -- it may change that setting itself, if it's one of its own")),
+                None => out.push(format!("Read and change {} ({name})", path.trim())),
+            }
         }
         for name in &self.settings {
             out.push(format!("Read your {name}.* settings"));
@@ -582,6 +587,12 @@ pub struct Contributes {
     /// `tests-launch`).
     #[serde(default)]
     pub test_providers: Vec<TestProviderContribution>,
+    /// The project kinds it knows (Fenix 1.6, no API): each named,
+    /// tagged, coloured and found as Fenix's own are. Read by Fenix, never
+    /// by its code, and one that breaks a rule is left out, said, rather
+    /// than keeping the extension from loading (`ProjectKinds`).
+    #[serde(default)]
+    pub project_kinds: ProjectKinds,
 }
 
 /// A test provider an extension is (API 1.6): a runner it knows -- cargo
@@ -608,6 +619,300 @@ pub struct TestProviderContribution {
     /// files, and its listing.
     #[serde(default)]
     pub scan: Vec<String>,
+}
+
+/// One `[[contributes.project_kinds]]`: a kind of project a pack knows,
+/// or -- for one of Fenix's ids -- the markers it adds to Fenix's.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectKindContribution {
+    /// What `kind = "..."` and templates say: `java`.
+    pub id: String,
+    /// What it's called: `Java`. Required unless the id is Fenix's.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The mark in front of a project: 1 to 4 of `A-Z 0-9 + # .`.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// One of `PROJECT_KIND_COLORS`; `constant` when left out.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Files at a project's top that say it's of this kind (`{folder}` is
+    /// the folder's own name). None: it's only ever declared.
+    #[serde(default)]
+    pub markers: Vec<String>,
+    /// What a project of it opens on, the first that exists: paths below
+    /// the project, `/` between parts.
+    #[serde(default)]
+    pub main: Vec<String>,
+}
+
+/// Fenix's own kinds, which a pack may add markers to and nothing else.
+pub const BUILT_IN_KINDS: &[&str] = &["python", "arduino", "rust", "tcl", "cpp", "node", "go"];
+
+/// Ids no pack declares: Fenix's two that are never detected, and the
+/// other names Fenix reads as one of its own.
+pub const RESERVED_KINDS: &[&str] = &["other", "monorepo", "py", "uv", "ino", "sketch", "rs", "c++", "c", "cmake", "js", "ts", "javascript", "typescript", "mib"];
+
+/// Fenix's own markers, by the id of the kind that owns each (`""`: a
+/// project's top, no kind). No pack's kind may name one, compared
+/// ignoring ASCII case, except the kind that owns it: a pack never takes
+/// Fenix's projects. (`fenix_project::FENIX_MARKERS`; a test in fenix-gui
+/// holds the two lists together.)
+pub const FENIX_MARKERS: &[(&str, &str)] = &[
+    ("library.properties", "arduino"),
+    ("sketch.yaml", "arduino"),
+    ("{folder}.ino", "arduino"),
+    ("{folder}.pde", "arduino"),
+    ("Cargo.toml", "rust"),
+    ("pyproject.toml", "python"),
+    ("setup.py", "python"),
+    ("requirements.txt", "python"),
+    ("uv.lock", "python"),
+    ("go.mod", "go"),
+    ("package.json", "node"),
+    ("CMakeLists.txt", "cpp"),
+    ("pkgIndex.tcl", "tcl"),
+    (".git", ""),
+    (".projectile", ""),
+];
+
+/// Fenix's kinds' tags and names, which no pack's kind may take (a name
+/// compared ignoring case and the spaces around it).
+pub const FENIX_KIND_TAGS: &[&str] = &["PY", "INO", "RS", "TCL", "C++", "JS", "GO", "MONO", "DIR"];
+pub const FENIX_KIND_NAMES: &[&str] = &["Python", "Arduino", "Rust", "Tcl", "C/C++", "JavaScript", "Go", "Monorepo", "Project"];
+
+/// Names Windows keeps for devices, with or without an extension: no
+/// marker or part of a main path may be one.
+pub const DEVICE_NAMES: &[&str] = &["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+
+/// Unicode's format characters (`Cf`, Unicode 16), which a kind's name
+/// may not hold: zero-width, bidirectional controls, the byte-order mark.
+pub const FORMAT_CHARACTERS: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
+];
+
+/// A character that shows nothing or moves what's around it: control
+/// (`Cc`), format (`Cf`), the line and paragraph separators.
+fn invisible(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || FORMAT_CHARACTERS.iter().any(|(a, b)| (*a..=*b).contains(&c))
+}
+
+/// Why a file name a kind gives would name another file on Windows: `:`
+/// (`C:x` is a drive's), a device, a trailing `.` or space.
+fn windows_problem(name: &str) -> Option<&'static str> {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    if name.contains(':') {
+        Some("has \":\" (on Windows, C:x is another drive's)")
+    } else if name.ends_with(['.', ' ']) {
+        Some("ends in a dot or a space (Windows drops both)")
+    } else if DEVICE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
+        Some("is a device's name on Windows")
+    } else {
+        None
+    }
+}
+
+/// The theme roles a kind's tag may be drawn in.
+pub const PROJECT_KIND_COLORS: &[&str] = &["keyword", "string", "function", "type", "number", "constant", "attribute", "variable"];
+
+pub const MAX_PROJECT_KINDS: usize = 8;
+const MAX_KIND_ID: usize = 24;
+const MAX_KIND_NAME: usize = 32;
+const MAX_KIND_TAG: usize = 4;
+const MAX_KIND_MARKERS: usize = 16;
+const MAX_KIND_MARKER: usize = 64;
+const MAX_KIND_MAIN: usize = 8;
+const MAX_KIND_MAIN_PATH: usize = 128;
+
+/// `[[contributes.project_kinds]]` as read: the kinds that keep every
+/// rule, and what was left out and why. An extension's manifest is
+/// untrusted, and this section is Fenix's to read, never its code's -- so
+/// a kind that breaks a rule is left out and said on the Extensions page,
+/// never a reason the extension, or Fenix, doesn't load.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectKinds {
+    pub kinds: Vec<ProjectKindContribution>,
+    /// One line each: "project kind java: tag \"JAVAX\" -- ...".
+    pub skipped: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for ProjectKinds {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(ProjectKinds::read(toml::Value::deserialize(deserializer)?))
+    }
+}
+
+impl ProjectKinds {
+    /// The section's value, held to the rules one entry at a time.
+    pub fn read(value: toml::Value) -> ProjectKinds {
+        let mut out = ProjectKinds::default();
+        let toml::Value::Array(items) = value else {
+            out.skipped.push("contributes.project_kinds is a list of [[contributes.project_kinds]]: left out".into());
+            return out;
+        };
+        if items.len() > MAX_PROJECT_KINDS {
+            out.skipped.push(format!("{} project kinds -- at most {MAX_PROJECT_KINDS} to an extension: those after the eighth are left out", items.len()));
+        }
+        for item in items.into_iter().take(MAX_PROJECT_KINDS) {
+            let named = item.get("id").and_then(|i| i.as_str()).map(str::to_string).unwrap_or_else(|| "?".into());
+            let kind = match ProjectKindContribution::deserialize(item) {
+                Ok(kind) => kind,
+                Err(e) => {
+                    out.skipped.push(format!("project kind {named}: {}", e.message().trim()));
+                    continue;
+                }
+            };
+            match check_project_kind(kind) {
+                Ok((kind, notes)) => {
+                    if out.kinds.iter().any(|k| k.id == kind.id) {
+                        out.skipped.push(format!("project kind {} is there twice: the second is left out", kind.id));
+                        continue;
+                    }
+                    out.skipped.extend(notes.into_iter().map(|n| format!("project kind {}: {n}", kind.id)));
+                    out.kinds.push(kind);
+                }
+                Err(why) => out.skipped.push(format!("project kind {named}: {why}")),
+            }
+        }
+        out
+    }
+
+    /// Whether `id` is one of Fenix's own kinds (`BUILT_IN_KINDS`).
+    pub fn is_built_in(id: &str) -> bool {
+        BUILT_IN_KINDS.contains(&id)
+    }
+}
+
+/// Why `marker` isn't a file name at a project's top, if it isn't.
+fn marker_problem(marker: &str) -> Option<String> {
+    if marker.is_empty() || marker.len() > MAX_KIND_MARKER {
+        return Some(format!("marker {marker:?} is {} bytes: 1 to {MAX_KIND_MARKER}", marker.len()));
+    }
+    if let Some(c) = marker.chars().find(|c| matches!(c, '/' | '\\' | '*' | '?' | '[' | ']')) {
+        return Some(format!("marker {marker:?} has {c:?}: a marker is a file name at the project's top, no path, no wildcard"));
+    }
+    if marker.chars().any(char::is_control) {
+        return Some(format!("marker {marker:?} has a control character"));
+    }
+    if marker.contains("..") {
+        return Some(format!("marker {marker:?} has \"..\""));
+    }
+    if marker.eq_ignore_ascii_case(".fenix") {
+        return Some(format!("marker {marker:?} is Fenix's own settings folder"));
+    }
+    if marker.replacen("{folder}", "", 1).contains(['{', '}']) {
+        return Some(format!("marker {marker:?}: {{folder}} at most once, and no other braces"));
+    }
+    windows_problem(marker).map(|why| format!("marker {marker:?} {why}"))
+}
+
+/// Why `path` isn't a path below the project, if it isn't.
+fn main_problem(path: &str) -> Option<String> {
+    if path.is_empty() || path.len() > MAX_KIND_MAIN_PATH {
+        return Some(format!("main {path:?} is {} bytes: 1 to {MAX_KIND_MAIN_PATH}", path.len()));
+    }
+    if path.contains('\\') || path.starts_with('/') {
+        return Some(format!("main {path:?}: a path below the project, with / between its parts"));
+    }
+    if path.split('/').any(|part| part.is_empty() || part == "..") {
+        return Some(format!("main {path:?}: a path below the project, with no empty or \"..\" part"));
+    }
+    path.split('/').find_map(windows_problem).map(|why| format!("main {path:?}: a part of it {why}"))
+}
+
+/// One declaration against the rules: the kind as Fenix keeps it
+/// (markers once each; for one of Fenix's ids, its markers only) with
+/// what was ignored, or why it's left out.
+fn check_project_kind(mut kind: ProjectKindContribution) -> Result<(ProjectKindContribution, Vec<String>), String> {
+    let id = kind.id.as_str();
+    let mut chars = id.chars();
+    let well_formed = chars.next().is_some_and(|c| c.is_ascii_lowercase()) && id.len() <= MAX_KIND_ID && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !well_formed {
+        return Err(format!("id {id:?} -- 1 to {MAX_KIND_ID} characters, a-z first, then a-z 0-9 - _"));
+    }
+    if RESERVED_KINDS.contains(&id) {
+        return Err(format!("{id:?} is Fenix's own (an alias, or a kind no extension declares)"));
+    }
+    if kind.markers.len() > MAX_KIND_MARKERS {
+        return Err(format!("{} markers -- at most {MAX_KIND_MARKERS}", kind.markers.len()));
+    }
+    if let Some(why) = kind.markers.iter().find_map(|m| marker_problem(m)) {
+        return Err(why);
+    }
+    let mut markers: Vec<String> = Vec::new();
+    let mut notes = Vec::new();
+    for marker in std::mem::take(&mut kind.markers) {
+        match FENIX_MARKERS.iter().find(|(m, _)| m.eq_ignore_ascii_case(&marker)) {
+            Some((_, owner)) if *owner == id => continue,
+            Some((own, owner)) => {
+                notes.push(format!("marker {marker} is Fenix's own ({}): left out", if owner.is_empty() { format!("{own} makes a project's top") } else { format!("{own} makes a project {owner}") }));
+                continue;
+            }
+            None => {}
+        }
+        if !markers.contains(&marker) {
+            markers.push(marker);
+        }
+    }
+    kind.markers = markers;
+    if ProjectKinds::is_built_in(id) {
+        // Fenix keeps its own name, tag, colour and main files; what's
+        // given is ignored, and said.
+        let given: Vec<&str> = [("name", kind.name.is_some()), ("tag", kind.tag.is_some()), ("color", kind.color.is_some()), ("main", !kind.main.is_empty())].into_iter().filter(|(_, g)| *g).map(|(f, _)| f).collect();
+        if !given.is_empty() {
+            notes.push(format!("{} ignored -- it's one of Fenix's own, and an extension adds its markers and nothing else", given.join(", ")));
+        }
+        kind.name = None;
+        kind.tag = None;
+        kind.color = None;
+        kind.main = Vec::new();
+        return Ok((kind, notes));
+    }
+    if kind.main.len() > MAX_KIND_MAIN {
+        return Err(format!("{} main files -- at most {MAX_KIND_MAIN}", kind.main.len()));
+    }
+    if let Some(why) = kind.main.iter().find_map(|m| main_problem(m)) {
+        return Err(why);
+    }
+    let name = kind.name.as_deref().ok_or("it needs a name")?;
+    if name.chars().count() > MAX_KIND_NAME || name.chars().any(invisible) || !name.chars().any(|c| !c.is_whitespace()) {
+        return Err(format!("name {name:?} -- 1 to {MAX_KIND_NAME} characters, at least one of them visible, none invisible (control, format or bidirectional characters)"));
+    }
+    if FENIX_KIND_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name.trim())) {
+        return Err(format!("name {name:?} is one of Fenix's own kinds'"));
+    }
+    let tag = kind.tag.as_deref().ok_or("it needs a tag")?;
+    if tag.is_empty() || tag.len() > MAX_KIND_TAG || !tag.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '+' | '#' | '.')) || !tag.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err(format!("tag {tag:?} -- 1 to {MAX_KIND_TAG} of A-Z 0-9 + # . with at least one letter"));
+    }
+    if FENIX_KIND_TAGS.contains(&tag) {
+        return Err(format!("tag {tag:?} is one of Fenix's own kinds' ({})", FENIX_KIND_TAGS.join(", ")));
+    }
+    if let Some(color) = kind.color.as_deref().filter(|c| !PROJECT_KIND_COLORS.contains(c)) {
+        return Err(format!("color {color:?} -- one of {}", PROJECT_KIND_COLORS.join(", ")));
+    }
+    Ok((kind, notes))
 }
 
 /// A coding agent an extension brings: one that speaks ACP on stdio, which
@@ -1036,8 +1341,13 @@ impl Manifest {
     /// `extension.toml`'s text read and checked: a well-formed id, a
     /// version and ranges that parse.
     pub fn parse(text: &str) -> Result<Manifest, String> {
-        let m: Manifest = toml::from_str(text).map_err(|e| format!("extension.toml: {}", e.message()))?;
+        let mut m: Manifest = toml::from_str(text).map_err(|e| format!("extension.toml: {}", e.message()))?;
         m.check()?;
+        // A bundle is its members: kinds it declares are theirs to.
+        if m.extension.runtime == Runtime::Bundle && !m.contributes.project_kinds.kinds.is_empty() {
+            m.contributes.project_kinds.kinds.clear();
+            m.contributes.project_kinds.skipped.push("a bundle has no contributions of its own: its project kinds are left out".into());
+        }
         Ok(m)
     }
 
@@ -1166,7 +1476,8 @@ impl Manifest {
             if self.dependencies.is_empty() {
                 return Err("extension.toml: a bundle is the extensions it depends on, and it has none ([dependencies])".into());
             }
-            if !self.permissions.none() || self.contributes != Contributes::default() || self.activation != Activation::default() || self.limits != Limits::default() {
+            let contributes = Contributes { project_kinds: ProjectKinds::default(), ..self.contributes.clone() };
+            if !self.permissions.none() || contributes != Contributes::default() || self.activation != Activation::default() || self.limits != Limits::default() {
                 return Err("extension.toml: a bundle runs nothing of its own -- no permissions, contributions or activation".into());
             }
         }
@@ -1627,6 +1938,10 @@ namespaces = [\"issues\"]
         let m = Manifest::parse(&text("\n[permissions]\nsound = true\neditor = \"read\"\n\n[contributes]\nevents = [\"changed\", \"focus\"]\n")).unwrap();
         assert_eq!(m.contributes.events, ["changed", "focus"]);
         assert!(m.permissions.sound && m.permissions.lines().contains(&"Play sounds".to_string()));
+        let f = Manifest::parse(&(sample("acme.notes", "1.0.0", "none") + "\n[permissions]\nfolders = { notes = \"${setting:notes.folder}|data:notes\", logs = \"/var/log/acme\" }\n")).unwrap();
+        let lines = f.permissions.lines();
+        assert!(lines.contains(&"Read and change the folders your notes.folder setting names (notes) -- it may change that setting itself, if it's one of its own".to_string()), "{lines:?}");
+        assert!(lines.contains(&"Read and change /var/log/acme (logs)".to_string()), "{lines:?}");
         assert!(Manifest::parse(&text("\n[contributes]\nevents = [\"changed\"]\n")).unwrap_err().contains("editor = \"read\""));
         assert!(Manifest::parse(&text("\n[contributes]\nevents = [\"focus\"]\n")).is_ok(), "focus needs nothing");
         // `view`, the lines a pane shows -- its files' only with
@@ -1712,5 +2027,213 @@ namespaces = [\"issues\"]
         assert!(Manifest::parse(&bad_range).unwrap_err().contains("engine.fenix"));
         let dep = sample("acme.themes", "1.0.0", "none") + "\n[dependencies]\n\"acme.base\" = \"^1\"\n";
         assert_eq!(Manifest::parse(&dep).unwrap().dependencies["acme.base"], "^1");
+    }
+
+    fn kinds_of(rest: &str) -> ProjectKinds {
+        Manifest::parse(&(sample("acme.java", "1.0.0", "none") + rest)).expect("a bad kind never stops the manifest").contributes.project_kinds
+    }
+
+    fn kind(fields: &str) -> String {
+        format!("\n[[contributes.project_kinds]]\n{fields}\n")
+    }
+
+    /// The kind is left out, with a line saying which and why.
+    fn left_out(fields: &str, says: &str) {
+        let kinds = kinds_of(&kind(fields));
+        assert!(kinds.kinds.is_empty(), "{fields:?}: {kinds:?}");
+        assert!(kinds.skipped.iter().any(|s| s.contains(says)), "{fields:?}: {:?} should say {says:?}", kinds.skipped);
+    }
+
+    fn kept(fields: &str) -> ProjectKindContribution {
+        let kinds = kinds_of(&kind(fields));
+        assert_eq!(kinds.kinds.len(), 1, "{fields:?}: {:?}", kinds.skipped);
+        kinds.kinds[0].clone()
+    }
+
+    const JAVA: &str = "id = \"java\"\nname = \"Java\"\ntag = \"JAVA\"";
+
+    #[test]
+    fn a_project_kind_as_the_plan_writes_it_is_read_with_no_api() {
+        let text = "\n[[contributes.project_kinds]]\nid = \"java\"\nname = \"Java\"\ntag = \"JAVA\"\ncolor = \"keyword\"\nmarkers = [\"pom.xml\", \"build.gradle\", \"{folder}.gradle\"]\nmain = [\"src/Main.java\", \"app/{folder}.java\", \"x/{folder}/{folder}.java\"]\n\n[[contributes.project_kinds]]\nid = \"node\"\nmarkers = [\"deno.json\", \"tsconfig.json\"]\n";
+        let kinds = kinds_of(text);
+        assert_eq!(kinds.skipped, Vec::<String>::new());
+        assert_eq!(kinds.kinds.len(), 2);
+        assert_eq!(kinds.kinds[0].markers, ["pom.xml", "build.gradle", "{folder}.gradle"]);
+        assert_eq!(kinds.kinds[1].markers, ["deno.json", "tsconfig.json"]);
+        // Not tied to engine.api, any runtime but a bundle: a WebAssembly
+        // pack built for 1.5 has them too.
+        let wasm = sample("acme.java", "1.0.0", "wasm").replace("[engine]\n", "[engine]\napi = \"1.5\"\n") + text;
+        assert_eq!(Manifest::parse(&wasm).unwrap().contributes.project_kinds.kinds.len(), 2);
+        assert_eq!(API, "1.6.0", "no new API for it");
+        // Declared only: no markers.
+        assert!(kept("id = \"kotlin\"\nname = \"Kotlin\"\ntag = \"KT\"").markers.is_empty());
+        for tag in ["C#", "C++X", "A.B", "F1", "J"] {
+            kept(&format!("id = \"cs\"\nname = \"C\"\ntag = \"{tag}\""));
+        }
+    }
+
+    #[test]
+    fn a_kinds_id_is_well_formed_and_not_fenixs() {
+        let with = |id: &str| format!("id = \"{id}\"\nname = \"X\"\ntag = \"X\"");
+        left_out("name = \"X\"\ntag = \"X\"", "missing field `id`");
+        for bad in ["", "Java", "1java", "-java", "ja va", "ja.va", "java/x", "c++", &"a".repeat(25)] {
+            left_out(&with(bad), "1 to 24 characters");
+        }
+        kept(&with(&"a".repeat(24)));
+        kept(&with("a0-b_c"));
+        for reserved in RESERVED_KINDS.iter().filter(|r| r.chars().all(|c| c.is_ascii_lowercase())) {
+            left_out(&with(reserved), "is Fenix's own");
+        }
+        let twice = kinds_of(&(kind(JAVA) + &kind(JAVA)));
+        assert_eq!(twice.kinds.len(), 1);
+        assert!(twice.skipped[0].contains("there twice"), "{:?}", twice.skipped);
+    }
+
+    #[test]
+    fn a_kind_needs_a_name_and_a_tag_within_limits() {
+        left_out("id = \"java\"\ntag = \"JAVA\"", "needs a name");
+        left_out("id = \"java\"\nname = \"Java\"", "needs a tag");
+        for bad in ["", "   ", "\\t", "Ja\\nva", "Ja\\u0007va", "\\u200B", "\\uFEFF", "\\u202Etsu R", "a\\u2066b", "\\u00AD"] {
+            left_out(&format!("id = \"java\"\nname = \"{bad}\"\ntag = \"J\""), "name");
+        }
+        left_out(&format!("id = \"java\"\nname = \"{}\"\ntag = \"J\"", "n".repeat(33)), "1 to 32 characters");
+        for own in ["Rust", " rust ", "PROJECT", "C/C++", "JavaScript"] {
+            left_out(&format!("id = \"java\"\nname = \"{own}\"\ntag = \"J\""), "one of Fenix's own kinds'");
+        }
+        for own in ["PY", "INO", "RS", "TCL", "C++", "JS", "GO", "MONO", "DIR"] {
+            left_out(&format!("id = \"java\"\nname = \"Java\"\ntag = \"{own}\""), "one of Fenix's own kinds'");
+        }
+        kept(&format!("id = \"java\"\nname = \"{}\"\ntag = \"J\"", "é".repeat(32)));
+        kept("id = \"java\"\nname = \"C and .NET\"\ntag = \"C#\"");
+        for bad in ["", "JAVAX", "java", "Java", "J-A", "J A", "123", "++", "É", "J\\u0301"] {
+            left_out(&format!("id = \"java\"\nname = \"Java\"\ntag = \"{bad}\""), "tag");
+        }
+    }
+
+    #[test]
+    fn a_kinds_colour_is_one_of_the_eight_roles() {
+        for color in PROJECT_KIND_COLORS {
+            assert_eq!(kept(&format!("{JAVA}\ncolor = \"{color}\"")).color.as_deref(), Some(*color));
+        }
+        for bad in ["#cc7832", "red", "Keyword", "muted", "fg", ""] {
+            left_out(&format!("{JAVA}\ncolor = \"{bad}\""), "one of keyword, string");
+        }
+    }
+
+    #[test]
+    fn a_kinds_markers_are_names_at_the_top() {
+        let with = |marker: &str| format!("{JAVA}\nmarkers = [\"{marker}\"]");
+        for bad in ["a/b", "a\\\\b", "..", "a..b", "*.java", "pom?", "x[1]", "{folder}{folder}", "{folder", "{other}", "a}", "x{folder}{", ".fenix", ".FENIX", ".Fenix", "", "a\\u0007b", "a\\tb", "C:evil", "a:b", "CON", "nul", "Aux.txt", "com1.json", "LPT9", "NUL.", "Gemfile.", "x ", "{folder}.", "a.b."] {
+            left_out(&with(bad), "marker");
+        }
+        left_out(&with(&"m".repeat(65)), "65 bytes");
+        left_out(&with(&"é".repeat(33)), "66 bytes");
+        for fine in ["pom.xml", "{folder}.sln", "x{folder}y", &"m".repeat(64), ".terraform.lock.hcl", ".fenixignore", "CONFIG", "console.toml", "com10"] {
+            kept(&with(fine));
+        }
+        let many = |n: usize| format!("{JAVA}\nmarkers = [{}]", (0..n).map(|i| format!("\"m{i}\"")).collect::<Vec<_>>().join(", "));
+        assert_eq!(kept(&many(16)).markers.len(), 16);
+        left_out(&many(17), "17 markers -- at most 16");
+        // The same marker twice is looked for once.
+        assert_eq!(kept(&format!("{JAVA}\nmarkers = [\"pom.xml\", \"a\", \"pom.xml\"]")).markers, ["pom.xml", "a"]);
+    }
+
+    #[test]
+    fn a_kinds_main_files_are_paths_below_the_project() {
+        let with = |main: &str| format!("{JAVA}\nmain = [\"{main}\"]");
+        for bad in ["/etc/passwd", "a\\\\b", "../x", "a/../b", "a/..", "a//b", "a/", "", "C:/Windows/win.ini", "C:x", "src/C:x", "src/CON", "src/nul.txt", "src/a.", "src/a ", "./x"] {
+            left_out(&with(bad), "main");
+        }
+        left_out(&with(&"p".repeat(129)), "129 bytes");
+        for fine in ["src/Main.java", "lib/{folder}.ex", "Sources/{folder}/main.swift", "{folder}/{folder}.x", &"p".repeat(128), "a..b/c"] {
+            kept(&with(fine));
+        }
+        let many = |n: usize| format!("{JAVA}\nmain = [{}]", (0..n).map(|i| format!("\"m{i}\"")).collect::<Vec<_>>().join(", "));
+        kept(&many(8));
+        left_out(&many(9), "9 main files -- at most 8");
+    }
+
+    /// No pack's kind may name a marker of Fenix's, ignoring case: it's
+    /// left out, and said; the kind that owns it may, adding nothing.
+    #[test]
+    fn fenixs_own_markers_are_left_out() {
+        let k = kinds_of(&kind(&format!("{JAVA}\nmarkers = [\"pom.xml\", \"package.json\", \"cmakelists.txt\", \".git\", \".Projectile\", \"{{folder}}.INO\"]")));
+        assert_eq!(k.kinds[0].markers, ["pom.xml"]);
+        assert_eq!(k.skipped.len(), 5, "{:?}", k.skipped);
+        assert!(k.skipped.iter().any(|n| n.contains("marker package.json is Fenix's own (package.json makes a project node)")), "{:?}", k.skipped);
+        let arduino = kinds_of(&kind("id = \"arduino\"\nmarkers = [\"Cargo.toml\", \"sketch.yaml\", \"x.ino.json\"]"));
+        assert_eq!(arduino.kinds[0].markers, ["x.ino.json"]);
+        assert_eq!(arduino.skipped.len(), 1, "its own sketch.yaml is dropped silently: {:?}", arduino.skipped);
+        let rust = kinds_of(&kind("id = \"rust\"\nmarkers = [\"package.json\", \"go.mod\", \"rust-toolchain.toml\"]"));
+        assert_eq!(rust.kinds[0].markers, ["rust-toolchain.toml"]);
+        assert_eq!(rust.skipped.len(), 2);
+    }
+
+    /// One of Fenix's ids takes markers; its name, tag, colour and main
+    /// files are Fenix's, so any given are ignored, and said.
+    #[test]
+    fn a_built_in_id_adds_markers_and_nothing_else() {
+        for id in BUILT_IN_KINDS {
+            let k = kept(&format!("id = \"{id}\"\nmarkers = [\"a.b\"]"));
+            assert_eq!(k.markers, ["a.b"]);
+        }
+        let kinds = kinds_of(&kind("id = \"node\"\nname = \"Node\"\ntag = \"N\"\ncolor = \"keyword\"\nmain = [\"../x\"]\nmarkers = [\"deno.json\"]"));
+        assert_eq!(kinds.kinds, [ProjectKindContribution { id: "node".into(), name: None, tag: None, color: None, markers: vec!["deno.json".into()], main: Vec::new() }]);
+        assert!(kinds.skipped[0].contains("name, tag, color, main ignored"), "{:?}", kinds.skipped);
+        left_out("id = \"node\"\nmarkers = [\"a/b\"]", "marker");
+    }
+
+    /// At most 8 kinds; a bundle's are left out; neither stops the
+    /// extension loading.
+    #[test]
+    fn an_extension_has_at_most_eight_kinds_and_a_bundle_none() {
+        let kinds = |n: usize| (0..n).map(|i| kind(&format!("id = \"k{i}\"\nname = \"K\"\ntag = \"K{i}\""))).collect::<String>();
+        assert_eq!(kinds_of(&kinds(8)).kinds.len(), 8);
+        let nine = kinds_of(&kinds(9));
+        assert_eq!(nine.kinds.len(), 8);
+        assert!(nine.skipped[0].contains("9 project kinds -- at most 8"), "{:?}", nine.skipped);
+        let bundle = sample("acme.lab", "1.0.0", "bundle") + "\n[dependencies]\n\"acme.a\" = \"^1\"\n" + &kind(JAVA);
+        let m = Manifest::parse(&bundle).unwrap();
+        assert!(m.contributes.project_kinds.kinds.is_empty());
+        assert!(m.contributes.project_kinds.skipped[0].contains("a bundle"));
+    }
+
+    /// A typo or a wrong type is that kind's, said; the section in the
+    /// wrong shape is left out whole. The extension loads either way.
+    #[test]
+    fn a_broken_kind_is_left_out_and_said() {
+        left_out(&format!("{JAVA}\nmarker = [\"pom.xml\"]"), "unknown field `marker`");
+        left_out(&format!("{JAVA}\nmarkers = \"pom.xml\""), "project kind java");
+        left_out("id = \"java\"\nname = 4\ntag = \"J\"", "project kind java");
+        left_out("id = 4", "project kind ?");
+        let wrong = kinds_of("\n[contributes]\nproject_kinds = \"java\"\n");
+        assert!(wrong.kinds.is_empty() && wrong.skipped[0].contains("a list of"));
+        let table = kinds_of("\n[contributes.project_kinds]\nid = \"java\"\n");
+        assert!(table.kinds.is_empty() && table.skipped[0].contains("a list of"));
+        // One bad kind, one good: the good one is kept.
+        let both = kinds_of(&(kind("id = \"Bad\"") + &kind(JAVA)));
+        assert_eq!(both.kinds.len(), 1);
+        assert_eq!(both.skipped.len(), 1);
+    }
+
+    /// Fenix 1.0 to 1.5 read `[contributes]` without the field and
+    /// without `deny_unknown_fields`: a pack declaring kinds installs
+    /// there as before (§6.3). Pinned with a struct shaped as theirs was.
+    #[test]
+    fn an_older_fenix_reads_past_the_section() {
+        #[derive(Deserialize)]
+        struct Then {
+            #[serde(default)]
+            contributes: ThenContributes,
+        }
+        #[derive(Deserialize, Default)]
+        struct ThenContributes {
+            #[serde(default)]
+            contexts: Vec<ContextContribution>,
+        }
+        let text = sample("acme.java", "1.0.0", "none") + "\n[[contributes.contexts]]\nname = \"java\"\nmarkers = [\"pom.xml\"]\n" + &kind(JAVA) + "markers = [\"pom.xml\"]\n";
+        let then: Then = toml::from_str(&text).unwrap();
+        assert_eq!(then.contributes.contexts.len(), 1);
+        assert_eq!(Manifest::parse(&text).unwrap().contributes.project_kinds.kinds.len(), 1);
     }
 }

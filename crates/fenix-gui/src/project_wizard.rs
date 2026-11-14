@@ -161,8 +161,10 @@ pub struct Wizard {
     git_touched: bool,
 }
 
-/// The order groups are listed in; anything else ("Yours") comes after.
-const GROUPS: [&str; 8] = ["Python", "Systems", "Web", "Embedded", "Mission", "Scripting", "Fenix", "Start from"];
+/// The order groups are listed in; anything else ("Yours", a pack's
+/// "Java and Kotlin") comes after, by name, and "Start from" last.
+const GROUPS: [&str; 7] = ["Python", "Systems", "Web", "Embedded", "Mission", "Scripting", "Fenix"];
+const LAST_GROUP: &str = "Start from";
 
 impl Wizard {
     pub fn new(templates: Vec<Template>, errors: Vec<String>, found: BTreeMap<String, bool>, parent: &Path) -> Self {
@@ -196,7 +198,7 @@ impl Wizard {
 
     /// Template indices in display order: by group, then as loaded.
     pub fn template_order(&self) -> Vec<usize> {
-        let rank = |group: &str| GROUPS.iter().position(|g| *g == group).unwrap_or(GROUPS.len());
+        let rank = |group: &str| if group == LAST_GROUP { GROUPS.len() + 1 } else { GROUPS.iter().position(|g| *g == group).unwrap_or(GROUPS.len()) };
         let mut order: Vec<usize> = (0..self.templates.len()).collect();
         order.sort_by_key(|&i| (rank(&self.templates[i].group), self.templates[i].group.clone()));
         order
@@ -444,7 +446,7 @@ impl Wizard {
     /// and `uv init` add themselves to one), for the review to say so.
     pub fn joins_workspace(&self) -> Option<PathBuf> {
         let kind = self.chosen()?.kind;
-        if !matches!(kind, fenix_project::ProjectKind::Rust | fenix_project::ProjectKind::Python) {
+        if !matches!(kind, fenix_project::ProjectKind::RUST | fenix_project::ProjectKind::PYTHON) {
             return None;
         }
         fenix_project::workspace::workspace_above(Path::new(self.parent.trim()), kind)
@@ -1033,8 +1035,11 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
         then.push("add it to your projects".to_string());
     }
     if let Some(workspace) = wizard.joins_workspace() {
-        let tool = if plan.kind == fenix_project::ProjectKind::Rust { "cargo" } else { "uv" };
+        let tool = if plan.kind == fenix_project::ProjectKind::RUST { "cargo" } else { "uv" };
         then.push(format!("{tool} adds it to the workspace at {}", workspace.display()));
+    }
+    if let Some(id) = plan.declares.as_ref().filter(|id| fenix_project::ProjectKind::from_id(id).is_none_or(|k| !k.is_declared())) {
+        then.push(format!("declare its kind \"{id}\" (no extension declares it now)"));
     }
     for hook in &plan.hooks {
         match hook {
@@ -1144,12 +1149,34 @@ mod tests {
         assert_eq!(groups.first(), Some(&"Python"));
         let mut seen: Vec<&str> = groups.clone();
         seen.dedup();
-        assert_eq!(seen, GROUPS, "each group once, in order");
+        assert_eq!(seen, [&GROUPS[..], &[LAST_GROUP]].concat(), "each group once, in order");
         assert_eq!(groups.last(), Some(&"Start from"));
         let page = layout(&w, 120);
         assert!(page.text.contains("PYTHON") && page.text.contains("SYSTEMS") && page.text.contains("EMBEDDED") && page.text.contains("MISSION"));
         assert!(page.text.contains("Python · uv"));
         assert!(page.text.contains("found"), "the focused template's needs are looked up:\n{}", page.text);
+    }
+
+    /// A pack's group comes before "Start from", and its templates show
+    /// the kind they name when an extension declares it; one nobody
+    /// declares shows as what its project will be, Other.
+    #[test]
+    fn a_packs_templates_come_before_start_from_with_their_kinds() {
+        let _kinds = crate::page::project_kinds_lock();
+        let pack = |id: &str, kind: &str| fenix_project::template::Template::parse(id, &format!("[template]\nname = \"{id}\"\nkind = \"{kind}\"\ngroup = \"Java and Kotlin\"\n"), &[], fenix_project::template::Origin::Extension(PathBuf::from("/x"))).unwrap();
+        fenix_project::set_extension_kinds(vec![fenix_project::KindDef { id: "java".into(), name: "Java".into(), tag: "JAVA".into(), color: fenix_project::KindColor::DEFAULT, markers: vec!["pom.xml".into()], main: Vec::new(), extension: Some("fenix.java".into()) }]);
+        let mut templates = builtin_templates();
+        templates.push(pack("spring", "java"));
+        templates.push(pack("fortran-app", "fortran"));
+        let w = Wizard::new(templates, Vec::new(), BTreeMap::new(), Path::new("/tmp"));
+        let mut groups: Vec<&str> = w.template_order().iter().map(|&i| w.templates[i].group.as_str()).collect();
+        groups.dedup();
+        assert_eq!(&groups[groups.len() - 2..], ["Java and Kotlin", "Start from"]);
+        let page = layout(&w, 120);
+        assert!(page.text.contains("JAVA ") && !page.text.contains("FORT"), "{}", page.text);
+        let fortran = w.templates.iter().find(|t| t.id == "fortran-app").unwrap();
+        assert_eq!((fortran.kind, fortran.kind_id.as_str()), (fenix_project::ProjectKind::OTHER, "fortran"));
+        fenix_project::set_extension_kinds(Vec::new());
     }
 
     #[test]

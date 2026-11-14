@@ -49,6 +49,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fenix 1.5, when no code reachable from its exports calls
   `tests::provider`. See
   [Writing extensions](docs/WRITING_EXTENSIONS.md#test-providers).
+- Language packs declare the kinds of project they know, in
+  `[[contributes.project_kinds]]`: an id, a name, a one-to-four-letter
+  tag, a theme colour, the files that mark one and the file it opens on.
+  With the Java pack installed a Maven project is `JAVA` in the hub, on
+  Home, in the modeline, the doctor and the settings page, as a Rust one
+  is `RS`; installed, updated, switched off or removed, the tags follow
+  without a restart. A pack's kind names only a project Fenix would call
+  a plain `DIR`: one Fenix recognises itself (a Rails app with a
+  `package.json` is JavaScript) keeps its kind with any pack installed,
+  and declares `kind = "ruby"` if it wants the pack's. A pack may add
+  markers to one of Fenix's own kinds (`deno.json` to JavaScript), for
+  folders Fenix's own markers don't name. No pack may claim one of
+  Fenix's markers, tags or kind names, and none of a pack's markers makes
+  your home folder, a folder above it or a drive's root a project --
+  nor, now, does a pack's context marker.
+  Detection only looks at which files exist -- no extension code runs,
+  no file is read -- and a project on another machine is never looked
+  at. The section needs no extension API: Fenix 1.5 ignores it. An
+  extension is told its project's kind as `("kind", id)` in `here()`'s
+  project `meta`. See
+  [Writing extensions](docs/WRITING_EXTENSIONS.md#project-kinds).
 - `tests.enabled`, off, on the settings page under Completion & LSP,
   with `tests.list_automatically`, `tests.on_save`, `tests.problems`,
   `tests.inline`, `tests.gutter`, `tests.timeout_minutes` and
@@ -136,6 +157,37 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A folder of SCOS-2000 MIB tables (`vdf.dat`, `ccf.dat`, `pcf.dat`, ...)
+  is no longer a project of its own. A MIB folder in a repository is
+  part of the repository's project: its files are that project's, and
+  `SPC p` (tasks, the doctor, finding in the project, the explorer,
+  settings) acts on the repository. It isn't listed under the
+  repository in the project hub any more. If you had added it to your
+  projects and have the repository there too, it's taken off the list
+  once, when Fenix first starts, and a notification names each folder
+  and the project it's in now (`SPC p a` adds one back). Any other --
+  one with something of its own (a `.fenix/` folder, a `setup.py`, ...),
+  one whose repository isn't among your projects, one with nothing
+  around it but your home folder -- stays on your list and opens as the
+  folder you chose. A MIB folder with nothing around it is in no
+  project, as any other folder is. Nothing in the
+  folders changes, and a MIB made with the SCOS-2000 MIB template is
+  still its own project. MIB is no longer a kind of project: one that
+  says `kind = "mib"` is shown as a plain project (`DIR`). Until the MIB
+  extension finds MIB folders inside a project by itself, list yours in
+  the project's `mib.roots` (`SPC k ,`).
+- A project's declared kind that Fenix doesn't know (`kind = "java"` in
+  `.fenix/settings.toml` without the Java pack) is still ignored for
+  what the project is, but never lost: the settings page shows it, and
+  moving through the kinds with `h` and `l` no longer writes the first
+  of Fenix's kinds over it -- nothing is written until Enter picks a
+  kind, and `r` on the row removes it. Once a pack declaring it is installed, it counts. A template may
+  name any kind id; a project made from one naming a kind that isn't
+  Fenix's declares it. Only a template whose kind isn't an id (`a-z`
+  first, then `a-z 0-9 - _`, at most 24) is refused.
+- The new-project wizard lists "Start from" last, after the groups of
+  extensions' templates. Home leaves five cells for a project's kind, so
+  a four-letter tag (`MONO`) no longer touches its name.
 - Release candidates are dropped from the release process in favour of
   the nightly ([how releases work](docs/RELEASING.md)), and the
   unreleased `updates.prereleases` setting with them, replaced by
@@ -143,6 +195,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An extension changing a setting of its own that names a folder of its
+  (the MIB extension's `mib.roots`) gets that folder right away: it
+  starts again once what it changed it in is done, as when you change it
+  on the settings page, rather than when Fenix next starts. A
+  notification says so each time ("Hello now reads /srv/mibs/OPS
+  (mib.roots)", with the setting a key away), the folder isn't made if
+  it isn't there, and the extensions that read the setting read it anew.
+  Neither it nor one sharing the folder starts again more than three
+  times a minute for it. An extension's folder permission now reads
+  "Read and change the folders your X setting names -- it may change
+  that setting itself, if it's one of its own".
 - Opening a project from before 1.5 no longer deletes its
   `.fenix/project.ini` when there's nothing in it to move (empty, or
   comments alone), which left a folder that file alone marked no longer a
