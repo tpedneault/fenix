@@ -654,6 +654,85 @@ pub const BUILT_IN_KINDS: &[&str] = &["python", "arduino", "rust", "tcl", "cpp",
 /// other names Fenix reads as one of its own.
 pub const RESERVED_KINDS: &[&str] = &["other", "monorepo", "py", "uv", "ino", "sketch", "rs", "c++", "c", "cmake", "js", "ts", "javascript", "typescript", "mib"];
 
+/// Fenix's own markers, by the id of the kind that owns each (`""`: a
+/// project's top, no kind). No pack's kind may name one, compared
+/// ignoring ASCII case, except the kind that owns it: a pack never takes
+/// Fenix's projects. (`fenix_project::FENIX_MARKERS`; a test in fenix-gui
+/// holds the two lists together.)
+pub const FENIX_MARKERS: &[(&str, &str)] = &[
+    ("library.properties", "arduino"),
+    ("sketch.yaml", "arduino"),
+    ("{folder}.ino", "arduino"),
+    ("{folder}.pde", "arduino"),
+    ("Cargo.toml", "rust"),
+    ("pyproject.toml", "python"),
+    ("setup.py", "python"),
+    ("requirements.txt", "python"),
+    ("uv.lock", "python"),
+    ("go.mod", "go"),
+    ("package.json", "node"),
+    ("CMakeLists.txt", "cpp"),
+    ("pkgIndex.tcl", "tcl"),
+    (".git", ""),
+    (".projectile", ""),
+];
+
+/// Fenix's kinds' tags and names, which no pack's kind may take (a name
+/// compared ignoring case and the spaces around it).
+pub const FENIX_KIND_TAGS: &[&str] = &["PY", "INO", "RS", "TCL", "C++", "JS", "GO", "MONO", "DIR"];
+pub const FENIX_KIND_NAMES: &[&str] = &["Python", "Arduino", "Rust", "Tcl", "C/C++", "JavaScript", "Go", "Monorepo", "Project"];
+
+/// Names Windows keeps for devices, with or without an extension: no
+/// marker or part of a main path may be one.
+pub const DEVICE_NAMES: &[&str] = &["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+
+/// Unicode's format characters (`Cf`, Unicode 16), which a kind's name
+/// may not hold: zero-width, bidirectional controls, the byte-order mark.
+pub const FORMAT_CHARACTERS: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
+];
+
+/// A character that shows nothing or moves what's around it: control
+/// (`Cc`), format (`Cf`), the line and paragraph separators.
+fn invisible(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || FORMAT_CHARACTERS.iter().any(|(a, b)| (*a..=*b).contains(&c))
+}
+
+/// Why a file name a kind gives would name another file on Windows: `:`
+/// (`C:x` is a drive's), a device, a trailing `.` or space.
+fn windows_problem(name: &str) -> Option<&'static str> {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    if name.contains(':') {
+        Some("has \":\" (on Windows, C:x is another drive's)")
+    } else if name.ends_with(['.', ' ']) {
+        Some("ends in a dot or a space (Windows drops both)")
+    } else if DEVICE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
+        Some("is a device's name on Windows")
+    } else {
+        None
+    }
+}
+
 /// The theme roles a kind's tag may be drawn in.
 pub const PROJECT_KIND_COLORS: &[&str] = &["keyword", "string", "function", "type", "number", "constant", "attribute", "variable"];
 
@@ -745,7 +824,7 @@ fn marker_problem(marker: &str) -> Option<String> {
     if marker.replacen("{folder}", "", 1).contains(['{', '}']) {
         return Some(format!("marker {marker:?}: {{folder}} at most once, and no other braces"));
     }
-    None
+    windows_problem(marker).map(|why| format!("marker {marker:?} {why}"))
 }
 
 /// Why `path` isn't a path below the project, if it isn't.
@@ -759,7 +838,7 @@ fn main_problem(path: &str) -> Option<String> {
     if path.split('/').any(|part| part.is_empty() || part == "..") {
         return Some(format!("main {path:?}: a path below the project, with no empty or \"..\" part"));
     }
-    None
+    path.split('/').find_map(windows_problem).map(|why| format!("main {path:?}: a part of it {why}"))
 }
 
 /// One declaration against the rules: the kind as Fenix keeps it
@@ -782,13 +861,21 @@ fn check_project_kind(mut kind: ProjectKindContribution) -> Result<(ProjectKindC
         return Err(why);
     }
     let mut markers: Vec<String> = Vec::new();
+    let mut notes = Vec::new();
     for marker in std::mem::take(&mut kind.markers) {
+        match FENIX_MARKERS.iter().find(|(m, _)| m.eq_ignore_ascii_case(&marker)) {
+            Some((_, owner)) if *owner == id => continue,
+            Some((own, owner)) => {
+                notes.push(format!("marker {marker} is Fenix's own ({}): left out", if owner.is_empty() { format!("{own} makes a project's top") } else { format!("{own} makes a project {owner}") }));
+                continue;
+            }
+            None => {}
+        }
         if !markers.contains(&marker) {
             markers.push(marker);
         }
     }
     kind.markers = markers;
-    let mut notes = Vec::new();
     if ProjectKinds::is_built_in(id) {
         // Fenix keeps its own name, tag, colour and main files; what's
         // given is ignored, and said.
@@ -809,12 +896,18 @@ fn check_project_kind(mut kind: ProjectKindContribution) -> Result<(ProjectKindC
         return Err(why);
     }
     let name = kind.name.as_deref().ok_or("it needs a name")?;
-    if name.chars().count() > MAX_KIND_NAME || name.chars().any(char::is_control) || name.trim().is_empty() {
-        return Err(format!("name {name:?} -- 1 to {MAX_KIND_NAME} characters, at least one of them visible, no control characters"));
+    if name.chars().count() > MAX_KIND_NAME || name.chars().any(invisible) || !name.chars().any(|c| !c.is_whitespace()) {
+        return Err(format!("name {name:?} -- 1 to {MAX_KIND_NAME} characters, at least one of them visible, none invisible (control, format or bidirectional characters)"));
+    }
+    if FENIX_KIND_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name.trim())) {
+        return Err(format!("name {name:?} is one of Fenix's own kinds'"));
     }
     let tag = kind.tag.as_deref().ok_or("it needs a tag")?;
     if tag.is_empty() || tag.len() > MAX_KIND_TAG || !tag.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '+' | '#' | '.')) || !tag.chars().any(|c| c.is_ascii_uppercase()) {
         return Err(format!("tag {tag:?} -- 1 to {MAX_KIND_TAG} of A-Z 0-9 + # . with at least one letter"));
+    }
+    if FENIX_KIND_TAGS.contains(&tag) {
+        return Err(format!("tag {tag:?} is one of Fenix's own kinds' ({})", FENIX_KIND_TAGS.join(", ")));
     }
     if let Some(color) = kind.color.as_deref().filter(|c| !PROJECT_KIND_COLORS.contains(c)) {
         return Err(format!("color {color:?} -- one of {}", PROJECT_KIND_COLORS.join(", ")));
@@ -2000,10 +2093,16 @@ namespaces = [\"issues\"]
     fn a_kind_needs_a_name_and_a_tag_within_limits() {
         left_out("id = \"java\"\ntag = \"JAVA\"", "needs a name");
         left_out("id = \"java\"\nname = \"Java\"", "needs a tag");
-        for bad in ["", "   ", "\\t", "Ja\\nva", "Ja\\u0007va"] {
+        for bad in ["", "   ", "\\t", "Ja\\nva", "Ja\\u0007va", "\\u200B", "\\uFEFF", "\\u202Etsu R", "a\\u2066b", "\\u00AD"] {
             left_out(&format!("id = \"java\"\nname = \"{bad}\"\ntag = \"J\""), "name");
         }
         left_out(&format!("id = \"java\"\nname = \"{}\"\ntag = \"J\"", "n".repeat(33)), "1 to 32 characters");
+        for own in ["Rust", " rust ", "PROJECT", "C/C++", "JavaScript"] {
+            left_out(&format!("id = \"java\"\nname = \"{own}\"\ntag = \"J\""), "one of Fenix's own kinds'");
+        }
+        for own in ["PY", "INO", "RS", "TCL", "C++", "JS", "GO", "MONO", "DIR"] {
+            left_out(&format!("id = \"java\"\nname = \"Java\"\ntag = \"{own}\""), "one of Fenix's own kinds'");
+        }
         kept(&format!("id = \"java\"\nname = \"{}\"\ntag = \"J\"", "é".repeat(32)));
         kept("id = \"java\"\nname = \"C and .NET\"\ntag = \"C#\"");
         for bad in ["", "JAVAX", "java", "Java", "J-A", "J A", "123", "++", "É", "J\\u0301"] {
@@ -2024,12 +2123,12 @@ namespaces = [\"issues\"]
     #[test]
     fn a_kinds_markers_are_names_at_the_top() {
         let with = |marker: &str| format!("{JAVA}\nmarkers = [\"{marker}\"]");
-        for bad in ["a/b", "a\\\\b", "..", "a..b", "*.java", "pom?", "x[1]", "{folder}{folder}", "{folder", "{other}", "a}", "x{folder}{", ".fenix", ".FENIX", ".Fenix", "", "a\\u0007b", "a\\tb"] {
+        for bad in ["a/b", "a\\\\b", "..", "a..b", "*.java", "pom?", "x[1]", "{folder}{folder}", "{folder", "{other}", "a}", "x{folder}{", ".fenix", ".FENIX", ".Fenix", "", "a\\u0007b", "a\\tb", "C:evil", "a:b", "CON", "nul", "Aux.txt", "com1.json", "LPT9", "NUL.", "Gemfile.", "x ", "{folder}.", "a.b."] {
             left_out(&with(bad), "marker");
         }
         left_out(&with(&"m".repeat(65)), "65 bytes");
         left_out(&with(&"é".repeat(33)), "66 bytes");
-        for fine in ["pom.xml", "{folder}.sln", "x{folder}y", &"m".repeat(64), ".terraform.lock.hcl", ".fenixignore", "a.b."] {
+        for fine in ["pom.xml", "{folder}.sln", "x{folder}y", &"m".repeat(64), ".terraform.lock.hcl", ".fenixignore", "CONFIG", "console.toml", "com10"] {
             kept(&with(fine));
         }
         let many = |n: usize| format!("{JAVA}\nmarkers = [{}]", (0..n).map(|i| format!("\"m{i}\"")).collect::<Vec<_>>().join(", "));
@@ -2042,7 +2141,7 @@ namespaces = [\"issues\"]
     #[test]
     fn a_kinds_main_files_are_paths_below_the_project() {
         let with = |main: &str| format!("{JAVA}\nmain = [\"{main}\"]");
-        for bad in ["/etc/passwd", "a\\\\b", "../x", "a/../b", "a/..", "a//b", "a/", ""] {
+        for bad in ["/etc/passwd", "a\\\\b", "../x", "a/../b", "a/..", "a//b", "a/", "", "C:/Windows/win.ini", "C:x", "src/C:x", "src/CON", "src/nul.txt", "src/a.", "src/a ", "./x"] {
             left_out(&with(bad), "main");
         }
         left_out(&with(&"p".repeat(129)), "129 bytes");
@@ -2052,6 +2151,22 @@ namespaces = [\"issues\"]
         let many = |n: usize| format!("{JAVA}\nmain = [{}]", (0..n).map(|i| format!("\"m{i}\"")).collect::<Vec<_>>().join(", "));
         kept(&many(8));
         left_out(&many(9), "9 main files -- at most 8");
+    }
+
+    /// No pack's kind may name a marker of Fenix's, ignoring case: it's
+    /// left out, and said; the kind that owns it may, adding nothing.
+    #[test]
+    fn fenixs_own_markers_are_left_out() {
+        let k = kinds_of(&kind(&format!("{JAVA}\nmarkers = [\"pom.xml\", \"package.json\", \"cmakelists.txt\", \".git\", \".Projectile\", \"{{folder}}.INO\"]")));
+        assert_eq!(k.kinds[0].markers, ["pom.xml"]);
+        assert_eq!(k.skipped.len(), 5, "{:?}", k.skipped);
+        assert!(k.skipped.iter().any(|n| n.contains("marker package.json is Fenix's own (package.json makes a project node)")), "{:?}", k.skipped);
+        let arduino = kinds_of(&kind("id = \"arduino\"\nmarkers = [\"Cargo.toml\", \"sketch.yaml\", \"x.ino.json\"]"));
+        assert_eq!(arduino.kinds[0].markers, ["x.ino.json"]);
+        assert_eq!(arduino.skipped.len(), 1, "its own sketch.yaml is dropped silently: {:?}", arduino.skipped);
+        let rust = kinds_of(&kind("id = \"rust\"\nmarkers = [\"package.json\", \"go.mod\", \"rust-toolchain.toml\"]"));
+        assert_eq!(rust.kinds[0].markers, ["rust-toolchain.toml"]);
+        assert_eq!(rust.skipped.len(), 2);
     }
 
     /// One of Fenix's ids takes markers; its name, tag, colour and main
