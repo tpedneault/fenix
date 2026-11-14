@@ -2101,6 +2101,14 @@ mod tests {
         assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"cobol\""));
         // Reopened: still there, still kept.
         assert_eq!(app.project_page_model(&dir.0).kept.as_deref(), Some("cobol"));
+        // `r` on the row removes it, and detection decides.
+        let mut again = app.project_page_model(&dir.0);
+        again.focus_on_kind();
+        let action = again.key(crate::page::Key::Char('r'));
+        app.project_page_action(dir.0.clone(), action);
+        assert_eq!(fenix_project::declared_id(&dir.0), None);
+        assert!(!std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap_or_default().contains("kind"));
+        std::fs::write(dir.0.join(".fenix/settings.toml"), "[project]\nkind = \"cobol\"\n").unwrap();
         // A pack that knows it, installed: it counts.
         app.project_kinds_now(&[pack("acme.cobol", "\n[[contributes.project_kinds]]\nid = \"cobol\"\nname = \"COBOL\"\ntag = \"CBL\"\ncolor = \"string\"\n")]);
         let cobol = fenix_project::ProjectKind::from_id("cobol").unwrap();

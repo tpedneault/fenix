@@ -100,7 +100,7 @@ The kind (`[project] kind`) is one of Fenix's (`python`, `rust`, `node`,
 extension declares is kept as written but ignored -- the project is what
 its files make it -- until one does; the settings page shows it, and
 moving through the kinds with `h` and `l` writes nothing over it until
-Enter picks one.
+Enter picks one; `r` on the kind's row removes the declaration.
 `p` switches the page between yours and the project's.
 
 **A project's programs wait for you.** `.fenix/tools.json` names

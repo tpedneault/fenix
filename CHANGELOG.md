@@ -181,7 +181,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what the project is, but never lost: the settings page shows it, and
   moving through the kinds with `h` and `l` no longer writes the first
   of Fenix's kinds over it -- nothing is written until Enter picks a
-  kind. Once a pack declaring it is installed, it counts. A template may
+  kind, and `r` on the row removes it. Once a pack declaring it is installed, it counts. A template may
   name any kind id; a project made from one naming a kind that isn't
   Fenix's declares it. Only a template whose kind isn't an id (`a-z`
   first, then `a-z 0-9 - _`, at most 24) is refused.

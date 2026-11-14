@@ -347,7 +347,11 @@ mode, the pack switched off -- or a misspelt `kind = "pyhton"`:
   cycler's `h` and `l` only move among the choices (`detect`, the known
   kinds, then the kept id, where it starts); Enter on a kind writes that
   kind; Enter on `detect` or on the kept id writes nothing. Reopening
-  the page finds it again.
+  the page finds it again. Removing it is its own act: `r` on the kind's
+  row -- the settings page's reset, as for any project setting --
+  removes `kind` from the project's settings, and detection decides; the
+  row says so (`pyhton -- no extension declares this kind; r removes
+  it`).
 - **Isn't interned**: no id a repository's settings, a template or
   anything else a repository controls says is ever interned (§2.2); an
   unknown declared id is carried as text where it's needed (the
@@ -1101,7 +1105,8 @@ master's behaviour.
   that. `declared_id` reads the text; `declared_kind` answers only for a
   declared id. The settings page keeps the text (`Settings::kept`),
   and while it's there `h`/`l` write nothing; Enter on a kind replaces
-  it, Enter on `detect` or on it writes nothing. A template's kind is
+  it, Enter on `detect` or on it writes nothing; `r` on the row, the
+  page's reset, removes it (`r_removes_a_kind_no_one_declares`). A template's kind is
   text (`Template::kind_id`); one no one declares is shown as Other and
   the project made from it declares it (`Plan::declare_kind`), unless its
   files already make it that kind. `from_id("nonsense")` is `None`

@@ -222,6 +222,10 @@ impl Settings {
                     self.confirm_delete = Some(field);
                 }
             }
+            // `r` resets the kind as it resets any of the project's settings
+            // on the page: the declaration goes, and detection decides. The
+            // one way to remove a kind no one declares.
+            Key::Char('r') if field == Some(Field::Kind) => return self.reset_kind(),
             Key::Char('h') | Key::Left => {
                 if field == Some(Field::Kind) {
                     return self.cycle_kind(false);
@@ -313,10 +317,23 @@ impl Settings {
             }
             None => {
                 let kept = self.kept.clone().unwrap_or_default();
-                self.note = Some(format!("kind = \"{kept}\" stays: it's ignored until an extension declares {kept}"));
+                self.note = Some(format!("kind = \"{kept}\" stays: it's ignored until an extension declares {kept} -- r removes it"));
                 Action::None
             }
         }
+    }
+
+    /// `r` on the kind: stops declaring one, known or not. Nothing to do
+    /// when none is declared.
+    fn reset_kind(&mut self) -> Action {
+        if self.declared.is_none() && self.kept.is_none() {
+            return Action::None;
+        }
+        let was = self.kept.take().or_else(|| self.declared.map(|k| k.id().to_string())).unwrap_or_default();
+        self.declared = None;
+        self.choice = None;
+        self.note = Some(format!("kind = \"{was}\" removed: the project's files decide its kind"));
+        Action::SetKind(None)
     }
 
     /// What the kind's row shows: the kind, "detect: X", or the kept id,
@@ -324,7 +341,7 @@ impl Settings {
     fn kind_text(&self) -> (String, bool) {
         let detect = |s: &Self| format!("detect: {}", s.detected.label());
         match (&self.kept, self.choice) {
-            (Some(kept), None) => (format!("{kept} -- no extension declares this kind"), false),
+            (Some(kept), None) => (format!("{kept} -- no extension declares this kind; r removes it"), false),
             (Some(_), Some(0)) => (detect(self), true),
             (Some(_), Some(i)) => (ProjectKind::known().get(i - 1).map_or_else(|| detect(self), |k| k.label().to_string()), true),
             (None, _) => match self.declared {
@@ -803,6 +820,28 @@ mod tests {
         assert_eq!(s.kept, None);
         // From then on, as ever: each move writes.
         assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(ProjectKind::ARDUINO)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `kind = "pyhton"`: only `r` on the kind's row removes it -- the
+    /// settings page's reset -- and the row says so; moving, and Enter on
+    /// it or on "detect", leave it.
+    #[test]
+    fn r_removes_a_kind_no_one_declares() {
+        let _kinds = crate::page::project_kinds_lock();
+        let (mut s, root) = settings("reset_kind", None);
+        s.kept = Some("pyhton".into());
+        assert!(layout(&s, 140).text.contains("pyhton -- no extension declares this kind; r removes it"), "{}", layout(&s, 140).text);
+        s.focus_on(&Field::Kind);
+        for key in [Key::Char('h'), Key::Char('l'), Key::Enter, Key::Char('l'), Key::Enter, Key::Char('h')] {
+            assert_eq!(s.key(key), Action::None, "{key:?} writes nothing");
+        }
+        assert_eq!(s.kept.as_deref(), Some("pyhton"));
+        assert_eq!(s.key(Key::Char('r')), Action::SetKind(None), "r removes the declaration");
+        assert_eq!((s.kept.as_deref(), s.declared), (None, None));
+        assert_eq!(s.key(Key::Char('r')), Action::None, "nothing left to remove");
+        s.declared = Some(ProjectKind::RUST);
+        assert_eq!(s.key(Key::Char('r')), Action::SetKind(None), "a known kind resets the same way");
         let _ = std::fs::remove_dir_all(root);
     }
 
