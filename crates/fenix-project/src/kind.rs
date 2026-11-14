@@ -130,10 +130,10 @@ const ALIASES: &[(&str, ProjectKind)] = &[
 /// The longest id there is.
 pub const MAX_ID: usize = 24;
 
-/// How many ids one run interns at most, Fenix's included. Every id is
-/// one a manifest, a template or a project's settings said, and each is
-/// at most `MAX_ID` long; past this many, a new one is read as no kind at
-/// all, as a malformed one is.
+/// How many ids one run interns at most, Fenix's included. Only Fenix's
+/// ids and those switched-on extensions declare are ever interned --
+/// never one a repository's settings or a template names -- so this is
+/// reached only by installing thousands of different kinds in one run.
 const MAX_INTERNED: usize = 4096;
 
 struct Interner {
@@ -207,10 +207,97 @@ fn registry() -> std::sync::RwLockReadGuard<'static, Registry> {
     REGISTRY.read().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Fenix's own markers -- what it detects its kinds by, and what makes a
+/// project's top -- by the kind that owns each (`None`: a root marker of
+/// no kind). No extension's kind may name one (compared ignoring ASCII
+/// case, as Windows and macOS compare names), except the kind that owns
+/// it, where it adds nothing: a pack can never take Fenix's projects.
+pub const FENIX_MARKERS: &[(&str, Option<ProjectKind>)] = &[
+    ("library.properties", Some(ProjectKind::ARDUINO)),
+    ("sketch.yaml", Some(ProjectKind::ARDUINO)),
+    ("{folder}.ino", Some(ProjectKind::ARDUINO)),
+    ("{folder}.pde", Some(ProjectKind::ARDUINO)),
+    ("Cargo.toml", Some(ProjectKind::RUST)),
+    ("pyproject.toml", Some(ProjectKind::PYTHON)),
+    ("setup.py", Some(ProjectKind::PYTHON)),
+    ("requirements.txt", Some(ProjectKind::PYTHON)),
+    ("uv.lock", Some(ProjectKind::PYTHON)),
+    ("go.mod", Some(ProjectKind::GO)),
+    ("package.json", Some(ProjectKind::NODE)),
+    ("CMakeLists.txt", Some(ProjectKind::CPP)),
+    ("pkgIndex.tcl", Some(ProjectKind::TCL)),
+    (".git", None),
+    (".projectile", None),
+];
+
+/// Which of Fenix's markers `marker` is, ignoring ASCII case: `Some(owner)`.
+pub fn fenix_marker(marker: &str) -> Option<Option<ProjectKind>> {
+    FENIX_MARKERS.iter().find(|(m, _)| m.eq_ignore_ascii_case(marker)).map(|(_, owner)| *owner)
+}
+
+/// Fenix's kinds' tags, which no extension's kind may take.
+pub const FENIX_TAGS: [&str; 9] = ["PY", "INO", "RS", "TCL", "C++", "JS", "GO", "MONO", "DIR"];
+
+/// Fenix's kinds' names, which no extension's kind may take (ignoring
+/// case and the spaces around it).
+pub const FENIX_NAMES: [&str; 9] = ["Python", "Arduino", "Rust", "Tcl", "C/C++", "JavaScript", "Go", "Monorepo", "Project"];
+
+/// Names Windows keeps for devices, with or without an extension.
+pub const DEVICE_NAMES: [&str; 22] = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+
+/// The format characters (Unicode's `Cf`, as of Unicode 16): zero-width
+/// spaces and joiners, bidirectional controls, the byte-order mark and
+/// the rest that draw nothing or reorder what's around them.
+pub const FORMAT_CHARACTERS: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
+];
+
+/// A character that draws nothing a reader can see, or moves what's
+/// around it: a control character (`Cc`), a format character (`Cf`), or
+/// the line and paragraph separators.
+pub fn is_invisible(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || FORMAT_CHARACTERS.iter().any(|(a, b)| (*a..=*b).contains(&c))
+}
+
+/// Whether `name` may name a kind as shown: none of it invisible, at
+/// least one character neither whitespace nor invisible.
+pub fn name_is_shown(name: &str) -> bool {
+    !name.chars().any(is_invisible) && name.chars().any(|c| !c.is_whitespace())
+}
+
+/// What no file name a kind gives may be, on any system: one with `:`
+/// (on Windows `C:x` is another drive's), a device's name, one ending in
+/// `.` or a space (Windows drops both, so it names another file).
+fn windows_trouble(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    name.contains(':') || name.ends_with(['.', ' ']) || DEVICE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(stem))
+}
+
 /// Whether `marker` is a file name a kind may be marked by: 1 to 64
-/// bytes, no path, wildcard or control character, `{folder}` at most once
-/// and no other brace, not Fenix's own settings folder. The manifest's
-/// check says why one isn't; this keeps the rule whoever gives the kinds.
+/// bytes, no path, wildcard, `:` or control character, `{folder}` at most
+/// once and no other brace, not Fenix's own settings folder, a device or
+/// a name ending in `.` or a space. The manifest's check says why one
+/// isn't; this keeps the rule whoever gives the kinds.
 pub fn marker_is_a_name(marker: &str) -> bool {
     !marker.is_empty()
         && marker.len() <= MAX_MARKER
@@ -218,22 +305,24 @@ pub fn marker_is_a_name(marker: &str) -> bool {
         && !marker.chars().any(|c| matches!(c, '/' | '\\' | '*' | '?' | '[' | ']') || c.is_control())
         && !marker.eq_ignore_ascii_case(".fenix")
         && !marker.replacen("{folder}", "", 1).contains(['{', '}'])
+        && !windows_trouble(marker)
 }
 
 /// Whether `path` is a path below a project a kind may be entered
-/// through: 1 to 128 bytes, `/` between parts, none empty or `..`.
+/// through: 1 to 128 bytes, `/` between parts, none empty, `..`, with a
+/// `:`, a device's name or ending in `.` or a space.
 pub fn main_is_below(path: &str) -> bool {
-    !path.is_empty() && path.len() <= MAX_MAIN_PATH && !path.contains('\\') && !path.split('/').any(|part| part.is_empty() || part == "..")
+    !path.is_empty() && path.len() <= MAX_MAIN_PATH && !path.contains('\\') && !path.split('/').any(|part| part.is_empty() || part == ".." || windows_trouble(part))
 }
 
 /// Settles the extensions' kinds, in the order they're detected in --
 /// the machine's extensions first, then yours, each by id, and each one's
 /// in the order it lists them. A Fenix id (`node`) adds its markers to
-/// Fenix's kind and nothing else; an id declared again is the first's;
-/// past `MAX_EXTENSION_KINDS` kinds or `MAX_EXTENSION_MARKERS` markers,
-/// the rest are left out. What's left out is said
-/// (`extension_kind_notes`). Returns whether anything changed: the same
-/// kinds again change nothing.
+/// Fenix's kind and nothing else; an id declared again is the first's; a
+/// marker of Fenix's (`FENIX_MARKERS`), a tag or name of Fenix's, past
+/// `MAX_EXTENSION_KINDS` kinds or `MAX_EXTENSION_MARKERS` markers: left
+/// out. What's left out is said (`extension_kind_notes`). Returns whether
+/// anything changed: the same kinds again change nothing.
 pub fn set_extension_kinds(kinds: Vec<KindDef>) -> bool {
     let mut registry = REGISTRY.write().unwrap_or_else(|e| e.into_inner());
     if registry.given == kinds {
@@ -243,25 +332,42 @@ pub fn set_extension_kinds(kinds: Vec<KindDef>) -> bool {
     for def in kinds {
         let extension = def.extension.clone().unwrap_or_default();
         let mut note = |text: String| next.notes.push((extension.clone(), text));
-        let kind = ProjectKind::from_id(&def.id).filter(|k| k.id() == def.id);
-        let Some(kind) = kind.filter(|k| *k != ProjectKind::MONOREPO && *k != ProjectKind::OTHER) else {
+        let built_in = BUILT_IN[..7].iter().position(|b| b.id == def.id).map(|i| ProjectKind(i as u16));
+        if built_in.is_none() && (!ProjectKind::is_well_formed(&def.id) || BUILT_IN.iter().any(|b| b.id == def.id) || ALIASES.iter().any(|(a, _)| *a == def.id)) {
             note(format!("its kind {:?} isn't one an extension may declare: left out", def.id));
             continue;
-        };
-        if !kind.is_builtin() && next.declared.iter().any(|d| d.kind == kind) {
-            let owner = next.declared.iter().find(|d| d.kind == kind).map(|d| d.extension.clone()).unwrap_or_default();
-            note(format!("its kind {} is {owner}'s", def.id));
-            continue;
         }
-        if !kind.is_builtin() && next.declared.len() >= MAX_EXTENSION_KINDS {
-            note(format!("its kind {} is past the {MAX_EXTENSION_KINDS} kinds Fenix takes from extensions: left out", def.id));
-            continue;
+        if built_in.is_none() {
+            if let Some(owner) = next.declared.iter().find(|d| d.kind.id() == def.id).map(|d| d.extension.clone()) {
+                note(format!("its kind {} is {owner}'s", def.id));
+                continue;
+            }
+            if next.declared.len() >= MAX_EXTENSION_KINDS {
+                note(format!("its kind {} is past the {MAX_EXTENSION_KINDS} kinds Fenix takes from extensions: left out", def.id));
+                continue;
+            }
+            if FENIX_TAGS.contains(&def.tag.as_str()) || FENIX_NAMES.iter().any(|n| n.eq_ignore_ascii_case(def.name.trim())) {
+                note(format!("its kind {} is named or tagged as one of Fenix's own: left out", def.id));
+                continue;
+            }
+            if !name_is_shown(&def.name) {
+                note(format!("its kind {}'s name has nothing to show, or what can't be seen: left out", def.id));
+                continue;
+            }
         }
         let mut markers: Vec<String> = Vec::new();
         let mut over = 0;
         for marker in def.markers.iter().filter(|m| marker_is_a_name(m)).take(MAX_MARKERS) {
             if markers.contains(marker) {
                 continue;
+            }
+            match fenix_marker(marker) {
+                Some(owner) if built_in.is_some() && owner == built_in => continue,
+                Some(_) => {
+                    note(format!("marker {marker} is Fenix's own: left out of its kind {}", def.id));
+                    continue;
+                }
+                None => {}
             }
             if !next.markers.contains(marker) {
                 if next.markers.len() >= MAX_EXTENSION_MARKERS {
@@ -275,15 +381,19 @@ pub fn set_extension_kinds(kinds: Vec<KindDef>) -> bool {
         if over > 0 {
             note(format!("{over} of its kind {}'s markers are past the {MAX_EXTENSION_MARKERS} Fenix looks for: left out", def.id));
         }
-        if kind.is_builtin() {
+        if let Some(kind) = built_in {
             let added = &mut next.added[kind.0 as usize];
             added.extend(markers.into_iter().filter(|m| !added.contains(m)).collect::<Vec<_>>());
             continue;
         }
+        let Some(kind) = ProjectKind::intern(&def.id) else {
+            note(format!("Fenix has read too many kind ids this run, so its kind {} is left out: start Fenix again to read it", def.id));
+            continue;
+        };
         let tag: String = def.tag.chars().filter(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '+' | '#' | '.')).take(4).collect();
         next.declared.push(Declared {
             kind,
-            name: keep(if def.name.trim().is_empty() { &def.id } else { &def.name }),
+            name: keep(def.name.trim()),
             tag: keep(if tag.is_empty() { &def.id } else { &tag }),
             color: def.color,
             markers,
@@ -351,8 +461,10 @@ impl ProjectKind {
         ALIASES.iter().map(|(alias, _)| *alias)
     }
 
-    /// A built-in id or alias, in any case; else any well-formed id
-    /// (`is_well_formed`, as written), interned. `None` for anything else.
+    /// A built-in id or alias, in any case; else an id an extension has
+    /// declared this run, as written. `None` for anything else: an id a
+    /// repository's settings or a template names is never interned
+    /// (`declared_id` keeps it as text).
     pub fn from_id(id: &str) -> Option<Self> {
         let id = id.trim();
         let lower = id.to_ascii_lowercase();
@@ -362,11 +474,14 @@ impl ProjectKind {
         if let Some((_, kind)) = ALIASES.iter().find(|(alias, _)| *alias == lower) {
             return Some(*kind);
         }
+        INTERNER.read().unwrap_or_else(|e| e.into_inner()).by_id.get(id).map(|&i| Self(i))
+    }
+
+    /// `id`'s handle, interned if it's new: only for what extensions
+    /// declare (`set_extension_kinds`).
+    fn intern(id: &str) -> Option<Self> {
         if !Self::is_well_formed(id) {
             return None;
-        }
-        if let Some(&i) = INTERNER.read().unwrap_or_else(|e| e.into_inner()).by_id.get(id) {
-            return Some(Self(i));
         }
         let mut interner = INTERNER.write().unwrap_or_else(|e| e.into_inner());
         if let Some(&i) = interner.by_id.get(id) {
@@ -380,6 +495,16 @@ impl ProjectKind {
         interner.ids.push(kept);
         interner.by_id.insert(kept, i);
         Some(Self(i))
+    }
+
+    /// `id` as a kind's id: a built-in's or an alias's own id, in any
+    /// case; else the id as written if it's well-formed. What a project
+    /// or a template declares, whether or not anyone knows it.
+    pub fn normalize_id(id: &str) -> Option<String> {
+        if let Some(kind) = Self::from_id(id).filter(|k| k.is_builtin()) {
+            return Some(kind.id().to_string());
+        }
+        Some(id.trim()).filter(|id| Self::is_well_formed(id)).map(str::to_string)
     }
 
     /// Who declares it now: `None` for an id no one does.
@@ -493,7 +618,7 @@ impl<'a> Looks<'a> {
                 return *found;
             }
             looked();
-            let found = self.root.join(marker.replace("{folder}", &self.folder)).is_file();
+            let found = below(self.root, marker, &self.folder).is_some_and(|p| p.is_file());
             self.seen.push((marker, found));
             found
         })
@@ -501,63 +626,81 @@ impl<'a> Looks<'a> {
 }
 
 /// What `root`'s files say it is, whatever its settings declare -- what
-/// the settings page offers as "detect". In this order: Arduino (a
-/// sketch, `library.properties`); Rust, Python, Go; the extensions' kinds,
-/// in theirs; JavaScript, C/C++; Tcl; else Other. The markers extensions
-/// add to Fenix's own kinds count in that kind's place. Nothing is read
-/// but names.
+/// the settings page offers as "detect". Fenix's own first, exactly as
+/// they always were: Arduino (a sketch, `library.properties`), Rust,
+/// Python, Go, JavaScript, C/C++, Tcl. Only a folder none of those name
+/// -- Other -- is looked at for more: the markers extensions add to
+/// Fenix's kinds, in those kinds' order, then the extensions' own kinds,
+/// in theirs. So a pack never changes the kind of a project Fenix
+/// recognises, and a project of Fenix's costs what it did. Nothing is
+/// read but names.
 pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
     if is_remote(root) {
         return ProjectKind::OTHER;
     }
-    let registry = registry();
-    let mut looks = Looks { root, folder: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), seen: Vec::new() };
-    let added = |kind: ProjectKind| &registry.added[kind.0 as usize][..];
     let has = |name: &str| {
         looked();
         root.join(name).exists()
     };
-    let is_file = |name: &str| {
-        looked();
-        root.join(name).is_file()
-    };
     // A sketch: `sketch.yaml`, `{folder}.ino`, `{folder}.pde`.
     (0..3).for_each(|_| looked());
-    if crate::root::is_sketch(root) || is_file("library.properties") || looks.any(added(ProjectKind::ARDUINO)) {
+    looked();
+    if crate::root::is_sketch(root) || root.join("library.properties").is_file() {
         return ProjectKind::ARDUINO;
     }
-    if has("Cargo.toml") || looks.any(added(ProjectKind::RUST)) {
+    if has("Cargo.toml") {
         return ProjectKind::RUST;
     }
-    if has("pyproject.toml") || has("setup.py") || has("requirements.txt") || has("uv.lock") || looks.any(added(ProjectKind::PYTHON)) {
+    if has("pyproject.toml") || has("setup.py") || has("requirements.txt") || has("uv.lock") {
         return ProjectKind::PYTHON;
     }
-    if has("go.mod") || looks.any(added(ProjectKind::GO)) {
+    if has("go.mod") {
         return ProjectKind::GO;
     }
-    if let Some(d) = registry.declared.iter().find(|d| looks.any(&d.markers)) {
-        return d.kind;
-    }
-    if has("package.json") || looks.any(added(ProjectKind::NODE)) {
+    if has("package.json") {
         return ProjectKind::NODE;
     }
-    if has("CMakeLists.txt") || looks.any(added(ProjectKind::CPP)) {
+    if has("CMakeLists.txt") {
         return ProjectKind::CPP;
     }
     if has("pkgIndex.tcl") || {
         looked();
         has_extension(root, "tcl")
-    } || looks.any(added(ProjectKind::TCL))
-    {
+    } {
         return ProjectKind::TCL;
     }
-    ProjectKind::OTHER
+    let registry = registry();
+    if registry.markers.is_empty() {
+        return ProjectKind::OTHER;
+    }
+    let mut looks = Looks { root, folder: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), seen: Vec::new() };
+    for kind in [ProjectKind::ARDUINO, ProjectKind::RUST, ProjectKind::PYTHON, ProjectKind::GO, ProjectKind::NODE, ProjectKind::CPP, ProjectKind::TCL] {
+        if looks.any(&registry.added[kind.0 as usize]) {
+            return kind;
+        }
+    }
+    registry.declared.iter().find(|d| looks.any(&d.markers)).map_or(ProjectKind::OTHER, |d| d.kind)
 }
 
 /// `root` joined with `path`, a path below it with `/` between its parts
-/// and `{folder}` for the folder's own name.
-fn below(root: &Path, path: &str, folder: &str) -> PathBuf {
-    path.replace("{folder}", folder).split('/').filter(|part| !part.is_empty()).fold(root.to_path_buf(), |at, part| at.join(part))
+/// and `{folder}` for the folder's own name -- `None` unless every part is
+/// a plain name (`Component::Normal`), so nothing absolute, on another
+/// drive (`C:x`), prefixed or `..` can replace or leave `root`, on any
+/// system.
+fn below(root: &Path, path: &str, folder: &str) -> Option<PathBuf> {
+    let mut at = root.to_path_buf();
+    for part in path.split('/') {
+        if part.contains(':') {
+            return None;
+        }
+        let part = part.replace("{folder}", folder);
+        let mut components = Path::new(&part).components();
+        match (components.next(), components.next()) {
+            (Some(std::path::Component::Normal(name)), None) => at.push(name),
+            _ => return None,
+        }
+    }
+    Some(at)
 }
 
 /// The file a project of `kind` is usually entered through -- a sketch's
@@ -574,7 +717,14 @@ pub fn main_file(root: &Path, kind: ProjectKind) -> Option<PathBuf> {
         found.sort();
         found.into_iter().next()
     };
-    let mut candidates: Vec<PathBuf> = kind.def().map(|d| d.main.iter().map(|m| below(root, m, &name)).collect()).unwrap_or_default();
+    let def = kind.def();
+    let mut candidates: Vec<PathBuf> = def.as_ref().map(|d| d.main.iter().filter_map(|m| below(root, m, &name)).collect()).unwrap_or_default();
+    // An extension's main file is opened only if it's in the project,
+    // links followed: a repository's `config.ru -> ~/.ssh/...` is not.
+    if def.is_some_and(|d| d.extension.is_some()) {
+        let inside = std::fs::canonicalize(root).ok();
+        candidates.retain(|c| inside.as_ref().is_some_and(|r| std::fs::canonicalize(c).is_ok_and(|c| c.starts_with(r))));
+    }
     if kind == ProjectKind::PYTHON {
         // A src-layout package: src/<package>/__init__.py.
         let mut packages: Vec<_> = std::fs::read_dir(root.join("src")).into_iter().flatten().flatten().map(|e| e.path().join("__init__.py")).collect();
@@ -594,9 +744,9 @@ fn has_extension(dir: &Path, extension: &str) -> bool {
 
 /// `[project] kind = ...` from the project's `.fenix/settings.toml` --
 /// or from the `.fenix/project.ini` it used to be kept in, for a project
-/// not opened since -- if present and an id (`ProjectKind::from_id`):
-/// one no installed extension declares is kept, not ignored.
-pub fn declared_kind(root: &Path) -> Option<ProjectKind> {
+/// not opened since -- as written, if it's an id (`normalize_id`), known
+/// or not: what the settings page shows as declared.
+pub fn declared_id(root: &Path) -> Option<String> {
     if is_remote(root) {
         return None;
     }
@@ -604,7 +754,16 @@ pub fn declared_kind(root: &Path) -> Option<ProjectKind> {
         let text = std::fs::read_to_string(root.join(".fenix").join("project.ini")).ok()?;
         ini_value(&text, "project", "kind")
     })?;
-    ProjectKind::from_id(&value)
+    ProjectKind::normalize_id(&value)
+}
+
+/// The kind the project declares, if it's one someone declares now:
+/// Fenix, or a switched-on extension. One no one declares (`kind =
+/// "java"` without the Java pack, a misspelt `pyhton`) is ignored, as
+/// it always was -- detection decides -- and kept on disk as written,
+/// to count again once a pack declaring it is installed.
+pub fn declared_kind(root: &Path) -> Option<ProjectKind> {
+    ProjectKind::from_id(&declared_id(root)?).filter(|k| k.is_declared())
 }
 
 /// One `key = value` from one `[section]` of an INI text -- the same
@@ -755,17 +914,18 @@ mod tests {
         for (alias, kind) in [("py", ProjectKind::PYTHON), ("uv", ProjectKind::PYTHON), ("ino", ProjectKind::ARDUINO), ("sketch", ProjectKind::ARDUINO), ("rs", ProjectKind::RUST), ("c++", ProjectKind::CPP), ("C", ProjectKind::CPP), ("cmake", ProjectKind::CPP), ("js", ProjectKind::NODE), ("TS", ProjectKind::NODE), ("javascript", ProjectKind::NODE), ("typescript", ProjectKind::NODE), (" mib ", ProjectKind::OTHER)] {
             assert_eq!(ProjectKind::from_id(alias), Some(kind), "{alias}");
         }
-        // Any well-formed id is a kind, the same handle each time.
-        let java = ProjectKind::from_id("java").unwrap();
-        assert_eq!(ProjectKind::from_id(" java "), Some(java));
-        assert_eq!(java.id(), "java");
-        assert!(!java.is_builtin() && !java.is_declared());
-        assert_eq!(ProjectKind::from_id("nonsense").map(|k| k.id()), Some("nonsense"));
-        // What isn't an id isn't a kind: case, characters, length.
+        // An id no extension declared is no kind, as before: nothing a
+        // repository or a template says is interned.
+        assert_eq!(ProjectKind::from_id("nonsense"), None);
+        assert_eq!(ProjectKind::from_id("cobol"), None);
+        // ... but it's an id, kept as written.
+        assert_eq!(ProjectKind::normalize_id(" cobol ").as_deref(), Some("cobol"));
+        assert_eq!(ProjectKind::normalize_id("TS").as_deref(), Some("node"));
         for bad in ["", "Java", "1java", "-java", "ja va", "ja.va", "java/x", "é", &"a".repeat(25)] {
             assert_eq!(ProjectKind::from_id(bad), None, "{bad:?}");
+            assert_eq!(ProjectKind::normalize_id(bad), None, "{bad:?}");
         }
-        assert!(ProjectKind::from_id(&"a".repeat(24)).is_some());
+        assert!(ProjectKind::normalize_id(&"a".repeat(24)).is_some());
     }
 
     /// The tags, names and colours Fenix's own have always had.
@@ -785,24 +945,33 @@ mod tests {
         assert_eq!(ProjectKind::known(), ProjectKind::BUILT_IN.to_vec());
     }
 
-    /// `kind = "java"` with nothing declaring Java: kept, by its id, muted.
+    /// `kind = "java"` with nothing declaring Java, or a misspelt
+    /// `pyhton`: kept on disk, ignored for what the project is -- its
+    /// files decide, its tag, main file and checks theirs, as before.
     #[test]
-    fn a_declared_kind_no_one_declares_is_kept_and_shown_by_its_id() {
+    fn a_declared_kind_no_one_declares_is_kept_and_ignored() {
         let _kinds = crate::test_util::kinds_lock();
         let dir = TempDir::new("kind_unknown");
         dir.write("pom.xml", "");
         dir.write(".fenix/settings.toml", "[project]\nkind = \"java\"\n");
-        let kind = detect_kind(dir.path());
-        assert_eq!(kind.id(), "java");
-        assert_eq!((kind.tag(), kind.label(), kind.color()), ("JAVA", "java", KindColor::Muted));
-        assert_eq!(kind.def(), None);
-        assert!(!ProjectKind::known().contains(&kind));
-        assert_eq!(main_file(dir.path(), kind), None);
-        let long = ProjectKind::from_id("my-kind_2").unwrap();
-        assert_eq!(long.tag(), "MY-K");
-        // What isn't an id is ignored, as before: detection decides.
-        dir.write(".fenix/settings.toml", "[project]\nkind = \"Not An Id\"\n");
+        assert_eq!(declared_id(dir.path()).as_deref(), Some("java"));
+        assert_eq!(declared_kind(dir.path()), None);
         assert_eq!(detect_kind(dir.path()), ProjectKind::OTHER);
+        dir.write("pyproject.toml", "");
+        dir.write("main.py", "");
+        dir.write(".fenix/settings.toml", "[project]\nkind = \"pyhton\"\n");
+        assert_eq!(detect_kind(dir.path()), ProjectKind::PYTHON, "a misspelling is ignored, as on master");
+        assert_eq!(main_file(dir.path(), detect_kind(dir.path())), Some(dir.path().join("main.py")));
+        assert_eq!(declared_id(dir.path()).as_deref(), Some("pyhton"));
+        // What isn't an id is ignored, and isn't kept either.
+        dir.write(".fenix/settings.toml", "[project]\nkind = \"Not An Id\"\n");
+        assert_eq!((declared_id(dir.path()), detect_kind(dir.path())), (None, ProjectKind::PYTHON));
+        // Declared by a pack once it's installed: then it counts.
+        dir.write(".fenix/settings.toml", "[project]\nkind = \"pyhton\"\n");
+        set_extension_kinds(vec![kind("pyhton", "acme.pyhton", &[])]);
+        assert_eq!(detect_kind(dir.path()).id(), "pyhton");
+        set_extension_kinds(Vec::new());
+        assert_eq!(detect_kind(dir.path()), ProjectKind::PYTHON);
     }
 
     #[test]
@@ -847,9 +1016,11 @@ mod tests {
         detect_kind(dir.path())
     }
 
-    /// §2.4's order, each tier against the next: declared, Arduino, Rust,
-    /// Python, Go, the extensions' kinds (in their order), Node, C/C++,
-    /// Tcl, Other -- and a Fenix id's added markers in that id's tier.
+    /// §2.4's order: declared; Fenix's own, exactly as on master
+    /// (Arduino, Rust, Python, Go, JavaScript, C/C++, Tcl); only then the
+    /// markers packs add to Fenix's kinds, in those kinds' order; then the
+    /// extensions' kinds, in theirs; else Other. A pack never changes the
+    /// kind of a project Fenix recognises.
     #[test]
     fn kinds_are_detected_in_their_tiers() {
         let _kinds = crate::test_util::kinds_lock();
@@ -865,27 +1036,120 @@ mod tests {
         assert_eq!(detected(&["Cargo.toml", "pyproject.toml", "Gemfile"]), ProjectKind::RUST);
         assert_eq!(detected(&["pyproject.toml", "go.mod", "Gemfile"]), ProjectKind::PYTHON);
         assert_eq!(detected(&["go.mod", "Gemfile"]), ProjectKind::GO);
-        // A Rails app: Ruby with JavaScript in it.
-        assert_eq!(detected(&["Gemfile", "package.json", "config.ru"]), ruby);
-        assert_eq!(detected(&["composer.json", "package.json", "artisan"]), php, "Laravel");
-        assert_eq!(detected(&["Gemfile", "CMakeLists.txt"]), ruby);
-        assert_eq!(detected(&["Gemfile", "main.tcl"]), ruby);
+        // A Rails app stays JavaScript, as it is without the pack (it can
+        // declare kind = "ruby"); a React Native app with a Gemfile too.
+        assert_eq!(detected(&["Gemfile", "package.json", "config.ru"]), ProjectKind::NODE);
+        assert_eq!(detected(&["composer.json", "package.json", "artisan"]), ProjectKind::NODE);
+        assert_eq!(detected(&["Gemfile", "CMakeLists.txt"]), ProjectKind::CPP);
+        assert_eq!(detected(&["Gemfile", "main.tcl"]), ProjectKind::TCL);
+        // What would be Other is the pack's.
         assert_eq!(detected(&["Gemfile"]), ruby);
+        assert_eq!(detected(&["Gemfile", ".projectile"]), ruby);
         // Within the extensions' tier, theirs is the order given.
         assert_eq!(detected(&["Gemfile", "composer.json"]), php);
         assert_eq!(detected(&["package.json", "CMakeLists.txt"]), ProjectKind::NODE);
         assert_eq!(detected(&["CMakeLists.txt", "main.tcl"]), ProjectKind::CPP);
         assert_eq!(detected(&["main.tcl"]), ProjectKind::TCL);
         assert_eq!(detected(&[".projectile"]), ProjectKind::OTHER);
-        // A Fenix id's added markers count in its own tier, not theirs.
+        // A Fenix id's added markers count only where Fenix's own name
+        // nothing, in that kind's place, before the extensions' kinds.
         assert_eq!(detected(&["rust-toolchain.toml", "Gemfile"]), ProjectKind::RUST);
         assert_eq!(detected(&["deno.json"]), ProjectKind::NODE);
-        assert_eq!(detected(&["deno.json", "Gemfile"]), ruby, "JavaScript's added marker is in JavaScript's tier");
-        assert_eq!(detected(&["deno.json", "CMakeLists.txt"]), ProjectKind::NODE);
+        assert_eq!(detected(&["deno.json", "Gemfile"]), ProjectKind::NODE);
+        assert_eq!(detected(&["deno.json", "CMakeLists.txt"]), ProjectKind::CPP, "C/C++'s own marker beats JavaScript's added one");
+        assert_eq!(detected(&["deno.json", "rust-toolchain.toml"]), ProjectKind::RUST, "added markers in Fenix's order");
         // A folder of the name a marker has isn't a marker.
         assert_eq!(detected(&["Gemfile/x"]), ProjectKind::OTHER);
         set_extension_kinds(Vec::new());
         assert_eq!(detected(&["Gemfile", "package.json"]), ProjectKind::NODE, "without the pack, as before");
+        assert_eq!(detected(&["Gemfile"]), ProjectKind::OTHER);
+    }
+
+    /// M1: no pack's kind may name a marker of Fenix's (ignoring case),
+    /// whether its own kind's or one it adds to another of Fenix's: the
+    /// marker is left out, and said. The kind that owns a marker may name
+    /// it, adding nothing.
+    #[test]
+    fn a_pack_never_takes_fenixs_markers() {
+        let _kinds = crate::test_util::kinds_lock();
+        let added = |id: &str, markers: &[&str]| KindDef { name: String::new(), tag: String::new(), ..kind(id, "acme.x", markers) };
+        set_extension_kinds(vec![
+            added("arduino", &["Cargo.toml"]),
+            added("rust", &["package.json", "go.mod", "Cargo.toml", "x.rs-marker"]),
+            kind("deno2", "acme.deno", &["package.json", "cmakelists.txt", ".git", ".PROJECTILE", "{FOLDER}.ino", "deno2.json"]),
+        ]);
+        assert_eq!(detected(&["Cargo.toml"]), ProjectKind::RUST);
+        assert_eq!(detected(&["package.json"]), ProjectKind::NODE);
+        assert_eq!(detected(&["go.mod"]), ProjectKind::GO);
+        assert_eq!(detected(&["CMakeLists.txt"]), ProjectKind::CPP);
+        assert_eq!(ProjectKind::RUST.def().unwrap().markers, ["Cargo.toml", "x.rs-marker"]);
+        assert_eq!(ProjectKind::ARDUINO.def().unwrap().markers.len(), 4, "nothing added");
+        assert_eq!(ProjectKind::from_id("deno2").unwrap().def().unwrap().markers, ["deno2.json"]);
+        let notes = extension_kind_notes();
+        for marker in ["Cargo.toml", "package.json", "go.mod", "cmakelists.txt", ".git", ".PROJECTILE"] {
+            assert!(notes.iter().any(|(_, n)| n.contains(&format!("marker {marker} is Fenix's own"))), "{marker}: {notes:?}");
+        }
+        set_extension_kinds(Vec::new());
+    }
+
+    /// S1: a pack's kind can't pass for one of Fenix's -- its tag or
+    /// name -- nor be named by what can't be seen.
+    #[test]
+    fn a_packs_kind_doesnt_look_like_fenixs() {
+        let _kinds = crate::test_util::kinds_lock();
+        let named = |id: &str, name: &str, tag: &str| KindDef { name: name.into(), tag: tag.into(), ..kind(id, "acme.x", &[]) };
+        set_extension_kinds(vec![named("k1", "Rusty", "RS"), named("k2", " rust ", "RU"), named("k3", "Project", "PR"), named("k4", "\u{200B}", "ZW"), named("k5", "\u{202E}tsuR", "RL"), named("k6", "Fine", "FN")]);
+        assert_eq!(ProjectKind::known().iter().filter(|k| !k.is_builtin()).map(|k| k.id()).collect::<Vec<_>>(), ["k6"]);
+        assert_eq!(extension_kind_notes().len(), 5);
+        assert!(name_is_shown("C and .NET") && !name_is_shown("  ") && !name_is_shown("a\u{FEFF}") && !name_is_shown("\u{2066}x"));
+        set_extension_kinds(Vec::new());
+    }
+
+    /// M2: nothing a kind gives can name a file anywhere but the project:
+    /// no `:` (`C:x` is another drive's on Windows), no device's name, no
+    /// name ending in `.` or a space, and every part joined a plain name.
+    #[test]
+    fn a_kinds_names_stay_in_the_project() {
+        for bad in ["C:evil", "a:b", "CON", "nul", "Aux.txt", "com1.json", "LPT9", "NUL.", "Gemfile.", "x ", "{folder}."] {
+            assert!(!marker_is_a_name(bad), "marker {bad:?}");
+        }
+        for fine in ["CONFIG", "console.toml", "Gemfile", "com10", "a.b", "{folder}.sln"] {
+            assert!(marker_is_a_name(fine), "marker {fine:?}");
+        }
+        for bad in ["C:/Windows/win.ini", "C:x", "src/C:x", "src/CON", "src/a.", "src/a ", "./x", "a//b"] {
+            assert!(!main_is_below(bad), "main {bad:?}");
+        }
+        let root = Path::new("project");
+        assert_eq!(below(root, "src/{folder}/Main.java", "app"), Some(root.join("src").join("app").join("Main.java")));
+        for bad in ["C:x", "/etc/passwd", "..", "a/../b", "a/./b", "src/C:/x"] {
+            assert_eq!(below(root, bad, "app"), None, "{bad:?}");
+        }
+        // Windows only, not checked here: `C:x` and `\\?\` prefixes are
+        // what `Component::Normal` refuses there; on Linux `C:x` is a name,
+        // refused by the `:` rule above.
+    }
+
+    /// An extension's main file is opened only inside the project, links
+    /// followed; Fenix's own main files are as they were.
+    #[cfg(unix)]
+    #[test]
+    fn an_extensions_main_file_doesnt_leave_the_project() {
+        let _kinds = crate::test_util::kinds_lock();
+        let dir = TempDir::new("main_link");
+        let outside = dir.write("secret.txt", "");
+        let project = dir.path().join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("config.ru")).unwrap();
+        set_extension_kinds(vec![KindDef { main: vec!["config.ru".into(), "inside.rb".into()], ..kind("ruby", "fenix.ruby", &["Gemfile"]) }]);
+        let ruby = ProjectKind::from_id("ruby").unwrap();
+        assert_eq!(main_file(&project, ruby), None);
+        dir.write("app/inside.rb", "");
+        assert_eq!(main_file(&project, ruby), Some(project.join("inside.rb")));
+        set_extension_kinds(Vec::new());
+        // A Rust project's src/main.rs linked elsewhere opens, as on master.
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("src").join("main.rs")).unwrap();
+        assert_eq!(main_file(&project, ProjectKind::RUST), Some(project.join("src").join("main.rs")));
     }
 
     /// An extension's kind is named, tagged, coloured and listed as
@@ -979,7 +1243,7 @@ mod tests {
         };
         let dir = TempDir::new("bounded");
         assert!(looked_for(dir.path()) <= 14 + MAX_EXTENSION_MARKERS, "{}", looked_for(dir.path()));
-        let bad = kind("bad", "acme.bad", &["../x", "a/b", "a\\\\b", "*.x", "x?", "[x]", ".fenix", ".FENIX", "{folder}{folder}", "{x}", "", "a\u{7}", &"m".repeat(65), "ok", "ok"]);
+        let bad = kind("bad", "acme.bad", &["../x", "a/b", "a\\\\b", "*.x", "x?", "[x]", ".fenix", ".FENIX", "{folder}{folder}", "{x}", "", "a\u{7}", &"m".repeat(65), "C:x", "CON", "x.", "ok", "ok"]);
         set_extension_kinds(vec![bad]);
         assert_eq!(ProjectKind::from_id("bad").unwrap().def().unwrap().markers, ["ok"]);
         set_extension_kinds(Vec::new());
@@ -1015,50 +1279,67 @@ mod tests {
         assert_eq!(LOOKS.with(|n| n.get()), 14);
     }
 
-    /// How long detection takes with 30 extensions' kinds registered (8
-    /// kinds of 16 markers each, every one distinct: past the bound), for
-    /// a hub of 50 projects and a file in no project.
-    /// `cargo test -p fenix-project --release -- --ignored --nocapture measure`
+    /// The store's packs' declarations (fenix-extensions `kinds/declare`),
+    /// as their manifests have them.
+    const STORE: &[(&str, &str, &[&str])] = &[
+        ("fenix.ada", "ada", &["alire.toml", "{folder}.gpr"]),
+        ("fenix.cpp", "cpp", &["CMakePresets.json", "compile_commands.json", "vcpkg.json", "conanfile.txt", "conanfile.py", ".clangd"]),
+        ("fenix.dart", "dart", &["pubspec.yaml"]),
+        ("fenix.dart", "flutter", &[]),
+        ("fenix.dotnet", "dotnet", &["{folder}.sln", "{folder}.slnx", "{folder}.csproj", "global.json", "Directory.Build.props"]),
+        ("fenix.elixir", "elixir", &["mix.exs"]),
+        ("fenix.haskell", "haskell", &["cabal.project", "stack.yaml", "{folder}.cabal", "package.yaml"]),
+        ("fenix.java", "java", &["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"]),
+        ("fenix.java", "kotlin", &[]),
+        ("fenix.lua", "lua", &[".luarc.json", ".luarc.jsonc", "selene.toml", "stylua.toml", ".stylua.toml", ".luacheckrc", ".busted", "conf.lua"]),
+        ("fenix.ocaml", "ocaml", &["dune-project", "dune-workspace", "{folder}.opam"]),
+        ("fenix.php", "php", &["composer.json", "artisan"]),
+        ("fenix.ruby", "ruby", &["Gemfile", "gems.rb", ".ruby-version", "config.ru"]),
+        ("fenix.swift", "swift", &["Package.swift"]),
+        ("fenix.terraform", "terraform", &["main.tf", "versions.tf", "providers.tf", ".terraform.lock.hcl"]),
+        ("fenix.zig", "zig", &["build.zig", "build.zig.zon"]),
+    ];
+
+    /// What detection costs, in looks at the file system and in time, by
+    /// the kind of folder: with no extension, with the store's packs, and
+    /// with 30 packs of 8 kinds of 16 markers (capped at 256). Fenix's own
+    /// folders cost the same in all three.
+    /// `cargo test -p fenix-project -- --ignored --nocapture measure`
     #[test]
     #[ignore]
-    fn measure_detection_with_thirty_extensions() {
+    fn measure_detection() {
         let _kinds = crate::test_util::kinds_lock();
         let dir = TempDir::new("measure");
-        let hub = dir.path().join("hub");
-        let markers = ["Cargo.toml", "pyproject.toml", "package.json", "go.mod", "CMakeLists.txt", "main.tcl", "Gemfile", ".projectile", "pom.xml", "composer.json"];
-        for i in 0..50 {
-            let project = hub.join(format!("p{i:02}"));
-            std::fs::create_dir_all(project.join("src")).unwrap();
-            std::fs::write(project.join(markers[i % markers.len()]), "").unwrap();
-            std::fs::write(project.join(".projectile"), "").unwrap();
-        }
-        let deep = dir.path().join("a/b/c/d/e/f/g/h");
-        std::fs::create_dir_all(&deep).unwrap();
-        let run = |label: &str| {
-            LOOKS.with(|n| n.set(0));
-            let start = std::time::Instant::now();
-            let found = crate::workspace::subprojects(&hub);
-            let listing = start.elapsed();
-            let looks = LOOKS.with(|n| n.get());
-            let start = std::time::Instant::now();
-            for _ in 0..100 {
-                crate::find_project_root(&deep.join("x.txt"));
-            }
-            let root = start.elapsed() / 100;
-            let start = std::time::Instant::now();
-            for (p, _) in &found {
-                detect_kind(p);
-            }
-            let detect = start.elapsed() / found.len().max(1) as u32;
-            println!("{label}: hub of {} projects listed (subprojects + kinds) in {listing:?}, {looks} looks by detection ({} a project); detect_kind {detect:?} a project; find_project_root for a file in no project 8 folders deep {root:?}", found.len(), looks / found.len().max(1));
-        };
-        set_extension_kinds(Vec::new());
-        run("no extensions");
+        let folders: &[(&str, &[&str])] = &[("Rust", &["Cargo.toml"]), ("Python", &["pyproject.toml"]), ("Node", &["package.json"]), ("C/C++", &["CMakeLists.txt"]), ("Tcl", &["main.tcl"]), ("Ruby (a pack's)", &["Gemfile"]), ("Other", &[".projectile"])];
+        let store: Vec<KindDef> = STORE.iter().map(|(e, id, m)| KindDef { name: format!("{id} kind"), tag: "X".into(), ..kind(id, e, m) }).collect();
         let thirty: Vec<KindDef> = (0..30)
             .flat_map(|e| (0..8).map(move |k| KindDef { markers: (0..16).map(|m| format!("e{e}k{k}m{m}.x")).collect(), ..kind(&format!("e{e}-k{k}"), &format!("acme.e{e:02}"), &[]) }))
             .collect();
-        set_extension_kinds(thirty);
-        run("30 extensions x 8 kinds x 16 markers (capped at 256 markers)");
+        let mut rows = Vec::new();
+        for (label, kinds) in [("none", Vec::new()), ("store's 14 packs", store), ("30 packs, 256 markers", thirty)] {
+            set_extension_kinds(kinds);
+            let mut row = format!("| {label} |");
+            for (name, files) in folders {
+                let folder = dir.path().join(name.replace(['/', ' ', '(', ')', '\''], "_"));
+                std::fs::create_dir_all(&folder).unwrap();
+                for f in files.iter() {
+                    std::fs::write(folder.join(f), "").unwrap();
+                }
+                LOOKS.with(|n| n.set(0));
+                detect_kind_from_files(&folder);
+                let looks = LOOKS.with(|n| n.get());
+                let start = std::time::Instant::now();
+                for _ in 0..200 {
+                    detect_kind_from_files(&folder);
+                }
+                row += &format!(" {looks} / {:.1} µs |", start.elapsed().as_secs_f64() * 1e6 / 200.0);
+            }
+            rows.push(row);
+        }
+        println!("| extensions | {} |", folders.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(" | "));
+        for row in rows {
+            println!("{row}");
+        }
         set_extension_kinds(Vec::new());
     }
 }

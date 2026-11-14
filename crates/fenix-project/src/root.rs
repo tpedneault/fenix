@@ -38,10 +38,15 @@ pub(crate) fn holds_pack_marker(dir: &Path) -> bool {
 }
 
 /// Whether `dir` holds one of `contexts`' or `kinds`' markers (`{folder}`
-/// is its own name).
+/// is its own name). A context's marker that isn't a plain file name is
+/// never looked for: it would leave `dir`.
 fn holds_one_of(dir: &Path, contexts: &[String], kinds: &[String]) -> bool {
     let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    contexts.iter().chain(kinds.iter().filter(|k| !contexts.contains(k))).any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
+    contexts.iter().chain(kinds.iter().filter(|k| !contexts.contains(k))).any(|m| {
+        let name = m.replace("{folder}", &folder);
+        let mut parts = Path::new(&name).components();
+        matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None)) && !m.contains(':') && dir.join(&name).is_file()
+    })
 }
 
 /// Walks up from `start` (a file or a directory -- a file's own directory
@@ -54,6 +59,19 @@ fn holds_one_of(dir: &Path, contexts: &[String], kinds: &[String]) -> bool {
 /// kinds' (`set_extension_kinds`) -- never nearer than one of Fenix's, so
 /// a kind's marker in a repository doesn't make a project of its own.
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
+    find_project_root_below(start, dirs::home_dir().as_deref())
+}
+
+/// Whether an extension's marker may make `dir` a project's top: never
+/// the home folder (`home`), a folder above it, or a file system's root
+/// -- a dotfile there (`~/.ruby-version`) would make every loose file
+/// under it one project. Fenix's own markers aren't held to this.
+fn pack_may_root(dir: &Path, home: Option<&Path>) -> bool {
+    dir.parent().is_some() && !home.is_some_and(|home| home.starts_with(dir))
+}
+
+/// `find_project_root`, with `home` as the home folder.
+fn find_project_root_below(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let first = if start.is_dir() { start } else { start.parent()? };
     let found = first.ancestors().find(|dir| {
         dir.join(".fenix/tools.json").is_file()
@@ -66,7 +84,7 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
         return found.map(Path::to_path_buf);
     }
     let markers = EXTENSION_MARKERS.read().unwrap_or_else(|e| e.into_inner());
-    crate::kind::with_kind_markers(|kinds| first.ancestors().find(|dir| holds_one_of(dir, &markers, kinds)).map(Path::to_path_buf))
+    crate::kind::with_kind_markers(|kinds| first.ancestors().find(|dir| pack_may_root(dir, home) && holds_one_of(dir, &markers, kinds)).map(Path::to_path_buf))
 }
 
 #[cfg(test)]
@@ -176,6 +194,46 @@ mod tests {
         crate::set_extension_kinds(Vec::new());
         fs::remove_dir_all(dir.path().join(".git")).unwrap();
         assert!(!holds_pack_marker(&app));
+    }
+
+    /// No extension's marker -- a kind's or a context's -- makes the home
+    /// folder, a folder above it or a file system's root a project; Fenix's
+    /// own markers do, as they always did.
+    #[test]
+    fn a_packs_marker_never_makes_home_a_project() {
+        let _kinds = crate::test_util::kinds_lock();
+        set_extension_markers(vec![".ruby-version".into()]);
+        crate::set_extension_kinds(vec![crate::KindDef {
+            id: "lua".into(),
+            name: "Lua".into(),
+            tag: "LUA".into(),
+            color: crate::KindColor::DEFAULT,
+            markers: vec![".luarc.json".into()],
+            main: Vec::new(),
+            extension: Some("acme.lua".into()),
+        }]);
+        let dir = TempDir::new("home_marker");
+        let home = dir.path().join("home").join("me");
+        let loose = home.join("notes").join("today");
+        fs::create_dir_all(&loose).unwrap();
+        for marker in [".ruby-version", ".luarc.json"] {
+            fs::write(home.join(marker), b"").unwrap();
+            assert_eq!(find_project_root_below(&loose.join("a.md"), Some(&home)), None, "{marker} in home");
+            fs::write(dir.path().join("home").join(marker), b"").unwrap();
+            assert_eq!(find_project_root_below(&loose.join("a.md"), Some(&home)), None, "{marker} above home");
+            // Below home, a pack's marker is a project's top as before.
+            fs::write(home.join("notes").join(marker), b"").unwrap();
+            assert_eq!(find_project_root_below(&loose.join("a.md"), Some(&home)), Some(home.join("notes")));
+            for f in [home.join(marker), dir.path().join("home").join(marker), home.join("notes").join(marker)] {
+                fs::remove_file(f).unwrap();
+            }
+        }
+        assert!(!pack_may_root(Path::new("/"), None), "a file system's root");
+        // Fenix's own markers are what they were: home with a .git is a project.
+        fs::create_dir_all(home.join(".git")).unwrap();
+        assert_eq!(find_project_root_below(&loose.join("a.md"), Some(&home)), Some(home.clone()));
+        set_extension_markers(Vec::new());
+        crate::set_extension_kinds(Vec::new());
     }
 
     #[test]

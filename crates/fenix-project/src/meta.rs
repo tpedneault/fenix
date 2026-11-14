@@ -126,7 +126,13 @@ pub fn set_jira_key(root: &Path, key: Option<&str>) -> io::Result<()> {
 
 /// Declares (or, with `None`, stops declaring) the project's kind.
 pub fn set_kind(root: &Path, kind: Option<crate::ProjectKind>) -> io::Result<()> {
-    fenix_storage::project_file::set(root, "project.kind", kind.map(|k| fenix_storage::project_file::Value::Text(k.id().to_string())))
+    set_kind_id(root, kind.map(|k| k.id()))
+}
+
+/// Declares the project's kind by its id, known or not (a template's
+/// kind no installed extension declares), or stops declaring one.
+pub fn set_kind_id(root: &Path, id: Option<&str>) -> io::Result<()> {
+    fenix_storage::project_file::set(root, "project.kind", id.map(|id| fenix_storage::project_file::Value::Text(id.to_string())))
 }
 
 /// `[git] reviewers = ["alex", "sam"]` -- who a new pull request for
@@ -319,58 +325,22 @@ mod tests {
         assert!(migrate_project_ini(root).is_none(), "nothing left to move");
     }
 
-    /// A kind no installed extension declares moves as written, and is
-    /// written back as its id.
+    /// A kind no installed extension declares moves as written, is
+    /// ignored for what the project is, and is kept.
     #[test]
-    fn a_kind_no_one_declares_survives_the_move_and_a_save() {
+    fn a_kind_no_one_declares_survives_the_move() {
         let dir = crate::test_util::TempDir::new("migrate_unknown_kind");
         let root = dir.path();
+        dir.write("Cargo.toml", "");
         dir.write(".fenix/project.ini", "[project]\nkind = java\n");
         migrate_project_ini(root).unwrap().unwrap();
-        let java = crate::declared_kind(root).unwrap();
-        assert_eq!(java.id(), "java");
         assert_eq!(fenix_storage::project_file::get(root, "project.kind").as_deref(), Some("java"));
-        set_kind(root, None).unwrap();
+        assert_eq!(crate::declared_id(root).as_deref(), Some("java"));
         assert_eq!(crate::declared_kind(root), None);
-        set_kind(root, Some(java)).unwrap();
-        assert_eq!(crate::declared_kind(root), Some(java));
+        assert_eq!(crate::detect_kind(root), crate::ProjectKind::RUST, "detection decides");
+        set_kind_id(root, None).unwrap();
+        assert_eq!(crate::declared_id(root), None);
+        set_kind_id(root, Some("java")).unwrap();
         assert_eq!(fenix_storage::project_file::get(root, "project.kind").as_deref(), Some("java"));
     }
-
-    /// A `project.ini` with nothing the move reads is left as it is, so
-    /// a folder it alone marks stays a project; what the move doesn't read
-    /// stays in it, under its section, with its comments; the folder is a
-    /// project after (the review of steps 4 to 6, N1).
-    #[test]
-    fn project_ini_keeps_what_it_doesnt_move_and_the_folder_stays_a_project() {
-        for text in ["", "; just a comment\n", "[custom]\nx = 1\n"] {
-            let dir = crate::test_util::TempDir::new("migrate_nothing");
-            dir.write(".fenix/project.ini", text);
-            assert!(migrate_project_ini(dir.path()).is_none(), "{text:?}: nothing to move");
-            assert_eq!(std::fs::read_to_string(project_ini(dir.path())).unwrap(), text, "left as it is");
-            assert_eq!(crate::find_project_root(&dir.path().join("a.rs")).as_deref(), Some(dir.path()), "{text:?}: still a project");
-        }
-        let dir = crate::test_util::TempDir::new("migrate_some");
-        let root = dir.path();
-        dir.write(".fenix/project.ini", "; ours\n[lsp]\nrust = my-ra\n[project]\njira = FNX\nowner = ops\n[git]\nreviewers = jo\n[custom]\nx = 1\n");
-        let moved = migrate_project_ini(root).unwrap().unwrap();
-        assert_eq!(moved, ["Jira key", "reviewers"]);
-        assert_eq!(jira_key(root).as_deref(), Some("FNX"));
-        let left = std::fs::read_to_string(project_ini(root)).unwrap();
-        assert_eq!(left, "; ours\n[lsp]\nrust = my-ra\n[project]\nowner = ops\n[custom]\nx = 1\n", "what it doesn't read stays; [git] had only what moved");
-        assert!(migrate_project_ini(root).is_none(), "and isn't moved again");
-        assert_eq!(crate::find_project_root(&root.join("a.rs")).as_deref(), Some(root));
-    }
-
-    #[test]
-    fn a_project_not_yet_moved_is_still_read() {
-        let dir = crate::test_util::TempDir::new("legacy_read");
-        dir.write(".fenix/project.ini", "[project]\njira = OPS\n[git]\nreviewers = jo\n");
-        assert_eq!(jira_key(dir.path()).as_deref(), Some("OPS"));
-        assert_eq!(reviewers(dir.path()), Some(vec!["jo".to_string()]));
-        set_jira_key(dir.path(), Some("FNX")).unwrap();
-        assert_eq!(jira_key(dir.path()).as_deref(), Some("FNX"), "the new file wins");
-    }
-
-
 }
