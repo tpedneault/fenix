@@ -476,35 +476,53 @@ main = ["src/main/java/Main.java"]
 - **Detection** is a file existing at the project's top, nothing more:
   no code of the extension runs, and no file is opened (a kind that
   can't be told from names, Flutter's, is declared by the project). A
-  project's kind is the one it declares (`[project] kind`), else the
-  first of: an Arduino sketch, Rust, Python, Go, the extensions' kinds
-  (the machine's extensions first, then yours, each by id; each one's in
-  its order), JavaScript, C/C++, Tcl, else Other. So a Rails app with a
-  `package.json` is Ruby once the Ruby pack is installed.
+  project's kind is the one it declares (`[project] kind`), else Fenix's
+  own detection exactly as without packs -- an Arduino sketch, Rust,
+  Python, Go, JavaScript, C/C++, Tcl -- and only for a folder none of
+  those name: the markers packs add to Fenix's kinds, in that order,
+  then the packs' own kinds (the machine's extensions first, then
+  yours, each by id; each one's in its order), else Other. A pack never
+  changes the kind of a project Fenix recognises: a Rails app with a
+  `package.json` stays JavaScript unless it declares `kind = "ruby"`.
 - **Markers** are file names at the top: at most 16, each 1 to 64 bytes,
-  no `/`, `\`, `..`, `*`, `?`, `[`, `]` or control character, not `.fenix`
-  in any case. `{folder}` (at most once, no other braces) is the
-  folder's own name: `{folder}.csproj`. A kind with none is only ever
-  declared (Kotlin: its projects' files are Java's). A kind's markers
-  also find a project's top where nothing of Fenix's is above it, as a
-  context's do -- never inside a repository, where the repository is
-  the project.
+  no `/`, `\`, `:`, `..`, `*`, `?`, `[`, `]` or control character, not
+  ending in `.` or a space, not a Windows device's name (`CON`, `PRN`,
+  `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an
+  extension), not `.fenix` in any case. `{folder}` (at most once, no
+  other braces) is the folder's own name: `{folder}.csproj`. One of
+  Fenix's own markers (`Cargo.toml`, `pyproject.toml`, `setup.py`,
+  `requirements.txt`, `uv.lock`, `go.mod`, `package.json`,
+  `CMakeLists.txt`, `library.properties`, `sketch.yaml`, `{folder}.ino`,
+  `{folder}.pde`, `pkgIndex.tcl`, `.git`, `.projectile`, in any case) is
+  left out, and said. A kind with none is only ever declared (Kotlin:
+  its projects' files are Java's). A kind's markers also find a
+  project's top where nothing of Fenix's is above it, as a context's do
+  -- never inside a repository, where the repository is the project, and
+  never your home folder, a folder above it or a drive's root.
 - **`main`**: at most 8 paths below the project, `/` between parts, none
-  empty or `..`, `{folder}` allowed: what opening the project lands on
-  when you've had none of it open, the first that exists.
+  empty, `..`, with a `:`, a device's name or ending in `.` or a space;
+  `{folder}` allowed: what opening the project lands on when you've had
+  none of it open, the first that exists -- and only if it's inside the
+  project once links are followed.
 - **`id`**: 1 to 24 characters, `a-z` first, then `a-z 0-9 - _`. Not
   `other`, `monorepo`, or another name Fenix reads as one of its own
   (`py`, `uv`, `ino`, `sketch`, `rs`, `c++`, `c`, `cmake`, `js`, `ts`,
   `javascript`, `typescript`, `mib`). One of Fenix's ids (`python`,
   `arduino`, `rust`, `tcl`, `cpp`, `node`, `go`) adds its markers to
-  Fenix's kind, in that kind's place, and nothing else: its `name`,
-  `tag`, `color` and `main` are ignored, and the Extensions page says
-  so. Several packs may add markers to one of Fenix's.
-- **`name`**: 1 to 32 characters, at least one visible, no control
-  character. **`tag`**: 1 to 4 of `A-Z 0-9 + # .`, at least one letter.
-  **`color`**: `keyword`, `string`, `function`, `type`, `number`,
-  `constant`, `attribute` or `variable` -- the theme's own syntax
-  colours, so a tag reads on every theme.
+  Fenix's kind, counted only where Fenix's own markers name nothing, and
+  nothing else: its `name`, `tag`, `color` and `main` are ignored, and
+  the Extensions page says so. Several packs may add markers to one of
+  Fenix's.
+- **`name`**: 1 to 32 characters, at least one neither whitespace nor
+  invisible, none invisible (control characters, Unicode's format
+  characters: zero-width spaces and joiners, bidirectional controls,
+  the byte-order mark), and not one of Fenix's kinds' names (Python,
+  Arduino, Rust, Tcl, C/C++, JavaScript, Go, Monorepo, Project, in any
+  case). **`tag`**: 1 to 4 of `A-Z 0-9 + # .`, at least one letter, not
+  one of Fenix's (`PY`, `INO`, `RS`, `TCL`, `C++`, `JS`, `GO`, `MONO`,
+  `DIR`). **`color`**: `keyword`, `string`, `function`, `type`,
+  `number`, `constant`, `attribute` or `variable` -- the theme's own
+  syntax colours, so a tag reads on every theme.
 - At most 8 kinds to an extension. A kind that breaks a rule is left
   out, and its extension's details on the Extensions page say which
   and why; the extension loads as before. An id another extension
@@ -514,9 +532,13 @@ main = ["src/main/java/Main.java"]
 - **No API**: Fenix reads the section, the extension's code never does.
   A pack declaring kinds keeps `api = "1.5"`, and Fenix 1.5 and earlier
   ignore the section. A template naming the pack's kind, though, is
-  refused by Fenix 1.5: such a pack needs `fenix = ">=1.6"`.
-- A project that declares a kind no installed extension knows keeps it:
-  it's shown by its id (`JAVA`), muted, until the pack is installed.
+  refused by Fenix 1.5: such a pack needs `fenix = ">=1.6"`. A project
+  made from a template naming a kind that isn't Fenix's declares it in
+  its `.fenix/settings.toml`, unless its files already make it that
+  kind.
+- A project that declares a kind no installed extension knows keeps the
+  declaration as written, and is otherwise what its files make it,
+  until a pack declaring that kind is installed.
 
 A launch file is one configuration, offered by `SPC u u` in a project
 that has no launch configuration of its own (`.fenix/tools.json`'s

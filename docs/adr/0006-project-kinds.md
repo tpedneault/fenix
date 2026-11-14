@@ -52,12 +52,19 @@ An older Fenix ignores a `[contributes]` section it doesn't know:
    ids; then only its markers count, added to Fenix's kind.
 4. **Detection runs no extension code and reads no file's contents**:
    one existence check per marker at a root. The order: declared, then
-   Arduino, then Rust, Python, Go, then the extensions' kinds, then Node,
-   C/C++, Tcl, Other. A kind's markers also find a project's top as the
-   packs' context markers do, under the same rule.
-5. **A declared kind no one declares is kept**: loaded, shown by its id
-   in a muted tag, never rewritten, and named again when its pack is
-   installed. A template may name any well-formed id.
+   Fenix's own detection exactly as before (Arduino, Rust, Python, Go,
+   Node, C/C++, Tcl), then -- only where that says Other -- the markers
+   packs add to Fenix's kinds, then the extensions' kinds, then Other.
+   Installing a pack never changes the kind of a project Fenix
+   recognises; no pack may name Fenix's markers, tags or kind names. A
+   kind's markers also find a project's top as the packs' context
+   markers do, under the same rule, and never the home folder, one above
+   it or a file system's root.
+5. **A declared kind no one declares is kept, and ignored**: never
+   rewritten or lost, but the project is what its files make it until a
+   pack declaring that kind is installed. Nothing a repository says is
+   interned. A template may name any well-formed id; the project made
+   from it declares it.
 6. **No extension API change.** The section is read by Fenix, not the
    extension's code; it needs no `api = "1.6"`, and a pack can ship it
    to Fenix 1.5, which ignores it. The WIT doesn't change: a project's
@@ -94,8 +101,9 @@ An older Fenix ignores a `[contributes]` section it doesn't know:
 - A Java, .NET, Ruby ... project is named as Fenix's own are once its
   pack is installed, and a teammate without the pack sees its declared
   kind by name.
-- Some projects change tag when packs are installed: a Rails or Laravel
-  app with a `package.json` becomes Ruby or PHP rather than `JS`.
+- Only projects Fenix calls `DIR` change tag when packs are installed: a
+  Rails or Laravel app with a `package.json` stays `JS` unless it
+  declares its kind. (Revised in review; the plan's §13.3.)
 - Packs whose templates name their own kind need Fenix 1.6, since 1.5
   refuses such a template; the registry keeps 1.5 users on their
   previous release.

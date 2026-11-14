@@ -55,10 +55,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   With the Java pack installed a Maven project is `JAVA` in the hub, on
   Home, in the modeline, the doctor and the settings page, as a Rust one
   is `RS`; installed, updated, switched off or removed, the tags follow
-  without a restart. A pack's kinds come after Rust, Python and Go and
-  before JavaScript, C/C++ and Tcl, so a Rails or Laravel app with a
-  `package.json` is Ruby or PHP rather than JavaScript. A pack may add
-  markers to one of Fenix's own kinds (`deno.json` to JavaScript).
+  without a restart. A pack's kind names only a project Fenix would call
+  a plain `DIR`: one Fenix recognises itself (a Rails app with a
+  `package.json` is JavaScript) keeps its kind with any pack installed,
+  and declares `kind = "ruby"` if it wants the pack's. A pack may add
+  markers to one of Fenix's own kinds (`deno.json` to JavaScript), for
+  folders Fenix's own markers don't name. No pack may claim one of
+  Fenix's markers, tags or kind names, and none of a pack's markers makes
+  your home folder, a folder above it or a drive's root a project --
+  nor, now, does a pack's context marker.
   Detection only looks at which files exist -- no extension code runs,
   no file is read -- and a project on another machine is never looked
   at. The section needs no extension API: Fenix 1.5 ignores it. An
@@ -172,12 +177,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   extension finds MIB folders inside a project by itself, list yours in
   the project's `mib.roots` (`SPC k ,`).
 - A project's declared kind that Fenix doesn't know (`kind = "java"` in
-  `.fenix/settings.toml`) is kept rather than ignored: the project is
-  shown by that id, muted (`JAVA`), the hub can filter on it, and the
-  settings page's kind cycler starts on it -- it no longer writes the
-  first of Fenix's kinds over it at the first key. A template may name
-  any kind id the same way; only one that isn't an id (`a-z` first, then
-  `a-z 0-9 - _`, at most 24) is refused.
+  `.fenix/settings.toml` without the Java pack) is still ignored for
+  what the project is, but never lost: the settings page shows it, and
+  moving through the kinds with `h` and `l` no longer writes the first
+  of Fenix's kinds over it -- nothing is written until Enter picks a
+  kind. Once a pack declaring it is installed, it counts. A template may
+  name any kind id; a project made from one naming a kind that isn't
+  Fenix's declares it. Only a template whose kind isn't an id (`a-z`
+  first, then `a-z 0-9 - _`, at most 24) is refused.
 - The new-project wizard lists "Start from" last, after the groups of
   extensions' templates. Home leaves five cells for a project's kind, so
   a four-letter tag (`MONO`) no longer touches its name.

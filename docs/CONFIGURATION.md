@@ -96,8 +96,11 @@ comes from you, or is the default, `Enter` sets one for the project and
 the rest of what's the project's own: its kind, group, pin and Jira key,
 and its tasks, language servers and debug launch (`.fenix/tools.json`).
 The kind (`[project] kind`) is one of Fenix's (`python`, `rust`, `node`,
-`monorepo`, ...) or any an extension declares (`java`); one no installed
-extension knows is kept as written and shown by its id.
+`monorepo`, ...) or any an extension declares (`java`). One no installed
+extension declares is kept as written but ignored -- the project is what
+its files make it -- until one does; the settings page shows it, and
+moving through the kinds with `h` and `l` writes nothing over it until
+Enter picks one.
 `p` switches the page between yours and the project's.
 
 **A project's programs wait for you.** `.fenix/tools.json` names

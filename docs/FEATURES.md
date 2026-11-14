@@ -555,8 +555,7 @@ its extension. The rest is built into Fenix.
 - **Project hub** (`SPC p p`): every known project with its kind tag,
   branch, uncommitted changes and a health dot, pinned ones first, then
   by group. Typing filters (a folder path typed in adds it), `Tab`
-  filters by kind (the extensions' kinds and those no one knows
-  included), and the right column previews the selected project's
+  filters by kind (the extensions' kinds included), and the right column previews the selected project's
   health, git state, linked Jira work and tasks. `Enter` opens it, `P`
   pins, `g` sets its group, `d d` removes it from the list (the folder
   is untouched), `c` creates a new one, `h` and `,` open its doctor and
@@ -627,15 +626,16 @@ its extension. The rest is built into Fenix.
 - **Project identity**: every project has a kind (Python, Arduino, Rust,
   Tcl, ...), detected from its files or declared as `[project]
   kind = "..."` in `.fenix/settings.toml`. Language packs add kinds of
-  their own (`[[contributes.project_kinds]]`): with the Java pack
-  installed a Maven project is `JAVA`, a Rails app with a `package.json`
-  is Ruby rather than JavaScript, and they come and go as packs are
-  installed, switched off or removed, without a restart. Its tag, one to
-  four characters, leads the modeline (`PY orbit-tools · decoder.py`) and
+  their own (`[[contributes.project_kinds]]`) for what Fenix doesn't
+  recognise: with the Java pack installed a Maven project is `JAVA`
+  rather than `DIR`, and kinds come and go as packs are installed,
+  switched off or removed, without a restart. A pack never changes the
+  kind of a project Fenix recognises itself. Its tag, one to four
+  characters, leads the modeline (`PY orbit-tools · decoder.py`) and
   Home's project rows (with the doctor's health dot), and the window is
   titled after the project. A declared kind no installed extension knows
-  (`kind = "java"` without the Java pack) is kept: shown by its id,
-  muted, never written over.
+  (`kind = "java"` without the Java pack) is kept as written, and the
+  project is what its files make it until the pack is installed.
 - **Files changing on disk**: every open file is checked against what's
   actually on disk a couple of times a second, and whenever the window
   regains focus. Both are needed -- focus catches editing in another

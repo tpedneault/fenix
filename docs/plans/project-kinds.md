@@ -1,7 +1,8 @@
 # Plan: project kinds from extensions
 
 - **Status:** steps 1 and 2 built, 14 November 2026, on `kinds/impl`
-  (not merged), for the maintainer to review. Recorded in
+  (not merged), reviewed, and the review's findings and three decisions
+  (§2.4, §2.6, §5; §13.3) built; for the maintainer to review. Recorded in
   [ADR 0006](../adr/0006-project-kinds.md). §13 says what was built
   differently from this plan; §6.2 states the rules as built, which the
   store's `xtask validate` holds packs to.
@@ -189,7 +190,8 @@ impl ProjectKind {
     pub const GO: Self; pub const MONOREPO: Self; pub const OTHER: Self;
 
     pub fn id(self) -> &'static str;
-    /// A built-in id or alias; else any well-formed id (§6.2), interned.
+    /// A built-in id or alias; else an id an extension has declared
+    /// (as built: nothing a repository says is interned, §2.6).
     pub fn from_id(id: &str) -> Option<Self>;
     /// Who declares it now: `None` for an id no one does (§2.6).
     pub fn def(self) -> Option<KindDef>;
@@ -247,31 +249,34 @@ same fallback rule (§1.1).
 
 ### 2.4 Which kind wins
 
-A root has one kind:
+**Revised in review (Decision A, replacing Q4's (a)):** installing a pack
+must never change the kind of a project Fenix recognises today. A root
+has one kind:
 
-1. **Declared** (`[project] kind`), whoever declares that id, or no one
-   (§2.6).
-2. **Arduino**: a sketch (`root.rs:14-21`) or `library.properties`. As
-   today: a sketch lives inside anything.
-3. **Rust, Python, Go**, in that order, as today.
+1. **Declared** (`[project] kind`), when someone declares that id now --
+   Fenix or a switched-on extension (§2.6).
+2. **Fenix's own detection, exactly as on master**: Arduino (a sketch,
+   `root.rs:14-21`, or `library.properties`), Rust, Python, Go, Node,
+   C/C++, Tcl (`pkgIndex.tcl`, any `*.tcl` at the top) -- the same
+   lookups in the same order, stopping at the first.
+3. Only for a folder none of those name: **the markers packs add to
+   Fenix's kinds**, in Fenix's order (Arduino's, Rust's, ... Tcl's).
 4. **The extensions' kinds**, in the extensions' order -- the machine's
    (managed) first, then yours, each by id -- and within one extension
    in the order it lists them.
-5. **Node, C/C++**, as today.
-6. **Tcl** (`pkgIndex.tcl`, any `*.tcl` at the top).
-7. **Other**.
+5. **Other**.
 
-Why extensions go between Go and Node: `package.json` and
-`CMakeLists.txt` are the files most often there for something else. A
-Rails app has `Gemfile` and `package.json` at its top, a Laravel app
-`composer.json` and `package.json`, an ASP.NET app with a front end
-`{folder}.csproj` and `package.json`: each is a Ruby, PHP or .NET
-project with JavaScript in it, and today all three are `JS`. `Cargo.toml`,
-`pyproject.toml` and `go.mod` don't sit beside another language's
-manifest unless that language is the guest. Tcl's rule is the weakest
-there is (one `*.tcl` file), so it stays last. The order is in one
-function, `detect_kind_from_files`, and a test pins each tier against
-the next (§11, step 2).
+So an extension's kind only ever names a project that would otherwise be
+Other. As first planned, packs' kinds sat between Go and Node, so that a
+Rails app (`Gemfile` and `package.json`) would be Ruby; the review
+showed the cost: a React Native app (`package.json` and a CocoaPods
+`Gemfile`), any JavaScript app with a fastlane `Gemfile`, `package.json`
+beside `main.tf` or `.luarc.json`, all stopped being JavaScript once a
+pack was installed. A Rails or Laravel app now stays `JS` as it is
+today, and declares `kind = "ruby"` to be the pack's. It also means a
+project of Fenix's costs exactly the lookups it did (§5). The order is
+in one function, `detect_kind_from_files`, and a test pins each tier
+against the next.
 
 Within the extensions' tier, the order is fixed but arbitrary (by id),
 so two packs claiming one marker give the same answer on every machine.
@@ -281,17 +286,21 @@ project that disagrees declares its kind.
 **The same id from two extensions**: the first in that order is the
 kind; the other's declaration of it is ignored, and the Extensions
 page's details for it say so ("its kind `java` is fenix.java's"). Two
-kinds may share a tag; Fenix doesn't refuse it, the store does (Q2).
+packs' kinds may share a tag; Fenix doesn't refuse it, the store does
+(Q2). No pack's kind may take one of **Fenix's** tags or names (§6.2).
 
-**The same id as a built-in** (a pack declaring `rust`): the built-in
-stays -- its tier, its tag, name, colour and main files -- and the
-pack's **markers are added** to it. That lets the Web pack say
+**The same id as a built-in** (a pack declaring `node`): the built-in
+stays -- its tag, name, colour and main files -- and the pack's
+**markers are added** to it, counted in step 3 above: only where none of
+Fenix's own markers names the folder. That lets the Web pack say
 `deno.json` and `tsconfig.json` are JavaScript projects and the C/C++
 pack that `compile_commands.json`, `vcpkg.json` and `conanfile.txt` are
 C/C++ ones, without either of them changing what a Rust or Node project
-looks like when the pack is installed or not. A built-in's presentation
-fields in a pack's declaration are refused by `xtask` and ignored by
-Fenix (§6.2).
+looks like when the pack is installed or not. No pack may name one of
+Fenix's own markers, for its own kind or another built-in's (M1, §6.2):
+`{id = "arduino", markers = ["Cargo.toml"]}` would otherwise have made
+every Rust project Arduino. A built-in's presentation fields in a pack's
+declaration are refused by `xtask` and ignored by Fenix (§6.2).
 
 **The MIB branch.** It maps `kind = "mib"` to Other (`from_id`, the
 branch's `kind.rs:66-68`) and says so in the changelog ("shown as a
@@ -321,28 +330,36 @@ plain foreground; Other stays the gutter's muted colour.
 
 ### 2.6 A declared kind no one declares
 
-`kind = "java"` in a project where no installed extension declares
-`java` -- a teammate without the pack, safe mode, the pack switched off:
+**Revised in review (Decision B):** `kind = "java"` in a project where no
+installed extension declares `java` -- a teammate without the pack, safe
+mode, the pack switched off -- or a misspelt `kind = "pyhton"`:
 
-- **Loads**: `declared_kind` returns the interned id (§2.2) instead of
-  `None`. Only a value that isn't a well-formed id (§6.2) is ignored, as
-  any unknown value is today.
-- **Shows** its id as its tag, upper-cased and cut to four (`JAVA`), in
-  the muted colour Other uses, so it reads as "known by name only"; its
-  name is the id, and the settings page's row says `java -- no installed
-  extension knows this kind`. The doctor runs no kind checks for it; the
-  hub's filter has it as its own entry.
-- **Isn't rewritten**: nothing writes `project.kind` but the settings
-  page's cycler (`app/pages.rs:1827-1833`, `meta.rs:128-130`). Today the
-  cycler can't see an unknown declaration (`declared` is `None`), so one
-  `l` writes the first built-in over it. With the id kept, the cycler's
-  list is `detect`, the known kinds, and the declared one if it isn't
-  among them, so it's where the cycle starts and only a deliberate
-  change moves off it.
-- **Isn't lost** by the `project.ini` move, which already copies the
-  value as written (`meta.rs:217-219`).
-- **Comes back to life** when the pack is installed: `def()` answers
-  again (§7.2).
+- **Is ignored for what the project is**, exactly as on master: the
+  project's kind, tag, colour, main file and doctor checks are what its
+  files make it. First planned was to show it by its id, muted; the
+  review showed that a misspelling then turned a Python project into
+  `PYHT`, with no main file and none of Python's checks, with no
+  extension involved.
+- **Is kept**: never rewritten or lost. `declared_id` reads it as
+  written (any well-formed id); `declared_kind` answers only for an id
+  someone declares now. Nothing writes `project.kind` but the settings
+  page's cycler, and while the declared id is one no one knows, the
+  cycler's `h` and `l` only move among the choices (`detect`, the known
+  kinds, then the kept id, where it starts); Enter on a kind writes that
+  kind; Enter on `detect` or on the kept id writes nothing. Reopening
+  the page finds it again.
+- **Isn't interned**: no id a repository's settings, a template or
+  anything else a repository controls says is ever interned (§2.2); an
+  unknown declared id is carried as text where it's needed (the
+  settings page's model). Only Fenix's ids and those switched-on
+  extensions declare are, bounded by §6.2's totals.
+- **Isn't lost** by the `project.ini` move, which copies the value as
+  written (`meta.rs:217-219`).
+- **Counts** once a pack declaring it is installed (§7.2).
+
+A template naming such a kind loads (shown as Other), and the project
+made from it declares that id in its `.fenix/settings.toml` -- unless
+its files already make it that kind, or it declares one itself.
 
 ## 3. Fenix's own kinds
 
@@ -430,9 +447,23 @@ separate cleanup, not a kinds question.
   what they do today: a folder listing for Tcl and sketches; core's
   `.fenix/settings.toml` read for the declaration.
 - **Bounded markers** (§6.2): at most 16 per kind and 8 kinds per
-  extension; a marker is a file name -- no `/`, `\`, `..`, wildcards --
-  of at most 64 bytes, with `{folder}` at most once. That rules out a
-  pack asking Fenix to look anywhere but the root.
+  extension, 256 kinds and 256 distinct markers from all extensions; a
+  marker is a file name -- no `/`, `\`, `:`, `..`, wildcards, no
+  device's name, not ending in `.` or a space -- of at most 64 bytes,
+  with `{folder}` at most once. Every marker and `main` part is joined to
+  the root only as a plain name (`Component::Normal`), so nothing
+  absolute, on another drive (`C:x` on Windows), prefixed or `..` can
+  replace or leave the root, whatever a validator misses. A pack's
+  `main` file is opened only if it is inside the project once links are
+  followed.
+- **Fenix's own projects cost what they did** (Decision A): its
+  detection runs first, as on master, and the packs' markers are looked
+  for only at a folder it calls Other.
+- **Never the home folder**: no extension's marker -- a kind's or a
+  context's -- makes the home folder, a folder above it or a file
+  system's root a project's top (Decision C); a dotfile there
+  (`~/.ruby-version`) would make every loose file under it one project.
+  Fenix's own markers are as they were.
 - **One look per marker.** The unique markers of every kind (about 70
   with every store pack installed, §10.2, and Fenix's own) are checked once per root, and
   the kinds matched from that set in §2.4's order, so the cost doesn't
@@ -480,11 +511,11 @@ mirrors every one (§10.3).
 |---|---|
 | (the list) | At most 8 per extension. Ids once each. Any runtime but `bundle` (which has no contributions, `manifest.rs:1165-1171`): a `runtime = "none"` pack of templates may declare the kind its templates name |
 | `id` | Required. 1 to 24 characters, `a-z` first, then `a-z 0-9 - _`. Not `other`, `monorepo`, or an alias of a built-in (`py`, `uv`, `ino`, `sketch`, `rs`, `c++`, `c`, `cmake`, `js`, `ts`, `javascript`, `typescript`, `mib`). A built-in id (`python`, `arduino`, `rust`, `tcl`, `cpp`, `node`, `go`) is allowed: §2.4 |
-| `name` | Required unless the id is built-in. 1 to 32 characters, no control characters |
-| `tag` | Required unless the id is built-in. 1 to 4 characters of `A-Z 0-9 + # .`, at least one letter. Upper case, ASCII and one cell each, so every place that puts a tag in a fixed field lines up (§7.3) |
+| `name` | Required unless the id is built-in. 1 to 32 characters, none invisible, at least one visible; not one of Fenix's kinds' names (below) |
+| `tag` | Required unless the id is built-in. 1 to 4 characters of `A-Z 0-9 + # .`, at least one letter; not one of Fenix's tags. Upper case, ASCII and one cell each, so every place that puts a tag in a fixed field lines up (§7.3) |
 | `color` | Optional, one of the eight in §2.5 |
-| `markers` | Optional, at most 16. Each 1 to 64 bytes; no `/`, `\`, `..`, `*`, `?`, `[`, `]`; `{folder}` at most once and no other `{` or `}`. Not a `.fenix` file |
-| `main` | Optional, at most 8. Each 1 to 128 bytes; a path below the project, `/` between parts; no `\`, no `..` part, not starting with `/`; `{folder}` allowed |
+| `markers` | Optional, at most 16. Each 1 to 64 bytes; no `/`, `\`, `:`, `..`, `*`, `?`, `[`, `]` or control character; `{folder}` at most once and no other `{` or `}`; not a Windows device's name, not ending in `.` or a space. Not a `.fenix` file. Not one of Fenix's own markers (below) |
+| `main` | Optional, at most 8. Each 1 to 128 bytes; a path below the project, `/` between parts; no `\`; no part empty, `..`, with a `:`, a device's name, or ending in `.` or a space; not starting with `/`; `{folder}` allowed |
 
 For a built-in id, `name`, `tag`, `color` and `main` are ignored by
 Fenix if given (and refused by `xtask`), and its markers join the
@@ -525,6 +556,47 @@ and Fenix and `xtask` hold to the same one):
    taken only as written: `Java` is not an id, in a template, in
    `[project] kind` or in a manifest.
 8. **`color`**: the eight roles of §2.5, by those names exactly.
+
+**Added in review** (M1, M2, S1; Fenix holds every one in the manifest
+reader *and* again in the registry, and a test in fenix-gui holds the two
+lists together):
+
+9. **Fenix's own markers** are no pack's (M1). A marker equal, ignoring
+   ASCII case, to one of these is left out of any pack's kind -- the
+   kind stays, with a note -- except for the built-in id that owns it,
+   where it's dropped silently as adding nothing:
+   - `arduino`: `library.properties`, `sketch.yaml`, `{folder}.ino`,
+     `{folder}.pde`
+   - `rust`: `Cargo.toml`
+   - `python`: `pyproject.toml`, `setup.py`, `requirements.txt`,
+     `uv.lock`
+   - `go`: `go.mod`
+   - `node`: `package.json`
+   - `cpp`: `CMakeLists.txt`
+   - `tcl`: `pkgIndex.tcl`
+   - no kind (a project's top): `.git`, `.projectile`
+   (Tcl's "any `*.tcl` at the top" is a rule, not a name; with Decision
+   A it ranks above every pack's marker anyway.)
+10. **No `:`, devices, trailing dot or space** (M2), in a marker and in
+    each part of a `main` path: `:` (on Windows `C:x` names another
+    drive's file); a name whose part before its first `.`, trailing
+    spaces dropped, is `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` or
+    `LPT1` to `LPT9`, in any case (`nul.txt`, `Aux.json`); a name ending
+    in `.` or a space. The kind is left out, as for any bad marker.
+11. **Fenix's tags and names** (S1): a tag equal to `PY`, `INO`, `RS`,
+    `TCL`, `C++`, `JS`, `GO`, `MONO` or `DIR`; a name equal, ignoring
+    case and the spaces around it, to `Python`, `Arduino`, `Rust`, `Tcl`,
+    `C/C++`, `JavaScript`, `Go`, `Monorepo` or `Project`. The kind is left
+    out.
+12. **Invisible characters** (S1): a name may hold none of: a control
+    character (Unicode `Cc`: U+0000-U+001F, U+007F-U+009F); a format
+    character (Unicode `Cf`, Unicode 16: U+00AD, U+0600-U+0605, U+061C,
+    U+06DD, U+070F, U+0890-U+0891, U+08E2, U+180E, U+200B-U+200F,
+    U+202A-U+202E, U+2060-U+2064, U+2066-U+206F, U+FEFF, U+FFF9-U+FFFB,
+    U+110BD, U+110CD, U+13430-U+1343F, U+1BCA0-U+1BCA3, U+1D173-U+1D17A,
+    U+E0001, U+E0020-U+E007F); U+2028, U+2029. And it needs at least one
+    character that is neither whitespace nor one of those. The kind is
+    left out.
 
 What `xtask` refuses Fenix leaves out, said, and loads the extension
 anyway: a manifest is untrusted input, and a bad kind is never why an
@@ -802,9 +874,9 @@ The implementers go ahead on the recommendations.
 | | Question | Options | Recommended |
 |---|---|---|---|
 | Q1 | Do Fenix's nine stay built in? | (a) yes, for now -- (b) of §3; (c) move them to packs in this work | **(a)**. Fenix with no packs keeps Rust and Python whole, and root finding doesn't move. The packs already declare the built-in ids (§10.2), so (c) later is deleting registrations, once root finding is decided (Q6). |
-| Q2 | Two kinds with one tag | (a) Fenix allows it, the store refuses it; (b) Fenix refuses the second; (c) Fenix shows the second's id instead | **(a)**: a tag is cosmetic, and refusing an extension for one is out of proportion; the store is where it's kept tidy. |
+| Q2 | Two kinds with one tag | (a) Fenix allows it, the store refuses it; (b) Fenix refuses the second; (c) Fenix shows the second's id instead | **(a)** between packs: a tag is cosmetic, and refusing an extension for one is out of proportion; the store is where it's kept tidy. But no pack may take one of **Fenix's** tags or names (S1, §6.2): that would pass a pack's kind off as Fenix's. |
 | Q3 | May an extension give its kind a colour of its own (`#cc7832`)? | (a) no: a theme role from §2.5's eight; (b) yes, as `page-render-ex` may (`page.rs:61-62`) | **(a)**: a fixed colour is unreadable on some theme, and the tag is drawn in Fenix's own chrome (the modeline), not on the extension's page. |
-| Q4 | The extensions' kinds come before Node, C/C++ and Tcl (§2.4) | (a) yes; (b) after all of Fenix's; (c) before all of Fenix's but Arduino | **(a)**: Rails, Laravel and ASP.NET apps with a front end become Ruby, PHP and C# rather than `JS`; a Rust, Python or Go project keeps its kind with any pack installed. (c) would let a stray `Gemfile` beat `Cargo.toml`. |
+| Q4 | The extensions' kinds come before Node, C/C++ and Tcl (§2.4) | (a) yes; (b) after all of Fenix's; (c) before all of Fenix's but Arduino | ~~(a)~~ **Decided (b) in review** (Decision A, §2.4): installing a pack must never change the kind of a project Fenix recognises today. Under (a) a React Native app (CocoaPods `Gemfile`), any JS app with a fastlane `Gemfile`, `package.json` beside `main.tf` or `.luarc.json` stopped being JavaScript. A Rails app stays `JS` and declares `kind = "ruby"`. |
 | Q5 | A pack whose templates name its own kind needs `fenix = ">=1.6"` (§4): Fenix 1.5 users stay on its previous release | (a) switch templates and raise the floor in the kinds release; (b) keep templates `other` until a pack needs 1.6 for something else | **(a)**: it's one release after 1.6.0 and 1.5 users lose nothing they have; under (b) the wizard shows `DIR` on Java's templates for as long as the floors don't move. |
 | Q6 | Should a kind's markers make a project inside a repository its own, as `Cargo.toml` does (§1.1)? | (a) not now; (b) yes, for kinds' markers only | **(a)**: it would split a .NET solution into a project per `.csproj`, a Gradle build into one per module, a Terraform repository into one per module folder. It's a decision about project boundaries, to make with (c) of Q1, not one this work needs. |
 
@@ -812,6 +884,10 @@ The implementers go ahead on the recommendations.
 
 Filled in as each step merges: what was built differently from this
 plan, and why.
+
+Steps 1 and 2 were reviewed before merging; §13.3 says what the review
+changed, and §2.4, §2.6, §5, §6.2 and §12 are revised to match. Where
+§13.1 and §13.2 say otherwise, §13.3 wins.
 
 ### Step 1: kinds as data
 
@@ -1004,3 +1080,75 @@ code keeps its `match` or `==`, on `ProjectKind::RUST` and the rest.
 | `docs/CONFIGURATION.md:96`, `134` | The kind among a project's own settings; the `project.ini` move | Any kind id, including a pack's |
 | `docs/WRITING_EXTENSIONS.md:1210-1330` | The manifest | `[[contributes.project_kinds]]` in the example, and a paragraph under Language packs (§6) |
 | `docs/WRITING_EXTENSIONS.md:141` | `here()` | Its project's `kind` in `meta` (§6.4) |
+
+### Review: what changed (§13.3)
+
+The guiding rule: installing a pack never changes the kind of a project
+Fenix recognises today, and a user with no extensions sees exactly
+master's behaviour.
+
+- **Decision A** (§2.4, Q4): Fenix's own detection runs first, exactly as
+  master's, and stops; packs' markers on Fenix's ids, then packs' kinds,
+  are looked for only where it says Other. Pinned by
+  `kind::tests::kinds_are_detected_in_their_tiers` (a Rails app stays
+  `JS`; `deno.json` beside `CMakeLists.txt` stays C/C++) and, in the app,
+  `a_packs_kind_comes_and_goes_with_it`.
+- **Decision B** (§2.6): a declared kind no one declares is ignored for
+  the project's kind and kept on disk. `from_id` interns nothing:
+  `set_extension_kinds` is the only place an id is interned (after its
+  checks, within the 256 kinds), so a repository can't fill the
+  interner (the review's S2), and "too many ids this run" is said as
+  that. `declared_id` reads the text; `declared_kind` answers only for a
+  declared id. The settings page keeps the text (`Settings::kept`),
+  and while it's there `h`/`l` write nothing; Enter on a kind replaces
+  it, Enter on `detect` or on it writes nothing. A template's kind is
+  text (`Template::kind_id`); one no one declares is shown as Other and
+  the project made from it declares it (`Plan::declare_kind`), unless its
+  files already make it that kind. `from_id("nonsense")` is `None`
+  again, as on master; the step-1 tests that showed a muted `JAVA` are
+  gone.
+- **Decision C** (§5): `find_project_root`'s fallback never makes the
+  home folder, a folder above it or a file system's root a project's top
+  on an extension's marker, a context's included. Fenix's own markers
+  unchanged (`root::tests::a_packs_marker_never_makes_home_a_project`).
+  A context marker that isn't a plain file name is no longer looked for
+  in root finding either (none in the store is).
+- **M1** (§6.2 rule 9): Fenix's markers are no pack's -- in the manifest
+  reader (marker dropped, kind kept, noted) and in the registry
+  (`a_pack_never_takes_fenixs_markers`, `fenixs_own_markers_are_left_out`).
+- **M2** (§6.2 rule 10, §5): `:`, device names and a trailing dot or
+  space refused in markers and `main` parts; every marker and `main` part
+  is joined only as one `Component::Normal`; a pack's `main` file is
+  opened only if its canonical path is under the project's
+  (`a_kinds_names_stay_in_the_project`,
+  `an_extensions_main_file_doesnt_leave_the_project`). Fenix's own main
+  files follow links as on master. What runs only on Windows -- `C:x`
+  and `\\?\` being prefixes to `Path::components` -- isn't tested here;
+  on Linux `C:x` is refused by the `:` rule before it's joined.
+- **S1** (§6.2 rules 11, 12): Fenix's tags and names, and invisible
+  characters in names, refused in both places
+  (`a_packs_kind_doesnt_look_like_fenixs`,
+  `a_kind_needs_a_name_and_a_tag_within_limits`).
+- **S3**: the explorer's header takes the cached kind; Fenix's folders
+  cost master's lookups exactly; when kinds change, an open hub's kinds
+  are looked for again on the hub's fetch thread
+  (`PageEvent::HubKinds`), not on the UI thread. Home's five rows and
+  open doctor pages are still asked on the UI thread, as any Home
+  refresh is.
+- **S4**: hub fetches carry `App::kinds_generation`; what one from before
+  the last change sends back is dropped
+  (`a_hub_fetch_from_before_the_kinds_changed_is_dropped`).
+- **Measured again** (`kind::tests::measure_detection`, `--ignored`;
+  debug build, Linux, local disk; looks at the file system / time per
+  detection):
+
+  | extensions | Rust | Python | Node | C/C++ | Tcl | a pack's (Ruby) | Other |
+  |---|---|---|---|---|---|---|---|
+  | none | 5 / 2.1 µs | 6 / 2.5 µs | 11 / 4.1 µs | 12 / 4.5 µs | 14 / 6.8 µs | 14 / 6.9 µs | 14 / 6.7 µs |
+  | the store's 14 packs | 5 / 1.9 µs | 6 / 2.2 µs | 11 / 4.2 µs | 12 / 4.4 µs | 14 / 7.0 µs | 52 / 37.7 µs | 62 / 46.5 µs |
+  | 30 packs, 256 markers | 5 / 1.9 µs | 6 / 2.3 µs | 11 / 4.0 µs | 12 / 4.3 µs | 14 / 6.9 µs | 270 / 339 µs | 270 / 337 µs |
+
+  Only folders Fenix calls Other pay for packs' markers (62 lookups with
+  the store's, as the review counted with strace); a project of Fenix's
+  costs what it did on master.
+
