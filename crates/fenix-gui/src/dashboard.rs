@@ -760,6 +760,7 @@ mod tests {
     /// has a space before the name, which lines up with the others'.
     #[test]
     fn a_four_character_tag_keeps_a_space_before_the_name() {
+        let _kinds = crate::page::project_kinds_lock();
         let mut data = sample();
         data.projects.push(ProjectItem { root: "/m".into(), name: "orbit".into(), branch: None, kind: ProjectKind::MONOREPO, health: None });
         data.projects.push(ProjectItem { root: "/j".into(), name: "spring".into(), branch: None, kind: ProjectKind::from_id("java").unwrap(), health: None });

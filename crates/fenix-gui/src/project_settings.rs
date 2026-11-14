@@ -268,6 +268,12 @@ impl Settings {
         }
     }
 
+    /// Puts the focus on the kind's row.
+    #[cfg(test)]
+    pub fn focus_on_kind(&mut self) {
+        self.focus_on(&Field::Kind);
+    }
+
     fn cycle_kind(&mut self, forward: bool) -> Action {
         // "detect", then each kind declared now, then the one this
         // project declares if no one else does -- so it's where the cycle
@@ -736,6 +742,7 @@ mod tests {
     /// back to it, never to the first built-in.
     #[test]
     fn a_kind_no_one_declares_is_kept_by_the_cycler() {
+        let _kinds = crate::page::project_kinds_lock();
         let (mut s, root) = settings("unknown_kind", None);
         let java = ProjectKind::from_id("java").unwrap();
         s.declared = Some(java);

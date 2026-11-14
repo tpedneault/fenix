@@ -147,6 +147,50 @@ pub fn code_extensions() -> Vec<CodeExtension> {
     code_of(&everything(machine().as_ref(), store().as_ref()))
 }
 
+/// The switched-on extensions whose project kinds are in use: every one
+/// whose manifest reads and that runs in this Fenix -- data packs too,
+/// not only code -- the machine's first, then yours, each by id, the
+/// order their kinds are detected in. None in tests or in safe mode, where
+/// only Fenix's own kinds are.
+pub fn kind_extensions() -> Vec<(String, fenix_extensions::Manifest)> {
+    if cfg!(test) || safe_mode() {
+        return Vec::new();
+    }
+    kinds_of(&everything(machine().as_ref(), store().as_ref()))
+}
+
+fn kinds_of(all: &[(Installed, bool)]) -> Vec<(String, fenix_extensions::Manifest)> {
+    let mut on: Vec<(bool, String, fenix_extensions::Manifest)> = all
+        .iter()
+        .filter(|(e, _)| e.enabled)
+        .filter_map(|(e, managed)| {
+            let m = e.manifest.as_ref().ok()?;
+            (m.runs_in(&release()).is_ok() && !m.contributes.project_kinds.kinds.is_empty()).then(|| (!managed, e.id.clone(), m.clone()))
+        })
+        .collect();
+    on.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    on.into_iter().map(|(_, id, m)| (id, m)).collect()
+}
+
+/// What an extension's details say of its project kinds: each it
+/// declares, and what of them is left out and why -- by its manifest
+/// (`ProjectKinds::skipped`), or because another extension has the id
+/// first, or past what Fenix takes in all (`extension_kind_notes`).
+pub fn kind_lines(id: &str, manifest: &fenix_extensions::Manifest) -> (Vec<String>, Vec<String>) {
+    let declared = manifest
+        .contributes
+        .project_kinds
+        .kinds
+        .iter()
+        .map(|k| match (&k.name, &k.tag) {
+            (Some(name), Some(tag)) if !fenix_extensions::manifest::ProjectKinds::is_built_in(&k.id) => format!("{tag} {name} ({}){}", k.id, if k.markers.is_empty() { ", declared only".to_string() } else { format!(": {}", k.markers.join(", ")) }),
+            _ => format!("{}: adds {}", k.id, k.markers.join(", ")),
+        })
+        .collect();
+    let notes = manifest.contributes.project_kinds.skipped.iter().cloned().chain(fenix_project::extension_kind_notes().into_iter().filter(|(e, _)| e == id).map(|(_, n)| n)).collect();
+    (declared, notes)
+}
+
 /// A code extension's `[[contributes.settings]]`, as the schema takes
 /// them: on the settings page in a section of their own (the one each
 /// names, else the extension's name), loaded and saved like any other. A
@@ -295,7 +339,10 @@ pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
         .map(|(e, managed)| {
             let m = e.manifest.as_ref().ok();
             let read = |name: &str| std::fs::read_to_string(e.dir.join(name)).ok();
+            let (kinds, kind_notes) = m.map(|m| kind_lines(&e.id, m)).unwrap_or_default();
             crate::extensions_page::InstalledRow {
+                kinds,
+                kind_notes,
                 managed,
                 name: e.name(),
                 about: m.map(|m| m.extension.description.clone()).unwrap_or_default(),
@@ -461,6 +508,28 @@ pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whose kinds count, in the order they're detected in: switched on,
+    /// readable and for this Fenix, data packs too; the machine's first,
+    /// then yours, each by id.
+    #[test]
+    fn kinds_come_from_every_extension_on_the_machines_first() {
+        let manifest = |id: &str, runtime: &str, fenix: &str| {
+            fenix_extensions::Manifest::parse(&format!("[extension]\nid = \"{id}\"\nname = \"x\"\nversion = \"1.0.0\"\nruntime = \"{runtime}\"\n\n[engine]\nfenix = \"{fenix}\"\napi = \"1.5\"\n\n[[contributes.project_kinds]]\nid = \"k\"\nname = \"K\"\ntag = \"K\"\n"))
+        };
+        let e = |id: &str, enabled: bool, m: Result<fenix_extensions::Manifest, String>| fenix_extensions::Installed { id: id.into(), version: "1.0.0".into(), enabled, dependency: false, dir: PathBuf::new(), manifest: m };
+        let all = vec![
+            (e("z.mine", true, manifest("z.mine", "none", ">=1.0, <2")), true),
+            (e("b.yours", true, manifest("b.yours", "wasm", ">=1.0, <2")), false),
+            (e("a.yours", true, manifest("a.yours", "none", ">=1.0, <2")), false),
+            (e("c.off", false, manifest("c.off", "none", ">=1.0, <2")), false),
+            (e("d.later", true, manifest("d.later", "none", ">=9, <10")), false),
+            (e("e.broken", true, Err("no".into())), false),
+            (e("f.plain", true, fenix_extensions::Manifest::parse("[extension]\nid = \"f.plain\"\nname = \"x\"\nversion = \"1.0.0\"\nruntime = \"none\"\n\n[engine]\nfenix = \">=1.0, <2\"\n")), false),
+        ];
+        let ids: Vec<String> = kinds_of(&all).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["z.mine", "a.yours", "b.yours"]);
+    }
 
     /// Only themes and languages wait for the next start (#40); and an
     /// extension loaded or let go meanwhile is said to be in use, or not.

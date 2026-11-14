@@ -1001,6 +1001,15 @@ pub fn overflow(page: &Page, cols: usize) -> Vec<String> {
     out
 }
 
+/// Held by every test that sets the process's project kinds
+/// (`fenix_project::set_extension_kinds`) or asks which are declared:
+/// tests run side by side, and the kinds are global.
+#[cfg(test)]
+pub(crate) fn project_kinds_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

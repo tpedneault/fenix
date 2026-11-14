@@ -1692,7 +1692,9 @@ impl App {
         let is_text = !self.is_page_buffer(self.focused_buffer_id()) && ob.kind.tracks_unsaved_changes();
         let cursor_info = is_text.then(|| fenix_wasm::host::CursorInfo { at: place(cursor.char_idx), selection: selected.then(|| (place(from), place(to))), selected });
         let project = path.as_deref().and_then(fenix_project::find_project_root).or_else(|| self.project_root.clone()).map(|root| {
-            let meta = fenix_project::meta::jira_key(&root).map(|k| ("jira".to_string(), k)).into_iter().collect();
+            // Its kind, by id (Fenix 1.6): no WIT change, one more pair.
+            let kind = ("kind".to_string(), self.project_kind_of(&root).id().to_string());
+            let meta = fenix_project::meta::jira_key(&root).map(|k| ("jira".to_string(), k)).into_iter().chain(std::iter::once(kind)).collect();
             let plain = fenix_lsp::normalize(root.clone());
             fenix_wasm::host::ProjectInfo { name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), root: plain.to_string_lossy().into_owned(), meta }
         });

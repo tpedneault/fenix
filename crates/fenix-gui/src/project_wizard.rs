@@ -1158,16 +1158,17 @@ mod tests {
     /// the kind they name: a pack's, one nobody declares (by its id).
     #[test]
     fn a_packs_templates_come_before_start_from_with_their_kinds() {
+        let _kinds = crate::page::project_kinds_lock();
         let pack = |id: &str, kind: &str| fenix_project::template::Template::parse(id, &format!("[template]\nname = \"{id}\"\nkind = \"{kind}\"\ngroup = \"Java and Kotlin\"\n"), &[], fenix_project::template::Origin::Extension(PathBuf::from("/x"))).unwrap();
         let mut templates = builtin_templates();
         templates.push(pack("spring", "java"));
-        templates.push(pack("cobol-app", "cobol"));
+        templates.push(pack("fortran-app", "fortran"));
         let w = Wizard::new(templates, Vec::new(), BTreeMap::new(), Path::new("/tmp"));
         let mut groups: Vec<&str> = w.template_order().iter().map(|&i| w.templates[i].group.as_str()).collect();
         groups.dedup();
         assert_eq!(&groups[groups.len() - 2..], ["Java and Kotlin", "Start from"]);
         let page = layout(&w, 120);
-        assert!(page.text.contains("JAVA ") && page.text.contains("COBO "), "{}", page.text);
+        assert!(page.text.contains("JAVA ") && page.text.contains("FORT "), "{}", page.text);
     }
 
     #[test]

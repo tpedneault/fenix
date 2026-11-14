@@ -650,6 +650,7 @@ mod tests {
     /// ones, and its rows carry its id as their tag.
     #[test]
     fn a_kind_no_one_declares_is_its_own_filter_after_the_rest() {
+        let _kinds = crate::page::project_kinds_lock();
         let java = ProjectKind::from_id("java").unwrap();
         let mut projects = hub().projects;
         projects.insert(0, project("spring-app", java, None, false));

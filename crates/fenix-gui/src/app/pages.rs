@@ -1563,7 +1563,7 @@ impl App {
 
     /// Rebuilds the hub's rows from the project list, keeping what git
     /// and the doctor already said and the selection where it was.
-    fn hub_reload(&mut self, id: BufferId) {
+    pub(super) fn hub_reload(&mut self, id: BufferId) {
         let fresh = self.hub_projects();
         let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
         let selected = hub.selected().map(|p| p.root.clone());
@@ -1592,7 +1592,7 @@ impl App {
 
     /// Git summaries and the doctor's quick pass for every project, off
     /// the UI thread, one project at a time.
-    fn hub_fetch(&mut self, id: BufferId) {
+    pub(super) fn hub_fetch(&mut self, id: BufferId) {
         let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else { return };
         let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
             hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
@@ -1922,6 +1922,165 @@ mod tests {
             app.known_projects.add(root.to_path_buf());
         }
         app
+    }
+
+    /// The process's project kinds are set by these tests one at a time,
+    /// and put back to none.
+    fn kinds_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::page::project_kinds_lock()
+    }
+
+    /// An installed extension `id` as `installed::kind_extensions` reads
+    /// it, declaring `kinds` (TOML).
+    fn pack(id: &str, kinds: &str) -> (String, fenix_extensions::Manifest) {
+        let text = format!("[extension]\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\nruntime = \"none\"\n\n[engine]\nfenix = \">=1.5, <2\"\n{kinds}");
+        (id.to_string(), fenix_extensions::Manifest::parse(&text).unwrap())
+    }
+
+    const RUBY: &str = "\n[[contributes.project_kinds]]\nid = \"ruby\"\nname = \"Ruby\"\ntag = \"RB\"\ncolor = \"constant\"\nmarkers = [\"Gemfile\", \"config.ru\"]\nmain = [\"config.ru\"]\n";
+
+    fn hub_rows(app: &mut App) -> String {
+        app.cmd_project_hub();
+        page_text(app)
+    }
+
+    /// A Rails app is JavaScript until the Ruby pack is installed, Ruby
+    /// with it -- in the modeline, Home, the hub and the cache -- and
+    /// JavaScript again once it's switched off or removed. Nothing is
+    /// written either way.
+    #[test]
+    fn a_packs_kind_comes_and_goes_with_it() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("pack-kinds");
+        let shop = dir.0.join("shop");
+        std::fs::create_dir_all(shop.join(".git")).unwrap();
+        for file in ["Gemfile", "package.json", "config.ru"] {
+            std::fs::write(shop.join(file), "").unwrap();
+        }
+        let mut app = app_with(&[&shop]);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        app.known_projects.add(shop.clone());
+        app.open_file_from_picker(&shop.join("Gemfile"));
+        app.refresh_home_data(false);
+        let node = fenix_project::ProjectKind::NODE;
+        assert_eq!(app.focused_project_identity().map(|(k, _)| k), Some(node));
+        assert_eq!(app.home_data.projects[0].kind, node);
+        assert!(hub_rows(&mut app).contains("JS   shop"));
+
+        app.project_kinds_now(&[pack("fenix.ruby", RUBY)]);
+        let ruby = fenix_project::ProjectKind::from_id("ruby").unwrap();
+        assert_eq!(app.focused_project_identity().map(|(k, _)| k), Some(ruby), "the modeline");
+        assert_eq!(app.home_data.projects[0].kind, ruby, "Home");
+        assert!(hub_rows(&mut app).contains("RB   shop"), "the hub");
+        assert_eq!(app.project_kinds.borrow().get(&shop), Some(&ruby), "the cache, filled again");
+        let id = app.focused_buffer_id();
+        app.close_page(id);
+        app.open_doctor(shop.clone());
+        assert!(page_text(&mut app).contains("RB "), "the doctor");
+
+        // Updated: what it declares now.
+        app.project_kinds_now(&[pack("fenix.ruby", &RUBY.replace("\"RB\"", "\"RUBY\""))]);
+        assert_eq!(ruby.tag(), "RUBY");
+        assert!(page_text(&mut app).contains("RUBY "), "an open doctor page names it again");
+
+        // Switched off, or removed: JavaScript again.
+        app.project_kinds_now(&[]);
+        assert_eq!(app.focused_project_identity().map(|(k, _)| k), Some(node));
+        assert_eq!(app.home_data.projects[0].kind, node);
+        assert!(hub_rows(&mut app).contains("JS   shop"));
+        assert!(!shop.join(".fenix").exists(), "nothing written to the project");
+        let stored = std::fs::read_to_string(dir.0.join("projects.json")).unwrap_or_default();
+        assert!(!stored.contains("kind") && !stored.contains("ruby"), "nor to the list: {stored}");
+    }
+
+    /// At start the session comes back, and a file given is opened,
+    /// before the extensions are read: what was drawn of a project then
+    /// is named again once they are, once -- the same kinds again clear
+    /// nothing -- and nothing is kept of the first guess.
+    #[test]
+    fn kinds_read_at_start_name_again_what_was_drawn_before() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("kinds-at-start");
+        let shop = dir.0.join("shop");
+        std::fs::create_dir_all(&shop).unwrap();
+        std::fs::write(shop.join("Gemfile"), "").unwrap();
+        // Opened at start: the hub and Home drawn with the files' kind.
+        let mut app = App::with_file(Some(shop.join("Gemfile").to_string_lossy().into_owned()));
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.json"));
+        app.known_projects.add(shop.clone());
+        app.refresh_home_data(false);
+        assert!(hub_rows(&mut app).contains("DIR  shop"));
+        assert_eq!(app.home_data.projects[0].kind, fenix_project::ProjectKind::OTHER);
+        // The extensions read, as `App::new` does next.
+        let exts = [pack("fenix.ruby", RUBY)];
+        app.project_kinds_now(&exts);
+        let ruby = fenix_project::ProjectKind::from_id("ruby").unwrap();
+        assert_eq!(app.home_data.projects[0].kind, ruby);
+        assert!(page_text(&mut app).contains("RB   shop"), "the open hub, named again");
+        assert_eq!(app.focused_project_identity(), None, "the hub is focused");
+        // Again with the same: the cache stays as it is.
+        app.project_kinds.borrow_mut().insert(PathBuf::from("/marker"), ruby);
+        app.project_kinds_now(&exts);
+        assert!(app.project_kinds.borrow().contains_key(Path::new("/marker")), "no change, nothing cleared");
+        assert!(!shop.join(".fenix").exists());
+        app.project_kinds_now(&[]);
+    }
+
+    /// `kind = "cobol"` where no extension knows COBOL: the project loads
+    /// as `COBO`, muted; the settings page shows it, and neither a visit,
+    /// a save of its tasks, nor `h` then `l` on its kind write anything
+    /// else over it.
+    #[test]
+    fn a_declared_kind_no_extension_knows_survives_the_settings_page() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("cobol-kind");
+        std::fs::create_dir_all(dir.0.join(".fenix")).unwrap();
+        std::fs::write(dir.0.join(".fenix/settings.toml"), "[project]\nkind = \"cobol\"\n").unwrap();
+        let mut app = app_with(&[&dir.0]);
+        let cobol = fenix_project::ProjectKind::from_id("cobol").unwrap();
+        assert_eq!(app.project_kind_of(&dir.0), cobol);
+        assert_eq!((cobol.tag(), cobol.color()), ("COBO", fenix_project::KindColor::Muted));
+        let mut settings = app.project_page_model(&dir.0);
+        assert_eq!(settings.declared, Some(cobol));
+        let tools = settings.tools.clone();
+        app.project_page_action(dir.0.clone(), project_settings::Action::SaveTools(tools));
+        settings.focus_on_kind();
+        for key in ['h', 'l'] {
+            let action = settings.key(crate::page::Key::Char(key));
+            app.project_page_action(dir.0.clone(), action);
+        }
+        assert_eq!(fenix_project::declared_kind(&dir.0), Some(cobol));
+        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"cobol\""));
+        assert_eq!(app.project_kind_of(&dir.0), cobol);
+        // A pack that knows it, installed: named by it, not muted.
+        app.project_kinds_now(&[pack("acme.cobol", "\n[[contributes.project_kinds]]\nid = \"cobol\"\nname = \"COBOL\"\ntag = \"CBL\"\ncolor = \"string\"\n")]);
+        assert_eq!((cobol.tag(), cobol.label(), app.project_kind_of(&dir.0)), ("CBL", "COBOL", cobol));
+        app.project_kinds_now(&[]);
+        assert_eq!(cobol.tag(), "COBO");
+    }
+
+    /// What an extension is told of the project it's called in: its kind,
+    /// by id, beside its Jira key -- `other` for a project of no kind.
+    #[test]
+    fn here_says_the_projects_kind() {
+        let _kinds = kinds_lock();
+        let dir = Scratch::new("here-kind");
+        std::fs::write(dir.0.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::write(dir.0.join("main.rs"), "").unwrap();
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&dir.0.join("main.rs"));
+        let meta = app.editor_where().0.project.unwrap().meta;
+        assert!(meta.contains(&("kind".to_string(), "rust".to_string())), "{meta:?}");
+        let other = Scratch::new("here-other");
+        std::fs::write(other.0.join(".projectile"), "").unwrap();
+        std::fs::write(other.0.join("notes.txt"), "").unwrap();
+        app.open_file_from_picker(&other.0.join("notes.txt"));
+        assert!(app.editor_where().0.project.unwrap().meta.contains(&("kind".to_string(), "other".to_string())));
+        app.project_kinds_now(&[pack("fenix.ruby", RUBY)]);
+        std::fs::write(other.0.join("Gemfile"), "").unwrap();
+        app.project_kinds.borrow_mut().clear();
+        assert!(app.editor_where().0.project.unwrap().meta.contains(&("kind".to_string(), "ruby".to_string())));
+        app.project_kinds_now(&[]);
     }
 
     /// The wizard open on `template`, pointed at `parent`, not registering.

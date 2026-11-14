@@ -28,6 +28,27 @@ pub(super) fn kind_color(kind: ProjectKind, theme: &Theme) -> glyphon::Color {
     }
 }
 
+/// The project kinds the extensions `exts` declare (id and manifest, in
+/// the order their kinds are detected in: the machine's first, then
+/// yours, each by id), as `fenix_project::set_extension_kinds` takes
+/// them. What the manifest left out is already out
+/// (`fenix_extensions::manifest::ProjectKinds`).
+pub(crate) fn kind_defs(exts: &[(String, fenix_extensions::Manifest)]) -> Vec<fenix_project::KindDef> {
+    exts.iter()
+        .flat_map(|(id, manifest)| {
+            manifest.contributes.project_kinds.kinds.iter().map(move |k| fenix_project::KindDef {
+                id: k.id.clone(),
+                name: k.name.clone().unwrap_or_default(),
+                tag: k.tag.clone().unwrap_or_default(),
+                color: k.color.as_deref().and_then(KindColor::from_role).unwrap_or(KindColor::DEFAULT),
+                markers: k.markers.clone(),
+                main: k.main.clone(),
+                extension: Some(id.clone()),
+            })
+        })
+        .collect()
+}
+
 /// `PY orbit-tools · ` -- the modeline's project segment, drawn between
 /// the mode label and the file name.
 pub(super) fn modeline_project_spans(kind: ProjectKind, name: &str, theme: &Theme) -> Vec<(String, glyphon::Color)> {
@@ -49,6 +70,61 @@ pub(crate) fn window_title(project: Option<&str>) -> String {
 }
 
 impl App {
+    /// The extensions' project kinds, from those switched on now (`exts`,
+    /// as `installed::kind_extensions` reads them): at start, before
+    /// anything is drawn but after the session came back, and whenever
+    /// extensions are installed, updated, switched or removed. When they
+    /// change, everything that named a project by its kind names it
+    /// again; the same kinds again change nothing.
+    pub(super) fn project_kinds_now(&mut self, exts: &[(String, fenix_extensions::Manifest)]) {
+        if fenix_project::set_extension_kinds(kind_defs(exts)) {
+            self.project_kinds_changed();
+        }
+    }
+
+    /// The kinds changed: the cache of each root's kind and the doctor's
+    /// health by it let go, and Home, the hub, the doctor, the settings
+    /// page and the explorer's header asked again. Nothing is written.
+    fn project_kinds_changed(&mut self) {
+        self.project_kinds.borrow_mut().clear();
+        self.project_health.clear();
+        self.refresh_home_data(false);
+        let hubs: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::Hub(_))).map(|(id, _)| *id).collect();
+        for id in hubs {
+            self.hub_reload(id);
+            self.hub_fetch(id);
+        }
+        let doctors: Vec<(BufferId, PathBuf)> = self.pages.iter().filter_map(|(id, s)| if let PageModel::Doctor(d) = &s.model { Some((*id, d.root.clone())) } else { None }).collect();
+        for (id, root) in doctors {
+            let kind = self.project_kind_of(&root);
+            let language = self.wasm.project_language(&root);
+            if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                d.kind = kind;
+                d.language = language;
+            }
+            self.doctor_check(id);
+        }
+        let mut explorers = vec![ExplorerTarget::Sidebar];
+        for state in self.pages.values_mut() {
+            match &mut state.model {
+                PageModel::UserSettings(page) => {
+                    if let Some(project) = page.project_page.as_mut() {
+                        project.detected = fenix_project::detect_kind_from_files(&project.root);
+                    }
+                }
+                PageModel::Explorer(target, _) => explorers.push(*target),
+                _ => continue,
+            }
+            state.stale = true;
+        }
+        for target in explorers {
+            self.explorer_header_facts(target);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Keeps the OS window's title on the focused buffer's project.
     /// Compared first: setting a title is a system call and a repaint
     /// of the title bar, and this runs every frame.

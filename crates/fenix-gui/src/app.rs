@@ -6171,6 +6171,10 @@ impl App {
         app.extensions_at_startup();
         // The extensions that run code, and their projects' markers.
         app.code_extensions_installed();
+        // The extensions' project kinds -- before anything is drawn, but
+        // after the session came back and a file given was opened, either
+        // of which may have named a project by its kind: named again.
+        app.project_kinds_now(&crate::installed::kind_extensions());
         // A MIB folder inside another project, on your list from when one
         // was a project of its own: taken off it, once (the packs'
         // markers are known now, so what's a project is too).
