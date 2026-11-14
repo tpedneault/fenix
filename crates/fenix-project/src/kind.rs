@@ -232,6 +232,17 @@ mod tests {
         }
     }
 
+    /// An ops repository of Tcl scripts and its MIB: Tcl. The MIB names no
+    /// kind any more.
+    #[test]
+    fn tcl_scripts_beside_a_mib_are_tcl() {
+        let dir = TempDir::new("kind_tcl_mib");
+        dir.write("main.tcl", "");
+        dir.write("mib/ccf.dat", "");
+        dir.write("vdf.dat", "");
+        assert_eq!(detect_kind(dir.path()), ProjectKind::Tcl);
+    }
+
     #[test]
     fn a_sketch_is_arduino_even_with_other_manifests() {
         let dir = TempDir::new("kind_sketch");

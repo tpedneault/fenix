@@ -78,30 +78,37 @@ impl KnownProjects {
     }
 
     /// Once, ever: the known projects that were a folder of MIB tables
-    /// inside another project, taken off the list. Until 1.6 a folder of
-    /// MIB tables was a project of its own; now it's in the project
-    /// around it, so an entry for one would open that project under the
-    /// MIB folder's name. A MIB folder in no other project stays: it's
-    /// a folder you added, and opens as one, as any other does. Only the
-    /// list changes -- nothing in the folder, its `.fenix/` included, and
-    /// not its pin or group, which come back if it's added again. Returns
-    /// what it took off; a list it can't read or save is left as it is,
-    /// to try again next time.
-    pub fn drop_mib_folders_once(&mut self) -> Vec<PathBuf> {
+    /// inside a repository you also have as a project, taken off the list.
+    /// Until 1.6 a folder of MIB tables was a project of its own; now it's
+    /// in the project around it, so an entry for one opens that project
+    /// under the MIB folder's name. It runs once and can't be redone, so it
+    /// takes off only what's certain (`taken_by`); everything else stays,
+    /// and opens as the folder you chose, as any folder you add does. Only
+    /// the list changes -- nothing in the folder, its `.fenix/` included,
+    /// and not its pin or group, which come back if it's added again.
+    /// Returns each taken off with the project it's in now. A list it can't
+    /// read or save is left as it is, to try again next time.
+    pub fn drop_mib_folders_once(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        self.drop_mib_folders_once_from(dirs::home_dir().as_deref())
+    }
+
+    /// `drop_mib_folders_once`, with `home` the home folder.
+    pub fn drop_mib_folders_once_from(&mut self, home: Option<&Path>) -> Vec<(PathBuf, PathBuf)> {
         if !matches!(fenix_storage::state::read::<bool>(&self.path, MIB_FOLDERS_DROPPED), Ok(None | Some(false))) {
             return Vec::new();
         }
-        let (dropped, kept): (Vec<PathBuf>, Vec<PathBuf>) = self.roots.iter().cloned().partition(|root| mib_folder_in_a_project(root));
+        let dropped: Vec<(PathBuf, PathBuf)> = self.roots.iter().filter_map(|root| taken_by(root, home, &self.roots).map(|around| (root.clone(), around))).collect();
         if !dropped.is_empty() {
-            let was = std::mem::replace(&mut self.roots, kept);
+            let was = self.roots.clone();
+            self.roots.retain(|r| !dropped.iter().any(|(d, _)| d == r));
             if self.save().is_err() {
                 self.roots = was;
                 return Vec::new();
             }
         }
-        if fenix_storage::state::write(&self.path, MIB_FOLDERS_DROPPED, &true).is_err() {
-            return Vec::new();
-        }
+        // Saved without it, it's done: a flag not written means looking
+        // again next time, which finds nothing more to take.
+        let _ = fenix_storage::state::write(&self.path, MIB_FOLDERS_DROPPED, &true);
         dropped
     }
 }
@@ -115,14 +122,26 @@ const MIB_FOLDERS_DROPPED: &str = "mib_folders_dropped";
 /// telecommands, TM parameters and packets, calibrations.
 const MIB_TABLES: &[&str] = &["vdf.dat", "ccf.dat", "pcf.dat", "pid.dat", "tpcf.dat", "caf.dat", "txf.dat"];
 
-/// Whether `root` is a folder of MIB tables that's in another project --
-/// one that was a project only because of its tables.
-fn mib_folder_in_a_project(root: &Path) -> bool {
-    let Some(text) = root.to_str() else { return false };
+/// The project `root` was taken into, when it's to come off the list: a
+/// folder of MIB tables with nothing of a project's own -- no marker of
+/// Fenix's or a language pack's, no kind its files give it (`setup.py`, a
+/// `.tcl`), nothing in a `.fenix/` (snippets, settings) -- inside a project
+/// that is on the list itself (`known`) and isn't the home folder or above
+/// it (a dotfiles `.git`, a stray `package.json`). None, else.
+fn taken_by(root: &Path, home: Option<&Path>, known: &[PathBuf]) -> Option<PathBuf> {
+    let text = root.to_str()?;
     if fenix_vfs::path::is_remote_text(text) || !MIB_TABLES.iter().any(|t| root.join(t).is_file()) {
-        return false;
+        return None;
     }
-    crate::find_project_root(root).is_some_and(|found| found != root)
+    let fenix_has_something = std::fs::read_dir(root.join(".fenix")).is_ok_and(|mut entries| entries.next().is_some());
+    if fenix_has_something || crate::root::holds_pack_marker(root) || crate::detect_kind_from_files(root) != crate::ProjectKind::Other {
+        return None;
+    }
+    let around = crate::find_project_root(root).filter(|around| around != root)?;
+    if home.is_some_and(|home| home.starts_with(&around)) || !known.contains(&around) {
+        return None;
+    }
+    Some(around)
 }
 
 /// `path` without Windows' extended-length `\\?\` prefix, which
@@ -257,38 +276,67 @@ mod tests {
         assert_eq!(known.roots(), &[PathBuf::from(r"C:\repo\one"), PathBuf::from(r"C:\repo\two")]);
     }
 
-    /// A MIB folder in a repository was a project of its own until 1.6:
-    /// taken off the list, once; one alone, one with a `.fenix` of its own
-    /// and everything else stay, and the folders are untouched.
+    /// A MIB folder in a repository on the list was a project of its own
+    /// until 1.6: taken off the list, once, saying where it is now. Anything
+    /// less certain stays -- and the folders are untouched.
     #[test]
-    fn mib_folders_inside_a_project_leave_the_list_once() {
+    fn mib_folders_inside_a_listed_project_leave_the_list_once() {
         let dir = TempDir::new("known_mib");
-        let repo = dir.path().join("repo");
+        let (repo, home, home2, unlisted) = (dir.path().join("repo"), dir.path().join("home"), dir.path().join("home2"), dir.path().join("unlisted"));
         dir.write("repo/.git/HEAD", "ref: refs/heads/main\n");
         dir.write("repo/ops/vdf.dat", "OPS\tops\n");
-        dir.write("repo/ops/.fenix/state.json", "{}");
         dir.write("repo/made/ccf.dat", "");
         dir.write("repo/made/.fenix/settings.toml", "[ccsds]\n");
+        dir.write("repo/snip/pcf.dat", "");
+        dir.write("repo/snip/.fenix/snippets/tc.toml", "");
+        dir.write("repo/py/pcf.dat", "");
+        dir.write("repo/py/setup.py", "");
+        dir.write("repo/sub/pcf.dat", "");
+        dir.write("repo/sub/.git/HEAD", "ref: refs/heads/main\n");
         dir.write("alone/pcf.dat", "");
-        let (ops, made, alone) = (repo.join("ops"), repo.join("made"), dir.path().join("alone"));
+        dir.write("home/.git/HEAD", "ref: refs/heads/main\n");
+        dir.write("home/mibs/ops/pcf.dat", "");
+        dir.write("home2/package.json", "{}");
+        dir.write("home2/work/ops/pcf.dat", "");
+        dir.write("unlisted/.git/HEAD", "ref: refs/heads/main\n");
+        dir.write("unlisted/ops/pcf.dat", "");
+        let ops = repo.join("ops");
+        let kept: Vec<PathBuf> = [repo.join("made"), repo.join("snip"), repo.join("py"), repo.join("sub"), dir.path().join("alone"), home.join("mibs/ops"), home2.join("work/ops"), unlisted.join("ops")].into();
         let path = dir.path().join("state").join("projects.json");
         let mut known = KnownProjects::load_or_default(path.clone());
-        for root in [&repo, &alone, &made, &ops] {
+        // home2 itself isn't on the list: its package.json is no project of yours.
+        for root in kept.iter().chain([&repo, &home, &ops]).rev() {
             known.add(root.clone());
         }
         known.save().unwrap();
+        let before = known.roots().to_vec();
 
-        assert_eq!(known.drop_mib_folders_once(), std::slice::from_ref(&ops));
-        assert_eq!(known.roots(), [made.clone(), alone.clone(), repo.clone()]);
-        assert_eq!(KnownProjects::load(path.clone()).unwrap().roots(), known.roots(), "saved");
-        assert!(ops.join("vdf.dat").is_file() && ops.join(".fenix/state.json").is_file(), "the folder is untouched");
+        let dropped = known.drop_mib_folders_once_from(Some(&home));
+        assert_eq!(dropped, [(ops.clone(), repo.clone())]);
+        let mut known = KnownProjects::load(path.clone()).unwrap();
+        assert_eq!(known.roots(), before.iter().filter(|r| **r != ops).cloned().collect::<Vec<_>>(), "saved, the rest in order");
+        assert!(ops.join("vdf.dat").is_file() && repo.join("snip/.fenix/snippets/tc.toml").is_file(), "the folders are untouched");
 
         // Added again by hand: it stays.
-        let mut known = KnownProjects::load(path.clone()).unwrap();
         known.add(ops.clone());
         known.save().unwrap();
-        assert!(known.drop_mib_folders_once().is_empty());
+        assert!(known.drop_mib_folders_once_from(Some(&home)).is_empty());
         assert_eq!(known.roots()[0], ops);
+    }
+
+    /// Above the home folder is no project of yours either: a stray
+    /// `package.json` there takes nothing off.
+    #[test]
+    fn a_marker_above_home_takes_nothing() {
+        let dir = TempDir::new("known_mib_home");
+        dir.write("package.json", "{}");
+        dir.write("me/work/ops/pcf.dat", "");
+        let ops = dir.path().join("me/work/ops");
+        let mut known = KnownProjects::load_or_default(dir.path().join("projects.json"));
+        known.add(dir.path().to_path_buf());
+        known.add(ops.clone());
+        assert!(known.drop_mib_folders_once_from(Some(&dir.path().join("me"))).is_empty());
+        assert!(known.roots().contains(&ops));
     }
 
     #[test]

@@ -30,6 +30,13 @@ pub fn set_extension_markers(markers: Vec<String>) {
     *EXTENSION_MARKERS.write().unwrap_or_else(|e| e.into_inner()) = markers;
 }
 
+/// Whether `dir` itself holds a language pack's marker
+/// (`set_extension_markers`).
+pub(crate) fn holds_pack_marker(dir: &Path) -> bool {
+    let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    EXTENSION_MARKERS.read().unwrap_or_else(|e| e.into_inner()).iter().any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
+}
+
 /// Walks up from `start` (a file or a directory -- a file's own directory
 /// is where the walk begins) looking for the closest ancestor containing
 /// any marker in `MARKERS`, or that is an Arduino sketch. A folder of MIB

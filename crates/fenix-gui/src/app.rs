@@ -6174,11 +6174,7 @@ impl App {
         // A MIB folder inside another project, on your list from when one
         // was a project of its own: taken off it, once (the packs'
         // markers are known now, so what's a project is too).
-        let dropped = app.known_projects.drop_mib_folders_once();
-        if !dropped.is_empty() {
-            let names: Vec<String> = dropped.iter().map(|root| fenix_vfs::display(root)).collect();
-            app.set_message(format!("off your projects, now in the project around them: {} -- the folders are untouched", names.join(", ")));
-        }
+        app.drop_mib_folders_from_projects(dirs::home_dir().as_deref());
         // The file opened at start was given its project before the
         // packs' markers were known: again, now they are. Then those that
         // start with Fenix start, in it (or a moment later, after it, each

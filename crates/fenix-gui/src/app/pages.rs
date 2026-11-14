@@ -1503,6 +1503,22 @@ impl App {
     // The hub
     // --------------------------------------------------------------
 
+    /// The folders of MIB tables your projects held from before 1.6 that
+    /// are now in a project of yours around them, taken off the list once
+    /// (`KnownProjects::drop_mib_folders_once`) -- and said in a
+    /// notification that stays until it's seen, naming each and where it
+    /// is now, so no project just goes.
+    pub(super) fn drop_mib_folders_from_projects(&mut self, home: Option<&Path>) {
+        let dropped = self.known_projects.drop_mib_folders_once_from(home);
+        if dropped.is_empty() {
+            return;
+        }
+        let lines: Vec<String> = dropped.iter().map(|(folder, around)| format!("{} -- in {} now", fenix_vfs::display(folder), fenix_vfs::display(around))).collect();
+        let summary = if dropped.len() == 1 { "A folder of MIB tables left your projects".to_string() } else { format!("{} folders of MIB tables left your projects", dropped.len()) };
+        let body = format!("{}\nA MIB folder is part of the project around it now. The folders are untouched; SPC p a adds one back.", lines.join("\n"));
+        self.notify(crate::notify::Request::new("fenix", summary).body(body).urgency(crate::notify::Urgency::Critical).tag("fenix.mib-folders").action("Add a project", "project.add"));
+    }
+
     /// What the hub shows for each known project, before git and the
     /// doctor have reported in.
     fn hub_projects(&self) -> Vec<HubProject> {
@@ -2226,7 +2242,12 @@ mod tests {
             app.known_projects.add(root.clone());
         }
 
-        assert_eq!(app.known_projects.drop_mib_folders_once(), std::slice::from_ref(&ops));
+        app.drop_mib_folders_from_projects(None);
+        assert!(!app.known_projects.roots().contains(&ops));
+        let said = app.notifications.history().iter().map(|n| format!("{}\n{}", n.summary, n.body)).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("A folder of MIB tables left your projects") && said.contains(&format!("{} -- in {} now", fenix_vfs::display(&ops), fenix_vfs::display(&repo))), "{said}");
+        app.drop_mib_folders_from_projects(None);
+        assert_eq!(app.notifications.history().len(), 1, "once");
         let hub: Vec<(PathBuf, fenix_project::ProjectKind)> = app.hub_projects().into_iter().map(|p| (p.root, p.kind)).collect();
         assert_eq!(hub, [(repo.clone(), fenix_project::ProjectKind::Other), (alone.clone(), fenix_project::ProjectKind::Other)]);
         assert!(fenix_project::workspace::subprojects(&repo).is_empty(), "not a subproject either");

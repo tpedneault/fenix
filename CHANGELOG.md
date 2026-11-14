@@ -141,11 +141,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   part of the repository's project: its files are that project's, and
   `SPC p` (tasks, the doctor, finding in the project, the explorer,
   settings) acts on the repository. It isn't listed under the
-  repository in the project hub any more, and if you had added it to
-  your projects, it's taken off the list once, when Fenix first starts
-  (Fenix says which). A MIB folder with nothing around it is in no
-  project, as any other folder is; if you added it to your projects it
-  stays there, and opens as the folder you chose. Nothing in the
+  repository in the project hub any more. If you had added it to your
+  projects and have the repository there too, it's taken off the list
+  once, when Fenix first starts, and a notification names each folder
+  and the project it's in now (`SPC p a` adds one back). Any other --
+  one with something of its own (a `.fenix/` folder, a `setup.py`, ...),
+  one whose repository isn't among your projects, one with nothing
+  around it but your home folder -- stays on your list and opens as the
+  folder you chose. A MIB folder with nothing around it is in no
+  project, as any other folder is. Nothing in the
   folders changes, and a MIB made with the SCOS-2000 MIB template is
   still its own project. MIB is no longer a kind of project: one that
   says `kind = "mib"` is shown as a plain project (`DIR`). Until the MIB
