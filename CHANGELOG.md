@@ -155,6 +155,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   says `kind = "mib"` is shown as a plain project (`DIR`). Until the MIB
   extension finds MIB folders inside a project by itself, list yours in
   the project's `mib.roots` (`SPC k ,`).
+- A project's declared kind that Fenix doesn't know (`kind = "java"` in
+  `.fenix/settings.toml`) is kept rather than ignored: the project is
+  shown by that id, muted (`JAVA`), the hub can filter on it, and the
+  settings page's kind cycler starts on it -- it no longer writes the
+  first of Fenix's kinds over it at the first key. A template may name
+  any kind id the same way; only one that isn't an id (`a-z` first, then
+  `a-z 0-9 - _`, at most 24) is refused.
 - Release candidates are dropped from the release process in favour of
   the nightly ([how releases work](docs/RELEASING.md)), and the
   unreleased `updates.prereleases` setting with them, replaced by

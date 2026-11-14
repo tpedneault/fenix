@@ -55,6 +55,11 @@ pub struct Settings {
     pub root: PathBuf,
     pub detected: ProjectKind,
     pub declared: Option<ProjectKind>,
+    /// A kind this project declared that no one declares now
+    /// (`kind = "java"` without the Java pack), once the cycler has seen
+    /// it: kept among its choices while the page is open, so `h` then `l`
+    /// comes back to it.
+    undeclared: Option<ProjectKind>,
     pub group: String,
     pub pinned: bool,
     pub jira: String,
@@ -86,6 +91,7 @@ impl Settings {
             root,
             detected,
             declared: None,
+            undeclared: None,
             group: String::new(),
             pinned: false,
             jira: String::new(),
@@ -263,8 +269,16 @@ impl Settings {
     }
 
     fn cycle_kind(&mut self, forward: bool) -> Action {
-        // "detect", then each kind.
-        let options: Vec<Option<ProjectKind>> = std::iter::once(None).chain(ProjectKind::ALL.into_iter().map(Some)).collect();
+        // "detect", then each kind declared now, then the one this
+        // project declares if no one else does -- so it's where the cycle
+        // starts, and only a deliberate change moves off it.
+        if self.declared.is_some_and(|k| !k.is_declared()) {
+            self.undeclared = self.declared;
+        }
+        let mut options: Vec<Option<ProjectKind>> = std::iter::once(None).chain(ProjectKind::known().into_iter().map(Some)).collect();
+        if !options.contains(&self.undeclared) {
+            options.push(self.undeclared);
+        }
         let at = options.iter().position(|o| *o == self.declared).unwrap_or(0);
         let next = if forward { (at + 1) % options.len() } else { (at + options.len() - 1) % options.len() };
         self.declared = options[next];
@@ -540,6 +554,7 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
                 Field::Kind => {
                     let room = (left + width).saturating_sub(value_x);
                     let text = match settings.declared {
+                        Some(k) if !k.is_declared() => format!("‹ {} -- no installed extension knows this kind ›", k.id()),
                         Some(k) => format!("‹ {} ›", k.label()),
                         // "detect:" goes first when it's tight.
                         None => {
@@ -617,7 +632,7 @@ mod tests {
         if let Some(json) = tools_json {
             std::fs::write(root.join(".fenix/tools.json"), json).unwrap();
         }
-        (Settings::new(root.clone(), ProjectKind::Python), root)
+        (Settings::new(root.clone(), ProjectKind::PYTHON), root)
     }
 
     fn type_in(s: &mut Settings, text: &str) {
@@ -703,7 +718,7 @@ mod tests {
         s.focus_on(&Field::Pinned);
         assert_eq!(s.key(Key::Space), Action::SetPinned(true));
         s.focus_on(&Field::Kind);
-        assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(ProjectKind::Python)));
+        assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(ProjectKind::PYTHON)));
         assert_eq!(s.key(Key::Char('h')), Action::SetKind(None));
         s.focus_on(&Field::Jira);
         s.key(Key::Enter);
@@ -714,6 +729,37 @@ mod tests {
         type_in(&mut s, "Mission ops");
         assert_eq!(s.key(Key::Enter), Action::SetGroup("Mission ops".into()));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `kind = "java"` with nothing declaring Java: shown by its id, said
+    /// to be unknown, and the cycle starts on it -- `h` then `l` comes
+    /// back to it, never to the first built-in.
+    #[test]
+    fn a_kind_no_one_declares_is_kept_by_the_cycler() {
+        let (mut s, root) = settings("unknown_kind", None);
+        let java = ProjectKind::from_id("java").unwrap();
+        s.declared = Some(java);
+        let text = layout(&s, 120).text;
+        assert!(text.contains("java -- no installed extension knows this kind"), "{text}");
+        s.focus_on(&Field::Kind);
+        assert_eq!(s.key(Key::Char('h')), Action::SetKind(Some(ProjectKind::OTHER)));
+        assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(java)));
+        assert_eq!(s.key(Key::Char('l')), Action::SetKind(None), "past it, detect");
+        assert_eq!(s.key(Key::Char('h')), Action::SetKind(Some(java)));
+        // A page opened on a project declaring one of the known kinds
+        // offers no other.
+        let (mut s, root2) = settings("known_kind", None);
+        s.declared = Some(ProjectKind::RUST);
+        s.focus_on(&Field::Kind);
+        let mut seen = Vec::new();
+        for _ in 0..ProjectKind::BUILT_IN.len() + 1 {
+            if let Action::SetKind(k) = s.key(Key::Char('l')) {
+                seen.push(k);
+            }
+        }
+        assert!(!seen.contains(&Some(java)), "{seen:?}");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
     }
 
     #[test]

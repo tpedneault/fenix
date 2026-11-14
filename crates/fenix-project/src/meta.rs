@@ -309,7 +309,7 @@ mod tests {
         let moved = migrate_project_ini(root).unwrap().unwrap();
         assert_eq!(moved.len(), 5, "{moved:?}");
         assert!(!project_ini(root).exists());
-        assert_eq!(crate::declared_kind(root), Some(crate::ProjectKind::Rust));
+        assert_eq!(crate::declared_kind(root), Some(crate::ProjectKind::RUST));
         assert_eq!(jira_key(root).as_deref(), Some("FNX"));
         assert_eq!(reviewers(root), Some(vec!["alex".to_string(), "sam".to_string()]));
         assert_eq!(fenix_storage::project_file::get(root, "monitor.baudrate").as_deref(), Some("9600"));
@@ -317,6 +317,24 @@ mod tests {
         assert_eq!((tools.tasks["Build"].executable.as_str(), tools.tasks["Build"].args.clone()), ("cargo", vec!["build".to_string(), "--release".to_string()]));
         assert_eq!(tools.launch.program, Some(PathBuf::from("target/debug/app")));
         assert!(migrate_project_ini(root).is_none(), "nothing left to move");
+    }
+
+    /// A kind no installed extension declares moves as written, and is
+    /// written back as its id.
+    #[test]
+    fn a_kind_no_one_declares_survives_the_move_and_a_save() {
+        let dir = crate::test_util::TempDir::new("migrate_unknown_kind");
+        let root = dir.path();
+        dir.write(".fenix/project.ini", "[project]\nkind = java\n");
+        migrate_project_ini(root).unwrap().unwrap();
+        let java = crate::declared_kind(root).unwrap();
+        assert_eq!(java.id(), "java");
+        assert_eq!(fenix_storage::project_file::get(root, "project.kind").as_deref(), Some("java"));
+        set_kind(root, None).unwrap();
+        assert_eq!(crate::declared_kind(root), None);
+        set_kind(root, Some(java)).unwrap();
+        assert_eq!(crate::declared_kind(root), Some(java));
+        assert_eq!(fenix_storage::project_file::get(root, "project.kind").as_deref(), Some("java"));
     }
 
     /// A `project.ini` with nothing the move reads is left as it is, so

@@ -329,7 +329,9 @@ impl Template {
     /// and its `files/` tree as (forward-slash relative path, contents).
     pub fn parse(id: &str, toml_text: &str, files: &[(String, String)], origin: Origin) -> Result<Self, String> {
         let raw: RawTemplate = toml::from_str(toml_text).map_err(|e| format!("template.toml: {e}"))?;
-        let kind = ProjectKind::from_id(&raw.template.kind).ok_or_else(|| format!("unknown kind \"{}\"", raw.template.kind))?;
+        // Any kind id: one no installed extension declares is shown by its
+        // id, muted. Only what isn't an id is refused.
+        let kind = ProjectKind::from_id(&raw.template.kind).ok_or_else(|| format!("unknown kind \"{}\" -- a kind's id is a-z first, then a-z 0-9 - _, at most 24", raw.template.kind))?;
         let name_rule = match raw.template.name_rule.as_deref() {
             None | Some("any") => NameRule::Any,
             Some("sketch") => NameRule::Sketch,
@@ -1436,7 +1438,7 @@ tm_time = \"cuc 4.2\""), "{profile}");
         assert_eq!(plan.files.iter().find(|f| f.path == "vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
         assert!(plan.steps.is_empty());
         assert_eq!(plan.hooks, [Hook::MibRoot { path: ".".into(), label: "mission-c".into() }]);
-        assert_eq!(plan.kind, ProjectKind::Other, "a project like any other");
+        assert_eq!(plan.kind, ProjectKind::OTHER, "a project like any other");
     }
 
     /// What the MIB template writes is a project of its own, by its
@@ -1451,7 +1453,7 @@ tm_time = \"cuc 4.2\""), "{profile}");
         let plan = template.plan("mission-c", dir.path(), &answers).unwrap();
         plan.write_files().unwrap();
         assert_eq!(crate::find_project_root(&plan.dir.join("ccf.dat")), Some(plan.dir.clone()));
-        assert_eq!(crate::detect_kind(&plan.dir), ProjectKind::Other);
+        assert_eq!(crate::detect_kind(&plan.dir), ProjectKind::OTHER);
         assert_eq!(plan.file_to_open(), Some(plan.dir.join("vdf.dat")));
     }
 
@@ -1472,11 +1474,28 @@ tm_time = \"cuc 4.2\""), "{profile}");
             (format!("{HEAD}[[run]]\nexec = \"x\"\nwhen = \"nope\"\n"), "isn't an ask"),
             (format!("{HEAD}typo = 1\n"), "unknown field"),
             (format!("{HEAD}[[ask]]\nkey = \"a\"\nlabel = \"A\"\n[[run]]\nexec = \"x\"\nargs = [\"-{{{{a...}}}}\"]\n"), "whole argument"),
-            ("[template]\nname = \"T\"\nkind = \"cobol\"\n".to_string(), "unknown kind"),
+            ("[template]\nname = \"T\"\nkind = \"Co Bol\"\n".to_string(), "unknown kind"),
         ];
         for (text, expected) in cases {
             let error = parse(&text).unwrap_err();
             assert!(error.contains(expected), "{error:?} should mention {expected:?}");
+        }
+    }
+
+    /// A template may name any kind id: a pack's (`java`), one nobody
+    /// declares (`cobol`, shown by its id), Fenix's in any case. Only what
+    /// isn't an id is refused.
+    #[test]
+    fn a_template_names_any_kind_id() {
+        for (kind, id) in [("java", "java"), ("cobol", "cobol"), ("Rust", "rust"), ("ts", "node"), ("mib", "other")] {
+            let template = parse(&format!("[template]\nname = \"T\"\nkind = \"{kind}\"\n")).unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(template.kind.id(), id);
+            let plan = template.plan("demo", Path::new("p"), &Answers::new()).unwrap();
+            assert_eq!(plan.kind, template.kind);
+        }
+        for bad in ["Java", "co bol", "c#", "", &"a".repeat(25)] {
+            let error = parse(&format!("[template]\nname = \"T\"\nkind = \"{bad}\"\n")).unwrap_err();
+            assert!(error.contains("unknown kind"), "{bad}: {error}");
         }
     }
 

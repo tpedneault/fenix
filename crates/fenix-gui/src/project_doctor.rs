@@ -62,7 +62,7 @@ impl DoctorPage {
     /// extension that recognises it calls it (#52).
     pub fn kind_label(&self) -> &str {
         match (&self.language, self.kind) {
-            (Some(language), ProjectKind::Other) => language,
+            (Some(language), ProjectKind::OTHER) => language,
             _ => self.kind.label(),
         }
     }
@@ -204,7 +204,7 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
     let end = g.put(1, left, doctor.kind.tag(), Role::Kind(doctor.kind));
     let end = g.put(1, end + 2, &fit(&doctor.name, stop.saturating_sub(end + 2)), Role::Title);
     let language = match (&doctor.language, doctor.kind) {
-        (Some(language), ProjectKind::Other) => format!("· {language}"),
+        (Some(language), ProjectKind::OTHER) => format!("· {language}"),
         _ => String::new(),
     };
     let mut end = end;
@@ -319,8 +319,8 @@ mod tests {
         std::fs::create_dir_all(dir.join(".fenix")).unwrap();
         std::fs::write(dir.join("uv.lock"), "").unwrap();
         std::fs::write(dir.join(".fenix/tools.json"), "{\"typo\":1}").unwrap();
-        let mut page = DoctorPage::new(dir.clone(), ProjectKind::Python);
-        page.set_checks(diagnose(&dir, ProjectKind::Python, &NoTools, false));
+        let mut page = DoctorPage::new(dir.clone(), ProjectKind::PYTHON);
+        page.set_checks(diagnose(&dir, ProjectKind::PYTHON, &NoTools, false));
         (page, dir)
     }
 
@@ -374,18 +374,18 @@ mod tests {
     /// recognises it calls it, not "Project" (#52).
     #[test]
     fn a_project_an_extension_recognises_is_named_as_it_says() {
-        let mut doctor = DoctorPage::new(PathBuf::from("/x/demo"), ProjectKind::Other);
+        let mut doctor = DoctorPage::new(PathBuf::from("/x/demo"), ProjectKind::OTHER);
         assert_eq!(doctor.kind_label(), "Project");
         doctor.language = Some("Zig".into());
         assert!(doctor.report().starts_with("demo (Zig) -- "), "{}", doctor.report());
         assert!(layout(&doctor, 100).text.contains("demo  · Zig  · doctor"), "{}", layout(&doctor, 100).text);
-        doctor.kind = ProjectKind::Rust;
+        doctor.kind = ProjectKind::RUST;
         assert_eq!(doctor.kind_label(), "Rust", "Fenix's own kind first");
     }
 
     #[test]
     fn while_checking_it_says_so() {
-        let doctor = DoctorPage::new(PathBuf::from("/x/demo"), ProjectKind::Rust);
+        let doctor = DoctorPage::new(PathBuf::from("/x/demo"), ProjectKind::RUST);
         let page = layout(&doctor, 60);
         assert!(page.text.contains("checking…"));
         assert!(page.text.lines().all(|l| l.chars().count() <= 60));

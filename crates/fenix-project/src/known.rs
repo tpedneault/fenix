@@ -134,7 +134,7 @@ fn taken_by(root: &Path, home: Option<&Path>, known: &[PathBuf]) -> Option<PathB
         return None;
     }
     let fenix_has_something = std::fs::read_dir(root.join(".fenix")).is_ok_and(|mut entries| entries.next().is_some());
-    if fenix_has_something || crate::root::holds_pack_marker(root) || crate::detect_kind_from_files(root) != crate::ProjectKind::Other {
+    if fenix_has_something || crate::root::holds_pack_marker(root) || crate::detect_kind_from_files(root) != crate::ProjectKind::OTHER {
         return None;
     }
     let around = crate::find_project_root(root).filter(|around| around != root)?;

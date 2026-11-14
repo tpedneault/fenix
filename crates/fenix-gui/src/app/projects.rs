@@ -4,21 +4,27 @@
 //! pages themselves (wizard, hub, doctor, settings) are in `pages`.
 
 use super::*;
-use fenix_project::ProjectKind;
+use fenix_project::{KindColor, ProjectKind};
 
 /// A kind's colour, taken from the theme's own syntax roles rather than
-/// fixed values, so a tag stays readable on a light theme too.
+/// fixed values, so a tag stays readable on a light theme too. A kind
+/// names its role (`KindColor`); a kind no one declares is muted, as
+/// Other is.
 pub(super) fn kind_color(kind: ProjectKind, theme: &Theme) -> glyphon::Color {
-    match kind {
-        ProjectKind::Python => theme.syntax_type,
-        ProjectKind::Arduino => rgba_to_glyphon(theme.mode_insert),
-        ProjectKind::Rust => theme.syntax_string,
-        ProjectKind::Tcl => theme.syntax_function,
-        ProjectKind::Cpp => theme.syntax_keyword,
-        ProjectKind::Node => theme.syntax_number,
-        ProjectKind::Go => theme.syntax_type,
-        ProjectKind::Monorepo => theme.fg,
-        ProjectKind::Other => theme.gutter_fg,
+    match kind.color() {
+        KindColor::Syntax(role) => match role {
+            "keyword" => theme.syntax_keyword,
+            "string" => theme.syntax_string,
+            "function" => theme.syntax_function,
+            "type" => theme.syntax_type,
+            "number" => theme.syntax_number,
+            "attribute" => theme.syntax_attribute,
+            "variable" => theme.syntax_variable,
+            _ => theme.syntax_constant,
+        },
+        KindColor::Insert => rgba_to_glyphon(theme.mode_insert),
+        KindColor::Fg => theme.fg,
+        KindColor::Muted => theme.gutter_fg,
     }
 }
 
@@ -62,10 +68,32 @@ mod tests {
 
     #[test]
     fn the_modeline_segment_is_the_tag_then_the_name() {
-        let spans = modeline_project_spans(ProjectKind::Arduino, "blink-lab", theme::by_name("Visual Studio Dark").unwrap());
+        let spans = modeline_project_spans(ProjectKind::ARDUINO, "blink-lab", theme::by_name("Visual Studio Dark").unwrap());
         let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(text, "INO blink-lab · ");
         assert_eq!(spans[0].1, rgba_to_glyphon(theme::by_name("Visual Studio Dark").unwrap().mode_insert));
+    }
+
+    /// Fenix's kinds keep the colours they had, and a kind no one
+    /// declares is drawn as Other is.
+    #[test]
+    fn each_kind_keeps_its_colour() {
+        let theme = theme::by_name("Visual Studio Dark").unwrap();
+        let expected = [
+            (ProjectKind::PYTHON, theme.syntax_type),
+            (ProjectKind::ARDUINO, rgba_to_glyphon(theme.mode_insert)),
+            (ProjectKind::RUST, theme.syntax_string),
+            (ProjectKind::TCL, theme.syntax_function),
+            (ProjectKind::CPP, theme.syntax_keyword),
+            (ProjectKind::NODE, theme.syntax_number),
+            (ProjectKind::GO, theme.syntax_type),
+            (ProjectKind::MONOREPO, theme.fg),
+            (ProjectKind::OTHER, theme.gutter_fg),
+        ];
+        for (kind, color) in expected {
+            assert_eq!(kind_color(kind, theme), color, "{kind:?}");
+        }
+        assert_eq!(kind_color(ProjectKind::from_id("cobol").unwrap(), theme), theme.gutter_fg);
     }
 
     #[test]

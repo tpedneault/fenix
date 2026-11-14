@@ -444,7 +444,7 @@ impl Wizard {
     /// and `uv init` add themselves to one), for the review to say so.
     pub fn joins_workspace(&self) -> Option<PathBuf> {
         let kind = self.chosen()?.kind;
-        if !matches!(kind, fenix_project::ProjectKind::Rust | fenix_project::ProjectKind::Python) {
+        if !matches!(kind, fenix_project::ProjectKind::RUST | fenix_project::ProjectKind::PYTHON) {
             return None;
         }
         fenix_project::workspace::workspace_above(Path::new(self.parent.trim()), kind)
@@ -1033,7 +1033,7 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
         then.push("add it to your projects".to_string());
     }
     if let Some(workspace) = wizard.joins_workspace() {
-        let tool = if plan.kind == fenix_project::ProjectKind::Rust { "cargo" } else { "uv" };
+        let tool = if plan.kind == fenix_project::ProjectKind::RUST { "cargo" } else { "uv" };
         then.push(format!("{tool} adds it to the workspace at {}", workspace.display()));
     }
     for hook in &plan.hooks {

@@ -2249,7 +2249,7 @@ mod tests {
         app.drop_mib_folders_from_projects(None);
         assert_eq!(app.notifications.history().len(), 1, "once");
         let hub: Vec<(PathBuf, fenix_project::ProjectKind)> = app.hub_projects().into_iter().map(|p| (p.root, p.kind)).collect();
-        assert_eq!(hub, [(repo.clone(), fenix_project::ProjectKind::Other), (alone.clone(), fenix_project::ProjectKind::Other)]);
+        assert_eq!(hub, [(repo.clone(), fenix_project::ProjectKind::OTHER), (alone.clone(), fenix_project::ProjectKind::OTHER)]);
         assert!(fenix_project::workspace::subprojects(&repo).is_empty(), "not a subproject either");
 
         app.open_file_from_picker(&ops.join("ccf.dat"));

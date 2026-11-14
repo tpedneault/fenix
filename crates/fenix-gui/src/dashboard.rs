@@ -625,8 +625,8 @@ mod tests {
                 FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
             ],
             projects: vec![
-                ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust, health: Some(fenix_project::doctor::Health::Warn) },
-                ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl, health: None },
+                ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::RUST, health: Some(fenix_project::doctor::Health::Warn) },
+                ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::TCL, health: None },
             ],
             sections: vec![today(vec![("Pick a dashboard", RowMark::Live("0:18".into())), ("Review PR", RowMark::Task(true))])],
             todos: vec![TodoItem { kind: TodoKind::Fix, message: "group id is wrong".into(), file: "pom.xml".into(), path: "/p/pom.xml".into(), line: 5, col: 8 }],
@@ -760,7 +760,7 @@ mod tests {
         let view = layout(&sample(), 140, 45);
         let fenix = line_of(&view, "fenix");
         assert!(view.text.lines().nth(fenix).unwrap().contains("RS  fenix"));
-        assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Kind(ProjectKind::Rust)));
+        assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Kind(ProjectKind::RUST)));
         assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Health(fenix_project::doctor::Health::Warn)), "a health dot");
         let tcl = line_of(&view, "test-tcl");
         assert!(!view.spans.iter().any(|s| s.line == tcl && matches!(s.role, Role::Health(_))), "no dot before the doctor has looked");
