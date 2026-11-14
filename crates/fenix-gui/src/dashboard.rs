@@ -439,15 +439,16 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                         if let Some(n) = number {
                             g.put(y, x + 2, &n.to_string(), Role::Muted);
                         }
-                        // The kind tag in a fixed four-cell field, so names
-                        // line up whatever the tag's length.
+                        // The kind tag in a fixed five-cell field -- four and
+                        // a space -- so names line up whatever the tag's
+                        // length.
                         g.put(y, x + 5, item.kind.tag(), Role::Kind(item.kind));
-                        g.put(y, x + 9, &fit(&item.name, col_width.saturating_sub(12)), Role::Title);
+                        g.put(y, x + 10, &fit(&item.name, col_width.saturating_sub(13)), Role::Title);
                         if let Some(health) = item.health {
                             g.put(y, x + col_width - 1, "●", Role::Health(health));
                         }
                         let under = item.branch.clone().unwrap_or_else(|| fenix_vfs::display(&item.root));
-                        g.put(y + 1, x + 9, &fit(&under, col_width.saturating_sub(9)), Role::Muted);
+                        g.put(y + 1, x + 10, &fit(&under, col_width.saturating_sub(10)), Role::Muted);
                         slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number, entry: HomeEntry::Project(item.root.clone()) });
                         y += 2;
                     }
@@ -755,11 +756,25 @@ mod tests {
         assert!(!view.text.contains("recovered"));
     }
 
+    /// A four-character tag -- `MONO`, or a kind's id no one declares --
+    /// has a space before the name, which lines up with the others'.
+    #[test]
+    fn a_four_character_tag_keeps_a_space_before_the_name() {
+        let mut data = sample();
+        data.projects.push(ProjectItem { root: "/m".into(), name: "orbit".into(), branch: None, kind: ProjectKind::MONOREPO, health: None });
+        data.projects.push(ProjectItem { root: "/j".into(), name: "spring".into(), branch: None, kind: ProjectKind::from_id("java").unwrap(), health: None });
+        let view = layout(&data, 140, 45);
+        let line = |name: &str| view.text.lines().nth(line_of(&view, name)).unwrap().to_string();
+        assert!(line("orbit").contains("MONO orbit"), "{}", view.text);
+        assert!(line("spring").contains("JAVA spring"), "{}", view.text);
+        assert_eq!(line("orbit").find("orbit"), line("fenix").find("fenix"), "names line up");
+    }
+
     #[test]
     fn projects_carry_their_kind_tag_and_end_with_a_new_project_slot() {
         let view = layout(&sample(), 140, 45);
         let fenix = line_of(&view, "fenix");
-        assert!(view.text.lines().nth(fenix).unwrap().contains("RS  fenix"));
+        assert!(view.text.lines().nth(fenix).unwrap().contains("RS   fenix"));
         assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Kind(ProjectKind::RUST)));
         assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Health(fenix_project::doctor::Health::Warn)), "a health dot");
         let tcl = line_of(&view, "test-tcl");

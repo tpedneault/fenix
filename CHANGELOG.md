@@ -162,6 +162,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first of Fenix's kinds over it at the first key. A template may name
   any kind id the same way; only one that isn't an id (`a-z` first, then
   `a-z 0-9 - _`, at most 24) is refused.
+- The new-project wizard lists "Start from" last, after the groups of
+  extensions' templates. Home leaves five cells for a project's kind, so
+  a four-letter tag (`MONO`) no longer touches its name.
 - Release candidates are dropped from the release process in favour of
   the nightly ([how releases work](docs/RELEASING.md)), and the
   unreleased `updates.prereleases` setting with them, replaced by

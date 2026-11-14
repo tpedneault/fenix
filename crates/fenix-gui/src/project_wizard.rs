@@ -161,8 +161,10 @@ pub struct Wizard {
     git_touched: bool,
 }
 
-/// The order groups are listed in; anything else ("Yours") comes after.
-const GROUPS: [&str; 8] = ["Python", "Systems", "Web", "Embedded", "Mission", "Scripting", "Fenix", "Start from"];
+/// The order groups are listed in; anything else ("Yours", a pack's
+/// "Java and Kotlin") comes after, by name, and "Start from" last.
+const GROUPS: [&str; 7] = ["Python", "Systems", "Web", "Embedded", "Mission", "Scripting", "Fenix"];
+const LAST_GROUP: &str = "Start from";
 
 impl Wizard {
     pub fn new(templates: Vec<Template>, errors: Vec<String>, found: BTreeMap<String, bool>, parent: &Path) -> Self {
@@ -196,7 +198,7 @@ impl Wizard {
 
     /// Template indices in display order: by group, then as loaded.
     pub fn template_order(&self) -> Vec<usize> {
-        let rank = |group: &str| GROUPS.iter().position(|g| *g == group).unwrap_or(GROUPS.len());
+        let rank = |group: &str| if group == LAST_GROUP { GROUPS.len() + 1 } else { GROUPS.iter().position(|g| *g == group).unwrap_or(GROUPS.len()) };
         let mut order: Vec<usize> = (0..self.templates.len()).collect();
         order.sort_by_key(|&i| (rank(&self.templates[i].group), self.templates[i].group.clone()));
         order
@@ -1144,12 +1146,28 @@ mod tests {
         assert_eq!(groups.first(), Some(&"Python"));
         let mut seen: Vec<&str> = groups.clone();
         seen.dedup();
-        assert_eq!(seen, GROUPS, "each group once, in order");
+        assert_eq!(seen, [&GROUPS[..], &[LAST_GROUP]].concat(), "each group once, in order");
         assert_eq!(groups.last(), Some(&"Start from"));
         let page = layout(&w, 120);
         assert!(page.text.contains("PYTHON") && page.text.contains("SYSTEMS") && page.text.contains("EMBEDDED") && page.text.contains("MISSION"));
         assert!(page.text.contains("Python · uv"));
         assert!(page.text.contains("found"), "the focused template's needs are looked up:\n{}", page.text);
+    }
+
+    /// A pack's group comes before "Start from", and its templates show
+    /// the kind they name: a pack's, one nobody declares (by its id).
+    #[test]
+    fn a_packs_templates_come_before_start_from_with_their_kinds() {
+        let pack = |id: &str, kind: &str| fenix_project::template::Template::parse(id, &format!("[template]\nname = \"{id}\"\nkind = \"{kind}\"\ngroup = \"Java and Kotlin\"\n"), &[], fenix_project::template::Origin::Extension(PathBuf::from("/x"))).unwrap();
+        let mut templates = builtin_templates();
+        templates.push(pack("spring", "java"));
+        templates.push(pack("cobol-app", "cobol"));
+        let w = Wizard::new(templates, Vec::new(), BTreeMap::new(), Path::new("/tmp"));
+        let mut groups: Vec<&str> = w.template_order().iter().map(|&i| w.templates[i].group.as_str()).collect();
+        groups.dedup();
+        assert_eq!(&groups[groups.len() - 2..], ["Java and Kotlin", "Start from"]);
+        let page = layout(&w, 120);
+        assert!(page.text.contains("JAVA ") && page.text.contains("COBO "), "{}", page.text);
     }
 
     #[test]
