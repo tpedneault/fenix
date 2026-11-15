@@ -3450,21 +3450,26 @@ fn reaches_fenix_control(name: &str) -> bool {
     if cfg!(windows) && bare.to_ascii_lowercase().starts_with("fenix-") {
         return true;
     }
-    let is_control = |path: &Path| {
-        let file = path.file_name().and_then(|f| f.to_str()).unwrap_or_default();
-        let folder = path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()).unwrap_or_default();
-        file.starts_with("control") && (folder == "fenix" || folder.starts_with("fenix-"))
-    };
-    let named = Path::new(bare);
-    if is_control(named) {
-        return true;
-    }
-    #[cfg(unix)]
-    if let Ok(path) = ipc_path(bare) {
-        if is_control(&path) || std::fs::canonicalize(&path).is_ok_and(|real| is_control(&real)) {
-            return true;
-        }
-    }
+    is_control(Path::new(bare)) || leads_to_control(bare)
+}
+
+/// Whether `path` is Fenix's control socket by its name: `control*` in a
+/// `fenix` or `fenix-<uid>` folder.
+fn is_control(path: &Path) -> bool {
+    let file = path.file_name().and_then(|f| f.to_str()).unwrap_or_default();
+    let folder = path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()).unwrap_or_default();
+    file.starts_with("control") && (folder == "fenix" || folder.starts_with("fenix-"))
+}
+
+/// Whether the name leads to it on this machine, a link followed.
+#[cfg(unix)]
+fn leads_to_control(bare: &str) -> bool {
+    ipc_path(bare).is_ok_and(|path| is_control(&path) || std::fs::canonicalize(&path).is_ok_and(|real| is_control(&real)))
+}
+
+/// A pipe's name is the whole of it on Windows: there is nothing to follow.
+#[cfg(not(unix))]
+fn leads_to_control(_bare: &str) -> bool {
     false
 }
 
