@@ -2,7 +2,9 @@
 //! id, it serves any name under it, by the name's last part:
 //!
 //! - `who`: who called it (`called_by`), as `extension:<id>`, `fenix`,
-//!   `agent-tool`, `agent-resource`, `agent-prompt`, `control` or `none`.
+//!   `agent-tool`, `agent-resource`, `agent-prompt`, `control`,
+//!   `other:<word>` or `none`.
+//! - `only_agenda`: `called_by_extension("fenix.agenda")`, as `yes` or `no`.
 //! - `who_later`: the same, answered once a timer goes off -- read in
 //!   `serve`, kept with the call.
 //! - `relay`: the payload is `<service> <rest>`; it calls that service
@@ -18,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use fenix_extension_api::{answer, call_service, called_by, export, host, info, Event, Extension, ServiceCaller};
+use fenix_extension_api::{answer, call_service, called_by, called_by_extension, export, host, info, Event, Extension, ServiceCaller};
 
 fn said(caller: Option<ServiceCaller>) -> String {
     match caller {
@@ -29,6 +31,7 @@ fn said(caller: Option<ServiceCaller>) -> String {
         Some(ServiceCaller::AgentResource) => "agent-resource".into(),
         Some(ServiceCaller::AgentPrompt) => "agent-prompt".into(),
         Some(ServiceCaller::Control) => "control".into(),
+        Some(ServiceCaller::Other(what)) => format!("other:{what}"),
     }
 }
 
@@ -69,6 +72,7 @@ impl Extension for Callers {
                 Some(Ok(format!("gated, for {caller}")))
             }
             "count" => Some(Ok(self.gated.to_string())),
+            "only_agenda" => Some(Ok(if called_by_extension("fenix.agenda") { "yes" } else { "no" }.into())),
             _ => Some(Ok(caller)),
         }
     }

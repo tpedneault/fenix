@@ -1995,6 +1995,8 @@ impl App {
             ServiceCaller::Fenix => "fenix",
             ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt => "agents",
             ServiceCaller::Control => "control",
+            // No gate can name an origin it doesn't know.
+            ServiceCaller::Other(_) => return Some(format!("{name}: {server} takes it only from {}", allowed.join(", "))),
         };
         if allowed.iter().any(|a| a == word) {
             return None;
@@ -2004,6 +2006,7 @@ impl App {
             ServiceCaller::Fenix => "Fenix".into(),
             ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt => "an agent".into(),
             ServiceCaller::Control => "the control channel".into(),
+            ServiceCaller::Other(what) => what.clone(),
         };
         Some(format!("{name}: {server} takes it only from {}, not from {who}", allowed.join(", ")))
     }

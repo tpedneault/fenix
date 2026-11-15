@@ -1375,6 +1375,10 @@ interface types {
         /// which may be one an extension started: never proof that no
         /// extension is behind it.
         control,
+        /// An origin this version of the API doesn't name -- a later one's
+        /// (a remote session, a scheduled task, a pipeline's step), by a
+        /// word for it. Treat it as untrusted: never as one of the above.
+        other(string),
     }
 }
 

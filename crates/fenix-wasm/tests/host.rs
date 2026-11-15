@@ -1790,6 +1790,7 @@ fn a_service_is_told_who_called_it_call_by_call() {
         (ServiceCaller::AgentResource, "agent-resource"),
         (ServiceCaller::AgentPrompt, "agent-prompt"),
         (ServiceCaller::Control, "control"),
+        (ServiceCaller::Other("remote".into()), "other:remote"),
     ];
     for (n, (caller, says)) in origins.into_iter().enumerate() {
         let served = ext.call(Call::Serve { call: n as u64, name: "c.who".into(), payload: String::new(), caller }).0;
@@ -1810,6 +1811,10 @@ fn a_service_is_told_who_called_it_call_by_call() {
     // Outside `serve`: a reply it's handed (`handle`) has no caller.
     let (_, seen) = ext.call(Call::Deliver(Notice::ServiceReply((99, Ok("x".into())))));
     assert!(said(&seen, Level::Info, "called-by in handle: none"), "{seen:?}");
+    // The safe check: the named extension, and nothing else.
+    for (caller, says) in [(ServiceCaller::Extension("fenix.agenda".into()), "yes"), (ServiceCaller::Extension("fenix.agenda2".into()), "no"), (ServiceCaller::Fenix, "no"), (ServiceCaller::Control, "no"), (ServiceCaller::Other("fenix.agenda".into()), "no")] {
+        assert_eq!(ext.call(Call::Serve { call: 20, name: "c.only_agenda".into(), payload: String::new(), caller }).0, Ok(Reply::Served(Some(Ok(says.into())))));
+    }
     // And `serve` after that is told its own again.
     assert_eq!(ext.call(Call::Serve { call: 12, name: "c.who".into(), payload: String::new(), caller: ServiceCaller::Control }).0, Ok(Reply::Served(Some(Ok("control".into())))));
 }

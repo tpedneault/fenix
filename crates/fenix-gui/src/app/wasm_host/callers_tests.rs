@@ -145,6 +145,8 @@ fn the_gate_refuses_an_unlisted_caller_before_the_extension_runs() {
     // Another extension, through its own call: refused, told why.
     let through = ask(&mut app, "test.evil", "evil.relay", "g.gated", ServiceCaller::Fenix).unwrap_err();
     assert_eq!(through, "fenix | g.gated: test.g takes it only from test.agenda, control, not from test.evil");
+    // An origin a later API names: never let through.
+    assert_eq!(ask(&mut app, "test.g", "g.gated", "", ServiceCaller::Other("remote".into())).unwrap_err(), "g.gated: test.g takes it only from test.agenda, control");
     // An agent: the same.
     assert!(ask(&mut app, "test.g", "g.gated", "", ServiceCaller::AgentTool).unwrap_err().ends_with("not from an agent"));
     // Running now (a service it doesn't gate is open to anyone), and its

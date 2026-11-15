@@ -1005,14 +1005,17 @@ once for anyone else -- `called_by()` says who called the service
 `serve` is answering:
 
 ```rust
-use fenix_extension_api::{called_by, ServiceCaller};
+use fenix_extension_api::{called_by, called_by_extension, ServiceCaller};
 
 fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<String, String>> {
-    match called_by() {
-        Some(ServiceCaller::Extension(id)) if id == "fenix.agenda" => {}
-        Some(ServiceCaller::Extension(id)) => return Some(Err(format!("{id} may not ask this"))),
-        Some(ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt) => {}
-        Some(ServiceCaller::Fenix | ServiceCaller::Control) | None => {}
+    // Allow what you name; refuse everything else, `None` included.
+    let allowed = match name {
+        "jira.comment" => called_by_extension("fenix.agenda"),
+        "jira.issue" => called_by_extension("fenix.agenda") || called_by() == Some(ServiceCaller::AgentResource),
+        _ => false,
+    };
+    if !allowed {
+        return Some(Err(format!("{name} isn't open to that caller")));
     }
     // ...
 }
@@ -1020,7 +1023,10 @@ fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<Strin
 
 Fenix sets it for each call: another extension by its id (Fenix knows
 which asked, since each runs on its own), `Fenix`, `AgentTool`,
-`AgentResource`, `AgentPrompt` or `Control`. A service called by a
+`AgentResource`, `AgentPrompt`, `Control`, or `Other(word)` -- an origin
+a later API names (a remote session, a scheduled task), which a service
+treats as untrusted: never as one of the others. A gate never lets
+`Other` through. A service called by a
 service sees that one, not the first in the chain. It's `None` outside
 `serve` -- in `handle`, a command, after an `.await` -- so a service
 that answers later reads it in `serve` and keeps it with the call. It
