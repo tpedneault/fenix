@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-15
+
 ### Added
 
 - A nightly build: `master`, built each night it changed, on one rolling
@@ -43,8 +45,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests_plan`, `tests_read`, `tests_step_ended`, `tests_launch` -- with
   the tests in a file, the commands to run, what it read in their
   output, and how to debug one; `tests::provider` says which runner it
-  found. The test explorer that calls them is still being built: a
-  provider can be written and tested against the API now. An extension
+  found. The test explorer that calls them is in this
+  release, off until you turn it on (`tests.enabled`). An extension
   rebuilt on the 1.6 crate may keep `api = "1.5"`, and still runs on
   Fenix 1.5, when no code reachable from its exports calls
   `tests::provider`. See
@@ -83,7 +85,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `tests.enabled`, off, on the settings page under Completion & LSP,
   with `tests.list_automatically`, `tests.on_save`, `tests.problems`,
   `tests.inline`, `tests.gutter`, `tests.timeout_minutes` and
-  `tests.keep_results`: the test explorer being built. Turned on, Fenix
+  `tests.keep_results`: the test explorer, off by default in this release
+  while it gets its first use. Turned on, Fenix
   scans, lists and runs tests through the providers of extensions that
   have them, their output in *Test output* (`tests.output`), from its
   page (`SPC T T`), `SPC T` and the file: a mark in the gutter beside
@@ -1339,7 +1342,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/tpedneault/fenix/compare/v1.5.2...v1.6.0
 [1.5.2]: https://github.com/tpedneault/fenix/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/tpedneault/fenix/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/tpedneault/fenix/compare/v1.4.0...v1.5.0
