@@ -110,12 +110,15 @@ fn void_namespace<'a>(id: &str, manifest: &'a Manifest, name: &str, installed: &
     manifest.contributes.namespaces.iter().map(String::as_str).find(|n| under(n) && *n != publisher && publishers.contains(n))
 }
 
+/// One claim to a name: how, whether it's the machine's, and whose.
+type Contender<'a> = (Claim, bool, &'a str);
+
 /// The names each of `claimants` lists that aren't its: `installed` is
 /// every installed extension's id, switched on or not, and `fenix_owns`
 /// says which names Fenix keeps for itself.
 pub fn refused(claimants: &[Claimant], installed: &[&str], fenix_owns: &dyn Fn(NameKind, &str) -> bool) -> Vec<Refused> {
     let mut out = Vec::new();
-    let mut contested: BTreeMap<(NameKind, String), Vec<(Claim, bool, &str)>> = BTreeMap::new();
+    let mut contested: BTreeMap<(NameKind, String), Vec<Contender>> = BTreeMap::new();
     for c in claimants {
         for (kind, name, claim) in names(c.id, c.manifest) {
             let mut refuse = |why: String| out.push(Refused { id: c.id.to_string(), kind, name: name.clone(), why });
@@ -149,8 +152,8 @@ pub fn refused(claimants: &[Claimant], installed: &[&str], fenix_owns: &dyn Fn(N
         // Under its id is caught above, so these are borrowed words; the
         // order holds whatever a manifest made some other way claims.
         let best = claims.iter().map(|(claim, _, _)| *claim).max().unwrap_or(Claim::Borrowed);
-        let strongest: Vec<&(Claim, bool, &str)> = claims.iter().filter(|(claim, _, _)| *claim == best).collect();
-        let managed: Vec<&&(Claim, bool, &str)> = strongest.iter().filter(|(_, managed, _)| *managed).collect();
+        let strongest: Vec<&Contender> = claims.iter().filter(|(claim, _, _)| *claim == best).collect();
+        let managed: Vec<&&Contender> = strongest.iter().filter(|(_, managed, _)| *managed).collect();
         let winner = match (strongest.len(), managed.len()) {
             (1, _) => Some(strongest[0].2),
             (_, 1) => Some(managed[0].2),
