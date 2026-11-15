@@ -803,7 +803,10 @@ impl App {
     /// (`unload_code_extension`); one switched on or installed has its
     /// settings, commands and keys, and starts as it would with Fenix.
     pub(super) fn code_extensions_now(&mut self, now: Vec<CodeExtension>) {
-        let same = |a: &CodeExtension, b: &CodeExtension| a.id == b.id && a.dir == b.dir && a.manifest.extension.version == b.manifest.extension.version;
+        // The same package, with the same names: another installed or
+        // switched off can give it names or take them (`installed::claimed`),
+        // and then it's put in use again with what it has now.
+        let same = |a: &CodeExtension, b: &CodeExtension| a.id == b.id && a.dir == b.dir && a.manifest.extension.version == b.manifest.extension.version && a.manifest.contributes == b.manifest.contributes;
         let gone: Vec<String> = self.wasm.installed.iter().filter(|e| !now.iter().any(|n| same(n, e))).map(|e| e.id.clone()).collect();
         for ext in &gone {
             self.unload_code_extension(ext);

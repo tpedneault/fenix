@@ -1,20 +1,20 @@
-//! Whose a name is, among the installed extensions: a service, a command,
+//! Whose a name is, among the switched-on code extensions: a service, a command,
 //! a setting, an agent tool or a prompt is one extension's alone, or no
 //! one's -- never the first one's in some order. `docs/plans/service-callers.md`
 //! §4.
 //!
 //! What a manifest may name at all is `Manifest::parse`'s (one-word
-//! namespaces; the word `fenix` only for `fenix.*` ids). Among the
-//! switched-on code extensions, then:
+//! namespaces; the word `fenix` only for `fenix.*` ids). Only the
+//! switched-on code extensions claim anything -- a theme, a data pack or
+//! one switched off serves, runs and keeps nothing -- and among them:
 //!
 //! 1. Fenix's own names are Fenix's.
-//! 2. A name under an installed extension's full id plus a dot is that
-//!    extension's -- switched on or not.
-//! 3. A namespace that is another installed extension's publisher claims
-//!    nothing.
-//! 4. A full id is a stronger claim than a borrowed word (the id's last
-//!    part, a namespace).
-//! 5. Between equal claims the machine's beats yours; else no one has it.
+//! 2. A word borrowed (the id's last part, a namespace) never reaches
+//!    under another's full id plus a dot.
+//! 3. A full id beats a borrowed word; between full ids, the shortest
+//!    that lists the name has it, so a longer id never takes a name.
+//! 4. Between borrowed words: the machine's, else the store's own
+//!    (`fenix.*`), when only one is; else no one has it.
 //!
 //! A refused name is taken out of the extension's manifest as Fenix uses
 //! it (`withdraw`), and said on the Extensions page.
@@ -89,34 +89,46 @@ fn names(id: &str, manifest: &Manifest) -> Vec<(NameKind, String, Option<Claim>)
     out
 }
 
-/// The installed extension other than `id` that `name` belongs to by
-/// its full id, if any: the longest id it's under (`acme.a.b.x` is
-/// `acme.a.b`'s, not `acme.a`'s).
-fn under_another<'a>(id: &str, name: &str, installed: &[&'a str]) -> Option<&'a str> {
-    let owner = installed.iter().copied().filter(|other| name.strip_prefix(other).is_some_and(|rest| rest.starts_with('.'))).max_by_key(|other| other.len())?;
-    (owner != id).then_some(owner)
-}
-
-/// The namespace through which alone `id` names `name`, when it's the
-/// publisher of another installed extension (`acme` beside `acme.dusk`).
-fn void_namespace<'a>(id: &str, manifest: &'a Manifest, name: &str, installed: &[&str]) -> Option<&'a str> {
-    let short = id.rsplit('.').next().unwrap_or_default();
-    let publisher = id.split('.').next().unwrap_or_default();
-    let under = |word: &str| name.strip_prefix(word).is_some_and(|rest| rest.starts_with('.'));
-    if under(short) {
-        return None;
-    }
-    let publishers: Vec<&str> = installed.iter().filter(|other| **other != id).filter_map(|other| other.split('.').next()).collect();
-    manifest.contributes.namespaces.iter().map(String::as_str).find(|n| under(n) && *n != publisher && publishers.contains(n))
+/// The switched-on code extension other than `id` whose full id `name`
+/// is under, if any: a word borrowed can't reach there, whether that
+/// extension lists the name or not.
+fn under_another<'a>(id: &str, name: &str, claimants: &[Claimant<'a>]) -> Option<&'a str> {
+    claimants.iter().map(|c| c.id).filter(|other| *other != id).find(|other| name.strip_prefix(other).is_some_and(|rest| rest.starts_with('.')))
 }
 
 /// One claim to a name: how, whether it's the machine's, and whose.
 type Contender<'a> = (Claim, bool, &'a str);
 
-/// The names each of `claimants` lists that aren't its: `installed` is
-/// every installed extension's id, switched on or not, and `fenix_owns`
-/// says which names Fenix keeps for itself.
-pub fn refused(claimants: &[Claimant], installed: &[&str], fenix_owns: &dyn Fn(NameKind, &str) -> bool) -> Vec<Refused> {
+/// Who has a name several claim, if anyone: under a full id, the shortest
+/// such id that lists it (`fenix.jira` over `fenix.jira.tracker` for
+/// `fenix.jira.tracker.about`, so a longer id never takes what a shorter
+/// one has); between borrowed words, the machine's, else the one the
+/// store publishes (`fenix.*`), when only one is; else no one. And how
+/// it's said to the others.
+fn winner<'a>(claims: &[Contender<'a>]) -> (Option<&'a str>, String) {
+    let ids: Vec<&Contender> = claims.iter().filter(|c| c.0 == Claim::Id).collect();
+    if let Some(shortest) = ids.iter().min_by_key(|c| c.2.len()) {
+        return (Some(shortest.2), format!("it's {}'s, under its id", shortest.2));
+    }
+    let managed: Vec<&Contender> = claims.iter().filter(|c| c.1).collect();
+    let pool: Vec<&Contender> = if managed.is_empty() { claims.iter().collect() } else { managed };
+    if let [only] = pool.as_slice() {
+        return (Some(only.2), format!("it's {}'s, the machine's extension", only.2));
+    }
+    let store: Vec<&&Contender> = pool.iter().filter(|c| c.2.split('.').next() == Some("fenix")).collect();
+    if let [only] = store.as_slice() {
+        return (Some(only.2), format!("it's {}'s, the store's own (fenix.*)", only.2));
+    }
+    let mut tied: Vec<&str> = pool.iter().map(|c| c.2).collect();
+    tied.sort_unstable();
+    let both = if tied.len() == 2 { "both" } else { "all" };
+    (None, format!("{} {both} claim it, so none of them has it -- switch all but one off (SPC h x)", said_list(&tied)))
+}
+
+/// The names each of `claimants` -- the switched-on code extensions,
+/// the only ones that can serve, run or keep anything -- lists that
+/// aren't its; `fenix_owns` says which names Fenix keeps for itself.
+pub fn refused(claimants: &[Claimant], fenix_owns: &dyn Fn(NameKind, &str) -> bool) -> Vec<Refused> {
     let mut out = Vec::new();
     let mut contested: BTreeMap<(NameKind, String), Vec<Contender>> = BTreeMap::new();
     for c in claimants {
@@ -126,22 +138,18 @@ pub fn refused(claimants: &[Claimant], installed: &[&str], fenix_owns: &dyn Fn(N
                 refuse("it's Fenix's own".into());
                 continue;
             }
-            if matches!(kind, NameKind::Service | NameKind::Command | NameKind::Setting) {
-                if let Some(owner) = under_another(c.id, &name, installed) {
-                    refuse(format!("names under {owner} are {owner}'s"));
-                    continue;
-                }
-                if let Some(namespace) = void_namespace(c.id, c.manifest, &name, installed) {
-                    refuse(format!("its namespace {namespace} is another extension's publisher, so it claims nothing"));
-                    continue;
-                }
-            }
             let Some(claim) = claim else {
                 // `Manifest::parse` lets none of these through; a manifest
                 // made some other way still claims nothing it may not.
                 refuse("it isn't under its name or a namespace of its own".into());
                 continue;
             };
+            if claim == Claim::Borrowed && matches!(kind, NameKind::Service | NameKind::Command | NameKind::Setting) {
+                if let Some(owner) = under_another(c.id, &name, claimants) {
+                    refuse(format!("names under {owner} are {owner}'s"));
+                    continue;
+                }
+            }
             contested.entry((kind, name)).or_default().push((claim, c.managed, c.id));
         }
     }
@@ -149,29 +157,11 @@ pub fn refused(claimants: &[Claimant], installed: &[&str], fenix_owns: &dyn Fn(N
         if claims.len() < 2 {
             continue;
         }
-        // Under its id is caught above, so these are borrowed words; the
-        // order holds whatever a manifest made some other way claims.
-        let best = claims.iter().map(|(claim, _, _)| *claim).max().unwrap_or(Claim::Borrowed);
-        let strongest: Vec<&Contender> = claims.iter().filter(|(claim, _, _)| *claim == best).collect();
-        let managed: Vec<&&Contender> = strongest.iter().filter(|(_, managed, _)| *managed).collect();
-        let winner = match (strongest.len(), managed.len()) {
-            (1, _) => Some(strongest[0].2),
-            (_, 1) => Some(managed[0].2),
-            _ => None,
-        };
-        let mut tied: Vec<&str> = if managed.len() > 1 { managed.iter().map(|c| c.2).collect() } else { strongest.iter().map(|c| c.2).collect() };
-        tied.sort_unstable();
+        let (has, why) = winner(&claims);
         for (_, _, id) in &claims {
-            if Some(*id) == winner {
-                continue;
+            if Some(*id) != has {
+                out.push(Refused { id: id.to_string(), kind, name: name.clone(), why: why.clone() });
             }
-            let why = match winner {
-                Some(w) if strongest.len() > 1 => format!("it's {w}'s, the machine's extension"),
-                Some(w) => format!("it's {w}'s, under its id"),
-                None if tied.contains(id) => format!("{} all claim it, so none of them has it -- switch all but one off (SPC h x)", said_list(&tied)),
-                None => format!("{} claim it ahead of it, and none of them has it", said_list(&tied)),
-            };
-            out.push(Refused { id: id.to_string(), kind, name: name.clone(), why });
         }
     }
     out.sort_by(|a, b| (&a.id, a.kind, &a.name).cmp(&(&b.id, b.kind, &b.name)));
@@ -231,50 +221,62 @@ mod tests {
         false
     }
 
-    fn refusals(all: &[(&str, &Manifest, bool)], installed: &[&str]) -> Vec<(String, String, String)> {
+    fn refusals(all: &[(&str, &Manifest, bool)]) -> Vec<(String, String, String)> {
         let claimants: Vec<Claimant> = all.iter().map(|(id, m, managed)| Claimant { id, manifest: m, managed: *managed }).collect();
-        refused(&claimants, installed, &nothing_is_fenixs).into_iter().map(|r| (r.id, r.name, r.why)).collect()
+        refused(&claimants, &nothing_is_fenixs).into_iter().map(|r| (r.id, r.name, r.why)).collect()
     }
 
     #[test]
-    fn a_name_under_an_installed_id_is_that_extensions() {
+    fn a_word_borrowed_never_reaches_under_another_full_id() {
         let jira = manifest("fenix.jira", "[contributes]\nservices = [\"fenix.jira.tracker.about\"]\n");
-        // Its own id ends in .jira: it may list jira.*, never fenix.jira.*.
         let other = manifest("acme.jira", "[contributes]\nservices = [\"acme.jira.x\"]\n");
-        let r = refusals(&[("acme.jira", &other, false), ("fenix.jira", &jira, false)], &["acme.jira", "fenix.jira"]);
-        assert!(r.is_empty(), "{r:?}");
-        // A fenix.* extension with the namespace jira can't reach under the
-        // installed fenix.jira's id: it's not jira.*, and fenix.jira.* is
-        // fenix.jira's.
-        let pack = manifest("fenix.tracker", "[contributes]\nnamespaces = [\"fenix\"]\nservices = [\"fenix.jira.tracker.about\"]\n");
-        let r = refusals(&[("fenix.jira", &jira, false), ("fenix.tracker", &pack, false)], &["fenix.jira", "fenix.tracker"]);
-        assert_eq!(r, vec![("fenix.tracker".into(), "fenix.jira.tracker.about".into(), "names under fenix.jira are fenix.jira's".into())]);
-        // Switched off, it still holds them: installed is enough.
-        let r = refusals(&[("fenix.tracker", &pack, false)], &["fenix.jira", "fenix.tracker"]);
-        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(refusals(&[("acme.jira", &other, false), ("fenix.jira", &jira, false)]).is_empty());
+        // A fenix.* extension borrowing the word fenix can't reach under
+        // fenix.jira's id, whether fenix.jira lists the name or not.
+        let pack = manifest("fenix.tracker", "[contributes]\nnamespaces = [\"fenix\"]\nservices = [\"fenix.jira.tracker.about\", \"fenix.jira.other\"]\n");
+        let r = refusals(&[("fenix.jira", &jira, false), ("fenix.tracker", &pack, false)]);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert!(r.iter().all(|(id, _, why)| id == "fenix.tracker" && why == "names under fenix.jira are fenix.jira's"), "{r:?}");
+        // Not switched on (so not a claimant), fenix.jira holds nothing.
+        assert!(refusals(&[("fenix.tracker", &pack, false)]).is_empty());
+    }
+
+    /// The review's M2: a longer id took a name under a shorter one's, and
+    /// any installed package -- a theme, one switched off -- voided a
+    /// namespace by being that word's publisher.
+    #[test]
+    fn a_longer_id_never_takes_a_name_and_a_publisher_voids_no_namespace() {
+        let jira = manifest("fenix.jira", "[contributes]\nservices = [\"fenix.jira.tracker.about\"]\n");
+        let longer = manifest("fenix.jira.tracker", "[contributes]\nservices = [\"fenix.jira.tracker.about\", \"fenix.jira.tracker.more\"]\n");
+        let r = refusals(&[("fenix.jira", &jira, false), ("fenix.jira.tracker", &longer, false)]);
+        assert_eq!(r, vec![("fenix.jira.tracker".into(), "fenix.jira.tracker.about".into(), "it's fenix.jira's, under its id".into())]);
+        // Review's git.* beside a code extension published as git: what
+        // git.tools lists under its own id is its, Review keeps git.*.
+        let review = manifest("fenix.review", "[contributes]\nnamespaces = [\"git\"]\n\n[[contributes.commands]]\nid = \"git.pull_request\"\ntitle = \"x\"\n");
+        let tools = manifest("git.tools", "[contributes]\nservices = [\"git.tools.x\"]\n");
+        assert!(refusals(&[("fenix.review", &review, false), ("git.tools", &tools, false)]).is_empty());
+        // Only a real clash costs anything: git.tools listing git.pull_request
+        // through the word git -- the store's own keeps it.
+        let clash = manifest("git.tools", "[contributes]\nnamespaces = [\"git\"]\n\n[[contributes.commands]]\nid = \"git.pull_request\"\ntitle = \"x\"\n");
+        let r = refusals(&[("fenix.review", &review, false), ("git.tools", &clash, false)]);
+        assert_eq!(r, vec![("git.tools".into(), "git.pull_request".into(), "it's fenix.review's, the store's own (fenix.*)".into())]);
     }
 
     #[test]
-    fn a_full_id_beats_a_borrowed_word_and_equal_claims_leave_it_to_no_one() {
+    fn equal_claims_go_to_the_machines_then_the_stores_else_no_one() {
         let jira = manifest("fenix.jira", "[contributes]\nservices = [\"jira.request\", \"jira.config\"]\n");
         let evil = manifest("evil.jira", "[contributes]\nservices = [\"jira.request\"]\n");
-        let r = refusals(&[("evil.jira", &evil, false), ("fenix.jira", &jira, false)], &["evil.jira", "fenix.jira"]);
+        // The store's own over another's.
+        let r = refusals(&[("evil.jira", &evil, false), ("fenix.jira", &jira, false)]);
+        assert_eq!(r, vec![("evil.jira".into(), "jira.request".into(), "it's fenix.jira's, the store's own (fenix.*)".into())]);
+        // The machine's over the store's.
+        let r = refusals(&[("evil.jira", &evil, true), ("fenix.jira", &jira, false)]);
+        assert_eq!(r, vec![("fenix.jira".into(), "jira.request".into(), "it's evil.jira's, the machine's extension".into())]);
+        // Two neither of which is: no one.
+        let acme = manifest("acme.jira", "[contributes]\nservices = [\"jira.request\"]\n");
+        let r = refusals(&[("acme.jira", &acme, false), ("evil.jira", &evil, false)]);
         assert_eq!(r.len(), 2, "{r:?}");
-        assert!(r.iter().all(|(_, name, why)| name == "jira.request" && why.contains("evil.jira and fenix.jira all claim it")), "{r:?}");
-        // jira.config, which only fenix.jira lists, stays its.
-        assert!(!r.iter().any(|(_, name, _)| name == "jira.config"));
-        // The machine's over yours.
-        let r = refusals(&[("evil.jira", &evil, false), ("fenix.jira", &jira, true)], &["evil.jira", "fenix.jira"]);
-        assert_eq!(r, vec![("evil.jira".into(), "jira.request".into(), "it's fenix.jira's, the machine's extension".into())]);
-        // A full id over a namespace: acme.tools serves acme.tools.x; a
-        // namespace "acme" claims nothing beside acme.* installed (rule 3),
-        // but its namespace tools does, and loses to the full id.
-        let tools = manifest("acme.tools", "[contributes]\nservices = [\"acme.tools.x\"]\n");
-        let borrower = manifest("bob.b", "[contributes]\nnamespaces = [\"acme\"]\nservices = [\"acme.tools.x\", \"acme.other\"]\n");
-        let r = refusals(&[("acme.tools", &tools, false), ("bob.b", &borrower, false)], &["acme.tools", "bob.b"]);
-        assert_eq!(r.len(), 2, "{r:?}");
-        assert_eq!(r[0], ("bob.b".into(), "acme.other".into(), "its namespace acme is another extension's publisher, so it claims nothing".into()));
-        assert_eq!(r[1], ("bob.b".into(), "acme.tools.x".into(), "names under acme.tools are acme.tools's".into()));
+        assert!(r.iter().all(|(_, _, why)| why.starts_with("acme.jira and evil.jira both claim it")), "{r:?}");
     }
 
     #[test]
@@ -284,7 +286,7 @@ mod tests {
             "[contributes]\nservices = [\"gitlab.search\", \"gitlab.read\"]\n\n[[contributes.settings]]\nkey = \"gitlab.token\"\n\n[[contributes.settings]]\nkey = \"gitlab.host\"\n\n[[contributes.agent_tools]]\nname = \"search\"\ndescription = \"x\"\nservice = \"gitlab.search\"\n\n[[contributes.agent_prompts]]\nname = \"triage\"\nservice = \"gitlab.read\"\n\n[contributes.service_callers]\n\"gitlab.search\" = [\"agents\"]\n",
         );
         let owns = |kind: NameKind, name: &str| (kind == NameKind::Setting && name == "gitlab.token") || (kind == NameKind::Service && name == "gitlab.search");
-        let refused = refused(&[Claimant { id: "acme.gitlab", manifest: &m, managed: false }], &["acme.gitlab"], &owns);
+        let refused = refused(&[Claimant { id: "acme.gitlab", manifest: &m, managed: false }], &owns);
         assert_eq!(refused.iter().map(Refused::line).collect::<Vec<_>>(), ["service gitlab.search: it's Fenix's own", "setting gitlab.token: it's Fenix's own"]);
         let mut used = m.clone();
         withdraw("acme.gitlab", &mut used, &refused);
@@ -301,7 +303,7 @@ mod tests {
     fn two_tools_or_prompts_of_one_name_are_no_ones() {
         let a = manifest("acme.x-y", "[contributes]\nservices = [\"x-y.s\"]\n\n[[contributes.agent_tools]]\nname = \"go\"\ndescription = \"x\"\nservice = \"x-y.s\"\n");
         let b = manifest("bob.x_y", "[contributes]\nservices = [\"x_y.s\"]\n\n[[contributes.agent_tools]]\nname = \"go\"\ndescription = \"x\"\nservice = \"x_y.s\"\n");
-        let r = refusals(&[("acme.x-y", &a, false), ("bob.x_y", &b, false)], &["acme.x-y", "bob.x_y"]);
+        let r = refusals(&[("acme.x-y", &a, false), ("bob.x_y", &b, false)]);
         assert_eq!(r.iter().map(|(id, name, _)| format!("{id} {name}")).collect::<Vec<_>>(), ["acme.x-y x_y_go", "bob.x_y x_y_go"]);
     }
 }

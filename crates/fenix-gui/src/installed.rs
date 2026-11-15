@@ -164,11 +164,11 @@ pub const FENIX_SERVICES: &[&str] = &["agents.ask", "agents.cancel"];
 
 /// `on` -- the switched-on code extensions, each with whether it's the
 /// machine's -- each without the names that aren't its, with why kept
-/// in `refused`. `installed` is every installed extension's id, switched
-/// on or not: a name under one is that one's.
-pub fn claimed(on: Vec<(CodeExtension, bool)>, installed: &[&str]) -> Vec<CodeExtension> {
+/// in `refused`. Only these claim: a theme, a data pack or an extension
+/// switched off serves, runs and keeps nothing, so takes nothing.
+pub fn claimed(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
     let claimants: Vec<Claimant> = on.iter().map(|(e, managed)| Claimant { id: &e.id, manifest: &e.manifest, managed: *managed }).collect();
-    let refused = fenix_extensions::claims::refused(&claimants, installed, &fenix_owns);
+    let refused = fenix_extensions::claims::refused(&claimants, &fenix_owns);
     on.into_iter()
         .map(|(mut e, _)| {
             fenix_extensions::claims::withdraw(&e.id, &mut e.manifest, &refused);
@@ -300,8 +300,7 @@ fn code_of(all: &[(Installed, bool)]) -> Vec<CodeExtension> {
                 .then(|| (CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone(), refused: Vec::new() }, *managed))
         })
         .collect();
-    let installed: Vec<&str> = all.iter().map(|(e, _)| e.id.as_str()).collect();
-    claimed(on, &installed)
+    claimed(on)
 }
 
 /// Installed extension `id` as Fenix uses it -- the machine's when it has
@@ -566,22 +565,20 @@ mod tests {
     #[ignore = "needs the store's manifests: FENIX_STORE_MANIFESTS"]
     fn every_store_extension_keeps_its_names() {
         let Some(dir) = std::env::var_os("FENIX_STORE_MANIFESTS") else { return };
-        let mut on = Vec::new();
-        let mut ids = Vec::new();
+        let (mut on, mut read) = (Vec::new(), 0);
         for entry in std::fs::read_dir(dir).unwrap() {
             let dir = entry.unwrap().path();
             let Ok(text) = std::fs::read_to_string(dir.join("extension.toml")) else { continue };
             let m = fenix_extensions::Manifest::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-            ids.push(m.extension.id.clone());
+            read += 1;
             if m.extension.runtime == fenix_extensions::Runtime::Wasm {
                 assert!(m.runs_in(&release()).is_ok(), "{} runs here", m.extension.id);
                 on.push((CodeExtension { id: m.extension.id.clone(), name: m.extension.name.clone(), dir: dir.clone(), manifest: m, refused: Vec::new() }, false));
             }
         }
-        let (read, code) = (ids.len(), on.len());
-        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let code = on.len();
         let before: Vec<fenix_extensions::Manifest> = on.iter().map(|(e, _)| e.manifest.clone()).collect();
-        let after = claimed(on, &ids);
+        let after = claimed(on);
         let refused: Vec<String> = after.iter().flat_map(|e| e.refused.iter().map(move |r| format!("{}: {}", e.id, r.line()))).collect();
         println!("{read} manifests read, {code} code extensions, {} names refused", refused.len());
         assert!(refused.is_empty(), "{refused:#?}");
