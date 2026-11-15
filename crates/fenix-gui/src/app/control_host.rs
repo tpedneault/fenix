@@ -95,7 +95,7 @@ impl App {
                 state.agenda_timer = timer.ok().and_then(|t| serde_json::from_str(&t).ok());
                 let _ = reply.send(Ok(to_value(state)));
             };
-            self.code_serve(&server, "agenda.timer", "null".into(), super::wasm_host::Answer::Fenix(Box::new(then)));
+            self.code_serve(&server, "agenda.timer", "null".into(), fenix_wasm::host::ServiceCaller::Control, super::wasm_host::Answer::Fenix(Box::new(then)));
             return Ok(());
         }
         let Some((name, payload, answer)) = asked else { return Err((call, reply)) };
@@ -103,7 +103,7 @@ impl App {
         let then = move |_: &mut App, said: Result<String, String>| {
             let _ = reply.send(said.map_err(RpcError::invalid_params).and_then(answer));
         };
-        self.code_serve(&server, name, payload.to_string(), super::wasm_host::Answer::Fenix(Box::new(then)));
+        self.code_serve(&server, name, payload.to_string(), fenix_wasm::host::ServiceCaller::Control, super::wasm_host::Answer::Fenix(Box::new(then)));
         Ok(())
     }
 

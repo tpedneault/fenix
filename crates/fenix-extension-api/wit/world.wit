@@ -50,7 +50,8 @@
 // `editor-keys` and `key-for`, and the export `key-scheme-changed`: the
 // key scheme. 1.6 added test providers: `test-provider-set`, and the
 // exports `tests-scan`, `tests-plan`, `tests-read`, `tests-step-ended` and
-// `tests-launch`, with the types only they use.
+// `tests-launch`, with the types only they use; and `called-by`, who
+// called the service it's answering, with its type `service-caller`.
 //
 // The package keeps version 1.0.0 across 1.x: what a 1.x adds is in the
 // same package, so a guest built for 1.0 still names the interfaces it
@@ -1350,10 +1351,35 @@ interface types {
         /// every step exited 0 and nothing was `broken` or `crashed` (§11).
         build-first(test-plan),
     }
+
+    /// Who called one of its services (`called-by`): set by Fenix for each
+    /// call, from where it came -- never from anything the caller says.
+    /// 1.6.
+    variant service-caller {
+        /// Another extension, by its id: Fenix knows which extension
+        /// asked, since each runs on its own.
+        extension(string),
+        /// Fenix itself, for a feature of its own: a forge for the Git
+        /// pages (`forge.*`), a PDF opened at a page, the hex view, the
+        /// reading view's diagrams and links, a `vnc:` link.
+        fenix,
+        /// A coding agent calling one of its agent tools: through `fenix
+        /// --mcp`, an agent thread, or `fenix/tools.call`.
+        agent-tool,
+        /// A coding agent reading one of its resources.
+        agent-resource,
+        /// A coding agent's client getting one of its prompts.
+        agent-prompt,
+        /// A program on this machine, through the control channel
+        /// (`fenix/agenda.tasks`, `fenix/state`). A program running as you,
+        /// which may be one an extension started: never proof that no
+        /// extension is behind it.
+        control,
+    }
 }
 
 interface host {
-    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config, git-summary, task-result, notification, key-scheme};
+    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config, git-summary, task-result, notification, key-scheme, service-caller};
 
     /// Kept for its output page (`SPC h l`).
     log: func(level: level, message: string);
@@ -1525,6 +1551,13 @@ interface host {
     /// later: a line saying what it's doing, and how much is done (0 to
     /// 1) when it knows. An agent calling its tool is shown it. 1.2.
     service-progress: func(call: u64, message: string, fraction: option<f32>);
+    /// Who called the service it's answering, while `serve` runs: set by
+    /// Fenix for that call, so a service called by two at once, or one
+    /// that calls another, each sees its own. None outside `serve` -- in
+    /// `activate`, `handle`, a command -- so a service that answers later
+    /// keeps it with the call. A manifest can have Fenix refuse callers
+    /// before `serve` runs (`[contributes.service_callers]`). 1.6.
+    called-by: func() -> option<service-caller>;
 
     /// A picture it made (PNG, JPEG, GIF, WebP; at most 16 MiB), as an
     /// image for its canvases.

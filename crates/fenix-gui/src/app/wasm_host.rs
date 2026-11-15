@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
-use fenix_wasm::host::{Call, Event, Level, Notice, Reply, Request, Source, Spec, Worker};
+use fenix_wasm::host::{Call, Event, Level, Notice, Reply, Request, ServiceCaller, Source, Spec, Worker};
 
 use super::pages::{PageEvent, PageModel};
 use super::*;
@@ -1754,7 +1754,7 @@ impl App {
         let Some((ext, payload)) = self.code_forge(root, number) else { return false };
         // It may read the repository, and run git there.
         self.code_call(&ext, Call::Grant(fenix_lsp::normalize(root.to_path_buf())), COMMAND_TICKS, Pending::Other);
-        self.code_serve(&ext, service, payload, Answer::Fenix(then));
+        self.code_serve(&ext, service, payload, ServiceCaller::Fenix, Answer::Fenix(then));
         true
     }
 
@@ -1866,6 +1866,7 @@ impl App {
             &ext,
             PDF_OPEN,
             payload,
+            ServiceCaller::Fenix,
             Answer::Fenix(Box::new(|app, answer| {
                 if let Err(why) = answer {
                     app.set_error(why);
@@ -1919,21 +1920,24 @@ impl App {
         self.code_call(ext, Call::Grant(path), COMMAND_TICKS, Pending::Other);
     }
 
-    /// Asks code extension `server` for service `name`; `answer` gets
-    /// what it says, now or later.
-    pub(crate) fn code_serve(&mut self, server: &str, name: &str, payload: String, answer: Answer) {
-        self.code_serve_with(server, name, payload, answer, ServeOptions::default());
+    /// Asks code extension `server` for service `name` on behalf of
+    /// `caller` -- what it's told `called-by` is; `answer` gets what it
+    /// says, now or later.
+    pub(crate) fn code_serve(&mut self, server: &str, name: &str, payload: String, caller: ServiceCaller, answer: Answer) {
+        self.code_serve_with(server, name, payload, caller, answer, ServeOptions::default());
     }
 
     /// `code_serve`, with a deadline for the whole call and somewhere for
     /// its progress to go: what an agent's tool call is. The id it
     /// returns is what `code_serve_cancel` takes.
-    pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, answer: Answer, options: ServeOptions) -> ServeId {
+    /// Every service call goes through here, so `caller` is always said:
+    /// an extension asking another is `Extension` of the asker's id.
+    pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, caller: ServiceCaller, answer: Answer, options: ServeOptions) -> ServeId {
         self.wasm.next_serve += 1;
         let call = self.wasm.next_serve;
         let deadline = options.timeout.map(|t| (std::time::Instant::now() + t, t));
         self.wasm.serving.insert((server.to_string(), call), Serving { answer, deadline, progress: options.progress, name: name.to_string() });
-        self.code_call(server, Call::Serve { call, name: name.to_string(), payload }, COMMAND_TICKS, Pending::Serve(call));
+        self.code_call(server, Call::Serve { call, name: name.to_string(), payload, caller }, COMMAND_TICKS, Pending::Serve(call));
         ServeId { server: server.to_string(), call }
     }
 
@@ -3428,7 +3432,7 @@ impl App {
             Request::Service { id, name, payload } => {
                 // Another code extension's.
                 match self.code_server(&name, Some(ext)) {
-                    Some(server) => self.code_serve(&server, &name, payload, Answer::Ext { asker: ext.to_string(), id }),
+                    Some(server) => self.code_serve(&server, &name, payload, ServiceCaller::Extension(ext.to_string()), Answer::Ext { asker: ext.to_string(), id }),
                     None => {
                         let why = self.code_unserved(&name);
                         self.code_deliver(ext, Notice::ServiceReply((id, Err(why))));
@@ -4196,6 +4200,8 @@ fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme 
 }
 
 #[cfg(test)]
+mod callers_tests;
+#[cfg(test)]
 mod names_tests;
 
 #[cfg(test)]
@@ -4391,7 +4397,7 @@ pub(crate) mod tests {
         // Cancelled by its caller: the same, with why.
         let got = std::rc::Rc::new(std::cell::RefCell::new(None));
         let kept = got.clone();
-        let id = app.code_serve_with("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| *kept.borrow_mut() = Some(a))), ServeOptions::default());
+        let id = app.code_serve_with("test.hello", "hello.forever", String::new(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, a| *kept.borrow_mut() = Some(a))), ServeOptions::default());
         pump_until(&mut app, |a| a.wasm.calls.is_empty());
         assert!(app.code_serve_cancel(&id, "the agent cancelled it"));
         assert_eq!(got.borrow().clone(), Some(Err("the agent cancelled it".to_string())));
@@ -4406,11 +4412,11 @@ pub(crate) mod tests {
         app.wasm.installed = vec![hello("")];
         let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let later = answers.clone();
-        app.code_serve("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| later.borrow_mut().push(a))));
+        app.code_serve("test.hello", "hello.forever", String::new(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, a| later.borrow_mut().push(a))));
         pump_until(&mut app, |a| a.code_ready("test.hello") && a.wasm.calls.is_empty());
         app.run_extension_command("test.hello", "hello.spin");
         let queued = answers.clone();
-        app.code_serve("test.hello", "hello.upper", "x".into(), Answer::Fenix(Box::new(move |_, a| queued.borrow_mut().push(a))));
+        app.code_serve("test.hello", "hello.upper", "x".into(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, a| queued.borrow_mut().push(a))));
         pump_until(&mut app, |_| answers.borrow().len() == 2);
         for answer in answers.borrow().iter() {
             let err = answer.clone().unwrap_err();
@@ -4434,7 +4440,7 @@ pub(crate) mod tests {
         assert_eq!(app.code_server("hello.later", Some("test.hello")), None, "not its own");
         let got = std::rc::Rc::new(std::cell::RefCell::new(None));
         let kept = got.clone();
-        app.code_serve("test.hello", "hello.later", "x".into(), Answer::Fenix(Box::new(move |_, answer| *kept.borrow_mut() = Some(answer))));
+        app.code_serve("test.hello", "hello.later", "x".into(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, answer| *kept.borrow_mut() = Some(answer))));
         pump_until(&mut app, |_| got.borrow().is_some());
         assert_eq!(got.borrow().clone(), Some(Ok("later: x".to_string())));
 

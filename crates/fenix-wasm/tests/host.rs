@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use fenix_extensions::manifest::Permissions;
 use fenix_wasm::host::{
-    load, Call, CellStyle, Changed, DecorationLook, Event, Focus, FocusedPage, Key, KeyMods, KeyPress, Level, Line, MouseAction, MouseButton, MouseEvent, MousePress, NamedKey, Notice, Reply, Request, Shade, Source, Span, Spec,
+    load, Call, CellStyle, ServiceCaller, Changed, DecorationLook, Event, Focus, FocusedPage, Key, KeyMods, KeyPress, Level, Line, MouseAction, MouseButton, MouseEvent, MousePress, NamedKey, Notice, Reply, Request, Shade, Source, Span, Spec,
     SurfaceKey, VerticalRule, Worker,
 };
 use fenix_wasm::{engine, Options, Ticker};
@@ -478,10 +478,10 @@ fn a_page_has_a_popup_and_hears_when_its_shown() {
 #[test]
 fn its_services_answer_now_or_later() {
     let mut ext = start();
-    assert_eq!(ext.call(Call::Serve { call: 1, name: "hello.upper".into(), payload: "abc".into() }).0, Ok(Reply::Served(Some(Ok("ABC".into())))));
-    assert_eq!(ext.call(Call::Serve { call: 2, name: "nope".into(), payload: String::new() }).0, Ok(Reply::Served(Some(Err("no service nope".into())))));
+    assert_eq!(ext.call(Call::Serve { call: 1, name: "hello.upper".into(), payload: "abc".into(), caller: ServiceCaller::Fenix }).0, Ok(Reply::Served(Some(Ok("ABC".into())))));
+    assert_eq!(ext.call(Call::Serve { call: 2, name: "nope".into(), payload: String::new(), caller: ServiceCaller::Fenix }).0, Ok(Reply::Served(Some(Err("no service nope".into())))));
     // Later: none now, then its answer to Fenix's call 7.
-    assert_eq!(ext.call(Call::Serve { call: 7, name: "hello.later".into(), payload: "x".into() }).0, Ok(Reply::Served(None)));
+    assert_eq!(ext.call(Call::Serve { call: 7, name: "hello.later".into(), payload: "x".into(), caller: ServiceCaller::Fenix }).0, Ok(Reply::Served(None)));
     let seen = ext.until(|e| matches!(e, Event::Asked(Request::ServiceAnswer { .. })));
     assert_eq!(seen.last(), Some(&Event::Asked(Request::ServiceAnswer { call: 7, answer: Ok("later: x".into()) })));
 }
@@ -629,10 +629,10 @@ fn an_extension_written_with_the_api_crate_runs() {
     assert_eq!(laid.lines[0].spans[1].text, "  60 wide");
     assert_eq!(laid.lines[2].spans.iter().map(|s| s.text.as_str()).collect::<String>(), "count 3", "its count kept between calls");
     assert_eq!(laid.keys[0].what, "count");
-    assert_eq!(ext.call(Call::Serve { call: 1, name: "counter.count".into(), payload: String::new() }).0, Ok(Reply::Served(Some(Ok("3".into())))));
+    assert_eq!(ext.call(Call::Serve { call: 1, name: "counter.count".into(), payload: String::new(), caller: ServiceCaller::Fenix }).0, Ok(Reply::Served(Some(Ok("3".into())))));
     assert_eq!(ext.call(Call::PageState(page)).0, Ok(Reply::State(Some("3".into()))));
     assert_eq!(ext.call(Call::PageRestore { page, kind: "counter".into(), state: "10".into() }).0, Ok(Reply::Restored(true)));
-    assert_eq!(ext.call(Call::Serve { call: 2, name: "counter.count".into(), payload: String::new() }).0, Ok(Reply::Served(Some(Ok("10".into())))));
+    assert_eq!(ext.call(Call::Serve { call: 2, name: "counter.count".into(), payload: String::new(), caller: ServiceCaller::Fenix }).0, Ok(Reply::Served(Some(Ok("10".into())))));
     assert_eq!(ext.run("counter.tick").0, Ok(()));
     assert_eq!(ext.logged_until(|s| s.starts_with("ticked")).last().map(String::as_str), Some("ticked 1"));
     assert_eq!(ext.run("nope").0, Err("no command nope".into()), "the trait's default answer");
@@ -1671,7 +1671,7 @@ fn an_agent_is_brought_asked_and_heard() {
 #[test]
 fn a_service_says_how_far_it_got_and_hears_its_cancellation() {
     let mut ext = start();
-    let (result, seen) = ext.call(Call::Serve { call: 41, name: "hello.forever".into(), payload: String::new() });
+    let (result, seen) = ext.call(Call::Serve { call: 41, name: "hello.forever".into(), payload: String::new(), caller: ServiceCaller::Fenix });
     assert_eq!(result, Ok(Reply::Served(None)), "answered later, or never");
     assert!(seen.contains(&Event::Asked(Request::ServiceProgress { call: 41, message: "working".into(), fraction: Some(0.5) })), "{seen:?}");
     assert!(seen.contains(&Event::Asked(Request::ServiceProgress { call: 41, message: "still working".into(), fraction: None })), "{seen:?}");
@@ -1697,7 +1697,7 @@ fn an_extension_built_before_1_2_is_told_nothing_it_lacks() {
     ext.until(|e| *e == Event::Ready);
     assert_eq!(ext.call(Call::ServiceCancelled(3)).0, Ok(Reply::Done));
     assert_eq!(ext.call(Call::AgentAskProgress { call: 3, text: "x".into() }).0, Ok(Reply::Done));
-    assert_eq!(ext.call(Call::Serve { call: 1, name: "counter.count".into(), payload: String::new() }).0, Ok(Reply::Served(Some(Ok("0".into())))), "still running");
+    assert_eq!(ext.call(Call::Serve { call: 1, name: "counter.count".into(), payload: String::new(), caller: ServiceCaller::Fenix }).0, Ok(Reply::Served(Some(Ok("0".into())))), "still running");
 }
 
 /// Pages first: a page laid out while service calls wait goes before
@@ -1705,7 +1705,7 @@ fn an_extension_built_before_1_2_is_told_nothing_it_lacks() {
 #[test]
 fn a_page_goes_before_the_service_calls_waiting() {
     let mut ext = start();
-    let serves: Vec<u64> = (0..4).map(|n| ext.worker.call(Call::Serve { call: n, name: "hello.busy".into(), payload: String::new() }, 0)).collect();
+    let serves: Vec<u64> = (0..4).map(|n| ext.worker.call(Call::Serve { call: n, name: "hello.busy".into(), payload: String::new(), caller: ServiceCaller::Fenix }, 0)).collect();
     let render = ext.worker.call(Call::Render { page: 1, width: 40, height: 10 }, 0);
     let mut order = Vec::new();
     while order.len() < 5 {
@@ -1747,4 +1747,98 @@ fn the_key_scheme_is_asked_and_told() {
     // Built before 1.5: told nothing, and fine.
     let mut old = start_with(Permissions::default(), &[]);
     assert_eq!(old.call(Call::KeySchemeChanged(fenix_wasm::host::KeyScheme::Standard)).0, Ok(Reply::Done));
+}
+
+/// `guests/callers.wasm` (API 1.6) as `id`, and what it said as it
+/// started.
+fn start_callers(id: &str) -> (Running, Vec<Event>) {
+    let engine = engine(&Options::default()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/guests/callers.wasm");
+    let spec = Spec::new(id, wasm, dir.path());
+    let (tx, events) = mpsc::channel();
+    let worker = Worker::start(&engine, spec, move |e| {
+        let _ = tx.send(e);
+    });
+    let running = Running { worker, events, dir, _ticker: Ticker::start(&engine) };
+    let seen = running.until(|e| *e == Event::Ready);
+    (running, seen)
+}
+
+/// The names of what the guest at `path` imports from Fenix's `host`.
+fn host_imports(path: &str) -> Vec<String> {
+    let engine = engine(&Options::default()).unwrap();
+    let component = wasmtime::component::Component::from_file(&engine, PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)).unwrap();
+    let ty = component.component_type();
+    let (_, host) = ty.imports(&engine).find(|(name, _)| name.starts_with("fenix:extension/host")).expect("it imports host");
+    let wasmtime::component::types::ComponentItem::ComponentInstance(host) = host.ty else { panic!("host is an instance") };
+    host.exports(&engine).map(|(name, _)| name.to_string()).collect()
+}
+
+/// API 1.6: `called-by` is who Fenix says called, call by call -- an
+/// extension by its id, Fenix, an agent's tool, resource or prompt, the
+/// control channel -- and none outside `serve`.
+#[test]
+fn a_service_is_told_who_called_it_call_by_call() {
+    assert!(host_imports("tests/guests/callers.wasm").contains(&"called-by".to_string()), "the guest asks");
+    let (mut ext, started) = start_callers("test.c");
+    assert!(said(&started, Level::Info, "called-by in activate: none"), "{started:?}");
+    let origins = [
+        (ServiceCaller::Extension("fenix.agenda".into()), "extension:fenix.agenda"),
+        (ServiceCaller::Fenix, "fenix"),
+        (ServiceCaller::AgentTool, "agent-tool"),
+        (ServiceCaller::AgentResource, "agent-resource"),
+        (ServiceCaller::AgentPrompt, "agent-prompt"),
+        (ServiceCaller::Control, "control"),
+    ];
+    for (n, (caller, says)) in origins.into_iter().enumerate() {
+        let served = ext.call(Call::Serve { call: n as u64, name: "c.who".into(), payload: String::new(), caller }).0;
+        assert_eq!(served, Ok(Reply::Served(Some(Ok(says.into())))));
+    }
+    // Two calls from two callers, queued before either runs, each
+    // answered later: each with its own, kept from its own `serve`.
+    ext.worker.call(Call::Serve { call: 10, name: "c.who_later".into(), payload: String::new(), caller: ServiceCaller::Extension("acme.a".into()) }, 0);
+    ext.worker.call(Call::Serve { call: 11, name: "c.who_later".into(), payload: String::new(), caller: ServiceCaller::AgentTool }, 0);
+    let mut answers = Vec::new();
+    while answers.len() < 2 {
+        if let Event::Asked(Request::ServiceAnswer { call, answer }) = ext.next() {
+            answers.push((call, answer));
+        }
+    }
+    answers.sort_by_key(|(call, _)| *call);
+    assert_eq!(answers, [(10, Ok("extension:acme.a".to_string())), (11, Ok("agent-tool".to_string()))]);
+    // Outside `serve`: a reply it's handed (`handle`) has no caller.
+    let (_, seen) = ext.call(Call::Deliver(Notice::ServiceReply((99, Ok("x".into())))));
+    assert!(said(&seen, Level::Info, "called-by in handle: none"), "{seen:?}");
+    // And `serve` after that is told its own again.
+    assert_eq!(ext.call(Call::Serve { call: 12, name: "c.who".into(), payload: String::new(), caller: ServiceCaller::Control }).0, Ok(Reply::Served(Some(Ok("control".into())))));
+}
+
+/// One that calls on: `relay` asks another service, and the reply is
+/// handed to it outside `serve`. What it asks goes to Fenix as its own
+/// request, for Fenix to route with it as the caller (`fenix-gui`'s tests
+/// follow it through three extensions).
+#[test]
+fn a_service_that_calls_another_asks_fenix_as_itself() {
+    let (mut ext, _) = start_callers("test.b");
+    let (served, seen) = ext.call(Call::Serve { call: 1, name: "b.relay".into(), payload: "c.who rest".into(), caller: ServiceCaller::Extension("test.a".into()) });
+    assert_eq!(served, Ok(Reply::Served(None)));
+    let Some((id, name, payload)) = seen.iter().find_map(|e| if let Event::Asked(Request::Service { id, name, payload }) = e { Some((*id, name.clone(), payload.clone())) } else { None }) else { panic!("{seen:?}") };
+    assert_eq!((name.as_str(), payload.as_str()), ("c.who", "rest"));
+    let (handled, seen) = ext.call(Call::Deliver(Notice::ServiceReply((id, Ok("extension:test.b".into())))));
+    assert_eq!(handled, Ok(Reply::Done));
+    assert!(seen.contains(&Event::Asked(Request::ServiceAnswer { call: 1, answer: Ok("extension:test.a | extension:test.b".into()) })), "{seen:?}");
+}
+
+/// Built before 1.6 (`hello`, on 1.2's WIT): it never asks who called,
+/// and is served from any caller as it was.
+#[test]
+fn a_guest_built_before_1_6_is_served_from_any_caller() {
+    assert!(!host_imports("tests/guests/hello.wasm").iter().any(|i| i == "called-by"));
+    assert!(!host_imports("tests/guests/keys.wasm").iter().any(|i| i == "called-by"));
+    assert!(!host_imports("tests/guests/plain16.wasm").iter().any(|i| i == "called-by"), "a 1.6 crate guest that doesn't call it doesn't import it");
+    let mut ext = start();
+    for caller in [ServiceCaller::Extension("acme.x".into()), ServiceCaller::AgentTool, ServiceCaller::Control] {
+        assert_eq!(ext.call(Call::Serve { call: 1, name: "hello.upper".into(), payload: "abc".into(), caller }).0, Ok(Reply::Served(Some(Ok("ABC".into())))));
+    }
 }

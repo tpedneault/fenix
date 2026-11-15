@@ -15277,6 +15277,7 @@ impl App {
             &ext,
             wasm_host::CCSDS_HEX,
             payload,
+            fenix_wasm::host::ServiceCaller::Fenix,
             wasm_host::Answer::Fenix(Box::new(|app, answer| {
                 if let Err(why) = answer {
                     app.set_error(why);
@@ -16380,7 +16381,7 @@ impl App {
                         app.set_error(e);
                     }
                 };
-                self.code_serve(&server, "vnc.connect", host.to_string(), wasm_host::Answer::Fenix(Box::new(then)));
+                self.code_serve(&server, "vnc.connect", host.to_string(), fenix_wasm::host::ServiceCaller::Fenix, wasm_host::Answer::Fenix(Box::new(then)));
             }
             None => self.set_error(format!("vnc:{host} needs the VNC extension -- SPC h x installs it (fenix.vnc)")),
         }

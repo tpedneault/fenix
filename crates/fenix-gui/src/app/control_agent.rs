@@ -439,7 +439,7 @@ impl App {
             let _ = reply.send(answer);
         };
         let options = super::wasm_host::ServeOptions { timeout: Some(std::time::Duration::from_millis(u64::from(tool.timeout_ms()))), progress };
-        Some(self.code_serve_with(&extension, &tool.service, payload, super::wasm_host::Answer::Fenix(Box::new(then)), options))
+        Some(self.code_serve_with(&extension, &tool.service, payload, fenix_wasm::host::ServiceCaller::AgentTool, super::wasm_host::Answer::Fenix(Box::new(then)), options))
     }
 }
 

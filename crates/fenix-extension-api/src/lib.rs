@@ -72,6 +72,7 @@ pub use bindings::fenix::extension::types::{KeyScheme,
     AgentTurn,
     GitSummary, TaskResult,
     Notification, NotificationAction, Urgency,
+    ServiceCaller,
 };
 pub use bindings::{Event, Key, Page, SurfaceInput};
 
@@ -899,6 +900,27 @@ pub fn answer(call: u64, result: Result<String, String>) {
 /// it as a tool is shown it. 1.2.
 pub fn progress(call: u64, message: &str, fraction: Option<f32>) {
     host::service_progress(call, message, fraction)
+}
+
+/// Who called the service [`Extension::serve`] is answering: another
+/// extension by its id, Fenix itself, an agent's tool call, resource read
+/// or prompt, or the control channel. Set by Fenix for that call; `None`
+/// outside `serve` -- so read it at the top of `serve`, before any
+/// `.await`, and keep it with the call if the answer comes later. Needs
+/// `api = "1.6"`; an extension that never calls it keeps loading on
+/// Fenix 1.5.
+///
+/// ```ignore
+/// fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<String, String>> {
+///     let from_agenda = matches!(called_by(), Some(ServiceCaller::Extension(id)) if id == "fenix.agenda");
+///     // ...
+/// }
+/// ```
+///
+/// A manifest can have Fenix refuse other callers before `serve` runs:
+/// `[contributes.service_callers]`. API 1.6.
+pub fn called_by() -> Option<ServiceCaller> {
+    host::called_by()
 }
 
 /// Asks another extension's, or Fenix's, service `name`; the answer comes

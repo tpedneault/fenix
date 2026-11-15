@@ -285,7 +285,7 @@ impl App {
             self.page_images.diagrams.insert(h, Drawing::Asked);
             let payload = serde_json::json!({ "source": source }).to_string();
             let then = move |app: &mut App, said: Result<String, String>| app.diagram_drawn(h, said);
-            self.code_serve(&server, "diagrams.render", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+            self.code_serve(&server, "diagrams.render", payload, fenix_wasm::host::ServiceCaller::Fenix, super::wasm_host::Answer::Fenix(Box::new(then)));
         }
     }
 
@@ -339,7 +339,7 @@ impl App {
             }
             app.page_pictures_arrived();
         };
-        self.code_serve(&server, "notebook.link", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+        self.code_serve(&server, "notebook.link", payload, fenix_wasm::host::ServiceCaller::Fenix, super::wasm_host::Answer::Fenix(Box::new(then)));
     }
 
     /// What's known of links and diagrams is forgotten (a note saved, the
@@ -359,7 +359,7 @@ impl App {
                     app.set_error(e);
                 }
             };
-            return self.code_serve(&server, "notebook.follow", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+            return self.code_serve(&server, "notebook.follow", payload, fenix_wasm::host::ServiceCaller::Fenix, super::wasm_host::Answer::Fenix(Box::new(then)));
         }
         if link.markdown && !link.target.is_empty() {
             let base = from.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();

@@ -55,6 +55,7 @@ pub use bindings::fenix::extension::types::{
     AgentTurn, DebugSession, DebugState, GitSummary, LaunchConfig, LaunchRequest, QuickFix, TaskResult,
     Notification, NotificationAction, Urgency,
     FoundTest, TestAsk, TestBroken, TestCrash, TestEnded, TestKind, TestLaunch, TestLine, TestLocation, TestOutcome, TestOutput, TestPlan, TestReport, TestStep, TestStepEnd,
+    ServiceCaller,
 };
 use crate::test_limits;
 
@@ -691,8 +692,9 @@ pub enum Call {
     Key { page: u64, key: Key },
     PageState(u64),
     PageRestore { page: u64, kind: String, state: String },
-    /// Service `name`, as call `call`: Fenix's own number for it.
-    Serve { call: u64, name: String, payload: String },
+    /// Service `name`, as call `call`: Fenix's own number for it, from
+    /// `caller` -- what `called-by` says while `serve` runs.
+    Serve { call: u64, name: String, payload: String, caller: ServiceCaller },
     Paste { page: u64, text: String },
     /// A message for its language server `server` (`LspPort`).
     Lsp { server: u64, message: String },
@@ -1241,6 +1243,9 @@ struct State {
     /// now: told when that's over (`Event::HandlerReturned`) if nothing
     /// else says so.
     set_a_setting: bool,
+    /// Who called the service `serve` is answering, while it runs
+    /// (`called-by`); none at any other time.
+    serving_for: Option<ServiceCaller>,
 }
 
 impl State {
@@ -3144,6 +3149,10 @@ impl fenix::extension::host::Host for State {
         self.ask(Request::ServiceAnswer { call, answer });
     }
 
+    fn called_by(&mut self) -> Option<ServiceCaller> {
+        self.serving_for.clone()
+    }
+
     fn service_progress(&mut self, call: u64, message: String, fraction: Option<f32>) {
         let fraction = fraction.filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));
         self.ask(Request::ServiceProgress { call, message, fraction });
@@ -3996,7 +4005,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let state = State {
             wasi: wasi.build(), table: ResourceTable::new(), limits, sink: sink.clone(), spec, jobs: back, next: 0, processes: HashMap::new(), timers: HashMap::new(), git_read: None, found: Vec::new(), lsp_out: HashMap::new(),
             sockets: HashMap::new(), surfaces: HashMap::new(), given: Vec::new(), restoring: None, listed: Vec::new(), scratches: HashSet::new(), requests: HashMap::new(),
-            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(), set_a_setting: false,
+            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(), set_a_setting: false, serving_for: None,
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -4126,7 +4135,15 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             Call::DebugChanged(state) => ext.call_debug_changed(&mut *store, &state).map(|()| Ok(Reply::Done)),
             Call::SocketAccepted { listener, socket, peer } => ext.call_socket_accepted(&mut *store, listener, socket, &peer).map(|()| Ok(Reply::Done)),
             Call::AgentTurnEnded(turn) => ext.call_agent_turn_ended(&mut *store, &turn).map(|()| Ok(Reply::Done)),
-            Call::Serve { call, name, payload } => ext.call_serve(&mut *store, call, &name, &payload).map(|r| Ok(Reply::Served(r))),
+            Call::Serve { call, name, payload, caller } => {
+                // Its caller for this call alone: set as `serve` starts,
+                // gone as it ends, whatever it did -- answered, said it
+                // would later, or trapped.
+                store.data_mut().serving_for = Some(caller);
+                let served = ext.call_serve(&mut *store, call, &name, &payload).map(|r| Ok(Reply::Served(r)));
+                store.data_mut().serving_for = None;
+                served
+            }
             Call::Paste { page, text } => ext.call_page_paste(&mut *store, page, &text).map(|()| Ok(Reply::Done)),
             Call::Lsp { server, message } => ext.call_lsp_message(&mut *store, server, &message).map(|()| Ok(Reply::Done)),
             // 1.2's, when it has them; else nothing to tell.
