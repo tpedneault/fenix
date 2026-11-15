@@ -49,6 +49,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fenix 1.5, when no code reachable from its exports calls
   `tests::provider`. See
   [Writing extensions](docs/WRITING_EXTENSIONS.md#test-providers).
+- Extension API 1.6: a service knows who called it. `called_by()` (the
+  import `called-by`) says, while `serve` runs, which extension asked, by
+  its id -- or Fenix itself, an agent's tool, resource or prompt, or the
+  control channel. `[contributes.service_callers]` names who may call a
+  service, and Fenix refuses anyone else before the extension runs; a
+  service it doesn't name is open to anyone, as before. Both need
+  `api = "1.6"`. See
+  [Writing extensions](docs/WRITING_EXTENSIONS.md#who-calls-a-service).
 - Language packs declare the kinds of project they know, in
   `[[contributes.project_kinds]]`: an id, a name, a one-to-four-letter
   tag, a theme colour, the files that mark one and the file it opens on.
@@ -195,6 +203,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A name is one extension's or no one's. A service went to the first
+  extension listing it, by id, so an impostor could take the calls meant
+  for another; now a name under an installed extension's full id is
+  that extension's, only `fenix.*` extensions may use the word `fenix`,
+  a namespace is one word and claims nothing that is another installed
+  extension's publisher, and a service, command, setting, agent tool or
+  prompt two extensions claim equally is neither's (the machine's over
+  yours). What's left out is said in the extension's details on the
+  Extensions page, and a caller is told why. Every extension in the
+  store keeps all its names.
+- An extension could declare one of Fenix's own settings as its own --
+  `gitlab.token`, say -- and be given its value without asking for the
+  secret; Fenix's settings are now never an extension's.
 - An extension changing a setting of its own that names a folder of its
   (the MIB extension's `mib.roots`) gets that folder right away: it
   starts again once what it changed it in is done, as when you change it

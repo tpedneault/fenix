@@ -1,6 +1,7 @@
 # Plan: who calls a service, and whose name it is
 
-- **Status:** planned 15 November 2026, on `svc/security` (not merged).
+- **Status:** built 15 November 2026, on `svc/security` (not merged),
+  for the maintainer to review.
   Recorded in [ADR 0007](../adr/0007-service-callers.md). §10 says what
   was built differently.
 - **Scope:** a service learns who called it, from Fenix, for every call;
@@ -449,4 +450,44 @@ and asks you for anyone else, naming them. **`jira.request`** is held to
 
 ## 10. As built
 
-(Filled in when built.)
+Three commits after the plan's, as §8 has them: the names, who called,
+the gate; then the docs.
+
+- **The names** -- `fenix-extensions/src/manifest.rs` (`namespace_problem`,
+  `word_is_theirs`, `borrows`, `Claim`) and `src/claims.rs` (`refused`,
+  `withdraw`, `unserved`); `fenix-gui/src/installed.rs` (`claimed`,
+  `fenix_owns`, used by `code_of`, so by everything that lists the code
+  extensions), the Extensions page's "Names left out", and
+  `WasmHost::code_unserved` for a caller. Commands aren't checked
+  against Fenix's own: Fenix's are registered first and an extension's of
+  the same id never is, as before.
+- **Who called** -- as §2, with one more origin than §1.2 listed:
+  `fenix/agent.call` (MCP and agent threads) and `fenix/tools.call` both
+  end in `control_tools_call_with`, so both are `agent-tool`.
+- **The gate** -- as §3, in `code_serve_with`
+  (`WasmHost::code_gate_refuses`). A refused call is answered at once; its
+  `ServeId` names a call never filed, so cancelling it is a no-op.
+
+**Rule 6 never decides in practice.** A borrowed word has no dot and an
+id has one, so a name claimed under one extension's full id and through
+another's word is always under an installed id, and rule 4 refuses the
+borrower first. The order stays, for manifests made some other way. Rule
+4 takes the **longest** installed id a name is under (`acme.a.b.x` is
+`acme.a.b`'s, not `acme.a`'s).
+
+**The store**, checked: `FENIX_STORE_MANIFESTS=<fenix-extensions>/extensions
+cargo test -p fenix-gui -- --ignored every_store_extension` -- "74
+manifests read, 60 code extensions, 0 names refused", each manifest
+unchanged by the claims. The test guests: `callers.wasm` is new, built on
+the 1.6 crate with Rust 1.100 (not `build.ps1`'s 1.98, which isn't
+installed here), its `Cargo.lock` copied from `plain16`'s so its
+dependencies are the same; `plain16.wasm` was rebuilt the same way on the
+crate with `called-by` in it -- it differs from the old one, since the
+crate's WIT changed -- and `tests/f15.rs` still starts it on Fenix 1.5's
+bindings, with no `called-by` import.
+
+**Not verified by anything here:** the store's trackers adopting §9 (that
+repository is read-only for this work); Windows; a real `fenix --mcp`
+client (the tests call `fenix/agent.call` and `fenix/tools.call` inside
+the app); and the forges, PDF and reading-view routes as `fenix` other
+than through the hex view and a `vnc:` link, which share the code.

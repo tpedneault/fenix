@@ -971,6 +971,64 @@ compiler can't prove unreachable is imported, and Fenix 1.5 refuses the
 component. Fenix's own test (`fenix-wasm/tests/f15.rs`) checks exactly
 this for 1.6 on 1.5.
 
+## Who calls a service
+
+Any installed extension can call another's services, and so can Fenix
+(a forge, the reading view), agents (a service that's a tool, a
+resource or a prompt) and programs on the control channel. A service
+that acts as you -- posts, moves an issue, sends a request with your
+token -- says who may call it (API 1.6):
+
+```toml
+[engine]
+api = "1.6"                    # needed: Fenix 1.5 would run it open
+
+[contributes]
+services = ["fenix.jira.tracker.comment", "fenix.jira.tracker.issues"]
+
+[contributes.service_callers]
+"fenix.jira.tracker.comment" = ["fenix.agenda"]
+"fenix.jira.tracker.issues" = ["fenix.agenda", "agents"]
+```
+
+Each key is one of its services; its value is extension ids, and
+`fenix` (Fenix's own features), `agents` (its agent tools, resources
+and prompts) and `control` (the control channel), at most 32. Fenix
+refuses anyone else before the extension is started or called, with
+"fenix.jira.tracker.comment: fenix.jira takes it only from fenix.agenda,
+not from acme.other". A service it doesn't name is open to anyone. An
+agent tool, resource or prompt on a service that doesn't list `agents`
+is refused when the manifest is read.
+
+For a finer rule -- reads from anyone, writes from the agenda; ask you
+once for anyone else -- `called_by()` says who called the service
+`serve` is answering:
+
+```rust
+use fenix_extension_api::{called_by, ServiceCaller};
+
+fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<String, String>> {
+    match called_by() {
+        Some(ServiceCaller::Extension(id)) if id == "fenix.agenda" => {}
+        Some(ServiceCaller::Extension(id)) => return Some(Err(format!("{id} may not ask this"))),
+        Some(ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt) => {}
+        Some(ServiceCaller::Fenix | ServiceCaller::Control) | None => {}
+    }
+    // ...
+}
+```
+
+Fenix sets it for each call: another extension by its id (Fenix knows
+which asked, since each runs on its own), `Fenix`, `AgentTool`,
+`AgentResource`, `AgentPrompt` or `Control`. A service called by a
+service sees that one, not the first in the chain. It's `None` outside
+`serve` -- in `handle`, a command, after an `.await` -- so a service
+that answers later reads it in `serve` and keeps it with the call. It
+needs `api = "1.6"`; an extension that never calls it keeps loading on
+1.5. `Control` and the agents' are programs running as you, which an
+extension allowed to run programs, or to reach Fenix's control socket
+(`permissions.ipc`), can be: only an extension id is an extension.
+
 ## Forges
 
 An extension can be a code-review forge (GitHub, GitLab) for Fenix's Git
@@ -1371,7 +1429,8 @@ restart = false                # true: read only as it starts (a debug
 [contributes]
 services = ["counter.count"]
 namespaces = []                # other names its commands, settings and
-                               # services may start with (diagram)
+                               # services may start with (diagram): one
+                               # word each, never fenix
 
 events = ["saved", "typing"]   # what you're doing it's told of:
                                # saved, diagnostics, tasks (and
@@ -1380,6 +1439,9 @@ events = ["saved", "typing"]   # what you're doing it's told of:
                                # focus, view, debug, agents
                                # (agent_turn_ended; what the agent said
                                # only with permissions.agents)
+
+[contributes.service_callers]  # who may call a service (api 1.6); one
+"counter.count" = ["fenix.agenda", "agents"]   # not named: anyone
 
 [limits]
 call_ms = 30000                # how long a command or an event may take,
@@ -1470,6 +1532,21 @@ installs it. A command, setting or service starts with its own name, or
 one of its `namespaces`; a setting under a namespace is read with
 `setting` as its own are (the PDF reader's `reader.zoom`).
 
+A name is one extension's, or no one's. A namespace is one word
+(lowercase letters, digits, `-`, `_`), and only a `fenix.*` extension
+may use the word `fenix`, as a namespace or as its id's last part. Among
+the switched-on extensions: Fenix's own settings (`gitlab.token`),
+services, agent tools and prompts are Fenix's; a name under an installed
+extension's full id and a dot (`fenix.jira.tracker.about`) is that
+extension's; a namespace that is another installed extension's
+publisher (`acme` beside `acme.dusk`) claims nothing; and when two claim
+one name equally -- two ids with the same last part, or a namespace --
+the machine's has it over yours, and otherwise neither does. A name
+left out isn't served, run, shown or given to it; its details on the
+Extensions page say why, under "Names left out", and a caller of such a
+service is told. So a name that must be yours whatever else is
+installed goes under your full id.
+
 A file Fenix reads for it -- `read_file`, a picture, a sound, a sheet or
 a model, a file it opens or edits -- is read once, as its path is checked:
 Fenix asks the open file where it is, so a link it puts in the
@@ -1517,7 +1594,8 @@ added notifications (`notify_with`, `notify_dismiss`); 1.4 added
 the export `key_scheme_changed`) and keymaps' `[[keys]]` chords; 1.6
 added test providers (`[[contributes.test_providers]]`,
 `tests::provider`, and the exports `tests_scan`, `tests_plan`,
-`tests_read`, `tests_step_ended` and `tests_launch`). An extension
+`tests_read`, `tests_step_ended` and `tests_launch`), and who called a
+service (`called_by`, `[contributes.service_callers]`). An extension
 rebuilt on the 1.6 crate that uses nothing 1.6 added -- no code
 reachable from its exports calls `tests::provider` -- may keep `api =
 "1.5"`: Fenix 1.5 never looks for the exports it gains (see [Test
