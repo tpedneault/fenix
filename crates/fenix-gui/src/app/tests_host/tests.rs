@@ -179,7 +179,7 @@ fn guest(id: &str) -> crate::installed::CodeExtension {
         "[extension]\nid = \"{id}\"\nname = \"Provider\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.6\"\nfenix = \">=1.5, <2\"\n\n[permissions]\nprocess = [\"fake-test-runner\"]\nfilesystem = \"project-read\"\n\n[[contributes.test_providers]]\nid = \"{short}\"\nname = \"fake\"\nmarkers = [\"fake.toml\"]\nscan = [\"*.fake\", \"*.py\"]\n"
     ))
     .unwrap();
-    crate::installed::CodeExtension { id: id.into(), name: "Provider".into(), dir: staged, manifest }
+    crate::installed::CodeExtension { id: id.into(), name: "Provider".into(), dir: staged, manifest, refused: Vec::new(), managed: false }
 }
 
 struct Project {

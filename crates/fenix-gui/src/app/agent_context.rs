@@ -121,7 +121,7 @@ fn fingerprint(value: &Value) -> u64 {
 }
 
 /// Fenix's prompts: name, what it's for, its arguments (name, required).
-const PROMPTS: &[(&str, &str, &[(&str, bool)])] = &[
+pub(crate) const PROMPTS: &[(&str, &str, &[(&str, bool)])] = &[
     ("fix_diagnostic", "Fix the problem the language server reports on a line, as small a change as will do", &[("path", true), ("line", true)]),
     ("explain", "Explain what some lines of code do, and why", &[("path", true), ("startLine", true), ("endLine", false)]),
     ("review_changes", "Review the working tree's changes, or a branch's against base, with findings by file and line", &[("base", false)]),
@@ -229,7 +229,7 @@ impl App {
                 let then = move |_: &mut App, said: Result<String, String>| {
                     let _ = inner.send(said.map_err(invalid).map(|text| serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text))));
                 };
-                self.code_serve(&extension, &resource.service, json!(params).to_string(), super::wasm_host::Answer::Fenix(Box::new(then)));
+                self.code_serve(&extension, &resource.service, json!(params).to_string(), fenix_wasm::host::ServiceCaller::AgentResource, super::wasm_host::Answer::Fenix(Box::new(then)));
                 return;
             }
         }
@@ -288,7 +288,7 @@ impl App {
                 });
                 let _ = reply.send(answer);
             };
-            self.code_serve(&extension, &prompt.service, arguments.to_string(), super::wasm_host::Answer::Fenix(Box::new(then)));
+            self.code_serve(&extension, &prompt.service, arguments.to_string(), fenix_wasm::host::ServiceCaller::AgentPrompt, super::wasm_host::Answer::Fenix(Box::new(then)));
             return;
         }
         let _ = reply.send(self.agent_fenix_prompt(name, arguments).map(|text| json!({ "description": PROMPTS.iter().find(|p| p.0 == name).map(|p| p.1), "messages": [{ "role": "user", "content": { "type": "text", "text": text } }] })));

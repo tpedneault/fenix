@@ -49,6 +49,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fenix 1.5, when no code reachable from its exports calls
   `tests::provider`. See
   [Writing extensions](docs/WRITING_EXTENSIONS.md#test-providers).
+- Extension API 1.6: a service knows who called it. `called_by()` (the
+  import `called-by`) says, while `serve` runs, which extension asked, by
+  its id -- or Fenix itself, an agent's tool, resource or prompt, the
+  control channel, or `Other` for an origin a later API names;
+  `called_by_extension(id)` is the safe check, true for that extension
+  alone. `[contributes.service_callers]` names who may call a
+  service, and Fenix refuses anyone else before the extension runs; a
+  service it doesn't name is open to anyone, as before. Both need
+  `api = "1.6"`. See
+  [Writing extensions](docs/WRITING_EXTENSIONS.md#who-calls-a-service).
 - Language packs declare the kinds of project they know, in
   `[[contributes.project_kinds]]`: an id, a name, a one-to-four-letter
   tag, a theme colour, the files that mark one and the file it opens on.
@@ -195,6 +205,34 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A name is one extension's or no one's. A service went to the first
+  extension listing it, by id, so an impostor could take the calls meant
+  for another. Now only switched-on code extensions claim names; a
+  borrowed word (an id's last part, a namespace, which is one word) never
+  reaches under another's full id; a full id beats a borrowed word, the
+  shorter of two; only `fenix.*` extensions may use the word `fenix`;
+  and a service, command, setting, agent tool, toolset, prompt or
+  resource template two claim equally goes to the machine's, else the
+  store's own, else no one. An extension that can't have a setting it
+  declares isn't run, so it never reads a default in the place of your
+  value. What's left out is said in a notification and in the
+  extension's details on the Extensions page, and a caller is told why.
+  Every extension in the store keeps all its names.
+- An extension could declare one of Fenix's own settings as its own --
+  `gitlab.token`, say -- and be given its value without asking for the
+  secret, and read another extension's settings by the word its id ends
+  in; neither now.
+- The services Fenix asks of a store extension and gives a file or an
+  action with (`ccsds.hex` every binary file you open, `pdf.open`,
+  `vnc.connect`, the reading view's, the control channel's agenda and
+  notebook calls) are asked only of that extension; a forge's host two
+  claim equally goes as a name does, rather than to the last by id, which
+  was given the repository; an agent resource's template is under its
+  own `fenix://ext/<toolset>/`, so it can't take reads meant for
+  another's; and an extension named like one of Fenix's toolsets (`git`)
+  no longer has its tools under that toolset's rules.
+- No extension reaches Fenix's own control channel through
+  `permissions.ipc` (`*`, `fenix-*`, a path, a link).
 - An extension changing a setting of its own that names a folder of its
   (the MIB extension's `mib.roots`) gets that folder right away: it
   starts again once what it changed it in is done, as when you change it

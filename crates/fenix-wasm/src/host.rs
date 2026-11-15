@@ -55,6 +55,7 @@ pub use bindings::fenix::extension::types::{
     AgentTurn, DebugSession, DebugState, GitSummary, LaunchConfig, LaunchRequest, QuickFix, TaskResult,
     Notification, NotificationAction, Urgency,
     FoundTest, TestAsk, TestBroken, TestCrash, TestEnded, TestKind, TestLaunch, TestLine, TestLocation, TestOutcome, TestOutput, TestPlan, TestReport, TestStep, TestStepEnd,
+    ServiceCaller,
 };
 use crate::test_limits;
 
@@ -691,8 +692,9 @@ pub enum Call {
     Key { page: u64, key: Key },
     PageState(u64),
     PageRestore { page: u64, kind: String, state: String },
-    /// Service `name`, as call `call`: Fenix's own number for it.
-    Serve { call: u64, name: String, payload: String },
+    /// Service `name`, as call `call`: Fenix's own number for it, from
+    /// `caller` -- what `called-by` says while `serve` runs.
+    Serve { call: u64, name: String, payload: String, caller: ServiceCaller },
     Paste { page: u64, text: String },
     /// A message for its language server `server` (`LspPort`).
     Lsp { server: u64, message: String },
@@ -1241,6 +1243,9 @@ struct State {
     /// now: told when that's over (`Event::HandlerReturned`) if nothing
     /// else says so.
     set_a_setting: bool,
+    /// Who called the service `serve` is answering, while it runs
+    /// (`called-by`); none at any other time.
+    serving_for: Option<ServiceCaller>,
 }
 
 impl State {
@@ -1643,11 +1648,13 @@ impl State {
             Some(key) => settings.get(key).is_some_and(|v| !v.trim().is_empty() && v.trim() == bare),
             None => fenix_extensions::manifest::glob_matches(entry, bare),
         });
-        if allowed {
-            Ok(())
-        } else {
-            Err(format!("{name} isn't a local socket this extension may reach (permissions.ipc)"))
+        if !allowed {
+            return Err(format!("{name} isn't a local socket this extension may reach (permissions.ipc)"));
         }
+        if reaches_fenix_control(name) {
+            return Err(format!("{name} is Fenix's own control channel: no extension reaches it (permissions.ipc)"));
+        }
+        Ok(())
     }
 
     /// A full path Fenix gave it, or one below such a path; or the file
@@ -3144,6 +3151,10 @@ impl fenix::extension::host::Host for State {
         self.ask(Request::ServiceAnswer { call, answer });
     }
 
+    fn called_by(&mut self) -> Option<ServiceCaller> {
+        self.serving_for.clone()
+    }
+
     fn service_progress(&mut self, call: u64, message: String, fraction: Option<f32>) {
         let fraction = fraction.filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));
         self.ask(Request::ServiceProgress { call, message, fraction });
@@ -3426,6 +3437,40 @@ fn ipc_open(name: &str, closed: Arc<AtomicBool>) -> Result<Local, String> {
     let reading = pipe.try_clone().map_err(|e| e.to_string())?;
     let flag = closed.clone();
     Ok((Box::new(PipeReader { pipe: reading, closed }), Box::new(pipe), Box::new(move || flag.store(true, Ordering::Relaxed))))
+}
+
+/// Whether local socket `name` is -- or leads to, through a link --
+/// Fenix's own control channel (`fenix_control::endpoint`): the pipe
+/// `fenix-<SID>-<session>` on Windows, the socket `control*.sock` in a
+/// folder `fenix` or `fenix-<uid>` elsewhere. An extension allowed `*`,
+/// `fenix-*` or a folder's path would otherwise speak to Fenix as a
+/// program on this machine, and call services as `control`.
+fn reaches_fenix_control(name: &str) -> bool {
+    let bare = name.strip_prefix(r"\\.\pipe\").unwrap_or(name);
+    if cfg!(windows) && bare.to_ascii_lowercase().starts_with("fenix-") {
+        return true;
+    }
+    is_control(Path::new(bare)) || leads_to_control(bare)
+}
+
+/// Whether `path` is Fenix's control socket by its name: `control*` in a
+/// `fenix` or `fenix-<uid>` folder.
+fn is_control(path: &Path) -> bool {
+    let file = path.file_name().and_then(|f| f.to_str()).unwrap_or_default();
+    let folder = path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()).unwrap_or_default();
+    file.starts_with("control") && (folder == "fenix" || folder.starts_with("fenix-"))
+}
+
+/// Whether the name leads to it on this machine, a link followed.
+#[cfg(unix)]
+fn leads_to_control(bare: &str) -> bool {
+    ipc_path(bare).is_ok_and(|path| is_control(&path) || std::fs::canonicalize(&path).is_ok_and(|real| is_control(&real)))
+}
+
+/// A pipe's name is the whole of it on Windows: there is nothing to follow.
+#[cfg(not(unix))]
+fn leads_to_control(_bare: &str) -> bool {
+    false
 }
 
 /// How long `http-send` waits when it isn't told.
@@ -3996,7 +4041,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let state = State {
             wasi: wasi.build(), table: ResourceTable::new(), limits, sink: sink.clone(), spec, jobs: back, next: 0, processes: HashMap::new(), timers: HashMap::new(), git_read: None, found: Vec::new(), lsp_out: HashMap::new(),
             sockets: HashMap::new(), surfaces: HashMap::new(), given: Vec::new(), restoring: None, listed: Vec::new(), scratches: HashSet::new(), requests: HashMap::new(),
-            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(), set_a_setting: false,
+            background: HashSet::new(), secrets_set: HashMap::new(), cuts_said: HashSet::new(), set_a_setting: false, serving_for: None,
         };
         let mut store = Store::new(&engine, state);
         store.limiter(|s| &mut s.limits);
@@ -4126,7 +4171,15 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             Call::DebugChanged(state) => ext.call_debug_changed(&mut *store, &state).map(|()| Ok(Reply::Done)),
             Call::SocketAccepted { listener, socket, peer } => ext.call_socket_accepted(&mut *store, listener, socket, &peer).map(|()| Ok(Reply::Done)),
             Call::AgentTurnEnded(turn) => ext.call_agent_turn_ended(&mut *store, &turn).map(|()| Ok(Reply::Done)),
-            Call::Serve { call, name, payload } => ext.call_serve(&mut *store, call, &name, &payload).map(|r| Ok(Reply::Served(r))),
+            Call::Serve { call, name, payload, caller } => {
+                // Its caller for this call alone: set as `serve` starts,
+                // gone as it ends, whatever it did -- answered, said it
+                // would later, or trapped.
+                store.data_mut().serving_for = Some(caller);
+                let served = ext.call_serve(&mut *store, call, &name, &payload).map(|r| Ok(Reply::Served(r)));
+                store.data_mut().serving_for = None;
+                served
+            }
             Call::Paste { page, text } => ext.call_page_paste(&mut *store, page, &text).map(|()| Ok(Reply::Done)),
             Call::Lsp { server, message } => ext.call_lsp_message(&mut *store, server, &message).map(|()| Ok(Reply::Done)),
             // 1.2's, when it has them; else nothing to tell.

@@ -285,7 +285,7 @@ impl App {
             self.page_images.diagrams.insert(h, Drawing::Asked);
             let payload = serde_json::json!({ "source": source }).to_string();
             let then = move |app: &mut App, said: Result<String, String>| app.diagram_drawn(h, said);
-            self.code_serve(&server, "diagrams.render", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+            self.code_serve(&server, "diagrams.render", payload, fenix_wasm::host::ServiceCaller::Fenix, super::wasm_host::Answer::Fenix(Box::new(then)));
         }
     }
 
@@ -339,7 +339,7 @@ impl App {
             }
             app.page_pictures_arrived();
         };
-        self.code_serve(&server, "notebook.link", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+        self.code_serve(&server, "notebook.link", payload, fenix_wasm::host::ServiceCaller::Fenix, super::wasm_host::Answer::Fenix(Box::new(then)));
     }
 
     /// What's known of links and diagrams is forgotten (a note saved, the
@@ -359,7 +359,7 @@ impl App {
                     app.set_error(e);
                 }
             };
-            return self.code_serve(&server, "notebook.follow", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+            return self.code_serve(&server, "notebook.follow", payload, fenix_wasm::host::ServiceCaller::Fenix, super::wasm_host::Answer::Fenix(Box::new(then)));
         }
         if link.markdown && !link.target.is_empty() {
             let base = from.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
@@ -757,13 +757,14 @@ mod tests {
         let text = app.buffers.get(page).unwrap().buffer.text();
         assert!(text.contains("flowchart TD") && text.contains("↳ Ground station"), "{text}");
 
-        let mut ext = super::super::wasm_host::tests::hello("");
-        ext.manifest = fenix_extensions::Manifest::parse(
-            "[extension]\nid = \"test.both\"\nname = \"Both\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"0.7\"\nfenix = \">=1.0, <2\"\n\n[contributes]\nnamespaces = [\"diagrams\", \"notebook\"]\nservices = [\"diagrams.render\", \"notebook.link\"]\n",
-        )
-        .unwrap();
-        ext.id = "test.both".into();
-        app.wasm.installed = vec![ext];
+        // The test guest twice, as the two Fenix asks for these.
+        let as_ext = |id: &str, service: &str| {
+            let mut ext = super::super::wasm_host::tests::hello("");
+            ext.manifest = fenix_extensions::Manifest::parse(&format!("[extension]\nid = \"{id}\"\nname = \"X\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"0.7\"\nfenix = \">=1.0, <2\"\n\n[contributes]\nservices = [\"{service}\"]\n")).unwrap();
+            ext.id = id.into();
+            ext
+        };
+        app.wasm.installed = vec![as_ext("fenix.diagrams", "diagrams.render"), as_ext("fenix.notebook", "notebook.link")];
         app.reading_forget();
         if let Some(state) = app.pages.get_mut(&page) {
             if let PageModel::Reading(p) = &mut state.model {

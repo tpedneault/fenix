@@ -2078,6 +2078,12 @@ reads only as it starts (its manifest says `restart = true`) starts that
 extension again when it's changed, in the running editor, and the
 settings page says so. Those that start with Fenix load once the
 window has drawn, so they don't hold it up.
+Extensions call each other's services, and a service knows who called
+it -- another extension by its id, Fenix, an agent, the control channel
+-- and may name who may (`[contributes.service_callers]`), Fenix
+refusing anyone else before the extension runs. A service, command or
+setting is one extension's or no one's: two claiming one name equally
+both lose it, and the Extensions page says so in each one's details.
 `SPC q r` restarts Fenix where you are -- the session, unsaved text
 included, comes back -- for themes and languages, and for a setting of
 Fenix's own only read at start (the settings page marks it).

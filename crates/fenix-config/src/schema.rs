@@ -553,6 +553,13 @@ pub fn register(settings: &'static [Setting]) {
     }
 }
 
+/// Whether `key` is one of Fenix's own settings, not one a feature or an
+/// extension registered: an extension may never declare it as its own
+/// (`gitlab.token` would be given to it).
+pub fn is_core(key: &str) -> bool {
+    SETTINGS.iter().any(|s| s.key == key)
+}
+
 /// Every setting: core's in page order, then the features'.
 pub fn settings() -> Vec<&'static Setting> {
     let registered = REGISTERED.read().unwrap_or_else(|poisoned| poisoned.into_inner());

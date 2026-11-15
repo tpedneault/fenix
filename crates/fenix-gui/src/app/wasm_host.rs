@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
-use fenix_wasm::host::{Call, Event, Level, Notice, Reply, Request, Source, Spec, Worker};
+use fenix_wasm::host::{Call, Event, Level, Notice, Reply, Request, ServiceCaller, Source, Spec, Worker};
 
 use super::pages::{PageEvent, PageModel};
 use super::*;
@@ -121,6 +121,32 @@ pub(crate) struct ServeId {
     pub call: u64,
 }
 
+/// Which extension is the forge for `host`, of those that claim it, each
+/// with its claim (`ForgeContribution::claims`, 0 for none): the one
+/// strongest claim; between equal ones, the machine's, else the store's
+/// own (`fenix.*`), when only one is; else none -- `Err(Some(why))`, for
+/// it's given the repository to read. `Err(None)`: no one claims it.
+pub(crate) fn forge_for(host: &str, claims: &[(u8, &CodeExtension)]) -> Result<String, Option<String>> {
+    let best = claims.iter().map(|(c, _)| *c).max().filter(|c| *c > 0).ok_or(None)?;
+    let top: Vec<&CodeExtension> = claims.iter().filter(|(c, _)| *c == best).map(|(_, e)| *e).collect();
+    let managed: Vec<&&CodeExtension> = top.iter().filter(|e| e.managed).collect();
+    let pool: Vec<&CodeExtension> = if managed.is_empty() { top.clone() } else { managed.into_iter().copied().collect() };
+    if let [only] = pool.as_slice() {
+        return Ok(only.id.clone());
+    }
+    let store: Vec<&&CodeExtension> = pool.iter().filter(|e| e.id.split('.').next() == Some("fenix")).collect();
+    if let [only] = store.as_slice() {
+        return Ok(only.id.clone());
+    }
+    let mut ids: Vec<&str> = pool.iter().map(|e| e.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if let [only] = ids.as_slice() {
+        return Ok(only.to_string());
+    }
+    Err(Some(format!("{host}: {} each say they're its forge, so neither is asked or given the repository -- switch all but one off (SPC h x)", ids.join(" and "))))
+}
+
 /// The PDF reader's services Fenix asks (`fenix.pdf`'s): a file opened at
 /// a page or a heading -- `gf` on `x.pdf#page=38`, a standard's clause --
 /// and a file searched, for the standards library.
@@ -204,6 +230,12 @@ pub(crate) struct WasmHost {
     /// at the first frame, or by then (`App::code_startup_tick`).
     pub(crate) startup_due: Option<Instant>,
     pub(crate) installed: Vec<CodeExtension>,
+    /// What's been said of the names the code extensions were refused
+    /// (`code_names_said`), each once: `<id>\n<line>`.
+    pub(crate) names_said: HashSet<String>,
+    /// Why the last repository asked for had no forge, when two claimed
+    /// its host equally (`forge_for`).
+    code_forge_disputed: std::cell::RefCell<Option<String>>,
     workers: HashMap<String, Worker>,
     pub(crate) status: HashMap<String, Status>,
     /// What each said, oldest first.
@@ -791,10 +823,36 @@ impl App {
     /// there are, and their project markers.
     pub(super) fn code_extensions_installed(&mut self) {
         self.wasm.installed = crate::installed::code_extensions();
+        self.code_names_said(&crate::installed::held_back());
         // The packs' project markers: a project's top where Fenix's own
         // find none (a `dotnet new console` folder).
         let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
         fenix_project::set_extension_markers(markers);
+    }
+
+    /// What the code extensions running (`installed`) and those `held`
+    /// back were refused of their names, said in a notification the first
+    /// time it's so -- as they're installed, switched on, or another is:
+    /// one that isn't run, critical, so it stays until you dismiss it; one
+    /// that runs without some names, a normal one. The Extensions page
+    /// says the same in each one's details.
+    pub(crate) fn code_names_said(&mut self, held: &[CodeExtension]) {
+        let mut said = Vec::new();
+        for (ext, is_held) in self.wasm.installed.iter().map(|e| (e, false)).chain(held.iter().map(|e| (e, true))) {
+            let lines = crate::installed::name_lines(ext);
+            let new: Vec<&String> = lines.iter().filter(|l| !self.wasm.names_said.contains(&format!("{}\n{l}", ext.id))).collect();
+            if new.is_empty() {
+                continue;
+            }
+            let summary = if is_held { format!("{} isn't running: a setting of its is another's", ext.id) } else { format!("{}: names left out", ext.id) };
+            let urgency = if is_held { crate::notify::Urgency::Critical } else { crate::notify::Urgency::Normal };
+            let body = new.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n");
+            said.push((ext.id.clone(), lines.clone(), crate::notify::Request::new("extensions", summary).body(body).urgency(urgency).tag(format!("names:{}", ext.id)).action("Extensions", "extensions.open")));
+        }
+        for (id, lines, request) in said {
+            self.wasm.names_said.extend(lines.iter().map(|l| format!("{id}\n{l}")));
+            self.notify(request);
+        }
     }
 
     /// The code extensions switched on now (`now`, as `installed` reads
@@ -803,7 +861,10 @@ impl App {
     /// (`unload_code_extension`); one switched on or installed has its
     /// settings, commands and keys, and starts as it would with Fenix.
     pub(super) fn code_extensions_now(&mut self, now: Vec<CodeExtension>) {
-        let same = |a: &CodeExtension, b: &CodeExtension| a.id == b.id && a.dir == b.dir && a.manifest.extension.version == b.manifest.extension.version;
+        // The same package, with the same names: another installed or
+        // switched off can give it names or take them (`installed::claimed`),
+        // and then it's put in use again with what it has now.
+        let same = |a: &CodeExtension, b: &CodeExtension| a.id == b.id && a.dir == b.dir && a.manifest.extension.version == b.manifest.extension.version && a.manifest.contributes == b.manifest.contributes;
         let gone: Vec<String> = self.wasm.installed.iter().filter(|e| !now.iter().any(|n| same(n, e))).map(|e| e.id.clone()).collect();
         for ext in &gone {
             self.unload_code_extension(ext);
@@ -819,6 +880,7 @@ impl App {
             return;
         }
         self.wasm.installed = now;
+        self.code_names_said(&crate::installed::held_back());
         let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
         fenix_project::set_extension_markers(markers);
         self.commands = std::rc::Rc::new(crate::commands::CommandRegistry::with_builtins().with_code_extensions(&self.wasm.installed));
@@ -981,8 +1043,12 @@ impl App {
         // extension's, `ccsds.*`): the project's own over yours there too.
         let project = self.wasm.projects.get(&ext.id).cloned().flatten().or_else(|| self.code_project()).map(|root| fenix_config::ProjectSettings::load(&root));
         let prefixes: Vec<String> = std::iter::once(ext.id.rsplit('.').next().unwrap_or(&ext.id).to_string()).chain(ext.manifest.permissions.settings.iter().cloned()).map(|n| format!("{n}.")).collect();
+        // Under its last part, only Fenix's own (`jira.base_url`): another
+        // extension's of that word aren't its because the word is.
+        let own = prefixes[0].clone();
         for s in fenix_config::schema::settings() {
-            if prefixes.iter().any(|p| s.key.starts_with(p.as_str())) && !settings.contains_key(s.key) && !matches!(s.kind, fenix_config::schema::Kind::Secret(_)) {
+            let theirs_to_read = if s.key.starts_with(own.as_str()) { fenix_config::schema::is_core(s.key) } else { prefixes[1..].iter().any(|p| s.key.starts_with(p.as_str())) };
+            if theirs_to_read && !settings.contains_key(s.key) && !matches!(s.kind, fenix_config::schema::Kind::Secret(_)) {
                 let theirs = project.as_ref().filter(|_| s.project).and_then(|p| p.get(s.key)).map(as_text);
                 if let Some(value) = theirs.or_else(|| read(s.key)) {
                     settings.insert(s.key.to_string(), value);
@@ -1733,15 +1799,17 @@ impl App {
         let remote = fenix_git::remote_url(root, "origin")?;
         let host = fenix_extensions::manifest::url_host(&remote)?;
         let setting = |key: &str| fenix_config::schema::setting(key).and_then(|s| s.get(&self.config)).or_else(|| self.config.value(key).cloned()).map(|v| as_text(&v));
-        let (best, ext) = self
-            .wasm
-            .installed
-            .iter()
-            .flat_map(|e| e.manifest.contributes.forges.iter().map(|f| (f.claims(&host, &setting), e.id.clone())))
-            .max_by_key(|(claim, _)| *claim)?;
-        if best == 0 {
-            return None;
-        }
+        let (host, setting) = (&host, &setting);
+        let claims: Vec<(u8, &CodeExtension)> = self.wasm.installed.iter().flat_map(|e| e.manifest.contributes.forges.iter().map(move |f| (f.claims(host, setting), e))).collect();
+        let host = host.as_str();
+        let ext = match forge_for(host, &claims) {
+            Ok(ext) => ext,
+            Err(None) => return None,
+            Err(Some(why)) => {
+                self.wasm.code_forge_disputed.borrow_mut().replace(why);
+                return None;
+            }
+        };
         let root = fenix_lsp::normalize(root.to_path_buf()).to_string_lossy().into_owned();
         let payload = serde_json::json!({ "root": root, "remote": remote, "branch": fenix_git::oplog::current_branch(Path::new(&root)), "number": number });
         Some((ext, payload.to_string()))
@@ -1751,10 +1819,18 @@ impl App {
     /// (`forge.branch`, `forge.open`, `forge.reviews`); `then` gets its
     /// answer. False when no code extension is its forge.
     pub(crate) fn code_forge_call(&mut self, root: &Path, service: &str, number: Option<u64>, then: Box<dyn FnOnce(&mut App, Result<String, String>)>) -> bool {
-        let Some((ext, payload)) = self.code_forge(root, number) else { return false };
+        let Some((ext, payload)) = self.code_forge(root, number) else {
+            let disputed = self.wasm.code_forge_disputed.borrow_mut().take();
+            if let Some(why) = disputed {
+                if self.wasm.names_said.insert(format!("forge\n{why}")) {
+                    self.notify(crate::notify::Request::new("extensions", "No forge for this repository").body(why).tag("names:forge").action("Extensions", "extensions.open"));
+                }
+            }
+            return false;
+        };
         // It may read the repository, and run git there.
         self.code_call(&ext, Call::Grant(fenix_lsp::normalize(root.to_path_buf())), COMMAND_TICKS, Pending::Other);
-        self.code_serve(&ext, service, payload, Answer::Fenix(then));
+        self.code_serve(&ext, service, payload, ServiceCaller::Fenix, Answer::Fenix(then));
         true
     }
 
@@ -1852,7 +1928,7 @@ impl App {
     /// no extension opens it.
     pub(crate) fn open_with_extension_at(&mut self, path: &Path, page: Option<u32>, heading: Option<&str>) -> bool {
         let Some(ext) = self.code_opener(path) else { return false };
-        let serves = self.wasm.installed.iter().any(|e| e.id == ext && e.manifest.contributes.services.iter().any(|s| s == PDF_OPEN));
+        let serves = crate::installed::may_serve(&ext, PDF_OPEN) && self.wasm.installed.iter().any(|e| e.id == ext && e.manifest.contributes.services.iter().any(|s| s == PDF_OPEN));
         if !serves || (page.is_none() && heading.is_none()) {
             self.open_with_extension(&ext, path);
             return true;
@@ -1866,6 +1942,7 @@ impl App {
             &ext,
             PDF_OPEN,
             payload,
+            ServiceCaller::Fenix,
             Answer::Fenix(Box::new(|app, answer| {
                 if let Err(why) = answer {
                     app.set_error(why);
@@ -1898,9 +1975,18 @@ impl App {
         self.buffer_on(path).filter(|id| !(open_only && self.wasm.sealed.contains(id)))
     }
 
-    /// The code extension, other than `but`, that answers service `name`.
+    /// The code extension, other than `but`, that answers service `name`:
+    /// the one it's left to (`installed::claimed`), since no name is
+    /// left to two.
     pub(crate) fn code_server(&self, name: &str, but: Option<&str>) -> Option<String> {
-        self.wasm.installed.iter().find(|e| Some(e.id.as_str()) != but && e.manifest.contributes.services.iter().any(|s| s == name)).map(|e| e.id.clone())
+        self.wasm.installed.iter().find(|e| Some(e.id.as_str()) != but && crate::installed::may_serve(&e.id, name) && e.manifest.contributes.services.iter().any(|s| s == name)).map(|e| e.id.clone())
+    }
+
+    /// Why no extension answers service `name`: the extensions that list
+    /// it may not have it, or none lists it.
+    pub(crate) fn code_unserved(&self, name: &str) -> String {
+        let refused: Vec<fenix_extensions::claims::Refused> = self.wasm.installed.iter().flat_map(|e| e.refused.iter().cloned()).collect();
+        fenix_extensions::claims::unserved(name, &refused).unwrap_or_else(|| format!("nothing offers {name}"))
     }
 
     /// Lets code extension `ext` read the file at `path`, as one Fenix gave
@@ -1910,22 +1996,62 @@ impl App {
         self.code_call(ext, Call::Grant(path), COMMAND_TICKS, Pending::Other);
     }
 
-    /// Asks code extension `server` for service `name`; `answer` gets
-    /// what it says, now or later.
-    pub(crate) fn code_serve(&mut self, server: &str, name: &str, payload: String, answer: Answer) {
-        self.code_serve_with(server, name, payload, answer, ServeOptions::default());
+    /// Asks code extension `server` for service `name` on behalf of
+    /// `caller` -- what it's told `called-by` is; `answer` gets what it
+    /// says, now or later.
+    pub(crate) fn code_serve(&mut self, server: &str, name: &str, payload: String, caller: ServiceCaller, answer: Answer) {
+        self.code_serve_with(server, name, payload, caller, answer, ServeOptions::default());
     }
 
     /// `code_serve`, with a deadline for the whole call and somewhere for
     /// its progress to go: what an agent's tool call is. The id it
     /// returns is what `code_serve_cancel` takes.
-    pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, answer: Answer, options: ServeOptions) -> ServeId {
+    /// Every service call goes through here, so `caller` is always said:
+    /// an extension asking another is `Extension` of the asker's id.
+    pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, caller: ServiceCaller, answer: Answer, options: ServeOptions) -> ServeId {
         self.wasm.next_serve += 1;
         let call = self.wasm.next_serve;
+        // Its manifest's gate, held before the extension is started or
+        // called: a caller it doesn't name is answered now, and it never
+        // hears of the call.
+        if let Some(why) = self.code_gate_refuses(server, name, &caller) {
+            match answer {
+                Answer::Ext { asker, id } => self.code_deliver(&asker, Notice::ServiceReply((id, Err(why)))),
+                Answer::Fenix(then) => then(self, Err(why)),
+            }
+            return ServeId { server: server.to_string(), call };
+        }
         let deadline = options.timeout.map(|t| (std::time::Instant::now() + t, t));
         self.wasm.serving.insert((server.to_string(), call), Serving { answer, deadline, progress: options.progress, name: name.to_string() });
-        self.code_call(server, Call::Serve { call, name: name.to_string(), payload }, COMMAND_TICKS, Pending::Serve(call));
+        self.code_call(server, Call::Serve { call, name: name.to_string(), payload, caller }, COMMAND_TICKS, Pending::Serve(call));
         ServeId { server: server.to_string(), call }
+    }
+
+    /// Why `server` won't take service `name` from `caller`, when its
+    /// manifest names who may call it (`[contributes.service_callers]`)
+    /// and that isn't `caller`.
+    pub(crate) fn code_gate_refuses(&self, server: &str, name: &str, caller: &ServiceCaller) -> Option<String> {
+        let ext = self.wasm.installed.iter().find(|e| e.id == server)?;
+        let allowed = ext.manifest.callers_of(name)?;
+        let word = match caller {
+            ServiceCaller::Extension(id) => id.as_str(),
+            ServiceCaller::Fenix => "fenix",
+            ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt => "agents",
+            ServiceCaller::Control => "control",
+            // No gate can name an origin it doesn't know.
+            ServiceCaller::Other(_) => return Some(format!("{name}: {server} takes it only from {}", allowed.join(", "))),
+        };
+        if allowed.iter().any(|a| a == word) {
+            return None;
+        }
+        let who = match caller {
+            ServiceCaller::Extension(id) => id.clone(),
+            ServiceCaller::Fenix => "Fenix".into(),
+            ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt => "an agent".into(),
+            ServiceCaller::Control => "the control channel".into(),
+            ServiceCaller::Other(what) => what.clone(),
+        };
+        Some(format!("{name}: {server} takes it only from {}, not from {who}", allowed.join(", ")))
     }
 
     /// Service call `id` given up on -- an agent cancelled its tool call,
@@ -3403,12 +3529,12 @@ impl App {
                 }
             }
             // Fenix's own.
-            Request::Service { id, name, payload } if name == "agents.ask" => {
+            Request::Service { id, name, payload } if name == crate::installed::AGENTS_ASK => {
                 let root = self.wasm.projects.get(ext).cloned().flatten();
                 self.agents_ask(ext, id, &payload, root);
             }
             // One of its asks given up on: `{"call": <its agents.ask call>}`.
-            Request::Service { id, name, payload } if name == "agents.cancel" => {
+            Request::Service { id, name, payload } if name == crate::installed::AGENTS_CANCEL => {
                 let call = serde_json::from_str::<serde_json::Value>(&payload).ok().and_then(|v| v.get("call").and_then(serde_json::Value::as_u64));
                 let answer = match call {
                     Some(call) => self.agents_ask_cancel(ext, call).then(String::new).ok_or_else(|| format!("no ask {call} of its is waiting")),
@@ -3419,8 +3545,11 @@ impl App {
             Request::Service { id, name, payload } => {
                 // Another code extension's.
                 match self.code_server(&name, Some(ext)) {
-                    Some(server) => self.code_serve(&server, &name, payload, Answer::Ext { asker: ext.to_string(), id }),
-                    None => self.code_deliver(ext, Notice::ServiceReply((id, Err(format!("nothing offers {name}"))))),
+                    Some(server) => self.code_serve(&server, &name, payload, ServiceCaller::Extension(ext.to_string()), Answer::Ext { asker: ext.to_string(), id }),
+                    None => {
+                        let why = self.code_unserved(&name);
+                        self.code_deliver(ext, Notice::ServiceReply((id, Err(why))));
+                    }
                 }
             }
         }
@@ -4184,6 +4313,11 @@ fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme 
 }
 
 #[cfg(test)]
+mod callers_tests;
+#[cfg(test)]
+mod names_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use fenix_wasm::host::Focus;
@@ -4218,7 +4352,7 @@ pub(crate) mod tests {
             "[extension]\nid = \"test.hello\"\nname = \"Hello\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.0\"\nfenix = \">=1.0, <2\"\n{manifest_extra}\n[[contributes.commands]]\nid = \"hello.greet\"\ntitle = \"Greet\"\n\n[[contributes.commands]]\nid = \"hello.spin\"\ntitle = \"Spin\"\n"
         ))
         .unwrap();
-        CodeExtension { id: "test.hello".into(), name: "Hello".into(), dir: staged, manifest }
+        CodeExtension { id: "test.hello".into(), name: "Hello".into(), dir: staged, manifest, refused: Vec::new(), managed: false }
     }
 
     /// A folder it's given is made when it isn't there, and its setting
@@ -4274,7 +4408,7 @@ pub(crate) mod tests {
     }
 
     /// Waits for the worker's events and applies them, until `done`.
-    fn pump_until(app: &mut App, done: impl Fn(&App) -> bool) {
+    pub(crate) fn pump_until(app: &mut App, done: impl Fn(&App) -> bool) {
         let started = std::time::Instant::now();
         while !done(app) {
             assert!(started.elapsed() < std::time::Duration::from_secs(60), "{}", app.extension_output_text());
@@ -4283,7 +4417,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn said(app: &App, text: &str) -> bool {
+    pub(crate) fn said(app: &App, text: &str) -> bool {
         app.extension_output_text().contains(text)
     }
 
@@ -4376,7 +4510,7 @@ pub(crate) mod tests {
         // Cancelled by its caller: the same, with why.
         let got = std::rc::Rc::new(std::cell::RefCell::new(None));
         let kept = got.clone();
-        let id = app.code_serve_with("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| *kept.borrow_mut() = Some(a))), ServeOptions::default());
+        let id = app.code_serve_with("test.hello", "hello.forever", String::new(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, a| *kept.borrow_mut() = Some(a))), ServeOptions::default());
         pump_until(&mut app, |a| a.wasm.calls.is_empty());
         assert!(app.code_serve_cancel(&id, "the agent cancelled it"));
         assert_eq!(got.borrow().clone(), Some(Err("the agent cancelled it".to_string())));
@@ -4391,11 +4525,11 @@ pub(crate) mod tests {
         app.wasm.installed = vec![hello("")];
         let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let later = answers.clone();
-        app.code_serve("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| later.borrow_mut().push(a))));
+        app.code_serve("test.hello", "hello.forever", String::new(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, a| later.borrow_mut().push(a))));
         pump_until(&mut app, |a| a.code_ready("test.hello") && a.wasm.calls.is_empty());
         app.run_extension_command("test.hello", "hello.spin");
         let queued = answers.clone();
-        app.code_serve("test.hello", "hello.upper", "x".into(), Answer::Fenix(Box::new(move |_, a| queued.borrow_mut().push(a))));
+        app.code_serve("test.hello", "hello.upper", "x".into(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, a| queued.borrow_mut().push(a))));
         pump_until(&mut app, |_| answers.borrow().len() == 2);
         for answer in answers.borrow().iter() {
             let err = answer.clone().unwrap_err();
@@ -4419,7 +4553,7 @@ pub(crate) mod tests {
         assert_eq!(app.code_server("hello.later", Some("test.hello")), None, "not its own");
         let got = std::rc::Rc::new(std::cell::RefCell::new(None));
         let kept = got.clone();
-        app.code_serve("test.hello", "hello.later", "x".into(), Answer::Fenix(Box::new(move |_, answer| *kept.borrow_mut() = Some(answer))));
+        app.code_serve("test.hello", "hello.later", "x".into(), ServiceCaller::Fenix, Answer::Fenix(Box::new(move |_, answer| *kept.borrow_mut() = Some(answer))));
         pump_until(&mut app, |_| got.borrow().is_some());
         assert_eq!(got.borrow().clone(), Some(Ok("later: x".to_string())));
 
@@ -5608,7 +5742,9 @@ pub(crate) mod tests {
         std::fs::write(&file, b"%PDF-1.4").unwrap();
         let mut app = App::with_file(None);
         assert!(!app.open_with_extension_at(&file, Some(38), None), "nothing opens PDFs");
-        app.wasm.installed = vec![hello("[contributes]\nopens = [\"*.pdf\"]\nnamespaces = [\"pdf\"]\nservices = [\"pdf.open\", \"pdf.search\"]\n")];
+        let mut pdf = hello("[contributes]\nopens = [\"*.pdf\"]\nnamespaces = [\"pdf\"]\nservices = [\"pdf.open\", \"pdf.search\"]\n");
+        pdf.id = "fenix.pdf".into();
+        app.wasm.installed = vec![pdf];
         assert!(app.open_with_extension_at(&file, Some(38), None));
         pump_until(&mut app, |a| said(a, "pdf.open at page 38, read Ok(8)"));
         // Without a page, it's opened as any file it opens.

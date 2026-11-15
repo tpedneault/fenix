@@ -971,6 +971,89 @@ compiler can't prove unreachable is imported, and Fenix 1.5 refuses the
 component. Fenix's own test (`fenix-wasm/tests/f15.rs`) checks exactly
 this for 1.6 on 1.5.
 
+## Who calls a service
+
+Any installed extension can call another's services, and so can Fenix
+(a forge, the reading view), agents (a service that's a tool, a
+resource or a prompt) and programs on the control channel. A service
+that acts as you -- posts, moves an issue, sends a request with your
+token -- says who may call it (API 1.6):
+
+```toml
+[engine]
+api = "1.6"                    # needed: Fenix 1.5 would run it open
+
+[contributes]
+services = ["fenix.jira.tracker.comment", "fenix.jira.tracker.issues"]
+
+[contributes.service_callers]
+"fenix.jira.tracker.comment" = ["fenix.agenda"]
+"fenix.jira.tracker.issues" = ["fenix.agenda", "agents"]
+```
+
+Each key is one of its services; its value is extension ids, and
+`fenix` (Fenix's own features), `agents` (its agent tools, resources
+and prompts) and `control` (the control channel), at most 32. Fenix
+refuses anyone else before the extension is started or called, with
+"fenix.jira.tracker.comment: fenix.jira takes it only from fenix.agenda,
+not from acme.other". A service it doesn't name is open to anyone. An
+agent tool, resource or prompt on a service that doesn't list `agents`
+is refused when the manifest is read.
+
+For a finer rule -- reads from anyone, writes from the agenda; ask you
+once for anyone else -- `called_by()` says who called the service
+`serve` is answering:
+
+```rust
+use fenix_extension_api::{called_by, called_by_extension, ServiceCaller};
+
+fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<String, String>> {
+    // Allow what you name; refuse everything else, `None` included.
+    let allowed = match name {
+        "jira.comment" => called_by_extension("fenix.agenda"),
+        "jira.issue" => called_by_extension("fenix.agenda") || called_by() == Some(ServiceCaller::AgentResource),
+        _ => false,
+    };
+    if !allowed {
+        return Some(Err(format!("{name} isn't open to that caller")));
+    }
+    // ...
+}
+```
+
+Fenix sets it for each call: another extension by its id (Fenix knows
+which asked, since each runs on its own), `Fenix`, `AgentTool`,
+`AgentResource`, `AgentPrompt`, `Control`, or `Other(word)` -- an origin
+a later API names (a remote session, a scheduled task), which a service
+treats as untrusted: never as one of the others. A gate never lets
+`Other` through. A service called by a
+service sees that one, not the first in the chain. It's `None` outside
+`serve` -- in `handle`, a command, after an `.await` -- so a service
+that answers later reads it in `serve` and keeps it with the call. It
+needs `api = "1.6"`; an extension that never calls it keeps loading on
+1.5.
+
+What each origin means:
+
+- **An extension id** is that extension: Fenix knows which asked. It
+  isn't proof of who published it: a package installed from a file is
+  whatever its manifest says, and replaces the one of that id.
+- **`fenix`** is Fenix's own feature, which an extension or a file you
+  opened can set off: opening a binary file has the hex view asked, a
+  link in a note `notebook.follow`, a Git command a forge.
+- **`control` and the agents'** are programs running as you. No
+  extension reaches Fenix's control channel through `permissions.ipc`,
+  but one allowed to run a program (`permissions.process`) can run one
+  that does: so in a gate they mean "a program of yours", never "no
+  extension".
+
+**If you list an extension, check what others can make it do.** A gate
+that lets in `fenix.agenda` lets in whatever can make the agenda call
+you: its own open services (`agenda.sync_quietly` sends what's queued),
+a command run on its behalf (`run-command`), the control channel's
+`fenix/agenda.clockIn`. Those are the agenda's to gate; until it does,
+listing it means "the agenda, or anything that can move it".
+
 ## Forges
 
 An extension can be a code-review forge (GitHub, GitLab) for Fenix's Git
@@ -1371,7 +1454,8 @@ restart = false                # true: read only as it starts (a debug
 [contributes]
 services = ["counter.count"]
 namespaces = []                # other names its commands, settings and
-                               # services may start with (diagram)
+                               # services may start with (diagram): one
+                               # word each, never fenix
 
 events = ["saved", "typing"]   # what you're doing it's told of:
                                # saved, diagnostics, tasks (and
@@ -1380,6 +1464,9 @@ events = ["saved", "typing"]   # what you're doing it's told of:
                                # focus, view, debug, agents
                                # (agent_turn_ended; what the agent said
                                # only with permissions.agents)
+
+[contributes.service_callers]  # who may call a service (api 1.6); one
+"counter.count" = ["fenix.agenda", "agents"]   # not named: anyone
 
 [limits]
 call_ms = 30000                # how long a command or an event may take,
@@ -1470,6 +1557,42 @@ installs it. A command, setting or service starts with its own name, or
 one of its `namespaces`; a setting under a namespace is read with
 `setting` as its own are (the PDF reader's `reader.zoom`).
 
+A name is one extension's, or no one's. A namespace is one word
+(lowercase letters, digits, `-`, `_`), and only a `fenix.*` extension
+may use the word `fenix`, as a namespace or as its id's last part. Only
+switched-on extensions that run code claim names -- a theme, a data pack
+or one switched off takes none -- and among them:
+
+- Fenix's own settings (`gitlab.token`), services, commands, agent tools,
+  toolsets (`git`, `debug`...) and prompts are Fenix's.
+- A word it borrows -- its id's last part, a namespace -- never reaches
+  under another's full id and a dot.
+- A name under its own full id (`fenix.jira.tracker.about`) beats any
+  borrowed word; between two full ids, the shorter that lists it has it,
+  so a longer id never takes one.
+- Between equal claims -- two ids with the same last part, or a namespace
+  -- the machine's has it over yours, else the store's own (`fenix.*`),
+  when only one is; otherwise neither does.
+- Its agent tools and resources go by its toolset (its last part, `-` as
+  `_`), which is one extension's like any name, and a resource's URI
+  template is under `fenix://ext/<toolset>/`, its first part a word.
+- The services Fenix asks of a store extension by name, giving it a file
+  or having it act -- `ccsds.hex`, `pdf.open`, `vnc.connect`,
+  `diagrams.render`, `notebook.link`, `notebook.follow`,
+  `notebook.capture`, `agenda.tasks`, `agenda.timer`, `agenda.clock_in`,
+  `agenda.clock_out` -- are asked only of that one (`fenix.ccsds`...),
+  whatever else lists them.
+
+A name left out isn't served, run, shown or given to it, and a caller of
+such a service is told why. **A setting is never taken from an extension
+that runs:** one that can't have every setting it declares isn't run at
+all, so it never reads a default in the place of your value. Fenix says
+what was left out in a notification as it happens -- one that stays, for
+an extension not run -- and in the extension's details on the Extensions
+page, under "Names left out". So a name that must be yours, a setting
+that's a safety switch above all (`fenix.jira.seam_writes`), goes under
+your full id.
+
 A file Fenix reads for it -- `read_file`, a picture, a sound, a sheet or
 a model, a file it opens or edits -- is read once, as its path is checked:
 Fenix asks the open file where it is, so a link it puts in the
@@ -1517,7 +1640,8 @@ added notifications (`notify_with`, `notify_dismiss`); 1.4 added
 the export `key_scheme_changed`) and keymaps' `[[keys]]` chords; 1.6
 added test providers (`[[contributes.test_providers]]`,
 `tests::provider`, and the exports `tests_scan`, `tests_plan`,
-`tests_read`, `tests_step_ended` and `tests_launch`). An extension
+`tests_read`, `tests_step_ended` and `tests_launch`), and who called a
+service (`called_by`, `[contributes.service_callers]`). An extension
 rebuilt on the 1.6 crate that uses nothing 1.6 added -- no code
 reachable from its exports calls `tests::provider` -- may keep `api =
 "1.5"`: Fenix 1.5 never looks for the exports it gains (see [Test

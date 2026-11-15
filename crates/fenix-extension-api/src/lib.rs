@@ -72,6 +72,7 @@ pub use bindings::fenix::extension::types::{KeyScheme,
     AgentTurn,
     GitSummary, TaskResult,
     Notification, NotificationAction, Urgency,
+    ServiceCaller,
 };
 pub use bindings::{Event, Key, Page, SurfaceInput};
 
@@ -899,6 +900,56 @@ pub fn answer(call: u64, result: Result<String, String>) {
 /// it as a tool is shown it. 1.2.
 pub fn progress(call: u64, message: &str, fraction: Option<f32>) {
     host::service_progress(call, message, fraction)
+}
+
+/// Whether the service [`Extension::serve`] is answering was called by
+/// extension `id`, and nothing else: false for Fenix, agents, the control
+/// channel, any origin a later API names (`Other`), and outside `serve`.
+/// The safe check -- allow the one you name, refuse the rest:
+///
+/// ```ignore
+/// if !called_by_extension("fenix.agenda") {
+///     return Some(Err("only the agenda may ask this".into()));
+/// }
+/// ```
+///
+/// API 1.6.
+pub fn called_by_extension(id: &str) -> bool {
+    called_by().is_some_and(|caller| caller.is_extension(id))
+}
+
+impl ServiceCaller {
+    /// Whether it's extension `id`, and nothing else.
+    pub fn is_extension(&self, id: &str) -> bool {
+        matches!(self, ServiceCaller::Extension(caller) if caller == id)
+    }
+}
+
+/// Who called the service [`Extension::serve`] is answering: another
+/// extension by its id, Fenix itself, an agent's tool call, resource read
+/// or prompt, the control channel, or -- `Other` -- an origin a later API
+/// names, to be treated as untrusted. Set by Fenix for that call; `None`
+/// outside `serve` -- so read it at the top of `serve`, before any
+/// `.await`, and keep it with the call if the answer comes later. Needs
+/// `api = "1.6"`; an extension that never calls it keeps loading on
+/// Fenix 1.5.
+///
+/// ```ignore
+/// fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<String, String>> {
+///     match called_by() {
+///         // Reads from agents too; anything else, `None` included, refused.
+///         Some(c) if c.is_extension("fenix.agenda") => {}
+///         Some(ServiceCaller::AgentTool) if name.ends_with(".read") => {}
+///         _ => return Some(Err(format!("{name} isn't open to that caller"))),
+///     }
+///     // ...
+/// }
+/// ```
+///
+/// A manifest can have Fenix refuse other callers before `serve` runs:
+/// `[contributes.service_callers]`. API 1.6.
+pub fn called_by() -> Option<ServiceCaller> {
+    host::called_by()
 }
 
 /// Asks another extension's, or Fenix's, service `name`; the answer comes
