@@ -1,6 +1,7 @@
 # ADR 0007: A service knows its caller, may choose its callers, and owns its names
 
-- **Status:** proposed 2026-11-15, for Fenix 1.6 (extension API 1.6)
+- **Status:** proposed 2026-11-15, for Fenix 1.6 (extension API 1.6);
+  revised in review the same day (the plan's §11)
 - **Date:** 2026-11-15
 - **Plan:** [`docs/plans/service-callers.md`](../plans/service-callers.md)
 
@@ -37,7 +38,10 @@ a field, and `serve` can't change. 1.5's manifest reader ignores a
 
 1. **`called-by: func() -> option<service-caller>`**, a new import, and
    `service-caller` a new variant: `extension(id)`, `fenix`,
-   `agent-tool`, `agent-resource`, `agent-prompt`, `control`. Fenix sets
+   `agent-tool`, `agent-resource`, `agent-prompt`, `control`, and
+   `other(word)` for an origin a later API names -- untrusted, never let
+   through a gate -- since a guest's imported variant can't gain a case.
+   `called_by_extension(id)` is the safe check. Fenix sets
    it per call, the host keeps it while `serve` runs and clears it after;
    none outside `serve`. In Rust, `fenix_extension_api::called_by()`, a
    function the extension calls -- never read by the crate's glue, so a
@@ -49,14 +53,20 @@ a field, and `serve` can't change. 1.5's manifest reader ignores a
    section needs `api = "1.6"`, so Fenix 1.5, which would ignore it,
    refuses the extension instead of running it open.
 3. **Names.** At parse: a namespace is one word; only `fenix.*` ids may
-   use the word `fenix`. Among the installed: Fenix's own names are
-   Fenix's; a name under an installed extension's full id is that
-   extension's; a namespace that is another installed extension's
-   publisher claims nothing; a full id beats a borrowed word (last part
-   or namespace); between equal claims the machine's beats yours, else
-   **neither** has the name. A refused name is taken out of the
-   extension as Fenix uses it and said on the Extensions page; its
-   callers are told why.
+   use the word `fenix`. Only switched-on code extensions claim names,
+   and among them: Fenix's own (settings, services, commands, agent
+   tools, toolsets, prompts) are Fenix's; a borrowed word (last part or
+   namespace) never reaches under another's full id; a full id beats a
+   borrowed word, the shortest of several; between equal claims the
+   machine's, else the store's own (`fenix.*`) when only one is, else
+   **no one**. Toolsets, resource templates (`fenix://ext/<toolset>/`)
+   and forge hosts go the same way, and Fenix's own asks (`ccsds.hex`,
+   `pdf.open`...) only to the store extension they're for. A refused
+   name is taken out of the extension as Fenix uses it, said in a
+   notification and on the Extensions page; its callers are told why.
+4. **A setting in dispute is never withdrawn from an extension that
+   runs**: one that can't have every setting it declares isn't run at
+   all, so it never reads a default in the place of your value.
 
 ## Rejected
 
@@ -77,8 +87,17 @@ a field, and `serve` can't change. 1.5's manifest reader ignores a
   every call.
 - **Reserving every publisher's word, not only `fenix`.** Installing
   someone's `git.tools` would take the Review extension's `git.*`
-  commands; only the store's own word is held for everyone, and a
-  namespace loses only to an installed publisher.
+  commands. As first built, a namespace lost to any installed package
+  of that publisher -- which did exactly that; the review removed it.
+- **Any installed package as a claimant**, and **the longest id owns a
+  name** (as first built): a theme or a switched-off package took
+  names, and a sideloaded `fenix.jira.tracker` took the tracker seam
+  from `fenix.jira`.
+- **Withdrawing a disputed setting** (as first built): the extension read
+  the setting's default, `ask` for `never`.
+- **Wildcards in a gate** (`"acme.*"`): publishers aren't authenticated
+  for sideloads, so a pattern would admit any file calling itself
+  `acme.<x>`.
 
 ## Consequences
 
@@ -86,9 +105,12 @@ a field, and `serve` can't change. 1.5's manifest reader ignores a
   question, and Jira's `jira.request` can be closed to everyone else, by
   a few manifest lines -- at the price of `api = "1.6"`.
 - Every extension in the store keeps every name.
-- An impostor installed beside an extension can deny it a borrowed name
-  (both lose it, said on the Extensions page), but no longer take it.
+- An impostor installed beside a store extension loses every tie to it;
+  beside another's, it can deny it a borrowed name (both lose it, said),
+  and with a setting keep both from running -- but no longer take it.
 - `control` and `agents` mean "a program running as you", which an
   extension allowed to run programs, or to reach Fenix's control socket,
   can be. Only an extension id is an extension.
-- A package installed from a file is trusted as its manifest says.
+- A package installed from a file is trusted as its manifest says, a
+  `fenix.*` one as the store's own: recording where a package came from
+  is the plan's open question (§12).

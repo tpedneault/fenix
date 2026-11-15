@@ -1,9 +1,10 @@
 # Plan: who calls a service, and whose name it is
 
-- **Status:** built 15 November 2026, on `svc/security` (not merged),
-  for the maintainer to review.
-  Recorded in [ADR 0007](../adr/0007-service-callers.md). §10 says what
-  was built differently.
+- **Status:** built 15 November 2026, on `svc/security` (not merged);
+  reviewed, and the review's findings built (§11), for the maintainer to
+  review. Recorded in [ADR 0007](../adr/0007-service-callers.md). §10
+  says what was built differently; **§11.1 states the name rules as they
+  now stand**, replacing §4.2's 4-7.
 - **Scope:** a service learns who called it, from Fenix, for every call;
   a service can say who may call it, and Fenix refuses anyone else before
   the extension runs; and a name an extension serves, runs or keeps as a
@@ -173,6 +174,9 @@ variant service-caller {
     /// A program on this machine, through the control channel
     /// (`fenix/agenda.tasks`, `fenix/state`).
     control,
+    /// An origin this version doesn't name (added in review, §11):
+    /// untrusted.
+    other(string),
 }
 
 /// Who called the service it's answering, while `serve` runs; none
@@ -276,6 +280,11 @@ writes from the agenda; or "ask once for anyone but the agenda".
 
 ### 4.2 The rules
 
+**Revised in review (§11):** rules 4, 5 and 7 below let any installed
+package -- a theme, one switched off -- void another's names, a longer
+id take a shorter one's, and a setting in dispute fall back to its
+default. §11.1 has the rules as built.
+
 When a manifest is read (`Manifest::parse`), so a hostile manifest is
 refused whatever else is installed:
 
@@ -357,30 +366,59 @@ that uses neither keeps `api = "1.5"`.
 
 ## 6. What an attacker extension can still do
 
+As built after the review (§11). Before it there were two more:
+denying a **setting** made it fall back to its default --
+`jira.seam_writes = "never"` read as `ask` once any `*.jira` declared the
+key (M1); and any installed package, data-only or switched off, voided a
+namespace by being that word's publisher, or a longer id took names
+under a shorter one (M2).
+
 - **Anything its permissions allow**, as before: a user-installed
   extension with network, secrets, processes or the project's files acts
   as you within them. Nothing here narrows a permission.
 - **Call any service that doesn't restrict its callers** -- every
   service today, until its extension adds the section or checks
   `called-by`.
-- **Pose as a program on this machine.** An extension allowed to run a
-  program (`permissions.process`) -- or to reach Fenix's own control
-  socket or pipe through `permissions.ipc` (`fenix/control*`,
-  `fenix-*`, `*`) -- can use the control channel, and its calls arrive
-  as `control` or `agent-tool`. So `control` and `agents` are "a program
-  of yours", never proof that no extension is behind it; a service that
-  only Fenix's agenda should call admits `fenix.agenda` and nothing else.
+- **Pose as a program on this machine** by running one
+  (`permissions.process`: an interpreter, `fenix --mcp`), whose calls
+  arrive as `control` or `agent-tool`. Through `permissions.ipc` it no
+  longer can: Fenix's control pipe and socket, and links to them, are
+  refused. So `control` and `agents` are "a program of yours", never
+  proof that no extension is behind it.
+- **Set off `fenix`**: an extension opening a binary file has the hex
+  view asked; a link in a note it wrote, `notebook.follow`; a Git command,
+  a forge. `fenix` is Fenix's feature, not proof that you acted.
+- **Use a deputy**: a gate listing `fenix.agenda` admits whatever can make
+  the agenda act -- its open services (`agenda.sync_quietly` sends the
+  queued writes; `agenda.add_issue`, `agenda.clock_in`,
+  `agenda.tracker_changed`), any of its commands through `run-command`,
+  and the control channel's `fenix/agenda.clockIn`, `clockOut` and
+  `fenix/runCommand`. The writes it then makes are ones you queued, so
+  little today; the agenda should gate those services once it's on 1.6
+  (§9).
 - **Install as `fenix.<x>` from a file.** Nothing authenticates a
-  sideloaded package's id (§4.1); a file you install yourself can claim
-  any id that isn't installed, and replace one that is.
-- **Deny a name.** An extension claiming a name another lists equally
-  (two last parts, or namespaces) makes it no one's (rule 7): visible,
-  and naming both, but a denial all the same.
-- **Take a borrowed name nobody installed claims**: `jira.request` while
-  no other extension lists it, `acme.future.*` while `acme.future` isn't
-  installed (only `fenix.*` is held back for everyone).
-- **Shadow a resource template**: two templates that match one URI
-  aren't compared (§7).
+  sideloaded package's id (§4.1): it replaces the one of that id and
+  passes every gate that lists it, borrows the word `fenix`, and wins
+  ties as the store's own. §12 says what it would take.
+- **Deny a name.** Claiming a name another lists equally, where neither
+  is the machine's nor the store's, makes it no one's. That is said in a
+  notification and on the Extensions page, naming both, but it is a
+  denial. For a setting, it keeps both extensions from running.
+- **Take a borrowed name no running extension claims**: `jira.request`
+  while nothing else switched on lists it -- except Fenix's own asks
+  (`FENIX_ASKS`), held for the store extension they're for, and anything
+  under the word `fenix`.
+- **Answer a resource URI under its own toolset** that no other has:
+  `fenix://ext/<its toolset>/...`.
+- **Rely on "the machine's"**: rule 6's tie-break trusts whoever can
+  write the managed folder (`FENIX_MANAGED_EXTENSIONS`,
+  `$FENIX_HOME/managed`, `%ProgramData%\Fenix\extensions`,
+  `/etc/fenix/extensions`). On Windows, a `%ProgramData%` folder that a
+  user created is that user's. The installer's ACL on it isn't checked
+  here.
+- **Open files by pattern** (`contributes.opens`, `*.pdf`): the first
+  extension that opens a pattern still gets the file. Only `pdf.open`, at
+  a page, is held for `fenix.pdf`.
 
 ## 7. Left for later
 
@@ -390,12 +428,10 @@ that uses neither keeps `api = "1.5"`.
 - **An event when an extension is installed, updated or removed**: a new
   export, called only when it's there; separate from this.
 - **A deadline on calls between extensions**: `Answer::Ext` calls have
-  none (`wasm_host.rs:1922`); one belongs with a manifest limit and its
-  own tests.
-- **Resource templates that overlap**: comparing two URI templates for a
-  common match; until then the first wins as today.
-- **Refusing an `ipc` permission that reaches Fenix's own control
-  endpoint** (§6): a check in `may_ipc`, worth doing on its own.
+  none; one belongs with a manifest limit and its own tests.
+- **`contributes.opens` patterns as names**: two extensions opening
+  `*.pdf` still go by order.
+- **Where a package came from**: §12.
 
 ## 8. The steps
 
@@ -434,6 +470,22 @@ Each tracker, at its next release (with `api = "1.6"`):
 "jira.set_blocked" = ["fenix.agenda"]
 "jira.new_issue" = ["fenix.agenda"]
 ```
+
+and the agenda, once it's on 1.6, gates the services through which
+others can make it write (§6's deputies), so that `fenix.agenda` in a
+tracker's gate means the agenda acting for you -- for example:
+
+```toml
+[contributes.service_callers]
+"agenda.sync_quietly" = ["fenix"]
+"agenda.add_issue" = ["fenix.notebook", "control"]
+"agenda.clock_in" = ["control", "fenix.pomodoro"]
+"agenda.clock_out" = ["control", "fenix.pomodoro"]
+"agenda.tracker_changed" = ["fenix.jira", "fenix.github-issues", "fenix.gitlab-issues", "fenix.linear"]
+```
+
+(who calls each today is the store's to check; these lists are a
+starting point, not checked against every caller).
 
 and drops the once-a-session question for those (keeping
 `<name>.seam_writes = "never"` as your off switch). Reads stay open, or
@@ -491,3 +543,81 @@ repository is read-only for this work); Windows; a real `fenix --mcp`
 client (the tests call `fenix/agent.call` and `fenix/tools.call` inside
 the app); and the forges, PDF and reading-view routes as `fenix` other
 than through the hex view and a `vnc:` link, which share the code.
+
+## 11. Review: what changed
+
+An independent review found that the caller identity can't be forged and
+that the gate sits on the only route to `serve`. It found two things
+that had to be fixed before merge, and more of the same class. Each fix
+below is its own commit, with a test that fails before it.
+
+| Finding | What was built | Test |
+|---|---|---|
+| **M1**: a setting in dispute fell back to its default (`jira.seam_writes = "never"` read as `ask`) | An extension that can't have every setting it declares isn't run ("held back", `installed::claimed_all`), and the names are worked out again without it. The machine's, else the store's own, keeps the setting with your value. A critical notification, which stays, names both and the setting. The API can't tell "withheld" from "unset" (a declared setting always reads as a value or its default), so not running is the safe answer | `names_tests::a_setting_in_dispute_never_falls_back_to_its_default`, `fenixs_own_setting_is_never_an_extensions` |
+| **M2**: any installed package voided names; a longer id took a shorter one's | Only switched-on code extensions claim names. Rule 5 (a publisher voids a namespace) is gone. Between full ids, the shortest that lists the name has it. `code_extensions_now` puts a change in the claims in use at once and registers a setting given back | `claims::tests::a_longer_id_never_takes_a_name_and_a_publisher_voids_no_namespace`, `a_word_borrowed_never_reaches_under_another_full_id`, `names_tests::a_change_in_the_claims_is_put_in_use_at_once` |
+| `service-caller` had no open case | `other(string)`, untrusted and never let through a gate. `ServiceCaller::is_extension` and `called_by_extension`. The docs' example denies by default | `host.rs::a_service_is_told_who_called_it_call_by_call`, `callers_tests::the_gate_refuses_an_unlisted_caller_before_the_extension_runs` |
+| S1: resource templates took others' reads | A template is under `fenix://ext/<its toolset>/`, or it's left out; the toolset is a name | `claims::tests::a_resource_is_under_its_own_toolset_and_fenixs_toolsets_are_fenixs` |
+| S2: a forge's host went to the last by id, along with the repository | `forge_for`: the strongest claim, then the machine's, then the store's own, else none, and that is said | `names_tests::a_forges_host_two_claim_goes_as_a_name_does` |
+| S3: Fenix's own asks went to whoever listed the name | `installed::FENIX_ASKS`, one table, held in `code_server`. `AGENTS_ASK` and `AGENTS_CANCEL` are one list, which `answer_code_request` matches | `names_tests::fenixs_own_asks_go_only_to_the_extension_meant` |
+| S5: `acme.git` was in Fenix's `git` toolset | Fenix's toolsets are Fenix's (`NameKind::Toolset`) | the S1 test |
+| S6: another's settings were read by the word; Fenix's commands weren't said | Only Fenix's own settings are read by the last part. A Fenix command an extension lists is said under "Names left out" | `names_tests::another_extensions_settings_arent_read_by_the_word_and_fenixs_commands_are_said` |
+| The control endpoint through `ipc` | `may_ipc` refuses Fenix's pipe and socket, and links to them | `host.rs::fenixs_control_socket_is_never_an_extensions` |
+| S7: denials were seen only on the Extensions page | A notification the first time: when an extension is installed or switched on, or another one is | `names_tests::a_setting_in_dispute_never_falls_back_to_its_default` |
+| S8: `build.ps1` named 1.98 | One `$toolchain`, 1.100.0. `provider.wasm` was rebuilt with it; `counter.wasm` is kept as built (its `Cargo.lock` is 1.0's) | the fenix-wasm suite |
+| S4: deputies | Documented (§6, `WRITING_EXTENSIONS.md`), with the agenda's services to gate (§9) | -- |
+
+One suggestion was not built: deciding "held before" by a stored value
+recorded for the extension. Fenix keeps settings by key, not by who
+declared them, so there is nothing to read it from. The machine's and the
+store's own are what decide.
+
+### 11.1 The name rules as they stand
+
+1. A namespace is one word; only a `fenix.*` id may use the word `fenix`
+   (at parse).
+2. Only switched-on code extensions claim names.
+3. Fenix's own settings, services, commands, agent tools, toolsets and
+   prompts are Fenix's.
+4. A borrowed word (the id's last part, a namespace) never reaches under
+   another claimant's full id.
+5. A full id beats a borrowed word; between full ids, the shortest that
+   lists the name has it.
+6. Between equal borrowed claims: the machine's, else the store's own
+   (`fenix.*`) when only one is, else no one.
+7. Toolsets and resource templates (`fenix://ext/<toolset>/`) are names.
+8. Fenix's own asks (`FENIX_ASKS`) go only to the store extension they're
+   for.
+9. An extension denied a setting it declares isn't run, and the rest are
+   worked out without it.
+10. A forge's host goes as rule 6. What's refused is said in a
+    notification and on the Extensions page.
+
+The store, checked again (`FENIX_STORE_MANIFESTS=<fenix-extensions>/extensions
+cargo test -p fenix-gui --bin fenix -- --ignored every_store_extension`):
+"74 manifests read, 60 code extensions, 0 names refused".
+
+## 12. Open question for the owner: where a package came from
+
+A sideloaded package with the id `fenix.agenda` replaces the store's and
+passes every gate that lists `fenix.agenda`. One called `fenix.<x>`
+borrows the word `fenix` and wins ties as the store's own. Fenix can't
+tell the difference: it doesn't record where an installed package came
+from.
+
+What it would take:
+
+- `extensions.toml` keeps an origin per extension: `origin = "store"`
+  when installed by `Registry::install`, its hash checked against the
+  signed index, or `"file"`. An older Fenix reads past the field.
+- A `fenix.*` id from a file then counts as no publisher's: it isn't the
+  store's own for ties, and it isn't allowed the word `fenix`.
+- A gate listing an id could say whether it takes that id from a file.
+- Packages installed before this would be checked against the index once,
+  by their SHA-256, or counted as from a file.
+
+Meanwhile, the install prompt for a file (`fenix --install-extension`, or
+`SPC h x` on a `.fenixext`) should say, for a `fenix.*` id: "This package
+calls itself fenix.agenda, but isn't from the store: it will replace the
+store's and be trusted as it is. Install only a file you built, or one
+the store's maintainers gave you." For an id already installed from the
+store, it should also say that the file replaces that one.

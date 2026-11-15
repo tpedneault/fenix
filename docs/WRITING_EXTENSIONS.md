@@ -1031,9 +1031,28 @@ service sees that one, not the first in the chain. It's `None` outside
 `serve` -- in `handle`, a command, after an `.await` -- so a service
 that answers later reads it in `serve` and keeps it with the call. It
 needs `api = "1.6"`; an extension that never calls it keeps loading on
-1.5. `Control` and the agents' are programs running as you, which an
-extension allowed to run programs, or to reach Fenix's control socket
-(`permissions.ipc`), can be: only an extension id is an extension.
+1.5.
+
+What each origin means:
+
+- **An extension id** is that extension: Fenix knows which asked. It
+  isn't proof of who published it: a package installed from a file is
+  whatever its manifest says, and replaces the one of that id.
+- **`fenix`** is Fenix's own feature, which an extension or a file you
+  opened can set off: opening a binary file has the hex view asked, a
+  link in a note `notebook.follow`, a Git command a forge.
+- **`control` and the agents'** are programs running as you. No
+  extension reaches Fenix's control channel through `permissions.ipc`,
+  but one allowed to run a program (`permissions.process`) can run one
+  that does: so in a gate they mean "a program of yours", never "no
+  extension".
+
+**If you list an extension, check what others can make it do.** A gate
+that lets in `fenix.agenda` lets in whatever can make the agenda call
+you: its own open services (`agenda.sync_quietly` sends what's queued),
+a command run on its behalf (`run-command`), the control channel's
+`fenix/agenda.clockIn`. Those are the agenda's to gate; until it does,
+listing it means "the agenda, or anything that can move it".
 
 ## Forges
 
@@ -1540,18 +1559,39 @@ one of its `namespaces`; a setting under a namespace is read with
 
 A name is one extension's, or no one's. A namespace is one word
 (lowercase letters, digits, `-`, `_`), and only a `fenix.*` extension
-may use the word `fenix`, as a namespace or as its id's last part. Among
-the switched-on extensions: Fenix's own settings (`gitlab.token`),
-services, agent tools and prompts are Fenix's; a name under an installed
-extension's full id and a dot (`fenix.jira.tracker.about`) is that
-extension's; a namespace that is another installed extension's
-publisher (`acme` beside `acme.dusk`) claims nothing; and when two claim
-one name equally -- two ids with the same last part, or a namespace --
-the machine's has it over yours, and otherwise neither does. A name
-left out isn't served, run, shown or given to it; its details on the
-Extensions page say why, under "Names left out", and a caller of such a
-service is told. So a name that must be yours whatever else is
-installed goes under your full id.
+may use the word `fenix`, as a namespace or as its id's last part. Only
+switched-on extensions that run code claim names -- a theme, a data pack
+or one switched off takes none -- and among them:
+
+- Fenix's own settings (`gitlab.token`), services, commands, agent tools,
+  toolsets (`git`, `debug`...) and prompts are Fenix's.
+- A word it borrows -- its id's last part, a namespace -- never reaches
+  under another's full id and a dot.
+- A name under its own full id (`fenix.jira.tracker.about`) beats any
+  borrowed word; between two full ids, the shorter that lists it has it,
+  so a longer id never takes one.
+- Between equal claims -- two ids with the same last part, or a namespace
+  -- the machine's has it over yours, else the store's own (`fenix.*`),
+  when only one is; otherwise neither does.
+- Its agent tools and resources go by its toolset (its last part, `-` as
+  `_`), which is one extension's like any name, and a resource's URI
+  template is under `fenix://ext/<toolset>/`, its first part a word.
+- The services Fenix asks of a store extension by name, giving it a file
+  or having it act -- `ccsds.hex`, `pdf.open`, `vnc.connect`,
+  `diagrams.render`, `notebook.link`, `notebook.follow`,
+  `notebook.capture`, `agenda.tasks`, `agenda.timer`, `agenda.clock_in`,
+  `agenda.clock_out` -- are asked only of that one (`fenix.ccsds`...),
+  whatever else lists them.
+
+A name left out isn't served, run, shown or given to it, and a caller of
+such a service is told why. **A setting is never taken from an extension
+that runs:** one that can't have every setting it declares isn't run at
+all, so it never reads a default in the place of your value. Fenix says
+what was left out in a notification as it happens -- one that stays, for
+an extension not run -- and in the extension's details on the Extensions
+page, under "Names left out". So a name that must be yours, a setting
+that's a safety switch above all (`fenix.jira.seam_writes`), goes under
+your full id.
 
 A file Fenix reads for it -- `read_file`, a picture, a sound, a sheet or
 a model, a file it opens or edits -- is read once, as its path is checked:
