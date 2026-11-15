@@ -187,7 +187,8 @@ fn said_list(ids: &[&str]) -> String {
 /// `manifest`, extension `id`'s, without the names `refused` says aren't
 /// its: a refused service isn't routed to it, a command isn't
 /// registered, a setting isn't shown or given to it; and an agent tool,
-/// resource or prompt calling a service it no longer serves goes too.
+/// resource or prompt calling a service it no longer serves goes too, as
+/// does a gate on one (`service_callers`).
 pub fn withdraw(id: &str, manifest: &mut Manifest, refused: &[Refused]) {
     let gone = |kind: NameKind, name: &str| refused.iter().any(|r| r.id == id && r.kind == kind && r.name == name);
     let toolset = toolset_of(id);
@@ -200,6 +201,7 @@ pub fn withdraw(id: &str, manifest: &mut Manifest, refused: &[Refused]) {
     c.agent_tools.retain(|t| serves(&t.service) && !gone(NameKind::AgentTool, &format!("{toolset}_{}", t.name)));
     c.agent_resources.retain(|r| serves(&r.service));
     c.agent_prompts.retain(|p| serves(&p.service) && !gone(NameKind::Prompt, &p.name));
+    c.service_callers.retain(|s, _| serves(s));
 }
 
 /// Why no one answers service `name`, when it's refused to every
@@ -276,7 +278,7 @@ mod tests {
     fn fenixs_own_names_are_refused_and_a_withdrawn_service_takes_its_tools() {
         let m = manifest(
             "acme.gitlab",
-            "[contributes]\nservices = [\"gitlab.search\", \"gitlab.read\"]\n\n[[contributes.settings]]\nkey = \"gitlab.token\"\n\n[[contributes.settings]]\nkey = \"gitlab.host\"\n\n[[contributes.agent_tools]]\nname = \"search\"\ndescription = \"x\"\nservice = \"gitlab.search\"\n\n[[contributes.agent_prompts]]\nname = \"triage\"\nservice = \"gitlab.read\"",
+            "[contributes]\nservices = [\"gitlab.search\", \"gitlab.read\"]\n\n[[contributes.settings]]\nkey = \"gitlab.token\"\n\n[[contributes.settings]]\nkey = \"gitlab.host\"\n\n[[contributes.agent_tools]]\nname = \"search\"\ndescription = \"x\"\nservice = \"gitlab.search\"\n\n[[contributes.agent_prompts]]\nname = \"triage\"\nservice = \"gitlab.read\"\n\n[contributes.service_callers]\n\"gitlab.search\" = [\"agents\"]\n",
         );
         let owns = |kind: NameKind, name: &str| (kind == NameKind::Setting && name == "gitlab.token") || (kind == NameKind::Service && name == "gitlab.search");
         let refused = refused(&[Claimant { id: "acme.gitlab", manifest: &m, managed: false }], &["acme.gitlab"], &owns);
@@ -287,6 +289,7 @@ mod tests {
         assert_eq!(used.contributes.settings.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["gitlab.host"]);
         assert!(used.contributes.agent_tools.is_empty(), "its tool's service is gone");
         assert_eq!(used.contributes.agent_prompts.len(), 1);
+        assert!(used.contributes.service_callers.is_empty());
         assert_eq!(unserved("gitlab.search", &refused).unwrap(), "gitlab.search: it's Fenix's own -- refused to acme.gitlab");
         assert_eq!(unserved("gitlab.read", &refused), None);
     }

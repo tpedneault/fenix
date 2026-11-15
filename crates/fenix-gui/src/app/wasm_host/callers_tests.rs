@@ -128,3 +128,31 @@ fn fenixs_own_features_call_as_fenix() {
     app.open_vnc_host("ground");
     pump_until(&mut app, |a| said(a, "vnc.connect called by fenix"));
 }
+
+/// `[contributes.service_callers]`: a caller it doesn't name is refused
+/// before the extension runs -- not started, and once running, not
+/// called (its `gated` count stays 0) -- and told who may; one it names
+/// gets through.
+#[test]
+fn the_gate_refuses_an_unlisted_caller_before_the_extension_runs() {
+    let mut app = App::with_file(None);
+    let gate = serving(&["g.gated", "g.count"]) + "\n[contributes.service_callers]\n\"g.gated\" = [\"test.agenda\", \"control\"]\n";
+    app.wasm.installed = vec![callers("test.g", &gate), callers("test.evil", &serving(&["evil.relay"])), callers("test.agenda", &serving(&["agenda.relay"]))];
+    // Fenix itself isn't named either: refused at once, nothing started.
+    let refused = ask(&mut app, "test.g", "g.gated", "", ServiceCaller::Fenix).unwrap_err();
+    assert_eq!(refused, "g.gated: test.g takes it only from test.agenda, control, not from Fenix");
+    assert!(!app.wasm.workers.contains_key("test.g") && !app.wasm.status.contains_key("test.g"), "not started for it");
+    // Another extension, through its own call: refused, told why.
+    let through = ask(&mut app, "test.evil", "evil.relay", "g.gated", ServiceCaller::Fenix).unwrap_err();
+    assert_eq!(through, "fenix | g.gated: test.g takes it only from test.agenda, control, not from test.evil");
+    // An agent: the same.
+    assert!(ask(&mut app, "test.g", "g.gated", "", ServiceCaller::AgentTool).unwrap_err().ends_with("not from an agent"));
+    // Running now (a service it doesn't gate is open to anyone), and its
+    // gated service has never run.
+    assert_eq!(ask(&mut app, "test.g", "g.count", "", ServiceCaller::AgentTool).as_deref(), Ok("0"));
+    assert!(!said(&app, "gated ran"), "{}", app.extension_output_text());
+    // Those it names get through.
+    assert_eq!(ask(&mut app, "test.agenda", "agenda.relay", "g.gated", ServiceCaller::Fenix).as_deref(), Ok("fenix | gated, for extension:test.agenda"));
+    assert_eq!(ask(&mut app, "test.g", "g.gated", "", ServiceCaller::Control).as_deref(), Ok("gated, for control"));
+    assert_eq!(ask(&mut app, "test.g", "g.count", "", ServiceCaller::Fenix).as_deref(), Ok("2"));
+}

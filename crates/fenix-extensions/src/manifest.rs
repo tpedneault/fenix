@@ -553,6 +553,12 @@ pub struct Contributes {
     /// name is among the installed is `claims`'.
     #[serde(default)]
     pub namespaces: Vec<String>,
+    /// Who may call its services, by service (API 1.6): extension ids,
+    /// and `fenix`, `agents` and `control` (`CALLER_WORDS`). Fenix
+    /// refuses anyone else before the extension runs. A service it
+    /// doesn't name is open to anyone.
+    #[serde(default)]
+    pub service_callers: BTreeMap<String, Vec<String>>,
     /// The language servers it is, for Fenix's languages: each runs
     /// beside their own servers, its answers merged with theirs.
     #[serde(default)]
@@ -1396,6 +1402,7 @@ impl Manifest {
                 return Err(format!("extension.toml: service {service:?} -- an extension's services start with its name ({own}...)"));
             }
         }
+        self.check_service_callers()?;
         for entry in &self.permissions.sockets {
             let by_setting = entry.trim().strip_prefix("${setting:").is_some_and(|k| k.ends_with('}'));
             if !by_setting {
@@ -1489,6 +1496,56 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+
+    /// `[contributes.service_callers]` (1.6): its own services, each
+    /// naming who may call it -- ids and `CALLER_WORDS`, once each, at
+    /// most `MAX_SERVICE_CALLERS` -- and no agent tool, resource or prompt
+    /// on a service agents may not call.
+    fn check_service_callers(&self) -> Result<(), String> {
+        let gates = &self.contributes.service_callers;
+        if gates.is_empty() {
+            return Ok(());
+        }
+        let api = self.engine.api.as_deref().and_then(|a| semver::Version::parse(&full_version(a)).ok());
+        if api.is_none_or(|v| v < semver::Version::new(1, 6, 0)) {
+            return Err("extension.toml: contributes.service_callers needs engine.api 1.6 -- a Fenix before it would run the extension with its services open to anyone".into());
+        }
+        for (service, callers) in gates {
+            if !self.contributes.services.contains(service) {
+                return Err(format!("extension.toml: contributes.service_callers: {service:?} isn't one of its services"));
+            }
+            if callers.is_empty() {
+                return Err(format!("extension.toml: contributes.service_callers: {service} names no one -- say who may call it"));
+            }
+            if callers.len() > MAX_SERVICE_CALLERS {
+                return Err(format!("extension.toml: contributes.service_callers: {service} names {} callers, and the most is {MAX_SERVICE_CALLERS}", callers.len()));
+            }
+            for (i, caller) in callers.iter().enumerate() {
+                if !CALLER_WORDS.contains(&caller.as_str()) && !valid_id(caller) {
+                    return Err(format!("extension.toml: contributes.service_callers: {service}: {caller:?} -- an extension's id, or one of {}", CALLER_WORDS.join(", ")));
+                }
+                if callers[..i].contains(caller) {
+                    return Err(format!("extension.toml: contributes.service_callers: {service} names {caller} twice"));
+                }
+            }
+        }
+        let closed = |service: &str| gates.get(service).is_some_and(|callers| !callers.iter().any(|c| c == "agents"));
+        let offered = self.contributes.agent_tools.iter().map(|t| ("agent tool", &t.name, &t.service))
+            .chain(self.contributes.agent_resources.iter().map(|r| ("agent resource", &r.name, &r.service)))
+            .chain(self.contributes.agent_prompts.iter().map(|p| ("agent prompt", &p.name, &p.service)));
+        for (what, name, service) in offered {
+            if closed(service) {
+                return Err(format!("extension.toml: {what} {name:?} -- agents may not call {service} (contributes.service_callers), so it could never answer"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Who may call its service `name` (`[contributes.service_callers]`):
+    /// `None` when anyone may.
+    pub fn callers_of(&self, name: &str) -> Option<&[String]> {
+        self.contributes.service_callers.get(name).map(Vec::as_slice)
     }
 
     /// `[[contributes.test_providers]]` (1.6): ids by its name (`own` is
@@ -1643,6 +1700,15 @@ impl Manifest {
         }
     }
 }
+
+/// The words a `[contributes.service_callers]` entry may name besides
+/// extension ids, which have a dot and so are never one of these:
+/// Fenix's own features, agents (their tools, resources and prompts),
+/// and programs on the control channel.
+pub const CALLER_WORDS: &[&str] = &["fenix", "agents", "control"];
+
+/// The most callers a service may name.
+pub const MAX_SERVICE_CALLERS: usize = 32;
 
 /// How a name is an extension's: under its full id (`fenix.jira.x`), or
 /// through a word it borrows -- its id's last part (`jira.x`), or a
@@ -2322,5 +2388,52 @@ namespaces = [\"issues\"]
         assert_eq!(borrows("fenix.jira", &[], "jira.x"), Some(Claim::Borrowed));
         assert_eq!(borrows("fenix.jira", &[], "fenix.jirax.y"), None);
         assert_eq!(borrows("fenix.jira", &["issues".into()], "issues.x"), Some(Claim::Borrowed));
+    }
+
+    #[test]
+    fn service_callers_name_its_services_and_who_may_call_them() {
+        let code = |api: &str, rest: &str| sample("fenix.jira", "1.0.0", "wasm").replace("fenix = ", &format!("api = \"{api}\"\nfenix = ")) + "\n[permissions]\nnetwork = [\"x.example\"]\n\n[contributes]\nservices = [\"jira.request\", \"jira.read\"]\n" + rest;
+        let gate = "\n[contributes.service_callers]\n\"jira.request\" = [\"fenix.agenda\", \"control\"]\n";
+        let m = Manifest::parse(&code("1.6", gate)).unwrap();
+        assert_eq!(m.callers_of("jira.request").unwrap(), ["fenix.agenda", "control"]);
+        assert_eq!(m.callers_of("jira.read"), None, "open to anyone");
+        let refused = |api: &str, rest: &str, says: &str| {
+            let err = Manifest::parse(&code(api, rest)).unwrap_err();
+            assert!(err.contains(says), "{rest}: {err}");
+        };
+        refused("1.5", gate, "needs engine.api 1.6");
+        refused("1.6", &gate.replace("jira.request\" =", "jira.other\" ="), "isn't one of its services");
+        refused("1.6", &gate.replace("[\"fenix.agenda\", \"control\"]", "[]"), "names no one");
+        refused("1.6", &gate.replace("\"control\"", "\"everyone\""), "an extension's id, or one of fenix, agents, control");
+        refused("1.6", &gate.replace("\"control\"", "\"fenix.agenda\""), "twice");
+        let many = format!("[{}]", (0..=MAX_SERVICE_CALLERS).map(|i| format!("\"acme.a{i}\"")).collect::<Vec<_>>().join(", "));
+        refused("1.6", &gate.replace("[\"fenix.agenda\", \"control\"]", &many), "the most is 32");
+        // An agent tool, resource or prompt on a service agents may not call.
+        let tool = "\n[[contributes.agent_tools]]\nname = \"request\"\ndescription = \"x\"\nservice = \"jira.request\"\n";
+        refused("1.6", &format!("{tool}{gate}"), "agents may not call jira.request");
+        assert!(Manifest::parse(&code("1.6", &format!("{tool}{}", gate.replace("\"control\"", "\"agents\"")))).is_ok());
+        let resource = "\n[[contributes.agent_resources]]\nname = \"r\"\nuri_template = \"fenix://ext/jira/{key}\"\nservice = \"jira.request\"\n";
+        refused("1.6", &format!("{resource}{gate}"), "agent resource");
+        let prompt = "\n[[contributes.agent_prompts]]\nname = \"p\"\nservice = \"jira.request\"\n";
+        refused("1.6", &format!("{prompt}{gate}"), "agent prompt");
+    }
+
+    /// Fenix 1.5 read `[contributes]` without `service_callers` and without
+    /// `deny_unknown_fields`, and `services` as strings: the section is
+    /// read past there, and the extension refused for its `api = "1.6"`.
+    #[test]
+    fn an_older_fenix_reads_past_service_callers() {
+        #[derive(Deserialize)]
+        struct Then {
+            contributes: ThenContributes,
+        }
+        #[derive(Deserialize)]
+        struct ThenContributes {
+            services: Vec<String>,
+        }
+        let text = sample("fenix.jira", "1.0.0", "wasm").replace("fenix = ", "api = \"1.6\"\nfenix = ") + "\n[contributes]\nservices = [\"jira.request\"]\n\n[contributes.service_callers]\n\"jira.request\" = [\"fenix.agenda\"]\n";
+        let then: Then = toml::from_str(&text).unwrap();
+        assert_eq!(then.contributes.services, ["jira.request"]);
+        assert!(Manifest::parse(&text).is_ok());
     }
 }

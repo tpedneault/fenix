@@ -1935,10 +1935,44 @@ impl App {
     pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, caller: ServiceCaller, answer: Answer, options: ServeOptions) -> ServeId {
         self.wasm.next_serve += 1;
         let call = self.wasm.next_serve;
+        // Its manifest's gate, held before the extension is started or
+        // called: a caller it doesn't name is answered now, and it never
+        // hears of the call.
+        if let Some(why) = self.code_gate_refuses(server, name, &caller) {
+            match answer {
+                Answer::Ext { asker, id } => self.code_deliver(&asker, Notice::ServiceReply((id, Err(why)))),
+                Answer::Fenix(then) => then(self, Err(why)),
+            }
+            return ServeId { server: server.to_string(), call };
+        }
         let deadline = options.timeout.map(|t| (std::time::Instant::now() + t, t));
         self.wasm.serving.insert((server.to_string(), call), Serving { answer, deadline, progress: options.progress, name: name.to_string() });
         self.code_call(server, Call::Serve { call, name: name.to_string(), payload, caller }, COMMAND_TICKS, Pending::Serve(call));
         ServeId { server: server.to_string(), call }
+    }
+
+    /// Why `server` won't take service `name` from `caller`, when its
+    /// manifest names who may call it (`[contributes.service_callers]`)
+    /// and that isn't `caller`.
+    pub(crate) fn code_gate_refuses(&self, server: &str, name: &str, caller: &ServiceCaller) -> Option<String> {
+        let ext = self.wasm.installed.iter().find(|e| e.id == server)?;
+        let allowed = ext.manifest.callers_of(name)?;
+        let word = match caller {
+            ServiceCaller::Extension(id) => id.as_str(),
+            ServiceCaller::Fenix => "fenix",
+            ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt => "agents",
+            ServiceCaller::Control => "control",
+        };
+        if allowed.iter().any(|a| a == word) {
+            return None;
+        }
+        let who = match caller {
+            ServiceCaller::Extension(id) => id.clone(),
+            ServiceCaller::Fenix => "Fenix".into(),
+            ServiceCaller::AgentTool | ServiceCaller::AgentResource | ServiceCaller::AgentPrompt => "an agent".into(),
+            ServiceCaller::Control => "the control channel".into(),
+        };
+        Some(format!("{name}: {server} takes it only from {}, not from {who}", allowed.join(", ")))
     }
 
     /// Service call `id` given up on -- an agent cancelled its tool call,
