@@ -204,6 +204,9 @@ pub(crate) struct WasmHost {
     /// at the first frame, or by then (`App::code_startup_tick`).
     pub(crate) startup_due: Option<Instant>,
     pub(crate) installed: Vec<CodeExtension>,
+    /// What's been said of the names the code extensions were refused
+    /// (`code_names_said`), each once: `<id>\n<line>`.
+    pub(crate) names_said: HashSet<String>,
     workers: HashMap<String, Worker>,
     pub(crate) status: HashMap<String, Status>,
     /// What each said, oldest first.
@@ -791,10 +794,36 @@ impl App {
     /// there are, and their project markers.
     pub(super) fn code_extensions_installed(&mut self) {
         self.wasm.installed = crate::installed::code_extensions();
+        self.code_names_said(&crate::installed::held_back());
         // The packs' project markers: a project's top where Fenix's own
         // find none (a `dotnet new console` folder).
         let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
         fenix_project::set_extension_markers(markers);
+    }
+
+    /// What the code extensions running (`installed`) and those `held`
+    /// back were refused of their names, said in a notification the first
+    /// time it's so -- as they're installed, switched on, or another is:
+    /// one that isn't run, critical, so it stays until you dismiss it; one
+    /// that runs without some names, a normal one. The Extensions page
+    /// says the same in each one's details.
+    pub(crate) fn code_names_said(&mut self, held: &[CodeExtension]) {
+        let mut said = Vec::new();
+        for (ext, is_held) in self.wasm.installed.iter().map(|e| (e, false)).chain(held.iter().map(|e| (e, true))) {
+            let lines = crate::installed::name_lines(ext);
+            let new: Vec<&String> = lines.iter().filter(|l| !self.wasm.names_said.contains(&format!("{}\n{l}", ext.id))).collect();
+            if new.is_empty() {
+                continue;
+            }
+            let summary = if is_held { format!("{} isn't running: a setting of its is another's", ext.id) } else { format!("{}: names left out", ext.id) };
+            let urgency = if is_held { crate::notify::Urgency::Critical } else { crate::notify::Urgency::Normal };
+            let body = new.iter().map(|l| l.as_str()).collect::<Vec<_>>().join("\n");
+            said.push((ext.id.clone(), lines.clone(), crate::notify::Request::new("extensions", summary).body(body).urgency(urgency).tag(format!("names:{}", ext.id)).action("Extensions", "extensions.open")));
+        }
+        for (id, lines, request) in said {
+            self.wasm.names_said.extend(lines.iter().map(|l| format!("{id}\n{l}")));
+            self.notify(request);
+        }
     }
 
     /// The code extensions switched on now (`now`, as `installed` reads
@@ -822,6 +851,7 @@ impl App {
             return;
         }
         self.wasm.installed = now;
+        self.code_names_said(&crate::installed::held_back());
         let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
         fenix_project::set_extension_markers(markers);
         self.commands = std::rc::Rc::new(crate::commands::CommandRegistry::with_builtins().with_code_extensions(&self.wasm.installed));

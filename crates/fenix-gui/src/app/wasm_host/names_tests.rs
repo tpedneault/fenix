@@ -67,8 +67,8 @@ fn a_name_under_an_installed_id_is_that_extensions_whoever_borrows_the_word() {
 
 /// Before: an extension naming one of Fenix's settings as its own --
 /// `gitlab.token`, through the namespace `gitlab` -- was given its value,
-/// the token, with no `permissions.secrets`. As Fenix lists the
-/// extensions now, the setting is refused and never given to it.
+/// the token, with no `permissions.secrets`. Now it's refused that
+/// setting, and so isn't run at all.
 #[test]
 fn fenixs_own_setting_is_never_an_extensions() {
     let mut app = App::with_file(None);
@@ -76,12 +76,42 @@ fn fenixs_own_setting_is_never_an_extensions() {
     let ext = hello("[contributes]\nnamespaces = [\"gitlab\"]\n\n[[contributes.settings]]\nkey = \"gitlab.token\"\n\n[[contributes.settings]]\nkey = \"hello.own\"\n");
     let (unclaimed, _) = app.code_settings_now(&ext);
     assert_eq!(unclaimed.get("gitlab.token").map(String::as_str), Some("glpat-secret"), "the hole, as the manifest alone has it");
-    let used = claimed(vec![(ext, false)]).remove(0);
-    let (settings, secrets) = app.code_settings_now(&used);
-    assert!(!settings.contains_key("gitlab.token") && !secrets.contains_key("gitlab.token"), "{settings:?}");
-    assert!(settings.contains_key("hello.own"));
-    assert_eq!(used.refused.iter().map(|r| r.line()).collect::<Vec<_>>(), ["setting gitlab.token: it's Fenix's own"]);
-    assert!(crate::installed::settings_of(&used).iter().all(|s| s.key != "gitlab.token"), "not on the settings page as its");
+    assert!(claimed(vec![(ext.clone(), false)]).is_empty(), "not run");
+    let held = crate::installed::claimed_all(vec![(ext, false)]).remove(0);
+    assert!(held.held_back());
+    assert_eq!(crate::installed::name_lines(&held)[1], "setting gitlab.token: it's Fenix's own");
+}
+
+/// The review's M1: `fenix.jira` keeps `jira.seam_writes`, and you set it
+/// to `never`. Another `*.jira` declaring the same key took it from both,
+/// and the tracker read its default, `ask`: your off switch undone. Now the
+/// store's own keeps it, with your value, and the other isn't run; where
+/// neither is the store's, neither runs, and a notification that stays
+/// says so -- no extension ever reads a default in the place of your
+/// value.
+#[test]
+fn a_setting_in_dispute_never_falls_back_to_its_default() {
+    let mut app = App::with_file(None);
+    app.config.set_value("jira.seam_writes", Some(fenix_config::Value::Text("never".into())));
+    let setting = "[[contributes.settings]]\nkey = \"jira.seam_writes\"\ndefault = \"ask\"\n";
+    let jira = as_id("fenix.jira", setting);
+    let evil = as_id("evil.jira", setting);
+    let acme = as_id("acme.jira", setting);
+    let on = claimed(vec![(evil.clone(), false), (jira, false)]);
+    assert_eq!(on.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["fenix.jira"], "the other isn't run");
+    let (settings, _) = app.code_settings_now(&on[0]);
+    assert_eq!(settings.get("jira.seam_writes").map(String::as_str), Some("never"), "your value, as before the other came");
+    // Neither the store's: neither runs, and it's said, critical.
+    let all = crate::installed::claimed_all(vec![(acme, false), (evil, false)]);
+    assert!(all.iter().all(|e| e.held_back()));
+    app.wasm.installed = Vec::new();
+    app.code_names_said(&all);
+    let notes: Vec<&crate::notify::Note> = app.notifications.history().iter().filter(|n| n.summary.contains("isn't running")).collect();
+    assert_eq!(notes.len(), 2, "one for each");
+    assert!(notes.iter().all(|n| n.urgency == crate::notify::Urgency::Critical && n.body.contains("setting jira.seam_writes: acme.jira and evil.jira both claim it")), "{:?}", notes.iter().map(|n| &n.body).collect::<Vec<_>>());
+    // Said once.
+    app.code_names_said(&all);
+    assert_eq!(app.notifications.history().iter().filter(|n| n.summary.contains("isn't running")).count(), 2);
 }
 
 #[test]

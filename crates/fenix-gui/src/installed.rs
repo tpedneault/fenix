@@ -162,21 +162,58 @@ pub fn fenix_owns(kind: NameKind, name: &str) -> bool {
 /// The services Fenix answers itself, which no extension is asked for.
 pub const FENIX_SERVICES: &[&str] = &["agents.ask", "agents.cancel"];
 
+impl CodeExtension {
+    /// Held back: it isn't run, since it can't have every setting it
+    /// declares -- another has one, or no one does -- and would read the
+    /// setting's default in the place of yours (`claimed_all`).
+    pub fn held_back(&self) -> bool {
+        self.refused.iter().any(|r| r.kind == NameKind::Setting)
+    }
+}
+
 /// `on` -- the switched-on code extensions, each with whether it's the
-/// machine's -- each without the names that aren't its, with why kept
-/// in `refused`. Only these claim: a theme, a data pack or an extension
+/// machine's -- each without the names that aren't its, with why kept in
+/// `refused`; and those held back (`CodeExtension::held_back`), which
+/// aren't run. Only these claim: a theme, a data pack or an extension
 /// switched off serves, runs and keeps nothing, so takes nothing.
-pub fn claimed(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
-    let claimants: Vec<Claimant> = on.iter().map(|(e, managed)| Claimant { id: &e.id, manifest: &e.manifest, managed: *managed }).collect();
-    let refused = fenix_extensions::claims::refused(&claimants, &fenix_owns);
+///
+/// A setting is never taken from an extension that runs: one that would
+/// lose a setting it declares is held back instead, with every name it
+/// lists, and the names are worked out again without it -- so a setting
+/// in dispute never reaches an extension as its default, and what's held
+/// back takes nothing from the rest.
+pub fn claimed_all(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
+    use fenix_extensions::claims::refused;
+    let all: Vec<Claimant> = on.iter().map(|(e, managed)| Claimant { id: &e.id, manifest: &e.manifest, managed: *managed }).collect();
+    let first = refused(&all, &fenix_owns);
+    let held: Vec<String> = first.iter().filter(|r| r.kind == NameKind::Setting).map(|r| r.id.clone()).collect();
+    let rest: Vec<Claimant> = all.iter().copied().filter(|c| !held.iter().any(|h| h == c.id)).collect();
+    let second = refused(&rest, &fenix_owns);
     on.into_iter()
         .map(|(mut e, _)| {
-            fenix_extensions::claims::withdraw(&e.id, &mut e.manifest, &refused);
-            e.refused = refused.iter().filter(|r| r.id == e.id).cloned().collect();
+            if held.contains(&e.id) {
+                e.refused = first.iter().filter(|r| r.id == e.id).cloned().collect();
+            } else {
+                fenix_extensions::claims::withdraw(&e.id, &mut e.manifest, &second);
+                e.refused = second.iter().filter(|r| r.id == e.id).cloned().collect();
+            }
             e
         })
         .collect()
 }
+
+/// `claimed_all`'s, without those held back: what runs.
+pub fn claimed(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
+    claimed_all(on).into_iter().filter(|e| !e.held_back()).collect()
+}
+
+/// What its details and notifications say of its names: a line each, the
+/// first saying it isn't run, if it's held back.
+pub fn name_lines(ext: &CodeExtension) -> Vec<String> {
+    let held = ext.held_back().then(|| "Not run: it can't have every setting it declares, and would read a default in the place of yours".to_string());
+    held.into_iter().chain(ext.refused.iter().map(Refused::line)).collect()
+}
+
 
 /// The switched-on code extensions, managed ones first; none in tests or
 /// in safe mode.
@@ -184,7 +221,16 @@ pub fn code_extensions() -> Vec<CodeExtension> {
     if cfg!(test) || safe_mode() {
         return Vec::new();
     }
-    code_of(&everything(machine().as_ref(), store().as_ref()))
+    code_of(&everything(machine().as_ref(), store().as_ref())).into_iter().filter(|e| !e.held_back()).collect()
+}
+
+/// The switched-on code extensions held back for a setting they can't
+/// have (`claimed_all`); none in tests or in safe mode.
+pub fn held_back() -> Vec<CodeExtension> {
+    if cfg!(test) || safe_mode() {
+        return Vec::new();
+    }
+    code_of(&everything(machine().as_ref(), store().as_ref())).into_iter().filter(CodeExtension::held_back).collect()
 }
 
 /// The switched-on extensions whose project kinds are in use: every one
@@ -300,7 +346,7 @@ fn code_of(all: &[(Installed, bool)]) -> Vec<CodeExtension> {
                 .then(|| (CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone(), refused: Vec::new() }, *managed))
         })
         .collect();
-    claimed(on)
+    claimed_all(on)
 }
 
 /// Installed extension `id` as Fenix uses it -- the machine's when it has
@@ -381,7 +427,7 @@ pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
     let code = code_of(&all);
     all.into_iter()
         .map(|(e, managed)| {
-            let name_notes = code.iter().find(|c| c.id == e.id).map(|c| c.refused.iter().map(Refused::line).collect()).unwrap_or_default();
+            let name_notes = code.iter().find(|c| c.id == e.id).map(name_lines).unwrap_or_default();
             let m = e.manifest.as_ref().ok();
             let read = |name: &str| std::fs::read_to_string(e.dir.join(name)).ok();
             let (kinds, kind_notes) = m.map(|m| kind_lines(&e.id, m)).unwrap_or_default();
@@ -578,7 +624,7 @@ mod tests {
         }
         let code = on.len();
         let before: Vec<fenix_extensions::Manifest> = on.iter().map(|(e, _)| e.manifest.clone()).collect();
-        let after = claimed(on);
+        let after = crate::installed::claimed_all(on);
         let refused: Vec<String> = after.iter().flat_map(|e| e.refused.iter().map(move |r| format!("{}: {}", e.id, r.line()))).collect();
         println!("{read} manifests read, {code} code extensions, {} names refused", refused.len());
         assert!(refused.is_empty(), "{refused:#?}");
