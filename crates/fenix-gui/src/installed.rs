@@ -247,7 +247,9 @@ pub fn claimed_all(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
         .collect()
 }
 
-/// `claimed_all`'s, without those held back: what runs.
+/// `claimed_all`'s, without those held back: what runs (`code_extensions`
+/// filters the same way).
+#[cfg(test)]
 pub fn claimed(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
     claimed_all(on).into_iter().filter(|e| !e.held_back()).collect()
 }
