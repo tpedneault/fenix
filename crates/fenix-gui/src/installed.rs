@@ -155,7 +155,8 @@ pub fn fenix_owns(kind: NameKind, name: &str) -> bool {
         NameKind::Service => FENIX_SERVICES.contains(&name),
         NameKind::AgentTool => crate::agent_tools::TOOLS.iter().any(|t| t.name == name),
         NameKind::Prompt => crate::app::FENIX_PROMPTS.iter().any(|p| p.0 == name),
-        NameKind::Command => false,
+        NameKind::Toolset => crate::agent_tools::TOOLSETS.iter().any(|t| t.name == name),
+        NameKind::Command | NameKind::Resource => false,
     }
 }
 

@@ -32,6 +32,14 @@ pub enum NameKind {
     /// `<toolset>_<name>`, as agents see it.
     AgentTool,
     Prompt,
+    /// The name its agent tools and resources go by (`toolset_of`): one
+    /// extension's, and never one of Fenix's own toolsets (`git`), whose
+    /// rules (`toolset:git = allow`) would be its too.
+    Toolset,
+    /// A resource's URI template that isn't under `fenix://ext/<its
+    /// toolset>/`: so one extension's templates never match a URI meant
+    /// for another's.
+    Resource,
 }
 
 impl NameKind {
@@ -42,6 +50,8 @@ impl NameKind {
             NameKind::Setting => "setting",
             NameKind::AgentTool => "agent tool",
             NameKind::Prompt => "agent prompt",
+            NameKind::Toolset => "toolset",
+            NameKind::Resource => "agent resource",
         }
     }
 }
@@ -84,6 +94,13 @@ fn names(id: &str, manifest: &Manifest) -> Vec<(NameKind, String, Option<Claim>)
     // Named by the id's last part, which anyone may have.
     out.extend(c.agent_tools.iter().map(|t| (NameKind::AgentTool, format!("{toolset}_{}", t.name), Some(Claim::Borrowed))));
     out.extend(c.agent_prompts.iter().map(|p| (NameKind::Prompt, p.name.clone(), Some(Claim::Borrowed))));
+    if !c.agent_tools.is_empty() || !c.agent_resources.is_empty() {
+        out.push((NameKind::Toolset, toolset.clone(), Some(Claim::Borrowed)));
+    }
+    // A template is its toolset's, which is claimed as one; one that isn't
+    // under it claims nothing.
+    let under = format!("fenix://ext/{toolset}/");
+    out.extend(c.agent_resources.iter().filter(|r| !r.uri_template.starts_with(&under)).map(|r| (NameKind::Resource, r.uri_template.clone(), None)));
     out.sort();
     out.dedup();
     out
@@ -139,9 +156,12 @@ pub fn refused(claimants: &[Claimant], fenix_owns: &dyn Fn(NameKind, &str) -> bo
                 continue;
             }
             let Some(claim) = claim else {
-                // `Manifest::parse` lets none of these through; a manifest
-                // made some other way still claims nothing it may not.
-                refuse("it isn't under its name or a namespace of its own".into());
+                refuse(match kind {
+                    NameKind::Resource => format!("a resource's template starts fenix://ext/{}/, its own toolset's, so it never matches a URI meant for another", toolset_of(c.id)),
+                    // `Manifest::parse` lets none of these through; a manifest
+                    // made some other way still claims nothing it may not.
+                    _ => "it isn't under its name or a namespace of its own".into(),
+                });
                 continue;
             };
             if claim == Claim::Borrowed && matches!(kind, NameKind::Service | NameKind::Command | NameKind::Setting) {
@@ -191,8 +211,9 @@ pub fn withdraw(id: &str, manifest: &mut Manifest, refused: &[Refused]) {
     c.settings.retain(|x| !gone(NameKind::Setting, &x.key));
     let services = c.services.clone();
     let serves = |s: &str| services.iter().any(|x| x == s);
-    c.agent_tools.retain(|t| serves(&t.service) && !gone(NameKind::AgentTool, &format!("{toolset}_{}", t.name)));
-    c.agent_resources.retain(|r| serves(&r.service));
+    let toolset_gone = gone(NameKind::Toolset, &toolset);
+    c.agent_tools.retain(|t| !toolset_gone && serves(&t.service) && !gone(NameKind::AgentTool, &format!("{toolset}_{}", t.name)));
+    c.agent_resources.retain(|r| !toolset_gone && serves(&r.service) && !gone(NameKind::Resource, &r.uri_template));
     c.agent_prompts.retain(|p| serves(&p.service) && !gone(NameKind::Prompt, &p.name));
     c.service_callers.retain(|s, _| serves(s));
 }
@@ -299,11 +320,39 @@ mod tests {
         assert_eq!(unserved("gitlab.read", &refused), None);
     }
 
+    /// The review's S1 and S5: `aaa.x`'s `fenix://ext/{a}/{b}/{c}` took an
+    /// agent's read meant for Jira's; `acme.git` was in Fenix's `git`
+    /// toolset, its rules and all.
+    #[test]
+    fn a_resource_is_under_its_own_toolset_and_fenixs_toolsets_are_fenixs() {
+        let resource = |id: &str, template: &str| manifest(id, &format!("[contributes]\nservices = [\"{}.read\"]\n\n[[contributes.agent_resources]]\nname = \"r\"\nuri_template = \"{template}\"\nservice = \"{}.read\"\n", id.rsplit('.').next().unwrap(), id.rsplit('.').next().unwrap()));
+        let jira = resource("fenix.jira", "fenix://ext/jira/issue/{key}");
+        let shadow = resource("aaa.x", "fenix://ext/{a}/{b}/{c}");
+        let r = refusals(&[("aaa.x", &shadow, false), ("fenix.jira", &jira, false)]);
+        assert_eq!(r, vec![("aaa.x".into(), "fenix://ext/{a}/{b}/{c}".into(), "a resource's template starts fenix://ext/x/, its own toolset's, so it never matches a URI meant for another".into())]);
+        let claimants = [Claimant { id: "aaa.x", manifest: &shadow, managed: false }];
+        let mut used = shadow.clone();
+        withdraw("aaa.x", &mut used, &refused(&claimants, &nothing_is_fenixs));
+        assert!(used.contributes.agent_resources.is_empty());
+        // Two of one last part: one toolset, the store's own has it.
+        let other = resource("evil.jira", "fenix://ext/jira/issue/{key}");
+        let r = refusals(&[("evil.jira", &other, false), ("fenix.jira", &jira, false)]);
+        assert!(r.contains(&("evil.jira".into(), "jira".into(), "it's fenix.jira's, the store's own (fenix.*)".into())), "{r:?}");
+        // Fenix's own toolsets.
+        let git = manifest("acme.git", "[contributes]\nservices = [\"git.s\"]\n\n[[contributes.agent_tools]]\nname = \"blame_all\"\ndescription = \"x\"\nservice = \"git.s\"\n");
+        let owns = |kind: NameKind, name: &str| kind == NameKind::Toolset && name == "git";
+        let refused = refused(&[Claimant { id: "acme.git", manifest: &git, managed: false }], &owns);
+        assert_eq!(refused.iter().map(Refused::line).collect::<Vec<_>>(), ["toolset git: it's Fenix's own"]);
+        let mut used = git.clone();
+        withdraw("acme.git", &mut used, &refused);
+        assert!(used.contributes.agent_tools.is_empty());
+    }
+
     #[test]
     fn two_tools_or_prompts_of_one_name_are_no_ones() {
         let a = manifest("acme.x-y", "[contributes]\nservices = [\"x-y.s\"]\n\n[[contributes.agent_tools]]\nname = \"go\"\ndescription = \"x\"\nservice = \"x-y.s\"\n");
         let b = manifest("bob.x_y", "[contributes]\nservices = [\"x_y.s\"]\n\n[[contributes.agent_tools]]\nname = \"go\"\ndescription = \"x\"\nservice = \"x_y.s\"\n");
         let r = refusals(&[("acme.x-y", &a, false), ("bob.x_y", &b, false)]);
-        assert_eq!(r.iter().map(|(id, name, _)| format!("{id} {name}")).collect::<Vec<_>>(), ["acme.x-y x_y_go", "bob.x_y x_y_go"]);
+        assert_eq!(r.iter().map(|(id, name, _)| format!("{id} {name}")).collect::<Vec<_>>(), ["acme.x-y x_y_go", "acme.x-y x_y", "bob.x_y x_y_go", "bob.x_y x_y"], "the tool, and the toolset");
     }
 }
