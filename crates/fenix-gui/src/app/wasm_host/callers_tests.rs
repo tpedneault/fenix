@@ -107,7 +107,7 @@ fn an_agents_tool_resource_and_prompt_are_each_their_own_caller() {
 #[test]
 fn the_control_channel_is_its_own_caller() {
     let mut app = App::with_file(None);
-    app.wasm.installed = vec![callers("test.notebook", &serving(&["notebook.capture"]))];
+    app.wasm.installed = vec![callers("fenix.notebook", &serving(&["notebook.capture"]))];
     let (reply, answer) = std::sync::mpsc::channel();
     let call = fenix_control::Call::NotebookCapture(fenix_control::protocol::CaptureParams { text: "x".into(), target: Default::default() });
     assert!(app.control_by_extension(call, reply).is_ok(), "an extension answers it");
@@ -122,7 +122,7 @@ fn fenixs_own_features_call_as_fenix() {
     let binary = dir.path().join("a.bin");
     std::fs::write(&binary, [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
     let mut app = App::with_file(None);
-    app.wasm.installed = vec![callers("test.ccsds", &serving(&["ccsds.hex"])), callers("test.vnc", &serving(&["vnc.connect"]))];
+    app.wasm.installed = vec![callers("fenix.ccsds", &serving(&["ccsds.hex"])), callers("fenix.vnc", &serving(&["vnc.connect"]))];
     app.open_binary(&binary);
     pump_until(&mut app, |a| said(a, "ccsds.hex called by fenix"));
     app.open_vnc_host("ground");

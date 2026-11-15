@@ -1924,7 +1924,7 @@ impl App {
     /// no extension opens it.
     pub(crate) fn open_with_extension_at(&mut self, path: &Path, page: Option<u32>, heading: Option<&str>) -> bool {
         let Some(ext) = self.code_opener(path) else { return false };
-        let serves = self.wasm.installed.iter().any(|e| e.id == ext && e.manifest.contributes.services.iter().any(|s| s == PDF_OPEN));
+        let serves = crate::installed::may_serve(&ext, PDF_OPEN) && self.wasm.installed.iter().any(|e| e.id == ext && e.manifest.contributes.services.iter().any(|s| s == PDF_OPEN));
         if !serves || (page.is_none() && heading.is_none()) {
             self.open_with_extension(&ext, path);
             return true;
@@ -1975,7 +1975,7 @@ impl App {
     /// the one it's left to (`installed::claimed`), since no name is
     /// left to two.
     pub(crate) fn code_server(&self, name: &str, but: Option<&str>) -> Option<String> {
-        self.wasm.installed.iter().find(|e| Some(e.id.as_str()) != but && e.manifest.contributes.services.iter().any(|s| s == name)).map(|e| e.id.clone())
+        self.wasm.installed.iter().find(|e| Some(e.id.as_str()) != but && crate::installed::may_serve(&e.id, name) && e.manifest.contributes.services.iter().any(|s| s == name)).map(|e| e.id.clone())
     }
 
     /// Why no extension answers service `name`: the extensions that list
@@ -3525,12 +3525,12 @@ impl App {
                 }
             }
             // Fenix's own.
-            Request::Service { id, name, payload } if name == "agents.ask" => {
+            Request::Service { id, name, payload } if name == crate::installed::AGENTS_ASK => {
                 let root = self.wasm.projects.get(ext).cloned().flatten();
                 self.agents_ask(ext, id, &payload, root);
             }
             // One of its asks given up on: `{"call": <its agents.ask call>}`.
-            Request::Service { id, name, payload } if name == "agents.cancel" => {
+            Request::Service { id, name, payload } if name == crate::installed::AGENTS_CANCEL => {
                 let call = serde_json::from_str::<serde_json::Value>(&payload).ok().and_then(|v| v.get("call").and_then(serde_json::Value::as_u64));
                 let answer = match call {
                     Some(call) => self.agents_ask_cancel(ext, call).then(String::new).ok_or_else(|| format!("no ask {call} of its is waiting")),
@@ -5738,7 +5738,9 @@ pub(crate) mod tests {
         std::fs::write(&file, b"%PDF-1.4").unwrap();
         let mut app = App::with_file(None);
         assert!(!app.open_with_extension_at(&file, Some(38), None), "nothing opens PDFs");
-        app.wasm.installed = vec![hello("[contributes]\nopens = [\"*.pdf\"]\nnamespaces = [\"pdf\"]\nservices = [\"pdf.open\", \"pdf.search\"]\n")];
+        let mut pdf = hello("[contributes]\nopens = [\"*.pdf\"]\nnamespaces = [\"pdf\"]\nservices = [\"pdf.open\", \"pdf.search\"]\n");
+        pdf.id = "fenix.pdf".into();
+        app.wasm.installed = vec![pdf];
         assert!(app.open_with_extension_at(&file, Some(38), None));
         pump_until(&mut app, |a| said(a, "pdf.open at page 38, read Ok(8)"));
         // Without a page, it's opened as any file it opens.

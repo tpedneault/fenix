@@ -849,7 +849,7 @@ mod tests {
         let mut notebook = super::super::wasm_host::tests::hello("");
         notebook.manifest = fenix_extensions::Manifest::parse(
             "[extension]
-id = \"test.notebook\"
+id = \"fenix.notebook\"
 name = \"Notebook\"
 version = \"1.0.0\"
 runtime = \"wasm\"
@@ -863,7 +863,7 @@ services = [\"notebook.capture\"]
 ",
         )
         .unwrap();
-        notebook.id = "test.notebook".into();
+        notebook.id = "fenix.notebook".into();
         app.wasm.installed = vec![notebook];
         assert!(app.control_by_extension(Call::NotebookCapture(params()), reply).is_ok());
         let started = std::time::Instant::now();
@@ -894,10 +894,10 @@ services = [\"notebook.capture\"]
         // The test guest, as an agenda: its services are named for it.
         let mut agenda = super::super::wasm_host::tests::hello("");
         agenda.manifest = fenix_extensions::Manifest::parse(
-            "[extension]\nid = \"test.agenda\"\nname = \"Agenda\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"0.6\"\nfenix = \">=1.0, <2\"\n\n[contributes]\nservices = [\"agenda.tasks\", \"agenda.timer\"]\n",
+            "[extension]\nid = \"fenix.agenda\"\nname = \"Agenda\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"0.6\"\nfenix = \">=1.0, <2\"\n\n[contributes]\nservices = [\"agenda.tasks\", \"agenda.timer\"]\n",
         )
         .unwrap();
-        agenda.id = "test.agenda".into();
+        agenda.id = "fenix.agenda".into();
         app.wasm.installed = vec![agenda];
         assert!(app.control_by_extension(Call::AgendaTasks(TasksParams { status: None }), reply.clone()).is_ok());
         let started = std::time::Instant::now();

@@ -163,8 +163,38 @@ pub fn fenix_owns(kind: NameKind, name: &str) -> bool {
     }
 }
 
-/// The services Fenix answers itself, which no extension is asked for.
-pub const FENIX_SERVICES: &[&str] = &["agents.ask", "agents.cancel"];
+/// Fenix's own `agents.ask`: an extension's question to a coding agent.
+pub const AGENTS_ASK: &str = "agents.ask";
+/// Fenix's own `agents.cancel`: one of its asks given up on.
+pub const AGENTS_CANCEL: &str = "agents.cancel";
+/// The services Fenix answers itself, which no extension is asked for:
+/// what `answer_code_request` matches on.
+pub const FENIX_SERVICES: &[&str] = &[AGENTS_ASK, AGENTS_CANCEL];
+
+/// The services Fenix asks of one store extension, by name, and that
+/// one's id. Each gives it a file (the hex view's, a PDF's) or has it act
+/// for you (a `vnc:` link, the control channel's methods), so no other
+/// extension is asked for them -- by Fenix or by another extension --
+/// whatever it lists; a list of them is refused, and said.
+pub const FENIX_ASKS: &[(&str, &str)] = &[
+    ("ccsds.hex", "fenix.ccsds"),
+    ("pdf.open", "fenix.pdf"),
+    ("vnc.connect", "fenix.vnc"),
+    ("diagrams.render", "fenix.diagrams"),
+    ("notebook.link", "fenix.notebook"),
+    ("notebook.follow", "fenix.notebook"),
+    ("notebook.capture", "fenix.notebook"),
+    ("agenda.tasks", "fenix.agenda"),
+    ("agenda.timer", "fenix.agenda"),
+    ("agenda.clock_in", "fenix.agenda"),
+    ("agenda.clock_out", "fenix.agenda"),
+];
+
+/// Whether extension `id` may be asked for service `name`: any, unless
+/// Fenix asks one store extension for it (`FENIX_ASKS`).
+pub fn may_serve(id: &str, name: &str) -> bool {
+    FENIX_ASKS.iter().find(|(service, _)| *service == name).is_none_or(|(_, owner)| *owner == id)
+}
 
 impl CodeExtension {
     /// Held back: it isn't run, since it can't have every setting it
@@ -192,7 +222,15 @@ pub fn claimed_all(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
     let first = refused(&all, &fenix_owns);
     let held: Vec<String> = first.iter().filter(|r| r.kind == NameKind::Setting).map(|r| r.id.clone()).collect();
     let rest: Vec<Claimant> = all.iter().copied().filter(|c| !held.iter().any(|h| h == c.id)).collect();
-    let second = refused(&rest, &fenix_owns);
+    let mut second = refused(&rest, &fenix_owns);
+    for c in &rest {
+        for name in c.manifest.contributes.services.iter().filter(|s| !may_serve(c.id, s)) {
+            let owner = FENIX_ASKS.iter().find(|(s, _)| s == name).map_or("", |(_, o)| o);
+            if !second.iter().any(|r| r.id == c.id && r.kind == NameKind::Service && r.name == *name) {
+                second.push(Refused { id: c.id.to_string(), kind: NameKind::Service, name: name.clone(), why: format!("Fenix asks only {owner} for it, since it gives it files or has it act for you") });
+            }
+        }
+    }
     on.into_iter()
         .map(|(mut e, managed)| {
             e.managed = managed;

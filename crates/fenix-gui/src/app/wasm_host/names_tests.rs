@@ -160,3 +160,20 @@ fn a_forges_host_two_claim_goes_as_a_name_does() {
     assert_eq!(forge_for("github.com", &[(claim(&managed), &managed), (claim(&review), &review)]), Ok("acme.y".to_string()));
     assert_eq!(forge_for("gitlab.com", &[(0, &review)]), Err(None));
 }
+
+/// The review's S3: with `fenix.ccsds` not installed, any `*.ccsds`
+/// listing `ccsds.hex` was asked for it -- and given every binary file
+/// you opened. Fenix asks only the store extension it means.
+#[test]
+fn fenixs_own_asks_go_only_to_the_extension_meant() {
+    let mut app = App::with_file(None);
+    let other = as_id("acme.ccsds", "[contributes]\nservices = [\"ccsds.hex\", \"ccsds.other\"]\n");
+    app.wasm.installed = claimed(vec![(other, false)]);
+    assert_eq!(app.code_server("ccsds.hex", None), None, "not asked, by Fenix");
+    assert_eq!(app.code_server("ccsds.hex", Some("test.asker")), None, "nor by another extension");
+    assert_eq!(app.code_server("ccsds.other", None).as_deref(), Some("acme.ccsds"));
+    assert_eq!(app.wasm.installed[0].refused[0].line(), "service ccsds.hex: Fenix asks only fenix.ccsds for it, since it gives it files or has it act for you");
+    app.wasm.installed = claimed(vec![(as_id("fenix.ccsds", "[contributes]\nservices = [\"ccsds.hex\"]\n"), false)]);
+    assert_eq!(app.code_server("ccsds.hex", None).as_deref(), Some("fenix.ccsds"));
+    assert!(crate::installed::FENIX_SERVICES.iter().all(|s| crate::installed::fenix_owns(fenix_extensions::claims::NameKind::Service, s)));
+}

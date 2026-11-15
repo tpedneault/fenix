@@ -757,13 +757,14 @@ mod tests {
         let text = app.buffers.get(page).unwrap().buffer.text();
         assert!(text.contains("flowchart TD") && text.contains("↳ Ground station"), "{text}");
 
-        let mut ext = super::super::wasm_host::tests::hello("");
-        ext.manifest = fenix_extensions::Manifest::parse(
-            "[extension]\nid = \"test.both\"\nname = \"Both\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"0.7\"\nfenix = \">=1.0, <2\"\n\n[contributes]\nnamespaces = [\"diagrams\", \"notebook\"]\nservices = [\"diagrams.render\", \"notebook.link\"]\n",
-        )
-        .unwrap();
-        ext.id = "test.both".into();
-        app.wasm.installed = vec![ext];
+        // The test guest twice, as the two Fenix asks for these.
+        let as_ext = |id: &str, service: &str| {
+            let mut ext = super::super::wasm_host::tests::hello("");
+            ext.manifest = fenix_extensions::Manifest::parse(&format!("[extension]\nid = \"{id}\"\nname = \"X\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"0.7\"\nfenix = \">=1.0, <2\"\n\n[contributes]\nservices = [\"{service}\"]\n")).unwrap();
+            ext.id = id.into();
+            ext
+        };
+        app.wasm.installed = vec![as_ext("fenix.diagrams", "diagrams.render"), as_ext("fenix.notebook", "notebook.link")];
         app.reading_forget();
         if let Some(state) = app.pages.get_mut(&page) {
             if let PageModel::Reading(p) = &mut state.model {
