@@ -140,3 +140,23 @@ fn a_change_in_the_claims_is_put_in_use_at_once() {
     assert_eq!(app.code_server("hello.upper", None).as_deref(), Some("test.hello"), "its again once the other is off");
     assert!(fenix_config::schema::setting("hello.given_back").is_some(), "its setting back on the settings page");
 }
+
+/// The review's S2: `fenix.review` and `zzz.x` both saying `github.com`,
+/// the last by id was the forge, and was given the repository to read.
+/// Now a forge's host goes as a name does.
+#[test]
+fn a_forges_host_two_claim_goes_as_a_name_does() {
+    let forge = "[[contributes.forges]]\nname = \"F\"\nhosts = [\"github.com\"]\n";
+    let review = as_id("fenix.review", forge);
+    let other = as_id("zzz.x", forge);
+    let claim = |e: &CodeExtension| e.manifest.contributes.forges[0].claims("github.com", &|_| None);
+    assert!(claim(&review) > 0);
+    assert_eq!(forge_for("github.com", &[(claim(&review), &review), (claim(&other), &other)]), Ok("fenix.review".to_string()));
+    let another = as_id("acme.y", forge);
+    let why = forge_for("github.com", &[(claim(&another), &another), (claim(&other), &other)]).unwrap_err().unwrap();
+    assert!(why.contains("acme.y and zzz.x each say they're its forge, so neither is asked"), "{why}");
+    let mut managed = another.clone();
+    managed.managed = true;
+    assert_eq!(forge_for("github.com", &[(claim(&managed), &managed), (claim(&review), &review)]), Ok("acme.y".to_string()));
+    assert_eq!(forge_for("gitlab.com", &[(0, &review)]), Err(None));
+}

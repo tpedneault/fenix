@@ -142,6 +142,9 @@ pub struct CodeExtension {
     /// The names it lists that are another's, Fenix's, or no one's
     /// (`fenix_extensions::claims`), and why.
     pub refused: Vec<Refused>,
+    /// The machine's (an administrator's), not yours: it has a name over
+    /// yours, and a forge's host.
+    pub managed: bool,
 }
 
 /// Whether Fenix keeps name `name` of kind `kind` for itself: its own
@@ -191,7 +194,8 @@ pub fn claimed_all(on: Vec<(CodeExtension, bool)>) -> Vec<CodeExtension> {
     let rest: Vec<Claimant> = all.iter().copied().filter(|c| !held.iter().any(|h| h == c.id)).collect();
     let second = refused(&rest, &fenix_owns);
     on.into_iter()
-        .map(|(mut e, _)| {
+        .map(|(mut e, managed)| {
+            e.managed = managed;
             if held.contains(&e.id) {
                 e.refused = first.iter().filter(|r| r.id == e.id).cloned().collect();
             } else {
@@ -344,7 +348,7 @@ fn code_of(all: &[(Installed, bool)]) -> Vec<CodeExtension> {
         .filter_map(|(e, managed)| {
             let m = e.manifest.as_ref().ok()?;
             (m.extension.runtime == fenix_extensions::Runtime::Wasm && m.runs_in(&release()).is_ok())
-                .then(|| (CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone(), refused: Vec::new() }, *managed))
+                .then(|| (CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone(), refused: Vec::new(), managed: false }, *managed))
         })
         .collect();
     claimed_all(on)
@@ -620,7 +624,7 @@ mod tests {
             read += 1;
             if m.extension.runtime == fenix_extensions::Runtime::Wasm {
                 assert!(m.runs_in(&release()).is_ok(), "{} runs here", m.extension.id);
-                on.push((CodeExtension { id: m.extension.id.clone(), name: m.extension.name.clone(), dir: dir.clone(), manifest: m, refused: Vec::new() }, false));
+                on.push((CodeExtension { id: m.extension.id.clone(), name: m.extension.name.clone(), dir: dir.clone(), manifest: m, refused: Vec::new(), managed: false }, false));
             }
         }
         let code = on.len();

@@ -121,6 +121,32 @@ pub(crate) struct ServeId {
     pub call: u64,
 }
 
+/// Which extension is the forge for `host`, of those that claim it, each
+/// with its claim (`ForgeContribution::claims`, 0 for none): the one
+/// strongest claim; between equal ones, the machine's, else the store's
+/// own (`fenix.*`), when only one is; else none -- `Err(Some(why))`, for
+/// it's given the repository to read. `Err(None)`: no one claims it.
+pub(crate) fn forge_for(host: &str, claims: &[(u8, &CodeExtension)]) -> Result<String, Option<String>> {
+    let best = claims.iter().map(|(c, _)| *c).max().filter(|c| *c > 0).ok_or(None)?;
+    let top: Vec<&CodeExtension> = claims.iter().filter(|(c, _)| *c == best).map(|(_, e)| *e).collect();
+    let managed: Vec<&&CodeExtension> = top.iter().filter(|e| e.managed).collect();
+    let pool: Vec<&CodeExtension> = if managed.is_empty() { top.clone() } else { managed.into_iter().copied().collect() };
+    if let [only] = pool.as_slice() {
+        return Ok(only.id.clone());
+    }
+    let store: Vec<&&CodeExtension> = pool.iter().filter(|e| e.id.split('.').next() == Some("fenix")).collect();
+    if let [only] = store.as_slice() {
+        return Ok(only.id.clone());
+    }
+    let mut ids: Vec<&str> = pool.iter().map(|e| e.id.as_str()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if let [only] = ids.as_slice() {
+        return Ok(only.to_string());
+    }
+    Err(Some(format!("{host}: {} each say they're its forge, so neither is asked or given the repository -- switch all but one off (SPC h x)", ids.join(" and "))))
+}
+
 /// The PDF reader's services Fenix asks (`fenix.pdf`'s): a file opened at
 /// a page or a heading -- `gf` on `x.pdf#page=38`, a standard's clause --
 /// and a file searched, for the standards library.
@@ -207,6 +233,9 @@ pub(crate) struct WasmHost {
     /// What's been said of the names the code extensions were refused
     /// (`code_names_said`), each once: `<id>\n<line>`.
     pub(crate) names_said: HashSet<String>,
+    /// Why the last repository asked for had no forge, when two claimed
+    /// its host equally (`forge_for`).
+    code_forge_disputed: std::cell::RefCell<Option<String>>,
     workers: HashMap<String, Worker>,
     pub(crate) status: HashMap<String, Status>,
     /// What each said, oldest first.
@@ -1766,15 +1795,17 @@ impl App {
         let remote = fenix_git::remote_url(root, "origin")?;
         let host = fenix_extensions::manifest::url_host(&remote)?;
         let setting = |key: &str| fenix_config::schema::setting(key).and_then(|s| s.get(&self.config)).or_else(|| self.config.value(key).cloned()).map(|v| as_text(&v));
-        let (best, ext) = self
-            .wasm
-            .installed
-            .iter()
-            .flat_map(|e| e.manifest.contributes.forges.iter().map(|f| (f.claims(&host, &setting), e.id.clone())))
-            .max_by_key(|(claim, _)| *claim)?;
-        if best == 0 {
-            return None;
-        }
+        let (host, setting) = (&host, &setting);
+        let claims: Vec<(u8, &CodeExtension)> = self.wasm.installed.iter().flat_map(|e| e.manifest.contributes.forges.iter().map(move |f| (f.claims(host, setting), e))).collect();
+        let host = host.as_str();
+        let ext = match forge_for(host, &claims) {
+            Ok(ext) => ext,
+            Err(None) => return None,
+            Err(Some(why)) => {
+                self.wasm.code_forge_disputed.borrow_mut().replace(why);
+                return None;
+            }
+        };
         let root = fenix_lsp::normalize(root.to_path_buf()).to_string_lossy().into_owned();
         let payload = serde_json::json!({ "root": root, "remote": remote, "branch": fenix_git::oplog::current_branch(Path::new(&root)), "number": number });
         Some((ext, payload.to_string()))
@@ -1784,7 +1815,15 @@ impl App {
     /// (`forge.branch`, `forge.open`, `forge.reviews`); `then` gets its
     /// answer. False when no code extension is its forge.
     pub(crate) fn code_forge_call(&mut self, root: &Path, service: &str, number: Option<u64>, then: Box<dyn FnOnce(&mut App, Result<String, String>)>) -> bool {
-        let Some((ext, payload)) = self.code_forge(root, number) else { return false };
+        let Some((ext, payload)) = self.code_forge(root, number) else {
+            let disputed = self.wasm.code_forge_disputed.borrow_mut().take();
+            if let Some(why) = disputed {
+                if self.wasm.names_said.insert(format!("forge\n{why}")) {
+                    self.notify(crate::notify::Request::new("extensions", "No forge for this repository").body(why).tag("names:forge").action("Extensions", "extensions.open"));
+                }
+            }
+            return false;
+        };
         // It may read the repository, and run git there.
         self.code_call(&ext, Call::Grant(fenix_lsp::normalize(root.to_path_buf())), COMMAND_TICKS, Pending::Other);
         self.code_serve(&ext, service, payload, ServiceCaller::Fenix, Answer::Fenix(then));
@@ -4309,7 +4348,7 @@ pub(crate) mod tests {
             "[extension]\nid = \"test.hello\"\nname = \"Hello\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.0\"\nfenix = \">=1.0, <2\"\n{manifest_extra}\n[[contributes.commands]]\nid = \"hello.greet\"\ntitle = \"Greet\"\n\n[[contributes.commands]]\nid = \"hello.spin\"\ntitle = \"Spin\"\n"
         ))
         .unwrap();
-        CodeExtension { id: "test.hello".into(), name: "Hello".into(), dir: staged, manifest, refused: Vec::new() }
+        CodeExtension { id: "test.hello".into(), name: "Hello".into(), dir: staged, manifest, refused: Vec::new(), managed: false }
     }
 
     /// A folder it's given is made when it isn't there, and its setting

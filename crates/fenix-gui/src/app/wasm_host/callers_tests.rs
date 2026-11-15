@@ -20,7 +20,7 @@ pub(super) fn callers(id: &str, extra: &str) -> CodeExtension {
     std::fs::copy(dir.join("callers.wasm"), staged.join("extension.wasm")).unwrap();
     let text = format!("[extension]\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.6\"\nfenix = \">=1.0, <2\"\n\n{extra}");
     let manifest = fenix_extensions::Manifest::parse(&text).unwrap_or_else(|e| panic!("{id}: {e}"));
-    CodeExtension { id: id.into(), name: id.into(), dir: staged, manifest, refused: Vec::new() }
+    CodeExtension { id: id.into(), name: id.into(), dir: staged, manifest, refused: Vec::new(), managed: false }
 }
 
 /// `services = [...]`, for `callers`.
