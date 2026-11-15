@@ -1385,6 +1385,25 @@ fn a_local_socket_is_reached_by_a_name_it_lists() {
     assert!(none.run("hello.ipc").0.unwrap_err().contains("permissions.ipc"));
 }
 
+/// Fenix's own control channel is never one, whatever its manifest
+/// lists: by its name, or through a link to it -- else an extension could
+/// call services as `control` (the review's control-endpoint finding).
+#[cfg(unix)]
+#[test]
+fn fenixs_control_socket_is_never_an_extensions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("fenix")).unwrap();
+    let control = dir.path().join("fenix").join("control.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&control).unwrap();
+    let link = dir.path().join("innocent");
+    std::os::unix::fs::symlink(&control, &link).unwrap();
+    for name in [control.display().to_string(), link.display().to_string()] {
+        let mut ext = start_with(Permissions { ipc: vec!["${setting:hello.ipc}".into()], ..Permissions::default() }, &[("hello.ipc", &name)]);
+        let err = ext.run("hello.ipc").0.unwrap_err();
+        assert!(err.contains("Fenix's own control channel"), "{name}: {err}");
+    }
+}
+
 /// an adapter over a socket, started (its port Fenix's to pick)
 /// or already running at a port it may reach; rules for decorating files,
 /// checked; the file a page shows; the machine; a file saved, by its

@@ -1648,11 +1648,13 @@ impl State {
             Some(key) => settings.get(key).is_some_and(|v| !v.trim().is_empty() && v.trim() == bare),
             None => fenix_extensions::manifest::glob_matches(entry, bare),
         });
-        if allowed {
-            Ok(())
-        } else {
-            Err(format!("{name} isn't a local socket this extension may reach (permissions.ipc)"))
+        if !allowed {
+            return Err(format!("{name} isn't a local socket this extension may reach (permissions.ipc)"));
         }
+        if reaches_fenix_control(name) {
+            return Err(format!("{name} is Fenix's own control channel: no extension reaches it (permissions.ipc)"));
+        }
+        Ok(())
     }
 
     /// A full path Fenix gave it, or one below such a path; or the file
@@ -3435,6 +3437,35 @@ fn ipc_open(name: &str, closed: Arc<AtomicBool>) -> Result<Local, String> {
     let reading = pipe.try_clone().map_err(|e| e.to_string())?;
     let flag = closed.clone();
     Ok((Box::new(PipeReader { pipe: reading, closed }), Box::new(pipe), Box::new(move || flag.store(true, Ordering::Relaxed))))
+}
+
+/// Whether local socket `name` is -- or leads to, through a link --
+/// Fenix's own control channel (`fenix_control::endpoint`): the pipe
+/// `fenix-<SID>-<session>` on Windows, the socket `control*.sock` in a
+/// folder `fenix` or `fenix-<uid>` elsewhere. An extension allowed `*`,
+/// `fenix-*` or a folder's path would otherwise speak to Fenix as a
+/// program on this machine, and call services as `control`.
+fn reaches_fenix_control(name: &str) -> bool {
+    let bare = name.strip_prefix(r"\\.\pipe\").unwrap_or(name);
+    if cfg!(windows) && bare.to_ascii_lowercase().starts_with("fenix-") {
+        return true;
+    }
+    let is_control = |path: &Path| {
+        let file = path.file_name().and_then(|f| f.to_str()).unwrap_or_default();
+        let folder = path.parent().and_then(|p| p.file_name()).and_then(|f| f.to_str()).unwrap_or_default();
+        file.starts_with("control") && (folder == "fenix" || folder.starts_with("fenix-"))
+    };
+    let named = Path::new(bare);
+    if is_control(named) {
+        return true;
+    }
+    #[cfg(unix)]
+    if let Ok(path) = ipc_path(bare) {
+        if is_control(&path) || std::fs::canonicalize(&path).is_ok_and(|real| is_control(&real)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// How long `http-send` waits when it isn't told.
