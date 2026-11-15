@@ -149,17 +149,19 @@ pub struct CodeExtension {
 
 /// Whether Fenix keeps name `name` of kind `kind` for itself: its own
 /// settings (`gitlab.token`), the services it answers itself
-/// (`agents.ask`), its agent tools and prompts. Commands aren't here:
-/// Fenix's are registered first, and an extension's of the same id never
-/// is (`CommandRegistry::with_code_extensions`).
+/// (`agents.ask`), its agent tools, toolsets, prompts and commands.
 pub fn fenix_owns(kind: NameKind, name: &str) -> bool {
+    // Fenix's own commands, once: an extension's of the same id was never
+    // registered, and now it's said.
+    static COMMANDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     match kind {
         NameKind::Setting => fenix_config::schema::is_core(name),
         NameKind::Service => FENIX_SERVICES.contains(&name),
         NameKind::AgentTool => crate::agent_tools::TOOLS.iter().any(|t| t.name == name),
         NameKind::Prompt => crate::app::FENIX_PROMPTS.iter().any(|p| p.0 == name),
         NameKind::Toolset => crate::agent_tools::TOOLSETS.iter().any(|t| t.name == name),
-        NameKind::Command | NameKind::Resource => false,
+        NameKind::Command => COMMANDS.get_or_init(|| crate::commands::CommandRegistry::with_builtins().iter().map(|c| c.id.to_string()).collect()).iter().any(|c| c == name),
+        NameKind::Resource => false,
     }
 }
 

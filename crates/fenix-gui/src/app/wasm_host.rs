@@ -1043,8 +1043,12 @@ impl App {
         // extension's, `ccsds.*`): the project's own over yours there too.
         let project = self.wasm.projects.get(&ext.id).cloned().flatten().or_else(|| self.code_project()).map(|root| fenix_config::ProjectSettings::load(&root));
         let prefixes: Vec<String> = std::iter::once(ext.id.rsplit('.').next().unwrap_or(&ext.id).to_string()).chain(ext.manifest.permissions.settings.iter().cloned()).map(|n| format!("{n}.")).collect();
+        // Under its last part, only Fenix's own (`jira.base_url`): another
+        // extension's of that word aren't its because the word is.
+        let own = prefixes[0].clone();
         for s in fenix_config::schema::settings() {
-            if prefixes.iter().any(|p| s.key.starts_with(p.as_str())) && !settings.contains_key(s.key) && !matches!(s.kind, fenix_config::schema::Kind::Secret(_)) {
+            let theirs_to_read = if s.key.starts_with(own.as_str()) { fenix_config::schema::is_core(s.key) } else { prefixes[1..].iter().any(|p| s.key.starts_with(p.as_str())) };
+            if theirs_to_read && !settings.contains_key(s.key) && !matches!(s.kind, fenix_config::schema::Kind::Secret(_)) {
                 let theirs = project.as_ref().filter(|_| s.project).and_then(|p| p.get(s.key)).map(as_text);
                 if let Some(value) = theirs.or_else(|| read(s.key)) {
                     settings.insert(s.key.to_string(), value);

@@ -177,3 +177,22 @@ fn fenixs_own_asks_go_only_to_the_extension_meant() {
     assert_eq!(app.code_server("ccsds.hex", None).as_deref(), Some("fenix.ccsds"));
     assert!(crate::installed::FENIX_SERVICES.iter().all(|s| crate::installed::fenix_owns(fenix_extensions::claims::NameKind::Service, s)));
 }
+
+/// The review's S6: `evil.jira` read `fenix.jira`'s settings without
+/// declaring them, by the word its id ends in; only Fenix's own are read
+/// so. And a command of Fenix's an extension lists is said to be Fenix's.
+#[test]
+fn another_extensions_settings_arent_read_by_the_word_and_fenixs_commands_are_said() {
+    static THEIRS: [fenix_config::Setting; 1] = [fenix_config::Setting::stored("jira.queries_probe", fenix_config::Category::Editor, "Queries", fenix_config::Kind::Text, "fenix.jira's.")];
+    fenix_config::schema::register(&THEIRS);
+    let mut app = App::with_file(None);
+    app.config.set_value("jira.queries_probe", Some(fenix_config::Value::Text("project = SECRET".into())));
+    app.config.set_value("jira.base_url", Some(fenix_config::Value::Text("https://jira.example".into())));
+    let evil = as_id("evil.jira", "");
+    let (settings, _) = app.code_settings_now(&evil);
+    assert!(!settings.contains_key("jira.queries_probe"), "another extension's");
+    assert_eq!(settings.get("jira.base_url").map(String::as_str), Some("https://jira.example"), "Fenix's own, as before");
+    let ext = as_id("acme.files", "[contributes]\nnamespaces = [\"file\"]\n\n[[contributes.commands]]\nid = \"file.save\"\ntitle = \"x\"\n");
+    let on = claimed(vec![(ext, false)]);
+    assert_eq!(on[0].refused[0].line(), "command file.save: it's Fenix's own");
+}
