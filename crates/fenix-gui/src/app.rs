@@ -81,6 +81,7 @@ mod explorer_host;
 mod search_host;
 pub(crate) use explorer_host::ExplorerTarget;
 pub(crate) use search_host::SearchOpen;
+pub(crate) use agent_context::PROMPTS as FENIX_PROMPTS;
 use explorer_host::{ExplorerPurpose, ExplorerPrompt, SLOW_LISTING_AFTER, ExplorerRequest, ExplorerJob, ExplorerConflict};
 use crate::explorer_page;
 use crate::page::Key as PageKey;

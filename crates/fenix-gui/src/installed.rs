@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
+use fenix_extensions::claims::{Claimant, NameKind, Refused};
 use fenix_extensions::{Installed, Policy, Store};
 
 /// The Fenix release this is, for an extension's `engine.fenix` range
@@ -135,7 +136,46 @@ pub struct CodeExtension {
     pub name: String,
     /// Where it's unpacked: `extension.wasm` is there, and `.compiled/`.
     pub dir: PathBuf,
+    /// Its manifest, as Fenix uses it: without the names `refused` says
+    /// aren't its (`claimed`).
     pub manifest: fenix_extensions::Manifest,
+    /// The names it lists that are another's, Fenix's, or no one's
+    /// (`fenix_extensions::claims`), and why.
+    pub refused: Vec<Refused>,
+}
+
+/// Whether Fenix keeps name `name` of kind `kind` for itself: its own
+/// settings (`gitlab.token`), the services it answers itself
+/// (`agents.ask`), its agent tools and prompts. Commands aren't here:
+/// Fenix's are registered first, and an extension's of the same id never
+/// is (`CommandRegistry::with_code_extensions`).
+pub fn fenix_owns(kind: NameKind, name: &str) -> bool {
+    match kind {
+        NameKind::Setting => fenix_config::schema::is_core(name),
+        NameKind::Service => FENIX_SERVICES.contains(&name),
+        NameKind::AgentTool => crate::agent_tools::TOOLS.iter().any(|t| t.name == name),
+        NameKind::Prompt => crate::app::FENIX_PROMPTS.iter().any(|p| p.0 == name),
+        NameKind::Command => false,
+    }
+}
+
+/// The services Fenix answers itself, which no extension is asked for.
+pub const FENIX_SERVICES: &[&str] = &["agents.ask", "agents.cancel"];
+
+/// `on` -- the switched-on code extensions, each with whether it's the
+/// machine's -- each without the names that aren't its, with why kept
+/// in `refused`. `installed` is every installed extension's id, switched
+/// on or not: a name under one is that one's.
+pub fn claimed(on: Vec<(CodeExtension, bool)>, installed: &[&str]) -> Vec<CodeExtension> {
+    let claimants: Vec<Claimant> = on.iter().map(|(e, managed)| Claimant { id: &e.id, manifest: &e.manifest, managed: *managed }).collect();
+    let refused = fenix_extensions::claims::refused(&claimants, installed, &fenix_owns);
+    on.into_iter()
+        .map(|(mut e, _)| {
+            fenix_extensions::claims::withdraw(&e.id, &mut e.manifest, &refused);
+            e.refused = refused.iter().filter(|r| r.id == e.id).cloned().collect();
+            e
+        })
+        .collect()
 }
 
 /// The switched-on code extensions, managed ones first; none in tests or
@@ -251,13 +291,17 @@ pub fn secret_env(key: &str) -> String {
 }
 
 fn code_of(all: &[(Installed, bool)]) -> Vec<CodeExtension> {
-    all.iter()
+    let on = all
+        .iter()
         .filter(|(e, _)| e.enabled)
-        .filter_map(|(e, _)| {
+        .filter_map(|(e, managed)| {
             let m = e.manifest.as_ref().ok()?;
-            (m.extension.runtime == fenix_extensions::Runtime::Wasm && m.runs_in(&release()).is_ok()).then(|| CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone() })
+            (m.extension.runtime == fenix_extensions::Runtime::Wasm && m.runs_in(&release()).is_ok())
+                .then(|| (CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone(), refused: Vec::new() }, *managed))
         })
-        .collect()
+        .collect();
+    let installed: Vec<&str> = all.iter().map(|(e, _)| e.id.as_str()).collect();
+    claimed(on, &installed)
 }
 
 /// Installed extension `id` as Fenix uses it -- the machine's when it has
@@ -334,15 +378,18 @@ pub fn settle_switches() -> Vec<String> {
 /// The Extensions page's rows for what's installed.
 pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
     let running = running();
-    everything(machine().as_ref(), store().as_ref())
-        .into_iter()
+    let all = everything(machine().as_ref(), store().as_ref());
+    let code = code_of(&all);
+    all.into_iter()
         .map(|(e, managed)| {
+            let name_notes = code.iter().find(|c| c.id == e.id).map(|c| c.refused.iter().map(Refused::line).collect()).unwrap_or_default();
             let m = e.manifest.as_ref().ok();
             let read = |name: &str| std::fs::read_to_string(e.dir.join(name)).ok();
             let (kinds, kind_notes) = m.map(|m| kind_lines(&e.id, m)).unwrap_or_default();
             crate::extensions_page::InstalledRow {
                 kinds,
                 kind_notes,
+                name_notes,
                 managed,
                 name: e.name(),
                 about: m.map(|m| m.extension.description.clone()).unwrap_or_default(),
@@ -508,6 +555,40 @@ pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every extension in the store's repository, read and switched on
+    /// together, keeps every name it lists: none is Fenix's, under
+    /// another's id, or claimed twice. The store isn't in this repository,
+    /// so this runs only when it's named: `FENIX_STORE_MANIFESTS=<its
+    /// extensions folder> cargo test -p fenix-gui -- --ignored
+    /// every_store_extension`.
+    #[test]
+    #[ignore = "needs the store's manifests: FENIX_STORE_MANIFESTS"]
+    fn every_store_extension_keeps_its_names() {
+        let Some(dir) = std::env::var_os("FENIX_STORE_MANIFESTS") else { return };
+        let mut on = Vec::new();
+        let mut ids = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let dir = entry.unwrap().path();
+            let Ok(text) = std::fs::read_to_string(dir.join("extension.toml")) else { continue };
+            let m = fenix_extensions::Manifest::parse(&text).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+            ids.push(m.extension.id.clone());
+            if m.extension.runtime == fenix_extensions::Runtime::Wasm {
+                assert!(m.runs_in(&release()).is_ok(), "{} runs here", m.extension.id);
+                on.push((CodeExtension { id: m.extension.id.clone(), name: m.extension.name.clone(), dir: dir.clone(), manifest: m, refused: Vec::new() }, false));
+            }
+        }
+        let (read, code) = (ids.len(), on.len());
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let before: Vec<fenix_extensions::Manifest> = on.iter().map(|(e, _)| e.manifest.clone()).collect();
+        let after = claimed(on, &ids);
+        let refused: Vec<String> = after.iter().flat_map(|e| e.refused.iter().map(move |r| format!("{}: {}", e.id, r.line()))).collect();
+        println!("{read} manifests read, {code} code extensions, {} names refused", refused.len());
+        assert!(refused.is_empty(), "{refused:#?}");
+        for (e, m) in after.iter().zip(&before) {
+            assert_eq!(e.manifest.contributes, m.contributes, "{} unchanged", e.id);
+        }
+    }
 
     /// Whose kinds count, in the order they're detected in: switched on,
     /// readable and for this Fenix, data packs too; the machine's first,

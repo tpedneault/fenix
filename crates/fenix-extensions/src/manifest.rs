@@ -548,7 +548,9 @@ pub struct Contributes {
     pub contexts: Vec<ContextContribution>,
     /// Other names its commands, settings and services may start with
     /// besides its own: `diagram` for the Diagrams extension's
-    /// `diagram.preview`.
+    /// `diagram.preview`. Each is one word; `fenix` is only `fenix.*`
+    /// extensions' (`namespace_problem`). Borrowed, not owned: whose a
+    /// name is among the installed is `claims`'.
     #[serde(default)]
     pub namespaces: Vec<String>,
     /// The language servers it is, for Fenix's languages: each runs
@@ -1365,8 +1367,13 @@ impl Manifest {
             let api = self.engine.api.as_deref().ok_or("extension.toml: a WebAssembly extension says the API it was built against (engine.api)")?;
             semver::Version::parse(&full_version(api)).map_err(|e| format!("extension.toml: engine.api {api:?}: {e}"))?;
         }
+        for namespace in &self.contributes.namespaces {
+            if let Some(why) = namespace_problem(&self.extension.id, namespace) {
+                return Err(format!("extension.toml: namespace {namespace:?} -- {why}"));
+            }
+        }
         let own = format!("{}.", self.extension.id.rsplit('.').next().unwrap_or_default());
-        let ours = |name: &str| name.starts_with(&own) || name.starts_with(&format!("{}.", self.extension.id)) || self.contributes.namespaces.iter().any(|n| name.starts_with(&format!("{n}.")));
+        let ours = |name: &str| borrows(&self.extension.id, &self.contributes.namespaces, name).is_some();
         for command in &self.contributes.commands {
             if !ours(&command.id) {
                 return Err(format!("extension.toml: command {:?} -- an extension's commands start with its name ({own}...)", command.id));
@@ -1447,7 +1454,7 @@ impl Manifest {
             if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')) {
                 return Err(format!("extension.toml: agent {id:?} -- an agent's id is lowercase letters, digits, -, _ and ."));
             }
-            if BUILTIN_AGENTS.contains(&id) || !(id == short || ours(id)) {
+            if BUILTIN_AGENTS.contains(&id) || !((id == short && word_is_theirs(&self.extension.id, short)) || ours(id)) {
                 return Err(format!("extension.toml: agent {id:?} -- an extension's agents are called by its name ({short}, or {own}...)"));
             }
             if agent.name.trim().is_empty() {
@@ -1489,7 +1496,7 @@ impl Manifest {
     /// below the project.
     fn check_test_providers(&self, own: &str) -> Result<(), String> {
         let short = self.extension.id.rsplit('.').next().unwrap_or_default();
-        let ours = |id: &str| id == short || id.starts_with(own) || id.starts_with(&format!("{}.", self.extension.id));
+        let ours = |id: &str| (id == short && word_is_theirs(&self.extension.id, short)) || borrows(&self.extension.id, &[], id).is_some();
         let api = self.engine.api.as_deref().and_then(|a| semver::Version::parse(&full_version(a)).ok());
         for (i, provider) in self.contributes.test_providers.iter().enumerate() {
             let id = provider.id.as_str();
@@ -1635,6 +1642,47 @@ impl Manifest {
             Runtime::Lua => Err(format!("{} runs Lua code, which this Fenix can't yet", self.extension.name)),
         }
     }
+}
+
+/// How a name is an extension's: under its full id (`fenix.jira.x`), or
+/// through a word it borrows -- its id's last part (`jira.x`), or a
+/// namespace. A full id is the stronger claim (`claims`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Claim {
+    /// Through its id's last part or a namespace: a word anyone may have.
+    Borrowed,
+    /// Under its full id.
+    Id,
+}
+
+/// Whether extension `id` may use `word` -- its last part, a namespace --
+/// for names: any word but `fenix`, which only the store publishes under
+/// (`fenix-extensions/publishers.toml`), so only a `fenix.*` id may.
+pub fn word_is_theirs(id: &str, word: &str) -> bool {
+    word != "fenix" || id.split('.').next() == Some("fenix")
+}
+
+/// How extension `id`, with `namespaces`, may name `name`, if it may:
+/// under its id, or through its last part or a namespace -- never
+/// through the word `fenix` unless it's a `fenix.*` extension.
+pub fn borrows(id: &str, namespaces: &[String], name: &str) -> Option<Claim> {
+    if name.strip_prefix(id).is_some_and(|rest| rest.starts_with('.')) {
+        return Some(Claim::Id);
+    }
+    let under = |word: &str| word_is_theirs(id, word) && name.strip_prefix(word).is_some_and(|rest| rest.starts_with('.'));
+    let short = id.rsplit('.').next().unwrap_or_default();
+    (under(short) || namespaces.iter().any(|n| under(n))).then_some(Claim::Borrowed)
+}
+
+/// What's wrong with `namespace` for extension `id`, if anything: it's
+/// one word -- lowercase letters, digits, `-` and `_`, no dot, so never
+/// an id or a part of one longer than a publisher -- and not `fenix`,
+/// unless it's a `fenix.*` extension.
+pub fn namespace_problem(id: &str, namespace: &str) -> Option<&'static str> {
+    if namespace.is_empty() || !namespace.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+        return Some("a namespace is one word: lowercase letters, digits, - and _ (diagram)");
+    }
+    (!word_is_theirs(id, namespace)).then_some("fenix is the store's own: only a fenix.* extension may name things under it")
 }
 
 /// The toolset of extension `id`'s agent tools: its last part, `-` as `_`.
@@ -2235,5 +2283,44 @@ namespaces = [\"issues\"]
         let then: Then = toml::from_str(&text).unwrap();
         assert_eq!(then.contributes.contexts.len(), 1);
         assert_eq!(Manifest::parse(&text).unwrap().contributes.project_kinds.kinds.len(), 1);
+    }
+
+    /// The names the reviews probed with `fenix.jira.tracker.about`: only
+    /// `fenix.jira`, by its full id, may name it at all. Whose a name is
+    /// among the installed is `claims`'.
+    #[test]
+    fn the_word_fenix_and_dotted_namespaces_are_refused() {
+        let code = |id: &str, contributes: &str| sample(id, "1.0.0", "wasm").replace("fenix = ", "api = \"1.5\"\nfenix = ") + "\n[contributes]\n" + contributes;
+        let name = "services = [\"fenix.jira.tracker.about\"]\n";
+        assert!(Manifest::parse(&code("fenix.jira", name)).is_ok(), "its own full id");
+        let refused = |id: &str, contributes: &str, says: &str| {
+            let err = Manifest::parse(&code(id, contributes)).unwrap_err();
+            assert!(err.contains(says), "{id} {contributes}: {err}");
+        };
+        // acme.fenix: its last part is fenix, which only fenix.* may use.
+        refused("acme.fenix", name, "start with its name");
+        refused("acme.jira", name, "start with its name");
+        refused("evil.a", &format!("namespaces = [\"fenix\"]\n{name}"), "fenix is the store's own");
+        refused("evil.b", &format!("namespaces = [\"fenix.jira\"]\n{name}"), "one word");
+        for bad in ["*", "", "Jira", "a b", "a/b", "fenix.jira"] {
+            refused("evil.c", &format!("namespaces = [{bad:?}]\n"), "namespace");
+        }
+        // acme.fenix keeps what's under its own id.
+        assert!(Manifest::parse(&code("acme.fenix", "services = [\"acme.fenix.x\"]\n")).is_ok());
+        // A fenix.* extension may borrow the word; whose fenix.jira.* is,
+        // among the installed, is fenix.jira's (claims).
+        assert!(Manifest::parse(&code("fenix.tracker", &format!("namespaces = [\"fenix\"]\n{name}"))).is_ok());
+        // Commands and settings the same; and an agent or a test provider
+        // named by the word.
+        let command = "\n[[contributes.commands]]\nid = \"fenix.x\"\ntitle = \"X\"\n";
+        refused("acme.fenix", command, "start with its name");
+        refused("acme.fenix", "\n[[contributes.settings]]\nkey = \"fenix.x\"\n", "start with its name");
+        refused("acme.fenix", "\n[[contributes.agents]]\nid = \"fenix\"\nname = \"F\"\n", "agent");
+        assert!(Manifest::parse(&code("acme.tools", &format!("namespaces = [\"diagram\", \"x-y_2\"]\n{}", command.replace("fenix.x", "diagram.x")))).is_ok());
+        assert_eq!(borrows("acme.fenix", &[], "fenix.jira.x"), None);
+        assert_eq!(borrows("fenix.jira", &[], "fenix.jira.x"), Some(Claim::Id));
+        assert_eq!(borrows("fenix.jira", &[], "jira.x"), Some(Claim::Borrowed));
+        assert_eq!(borrows("fenix.jira", &[], "fenix.jirax.y"), None);
+        assert_eq!(borrows("fenix.jira", &["issues".into()], "issues.x"), Some(Claim::Borrowed));
     }
 }

@@ -121,7 +121,7 @@ fn fingerprint(value: &Value) -> u64 {
 }
 
 /// Fenix's prompts: name, what it's for, its arguments (name, required).
-const PROMPTS: &[(&str, &str, &[(&str, bool)])] = &[
+pub(crate) const PROMPTS: &[(&str, &str, &[(&str, bool)])] = &[
     ("fix_diagnostic", "Fix the problem the language server reports on a line, as small a change as will do", &[("path", true), ("line", true)]),
     ("explain", "Explain what some lines of code do, and why", &[("path", true), ("startLine", true), ("endLine", false)]),
     ("review_changes", "Review the working tree's changes, or a branch's against base, with findings by file and line", &[("base", false)]),

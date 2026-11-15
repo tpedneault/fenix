@@ -9,6 +9,7 @@
 //! (`runtime = "bundle"`) is other extensions, its dependencies, installed
 //! with it.
 
+pub mod claims;
 pub mod manifest;
 pub mod package;
 pub mod registry;

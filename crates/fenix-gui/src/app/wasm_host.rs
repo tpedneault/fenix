@@ -1898,9 +1898,18 @@ impl App {
         self.buffer_on(path).filter(|id| !(open_only && self.wasm.sealed.contains(id)))
     }
 
-    /// The code extension, other than `but`, that answers service `name`.
+    /// The code extension, other than `but`, that answers service `name`:
+    /// the one it's left to (`installed::claimed`), since no name is
+    /// left to two.
     pub(crate) fn code_server(&self, name: &str, but: Option<&str>) -> Option<String> {
         self.wasm.installed.iter().find(|e| Some(e.id.as_str()) != but && e.manifest.contributes.services.iter().any(|s| s == name)).map(|e| e.id.clone())
+    }
+
+    /// Why no extension answers service `name`: the extensions that list
+    /// it may not have it, or none lists it.
+    pub(crate) fn code_unserved(&self, name: &str) -> String {
+        let refused: Vec<fenix_extensions::claims::Refused> = self.wasm.installed.iter().flat_map(|e| e.refused.iter().cloned()).collect();
+        fenix_extensions::claims::unserved(name, &refused).unwrap_or_else(|| format!("nothing offers {name}"))
     }
 
     /// Lets code extension `ext` read the file at `path`, as one Fenix gave
@@ -3420,7 +3429,10 @@ impl App {
                 // Another code extension's.
                 match self.code_server(&name, Some(ext)) {
                     Some(server) => self.code_serve(&server, &name, payload, Answer::Ext { asker: ext.to_string(), id }),
-                    None => self.code_deliver(ext, Notice::ServiceReply((id, Err(format!("nothing offers {name}"))))),
+                    None => {
+                        let why = self.code_unserved(&name);
+                        self.code_deliver(ext, Notice::ServiceReply((id, Err(why))));
+                    }
                 }
             }
         }
@@ -4184,6 +4196,9 @@ fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme 
 }
 
 #[cfg(test)]
+mod names_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use fenix_wasm::host::Focus;
@@ -4218,7 +4233,7 @@ pub(crate) mod tests {
             "[extension]\nid = \"test.hello\"\nname = \"Hello\"\nversion = \"1.0.0\"\nruntime = \"wasm\"\n\n[engine]\napi = \"1.0\"\nfenix = \">=1.0, <2\"\n{manifest_extra}\n[[contributes.commands]]\nid = \"hello.greet\"\ntitle = \"Greet\"\n\n[[contributes.commands]]\nid = \"hello.spin\"\ntitle = \"Spin\"\n"
         ))
         .unwrap();
-        CodeExtension { id: "test.hello".into(), name: "Hello".into(), dir: staged, manifest }
+        CodeExtension { id: "test.hello".into(), name: "Hello".into(), dir: staged, manifest, refused: Vec::new() }
     }
 
     /// A folder it's given is made when it isn't there, and its setting
@@ -4274,7 +4289,7 @@ pub(crate) mod tests {
     }
 
     /// Waits for the worker's events and applies them, until `done`.
-    fn pump_until(app: &mut App, done: impl Fn(&App) -> bool) {
+    pub(crate) fn pump_until(app: &mut App, done: impl Fn(&App) -> bool) {
         let started = std::time::Instant::now();
         while !done(app) {
             assert!(started.elapsed() < std::time::Duration::from_secs(60), "{}", app.extension_output_text());
@@ -4283,7 +4298,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn said(app: &App, text: &str) -> bool {
+    pub(crate) fn said(app: &App, text: &str) -> bool {
         app.extension_output_text().contains(text)
     }
 

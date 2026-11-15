@@ -121,6 +121,10 @@ pub struct InstalledRow {
     /// pom.xml`), and what of them is left out and why.
     pub kinds: Vec<String>,
     pub kind_notes: Vec<String>,
+    /// The names it lists that aren't its -- another extension's,
+    /// Fenix's, or no one's -- and why (`fenix_extensions::claims`): a
+    /// line each.
+    pub name_notes: Vec<String>,
 }
 
 /// What the page knows of the registry.
@@ -857,6 +861,12 @@ fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bund
                     p.put(line, Role::Text, width);
                 }
                 for note in &r.kind_notes {
+                    p.put(note, Role::Warn, width);
+                }
+            }
+            if !r.name_notes.is_empty() {
+                p.heading("Names left out");
+                for note in &r.name_notes {
                     p.put(note, Role::Warn, width);
                 }
             }
@@ -1635,6 +1645,20 @@ mod tests {
         p.installed = vec![InstalledRow { kinds, kind_notes, ..installed("acme.java", true, None) }];
         let text = layout(&p, 140).text;
         assert!(text.contains("PROJECT KINDS") && text.contains("JAVA Java (java): pom.xml") && text.contains("project kind groovy"), "{text}");
+    }
+
+    /// The names an extension lists that aren't its -- another's,
+    /// Fenix's, or no one's -- are on its details, and why
+    /// (`installed::claimed`).
+    #[test]
+    fn details_say_what_names_were_left_out() {
+        let mut p = page();
+        let note = "service hello.upper: evil.hello and test.hello all claim it, so none of them has it -- switch all but one off (SPC h x)";
+        p.installed = vec![InstalledRow { name_notes: vec![note.into()], runtime: Some(Runtime::Wasm), ..installed("evil.hello", true, None) }];
+        let text = layout(&p, 200).text;
+        assert!(text.contains("NAMES LEFT OUT") && text.contains("service hello.upper: evil.hello and"), "{text}");
+        p.installed = vec![installed("acme.dusk", true, None)];
+        assert!(!layout(&p, 200).text.contains("NAMES LEFT OUT"), "nothing said when nothing's left out");
     }
 
     /// What a code extension may do is on its details before it's
