@@ -82,15 +82,19 @@ impl Helpers {
     /// The helpers shipped with this program: `FENIX_REMOTE_HELPERS` if
     /// it's set (a build from source has none beside it), else the
     /// `remote` folder beside the program, else, for a package with the
-    /// program in `/usr/bin`, Fenix's own folder (`/usr/lib/fenix/remote`).
+    /// program in `/usr/bin`, Fenix's own folder (`/usr/lib/fenix/remote`), or, in a macOS application, its
+    /// `Contents/Resources/remote`.
     pub fn shipped() -> Helpers {
         if let Some(folder) = std::env::var_os("FENIX_REMOTE_HELPERS").filter(|folder| !folder.is_empty()) {
             return Helpers { folder: folder.into() };
         }
         let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.to_path_buf()));
         let packaged = beside.as_deref().and_then(Path::parent).map(|prefix| prefix.join("lib").join("fenix").join("remote"));
+        // A macOS application keeps what isn't a program in `Resources`,
+        // beside its `MacOS`.
+        let bundled = beside.as_deref().and_then(Path::parent).map(|contents| contents.join("Resources").join("remote"));
         let beside = beside.map(|folder| folder.join("remote"));
-        match (beside, packaged) {
+        match (beside, packaged.filter(|p| p.is_dir()).or(bundled)) {
             (Some(beside), Some(packaged)) if !beside.is_dir() && packaged.is_dir() => Helpers { folder: packaged },
             (Some(beside), _) => Helpers { folder: beside },
             _ => Helpers { folder: "remote".into() },

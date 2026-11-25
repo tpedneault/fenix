@@ -6,6 +6,24 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- macOS, 11 or newer, on Apple silicon and Intel: a `.dmg` and an archive
+  for each with every release and nightly, and the whole test suite in
+  CI. Finder opens files and folders with Fenix; quitting from the menu,
+  the Dock or a log-out asks about unsaved work; a launch from Finder has
+  your login shell's `PATH`; deleting goes to the Trash; the drives list
+  has what's mounted. The build isn't notarised yet.
+- On a Mac, Command: with standard keys it does what Ctrl does, and with
+  either scheme it saves, copies, pastes, undoes, finds, opens and closes
+  (Command-C and Command-V in a terminal too). Ctrl-click is a right
+  click. `keys.option_as_alt` says which Option keys are Alt (the left,
+  unless you say); the others type your layout's characters.
+
+### Fixed
+
+- A remote's `HEAD` was listed as a branch with some versions of Git.
+
 ## [1.6.0] - 2026-11-15
 
 ### Added

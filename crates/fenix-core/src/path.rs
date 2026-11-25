@@ -38,7 +38,9 @@ pub fn plain_path(path: &Path) -> PathBuf {
 }
 
 /// What two spellings of one file have in common: `plain_path`, and on
-/// Windows, where names don't differ by case, in one case. For comparing
+/// Windows, where names don't differ by case, in one case; on macOS, with the
+/// links in it followed (`/tmp` is `/private/tmp`) and in the disk's own
+/// case. For comparing
 /// only: never shown, and never opened.
 ///
 /// A file on a remote machine (`fenix_vfs::remote`) keeps its case
@@ -52,10 +54,29 @@ pub fn path_key(path: &Path) -> PathBuf {
         }
         PathBuf::from(plain.to_string_lossy().to_lowercase())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        if fenix_vfs::is_remote(&plain) {
+            return plain;
+        }
+        real_path(&plain).unwrap_or(plain)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         plain
     }
+}
+
+/// `path` as the disk has it: links followed, and each name in the case it
+/// was made with, which is the only way to know whether a Mac's volume
+/// tells cases apart (most don't). A file not there yet is its folder's,
+/// under the name it's given.
+#[cfg(target_os = "macos")]
+fn real_path(path: &Path) -> Option<PathBuf> {
+    if let Ok(real) = path.canonicalize() {
+        return Some(real);
+    }
+    Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
 }
 
 #[cfg(test)]
@@ -105,6 +126,22 @@ mod tests {
         assert_eq!(path_key(&upper), upper);
         assert_ne!(path_key(&upper), path_key(&fenix_vfs::remote("devbox", "/src/makefile")));
         assert_ne!(path_key(&upper), path_key(&fenix_vfs::remote("other", "/src/Makefile")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_macs_links_and_cases_have_one_key() {
+        let name = format!("fenix-path-key-{}", std::process::id());
+        let dir = Path::new("/tmp").join(&name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = Path::new("/private/tmp").join(&name);
+        assert_eq!(path_key(&dir.join("new.rs")), real.join("new.rs"), "one not there yet");
+        std::fs::write(dir.join("A.rs"), "").unwrap();
+        assert_eq!(path_key(&dir.join("A.rs")), real.join("A.rs"));
+        if dir.join("a.rs").exists() {
+            assert_eq!(path_key(&dir.join("a.rs")), real.join("A.rs"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[cfg(not(windows))]

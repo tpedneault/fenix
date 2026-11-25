@@ -101,7 +101,7 @@ Honest differences, so you can tell whether it's for you:
   Vim mode is one keymap among others; Fenix is built around
   modal editing and the `SPC` leader, and every page -- Git, the
   debugger, settings, the store -- is driven from the keyboard. Zed has
-  real-time collaboration and runs on macOS; Fenix doesn't yet.
+  real-time collaboration; Fenix doesn't yet.
 - **VS Code**: Fenix has much of what you'd install extensions for in VS
   Code -- Git, a debugger over DAP, language servers, terminals, agents
   -- in a native window rather than Electron. VS Code's extension
@@ -115,9 +115,10 @@ For many people, yes -- with eyes open. Fenix is young: 1.0 shipped on
 31 October 2026.
 
 - **Platforms**: Windows 10 and 11 are the primary platform; Linux
-  (x86_64, glibc 2.35 or newer) is supported. CI builds and tests on
-  both. **macOS isn't built or tested yet**, and there's no desktop
-  build for ARM Linux.
+  (x86_64, glibc 2.35 or newer) and macOS (11 or newer, Apple silicon
+  and Intel) are supported. CI builds and tests on all three. The macOS
+  build isn't notarised by Apple yet, and there's no desktop build for
+  ARM Linux.
 - **Solid**: Vim editing, files and projects, saves and crash recovery,
   Git, language servers, the debugger, terminals, coding agents and the
   extension store. Each is covered by the test suite CI runs on every
@@ -167,6 +168,18 @@ it (`sudo apt install ./fenix_<version>_amd64.deb`, or
 applications menu, `fenix` on `PATH`. Or unpack the `.tar.gz` and run
 `fenix`. Any distribution with glibc 2.35 or newer.
 
+**macOS:** download the disk image for your Mac from
+[Releases](https://github.com/tpedneault/fenix/releases/latest)
+(`fenix-<version>-aarch64-apple-darwin.dmg` for Apple silicon,
+`x86_64-apple-darwin` for Intel) and drag Fenix to Applications. It
+isn't notarised, so macOS stops it the first time: open it once, then
+**Open Anyway** under System Settings, Privacy & Security. For `fenix`
+in a terminal:
+
+```bash
+sudo mkdir -p /usr/local/bin && sudo ln -sf /Applications/Fenix.app/Contents/MacOS/fenix /usr/local/bin/fenix
+```
+
 **The nightly**, to try what's next: `master` built each night it
 changed, on the
 [`nightly` release](https://github.com/tpedneault/fenix/releases/tag/nightly)
@@ -190,8 +203,8 @@ when it's on your `PATH` (`git`, `rg`, language servers, debug adapters,
 and what individual extensions need). [Building](docs/BUILDING.md) lists
 them all.
 
-**Platforms:** Windows 10 and 11 are the primary platform. Linux is
-supported, and CI tests on both. macOS isn't built yet (see
+**Platforms:** Windows 10 and 11 are the primary platform. Linux
+and macOS are supported, and CI tests on all three (see
 [Is Fenix ready for daily use?](#is-fenix-ready-for-daily-use)).
 
 **Updates:** Fenix can tell you on Home when a newer release is out

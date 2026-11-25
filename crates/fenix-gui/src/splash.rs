@@ -136,6 +136,9 @@ impl SplashHandle {
         let progress = Arc::new(AtomicU32::new(0));
         let (first_tx, first_frame) = mpsc::channel();
         let (thread_stop, thread_progress) = (Arc::clone(&stop), Arc::clone(&progress));
+        // Held by the caller for as long as the surface is drawn into.
+        #[cfg(target_os = "macos")]
+        drop(window);
         let thread = std::thread::Builder::new().name("fenix-splash".into()).spawn(move || {
             let started = Instant::now();
             let mut sprites = SpriteRenderer::new(Arc::clone(&device), Arc::clone(&queue), config.format);
@@ -158,6 +161,13 @@ impl SplashHandle {
                 if thread_stop.load(Ordering::Acquire) {
                     return Some(SplashReturn { surface, config, sprites, scene, started, progress: shown, still });
                 }
+                // A Mac's window answers only on the main thread, and winit
+                // waits for it there -- which is loading the editor, then
+                // waiting for this thread: neither would ever go on. A
+                // resize there is seen once the editor has the surface.
+                #[cfg(target_os = "macos")]
+                let size = winit::dpi::PhysicalSize::new(config.width, config.height);
+                #[cfg(not(target_os = "macos"))]
                 let size = window.inner_size();
                 if size.width > 0 && size.height > 0 && (size.width, size.height) != (config.width, config.height) {
                     config.width = size.width;
@@ -204,6 +214,8 @@ impl SplashHandle {
                     sprites.render(&mut pass);
                 }
                 queue.submit(Some(encoder.finish()));
+                // Nothing on a Mac, but asked of its main thread too.
+                #[cfg(not(target_os = "macos"))]
                 window.pre_present_notify();
                 queue.present(frame);
                 if let Some(tx) = first_tx.take() {

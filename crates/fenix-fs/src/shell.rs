@@ -6,7 +6,8 @@
 //! makes trusting it easy -- being unable to leave is not the same as
 //! not needing to.
 //!
-//! Both go through `explorer.exe`, which is the shell itself: opening a
+//! On macOS both go through `open` (`open -R` selects in Finder); on
+//! Linux, `xdg-open`. On Windows both go through `explorer.exe`, which is the shell itself: opening a
 //! path through it applies whatever the user has associated with that
 //! type, including the choices they made in Windows' own "open with"
 //! dialog. Shelling out to `cmd /c start` would work too and brings
@@ -31,7 +32,12 @@ pub fn open_with_default(path: &Path) -> io::Result<()> {
         // application, which may sit open for hours. `spawn` and forget.
         no_window("explorer.exe").arg(path).spawn().map(|_| ())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // `./`: a relative name that starts with `-` isn't an option.
+        launch(Command::new("/usr/bin/open").arg(not_an_option(path)))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Command::new("xdg-open").arg(path).spawn().map(|_| ())
     }
@@ -55,7 +61,11 @@ pub fn reveal(path: &Path) -> io::Result<()> {
         // Explorer opens the *parent* and selects nothing.
         no_window("explorer.exe").arg(format!("/select,{}", path.display())).spawn().map(|_| ())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        launch(Command::new("/usr/bin/open").arg("-R").arg(not_an_option(path)))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         // No universal equivalent, so open the containing directory --
         // less than asked for, but more useful than an error.
@@ -78,10 +88,31 @@ pub fn open_url(url: &str) -> io::Result<()> {
     {
         no_window("explorer.exe").arg(url.trim()).spawn().map(|_| ())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        launch(Command::new("/usr/bin/open").arg(url.trim()))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Command::new("xdg-open").arg(url.trim()).spawn().map(|_| ())
     }
+}
+
+/// `path` as an argument `open` can't read as one of its options.
+#[cfg(target_os = "macos")]
+fn not_an_option(path: &Path) -> std::path::PathBuf {
+    if path.is_absolute() { path.to_path_buf() } else { Path::new(".").join(path) }
+}
+
+/// Starts `command`, which hands over to another application and ends at
+/// once, and waits for it on a thread of its own so it isn't left a zombie.
+#[cfg(target_os = "macos")]
+fn launch(command: &mut Command) -> io::Result<()> {
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[cfg(windows)]

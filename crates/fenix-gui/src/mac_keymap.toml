@@ -1,0 +1,117 @@
+# A Mac's keys, laid over default_keymap.toml's on macOS: Command (`s-`).
+# With standard keys every Ctrl chord works with Command too
+# (`ChordMap::add_command_keys`); these are the ones for Vim keys as well,
+# and those a Mac does differently.
+
+[[keys]]
+keys = "s-s"
+command = "file.save"
+
+[[keys]]
+keys = "s-z"
+command = "edit.undo"
+
+[[keys]]
+keys = "s-S-z"
+command = "edit.redo"
+
+[[keys]]
+keys = "s-c"
+command = "edit.copy"
+when = "text"
+
+[[keys]]
+keys = "s-x"
+command = "edit.cut"
+when = "text"
+
+[[keys]]
+keys = "s-v"
+command = "edit.paste"
+when = "text"
+
+[[keys]]
+keys = "s-a"
+command = "edit.select_all"
+when = "text"
+
+[[keys]]
+keys = "s-f"
+command = "search.file"
+
+[[keys]]
+keys = "s-M-f"
+command = "search.replace_buffer"
+
+[[keys]]
+keys = "s-S-f"
+command = "search.project"
+
+[[keys]]
+keys = "s-p"
+command = "project.find_file"
+when = "terminal"
+
+[[keys]]
+keys = "s-S-p"
+command = "commands.palette"
+when = "terminal"
+
+[[keys]]
+keys = "s-o"
+command = "file.find"
+
+[[keys]]
+keys = "s-n"
+command = "buffer.scratch"
+
+[[keys]]
+keys = "s-S-n"
+command = "frame.new"
+when = "terminal"
+
+[[keys]]
+keys = "s-w"
+command = "tab.close"
+
+[[keys]]
+keys = "s-S-w"
+command = "frame.close"
+
+[[keys]]
+keys = "s-S-t"
+command = "tab.reopen"
+
+[[keys]]
+keys = "s-,"
+command = "settings.open"
+when = "terminal"
+
+[[keys]]
+keys = "s-q"
+command = "app.quit"
+when = "terminal"
+
+[[keys]]
+keys = "s-="
+command = "view.increase_font_size"
+
+[[keys]]
+keys = "s-+"
+command = "view.increase_font_size"
+
+[[keys]]
+keys = "s--"
+command = "view.decrease_font_size"
+
+[[keys]]
+keys = "s-0"
+command = "view.reset_font_size"
+
+[[keys]]
+keys = "s-{"
+command = "tab.prev"
+
+[[keys]]
+keys = "s-}"
+command = "tab.next"

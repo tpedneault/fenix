@@ -177,7 +177,14 @@ pub(super) fn same_file(a: &Path, b: &Path) -> bool {
         let s = fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('\\', "/");
         if cfg!(windows) { s.to_lowercase() } else { s }
     };
-    norm(a) == norm(b)
+    if norm(a) == norm(b) {
+        return true;
+    }
+    // `/tmp` is a link on a Mac, and an adapter follows it or doesn't. The
+    // disk is asked only about files of one name.
+    cfg!(target_os = "macos")
+        && matches!((a.file_name(), b.file_name()), (Some(x), Some(y)) if x.eq_ignore_ascii_case(y))
+        && fenix_core::path_key(a) == fenix_core::path_key(b)
 }
 
 /// The values to write at the ends of lines, for a frame stopped at

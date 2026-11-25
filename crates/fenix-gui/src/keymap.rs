@@ -93,7 +93,7 @@ pub fn text_keypresses(text: &str) -> Vec<KeyPress> {
 pub fn keypress_with(code: KeyCode, mods: ModifiersState) -> KeyPress {
     let (ctrl, alt) = (mods.control_key(), mods.alt_key());
     let printable = matches!(code, KeyCode::Char(_));
-    let shift = mods.shift_key() && (!printable || ctrl || alt);
+    let shift = mods.shift_key() && (!printable || ctrl || alt || mods.super_key());
     KeyPress { code, mods: Mods { ctrl, alt, super_: mods.super_key(), shift } }
 }
 
@@ -118,7 +118,7 @@ pub fn function_key_number(named: &NamedKey) -> Option<u8> {
 
 /// A short human-readable label for a keypress, for the which-key popup
 /// (`SPC` rather than a literal space, `C-r` for Ctrl-r, `Esc` for Escape,
-/// `S-Down` for Shift-Down, `s-` for Super).
+/// `S-Down` for Shift-Down, `s-` for Super -- `⌘` on a Mac, where it's Command).
 pub fn describe_keypress(kp: &KeyPress) -> String {
     let mut s = String::new();
     if kp.mods.ctrl {
@@ -128,7 +128,7 @@ pub fn describe_keypress(kp: &KeyPress) -> String {
         s.push_str("M-");
     }
     if kp.mods.super_ {
-        s.push_str("s-");
+        s.push_str(if MAC { "⌘" } else { "s-" });
     }
     if kp.mods.shift {
         s.push_str("S-");
@@ -362,6 +362,9 @@ pub fn reload_leader() -> Vec<String> {
     let mut locals = Vec::new();
     let mut chords = ChordMap::new();
     lay_chords(&mut chords, default_keymap(), None, &known, ChordSource::Fenix, &mut Vec::new());
+    if MAC {
+        lay_chords(&mut chords, mac_keymap(), None, &known, ChordSource::Fenix, &mut Vec::new());
+    }
     for path in extension_keymaps() {
         match read_user_keymap(&path) {
             Ok(Some(keys)) => {
@@ -376,6 +379,9 @@ pub fn reload_leader() -> Vec<String> {
             Ok(None) => {}
             Err(problem) => problems.push(format!("{}: {problem}", path.display())),
         }
+    }
+    if MAC {
+        chords.add_command_keys();
     }
     let bound = match user_keymap_path() {
         Some(path) => match read_user_keymap(&path) {
@@ -687,6 +693,18 @@ struct KeyEntry {
     unbind: bool,
 }
 
+/// Whether Fenix's keys are a Mac's: Command does what Ctrl does on other
+/// systems. Not in tests, which press the keys every system has.
+pub const MAC: bool = cfg!(target_os = "macos") && !cfg!(test);
+
+/// What a Mac adds to Fenix's own keys: `mac_keymap.toml`.
+const MAC_KEYMAP: &str = include_str!("mac_keymap.toml");
+
+fn mac_keymap() -> &'static KeymapData {
+    static DATA: OnceLock<KeymapData> = OnceLock::new();
+    DATA.get_or_init(|| toml::from_str(MAC_KEYMAP).unwrap_or_else(|e| panic!("the Mac's keymap doesn't parse: {e}")))
+}
+
 fn default_keymap() -> &'static KeymapData {
     static DATA: OnceLock<KeymapData> = OnceLock::new();
     DATA.get_or_init(|| toml::from_str(DEFAULT_KEYMAP).unwrap_or_else(|e| panic!("the built-in keymap doesn't parse: {e}")))
@@ -709,6 +727,10 @@ pub(crate) fn parse_keys(text: &str) -> Result<Vec<KeyPress>, String> {
 pub(crate) fn parse_key(token: &str) -> Option<KeyPress> {
     let mut mods = Mods::default();
     let mut rest = token;
+    while let Some(after) = rest.strip_prefix('⌘').filter(|r| !r.is_empty()) {
+        mods.super_ = true;
+        rest = after;
+    }
     while let (Some(prefix), true) = (rest.get(..2), rest.chars().count() > 2) {
         match prefix {
             "C-" => mods.ctrl = true,
@@ -729,7 +751,7 @@ pub(crate) fn parse_key(token: &str) -> Option<KeyPress> {
     let mut key = KeyPress { code, mods };
     // A plain printable character carries its Shift in its case.
     if let KeyCode::Char(c) = key.code {
-        if key.mods.shift && !key.mods.ctrl && !key.mods.alt {
+        if key.mods.shift && !key.mods.ctrl && !key.mods.alt && !key.mods.super_ {
             key.code = KeyCode::Char(c.to_uppercase().next().unwrap_or(c));
             key.mods.shift = false;
         }
@@ -823,7 +845,8 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
 /// keys, `SPC` written as `leader` (`C-k` with standard keys).
 pub fn key_for(command: &str, scheme: Scheme, leader: &str) -> Option<String> {
     let mut chords: Vec<String> = chord_map().in_use(scheme).into_iter().filter(|c| c.command == Some(command)).map(|c| describe_keypress(&c.key)).collect();
-    chords.sort_by_key(|k| (k.len(), k.clone()));
+    // A Mac's own spelling of a key first.
+    chords.sort_by_key(|k| (MAC && !k.contains('⌘'), k.chars().count(), k.clone()));
     if let Some(chord) = chords.into_iter().next() {
         return Some(chord);
     }

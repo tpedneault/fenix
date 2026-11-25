@@ -191,6 +191,9 @@ settings and keys as they are; `R` replaces those too, when you ask it
 to. Settings go into `settings.toml`, keys into `keybindings.toml` (each
 with a `# from …` comment), and both are in use at once.
 
+On macOS, VS Code's are in `~/Library/Application Support/<name>/User`,
+and Vim's and Neovim's where Linux has them.
+
 **Where it looks**
 
 | Editor | Windows | Linux |

@@ -24,6 +24,10 @@ with the reason -- and a change applies at once and is saved at once.
 | Extensions you've installed, and `extensions.toml` | `%LocalAppData%\fenix\extensions` | `~/.local/state/fenix/extensions` |
 | Extensions an administrator installed for everyone, and `policy.toml` | `%ProgramData%\Fenix\extensions` | `/etc/fenix/extensions` |
 
+On macOS all of these are in `~/Library/Application Support/fenix`
+(state in its `state` folder), and an administrator's extensions in
+`/Library/Application Support/Fenix/extensions`.
+
 What you chose roams with your Windows profile; what Fenix noticed about
 this machine, and what it downloaded, doesn't. Since the agenda roams,
 another machine can change `agenda.json` while Fenix is open here: Fenix
@@ -544,6 +548,7 @@ when it's out of date).
 | `editor.keys` | vim / standard | vim | How you edit. Vim: Vim's modes and keys, and SPC for everything else. Standard: the keys of a traditional IDE -- typing at once, Shift+arrows to select, Ctrl+C/X/V, Alt+click for more cursors -- and Ctrl+K for the leader's menu. SPC t k switches. |
 | `keys.leader_chord` | text | C-k | With standard keys: the chord that opens the leader's menu, as SPC does with Vim keys (C-k, C-;, F1...). |
 | `keys.leader_hint` | true / false | on | With standard keys: the modeline says which chord opens the leader's menu, until you've used it a few times. |
+| `keys.option_as_alt` | left / right / both / none | left | On a Mac: which Option keys are Alt, for keys like Alt+x; one that isn't types the characters your keyboard layout has on it (@, {, é). |
 | `editor.multi_cursor_modifier` | alt / ctrl | alt | With standard keys: the key held while clicking to add a cursor. Ctrl, for desktops that move windows with Alt+drag; go to definition then moves to Alt+click. |
 | `editor.undo_pause_ms` | 0–10000 | 1000 | With standard keys: a pause this long, in milliseconds, between keys you type starts a new undo step; 0 never does. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |

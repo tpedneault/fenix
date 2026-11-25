@@ -2088,8 +2088,11 @@ fn a_run_fenix_closed_on_is_picked_up_where_it_stopped() {
     assert!(run.run.is_live() && run.tag.ended.is_none());
     assert!(f.app.agents.hub.view(&plan).unwrap().meta.run.as_ref().is_some_and(|t| t.ended.is_none()), "running again, not ended");
     f.app.pipeline_go();
-    assert!(f.pump(|app| app.pipelines.runs.values().any(|r| r.threads.len() == 2)), "SPC a g at the gate is y");
-    let build = f.app.pipelines.runs.values().next().unwrap().threads[1].clone();
+    // Its last step's thread; on a quick machine the run is over, and
+    // moved to `ended`, before it's looked for.
+    let steps = |app: &App| app.pipelines.runs.values().map(|r| r.threads.clone()).chain(app.pipelines.ended.iter().cloned()).find(|t| t.len() == 2);
+    assert!(f.pump(|app| steps(app).is_some()), "SPC a g at the gate is y");
+    let build = steps(&f.app).unwrap()[1].clone();
     let asked = |app: &App| app.agents.hub.view(&build).is_some_and(|v| v.thread.transcript().contains(&format!("Build: {passing}")));
     assert!(f.pump(asked), "build has the plan: {:?}", f.app.agents.hub.view(&build).map(|v| v.thread.transcript()));
 }

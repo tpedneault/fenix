@@ -78,6 +78,12 @@ winit = "0.30.13"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+# The application delegate's methods winit leaves out (`mac`); already in
+# the tree.
+objc2 = "0.6"
+
 [build-dependencies]
 winresource = "0.1"
 fenix-brand = { path = "../fenix-brand", features = ["ico"] }

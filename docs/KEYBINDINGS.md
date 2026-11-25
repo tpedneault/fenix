@@ -548,6 +548,25 @@ keys'; the palette has the commands).
 | `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
 
+## On a Mac
+
+| Keys | Does |
+|---|---|
+| `Cmd+S` `Cmd+Z` `Cmd+Shift+Z` `Cmd+C` `Cmd+X` `Cmd+V` `Cmd+A` | Save, undo, redo, copy, cut, paste, select all -- with either key scheme; copy and paste in a terminal too |
+| `Cmd+F` `Cmd+Option+F` `Cmd+Shift+F` | Search the file, replace in it, search the project |
+| `Cmd+P` `Cmd+Shift+P` `Cmd+O` `Cmd+N` `Cmd+Shift+N` | Find a project file, the palette, open by path, a scratch buffer, a window |
+| `Cmd+W` `Cmd+Shift+T` `Cmd+{` `Cmd+}` `Cmd+Shift+W` | Close the tab, reopen it, the tab before and after, close the window |
+| `Cmd+,` `Cmd+=` `Cmd+-` `Cmd+0` `Cmd+M` `Ctrl+Cmd+F` `Cmd+Q` | Settings, text size, minimise, full screen, quit |
+| `Cmd+←` `Cmd+→` `Cmd+↑` `Cmd+↓` | Line start and end, file start and end |
+| Ctrl-click | A right click |
+
+With standard keys, every `Ctrl` key works with `Cmd` too (but `Cmd+H`,
+which hides Fenix, and `Cmd+Tab`). In `keybindings.toml` Command is `s-`
+(`s-S-p`) or `⌘`. Vim's own `Ctrl` keys stay on `Ctrl`.
+
+The left Option is Alt (`M-x`); the right types what your keyboard has on
+it. `keys.option_as_alt` (`left`, `right`, `both`, `none`) changes that.
+
 ## The arrow keys
 
 The arrow keys are `h`, `j`, `k` and `l` wherever a motion is taken: with a

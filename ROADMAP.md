@@ -40,9 +40,9 @@ not started. When something ships it moves to the
 
 ## Next
 
-- **macOS builds.** The code already has macOS paths in places (the
-  keychain, notifications, sound), but nothing builds, tests or packages
-  for it. CI on a macOS runner first, then a signed, notarised `.dmg`.
+- **A notarised macOS build.** Fenix builds, tests and packages for
+  macOS; its `.dmg` is signed ad hoc, so macOS asks before it first runs.
+  It needs a Developer ID and a notarisation step.
 - **One key to install a language server.** Today Fenix finds the
   servers on your `PATH` and the doctor says what's missing; a missing
   server should be installable from where it's reported.
@@ -69,7 +69,7 @@ not started. When something ships it moves to the
 
 - **More install channels**: winget (a manifest is in
   [packaging/winget](packaging/winget/) and waiting for review),
-  Homebrew once macOS builds, the AUR, Flatpak, and ARM64 Linux.
+  Homebrew, the AUR, Flatpak, and ARM64 Linux.
 - **Screen-reader support** across the editor and its pages, beyond the
   first step above.
 - **The smaller open issues**: the tab strip scrolling to the active tab

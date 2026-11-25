@@ -17,6 +17,17 @@ cargo run -p fenix-gui              # opens Home
 cargo run -p fenix-gui -- path/to/file
 ```
 
+On macOS the Command Line Tools (`xcode-select --install`) are all else
+it needs. `packaging/macos/build-app.sh` makes `Fenix.app` and a disk
+image from a build:
+
+```bash
+packaging/macos/build-app.sh 0.0.0 target/release dist Fenix
+```
+
+Launched from Finder or the Dock, Fenix asks your login shell for its
+environment as it starts, so tools on your shell's `PATH` are found.
+
 ## Optional external tools
 
 Some features shell out to standard tools if they're present on `PATH`,
@@ -92,5 +103,5 @@ Started from a terminal, Fenix prints into that terminal. Note that
 PowerShell and `cmd` don't wait for a windowed program, so their prompt
 comes back straight away and the output arrives underneath it. Started
 from a shortcut or Explorer, Fenix opens a console window of its own;
-closing that window closes Fenix too. On Linux, starting Fenix from a
+closing that window closes Fenix too. On Linux and macOS, starting Fenix from a
 terminal is enough, and the flag does nothing.

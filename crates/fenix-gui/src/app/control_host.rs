@@ -372,6 +372,23 @@ impl App {
         }
     }
 
+    /// Files and folders the system opened with Fenix: each file in a tab,
+    /// a folder as the project.
+    pub(super) fn open_asked(&mut self, paths: Vec<std::path::PathBuf>) {
+        for path in paths {
+            let text = path.to_string_lossy().into_owned();
+            let call = if path.is_dir() {
+                Call::OpenProject(fenix_control::protocol::OpenProjectParams { root: text })
+            } else {
+                Call::Open(fenix_control::OpenParams { paths: vec![fenix_control::OpenPath { path: text, line: None, column: None }], new_window: false, focus: true })
+            };
+            if let Err(e) = self.apply_control(call) {
+                self.set_error(e.message);
+            }
+        }
+        self.raise_window();
+    }
+
     /// The command line, when this launch is the editor: the project,
     /// then the files after the first (`App::new` opened that one),
     /// each at its position. With files to show, the project's file

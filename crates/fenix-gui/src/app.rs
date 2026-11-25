@@ -49,6 +49,7 @@ mod panels;
 mod palette;
 mod terminal_view;
 mod terminal_mouse;
+mod mac_keys;
 mod terminal_keys;
 pub(crate) use debug_host::{debug_dock_height, DOCK_TEXT_X, DOCK_TEXT_Y};
 pub(crate) use terminal_view::{BOLD as TERM_BOLD, ITALIC as TERM_ITALIC};
@@ -1934,6 +1935,13 @@ pub enum FenixUserEvent {
     /// The main window's accessibility adapter: the tree asked for, an
     /// action, the assistive technology gone (`a11y_host`).
     Accessibility(accesskit_winit::Event),
+    /// The system asked Fenix to quit (macOS: the menu, the Dock, a
+    /// log-out) with unsaved work.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    QuitAsked,
+    /// Files the system opened with Fenix (macOS: Finder, the Dock).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    OpenAsked(Vec<PathBuf>),
     /// The machine was asleep this long (`watchdog`). Winit doesn't say.
     Woke(Duration),
     /// One decoded event from a language server's connection (a
@@ -2399,6 +2407,8 @@ impl FenixUserEvent {
     fn label(&self) -> &'static str {
         match self {
             Self::Accessibility(_) => "Accessibility",
+            Self::QuitAsked => "QuitAsked",
+            Self::OpenAsked(_) => "OpenAsked",
             Self::Woke(_) => "Woke",
             Self::Lsp { .. } => "Lsp",
             Self::LspStarted(_) => "LspStarted",
@@ -5845,6 +5855,11 @@ pub struct App {
 
 
     modifiers: ModifiersState,
+    /// The Option held is for its characters, not Alt (`mac_keys`).
+    option_composes: bool,
+    /// The windows set up for a Mac's typing so far.
+    #[cfg(target_os = "macos")]
+    mac_windows: Vec<WindowId>,
     /// Whether the caret is fading toward visible or toward hidden --
     /// the *target* of the current transition, not necessarily what's on
     /// screen right now (see `caret_alpha`).
@@ -6594,6 +6609,9 @@ impl App {
             compose_drafts_file: if cfg!(test) { isolated_test_path("compose-drafts.json") } else { fenix_storage::paths::state_file("compose-drafts.json").unwrap_or_else(|| PathBuf::from("compose-drafts.json")) },
             snippets_project: None,
             modifiers: ModifiersState::empty(),
+            option_composes: false,
+            #[cfg(target_os = "macos")]
+            mac_windows: Vec::new(),
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
@@ -16744,6 +16762,11 @@ impl App {
     fn handle_drawn_user_event(&mut self, event: FenixUserEvent) {
         match event {
             FenixUserEvent::Accessibility(event) => self.a11y_event(event),
+            FenixUserEvent::QuitAsked => {
+                self.arm_quit_confirm_if_dirty();
+                self.raise_window();
+            }
+            FenixUserEvent::OpenAsked(paths) => self.open_asked(paths),
             FenixUserEvent::Woke(slept) => self.machine_woke(slept, Instant::now()),
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
             FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
@@ -16815,7 +16838,7 @@ impl App {
         if self.wasm.captured.is_some() {
             let caps = event.logical_key == Key::Named(NamedKey::CapsLock);
             let down = event.state == ElementState::Pressed;
-            let keypress = if caps { None } else { keymap::to_keypress(event, self.modifiers) };
+            let keypress = if caps { None } else { keymap::to_keypress(event, self.key_modifiers()) };
             if self.code_surface_captured_key(keypress, caps, down) {
                 return;
             }
@@ -16833,12 +16856,12 @@ impl App {
             }
             // An F-key a `[[keys]]` entry binds (yours, or a keymap
             // flavour's) goes to it; the rest are the debugger's.
-            let bound = keymap::to_keypress(event, self.modifiers).is_some_and(|k| self.chord_takes_function_key(k));
+            let bound = keymap::to_keypress(event, self.key_modifiers()).is_some_and(|k| self.chord_takes_function_key(k));
             if !bound && self.debug_function_key(named) {
                 return;
             }
         }
-        let keypresses = keymap::to_keypresses(&event.logical_key, event.physical_key, event.text.as_deref(), self.modifiers);
+        let keypresses = keymap::to_keypresses(&event.logical_key, event.physical_key, event.text.as_deref(), self.key_modifiers());
         self.dispatch_keypresses(keypresses, Some(event_loop));
     }
 
@@ -16968,6 +16991,8 @@ impl App {
         // Standard keys in a listing: F2 renames and Delete deletes, as
         // its `R` and `D` do.
         let keypress = self.standard_explorer_alias(keypress).unwrap_or(keypress);
+        // A Mac's Command keys.
+        let Some(keypress) = self.mac_key(keypress, event_loop) else { return };
         let full = keypress;
         let keypress = keypress.legacy();
         // A feature's informational menu (the Docker panel's `x`) is not a
@@ -23252,6 +23277,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
     /// part so it's directly testable" reasoning `handle_key`/
     /// `test_vim_key` already established for keyboard input).
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: FenixUserEvent) {
+        // Saved since the system was told there's something to lose: a
+        // quit asked for then is simply done.
+        if matches!(event, FenixUserEvent::QuitAsked) {
+            self.request_quit(_event_loop);
+        }
         // Timed with FENIX_PROFILE, and named in the hang log while it runs.
         let _busy = crate::profile::Scope::new(event.label());
         self.handle_user_event(event);
@@ -23362,6 +23392,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                self.note_option_keys(&modifiers);
                 // Ctrl let go with the recent-buffer switcher up: its row.
                 if !self.modifiers.control_key() {
                     self.recent_switch_released();
@@ -23411,6 +23442,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                // A Mac's Ctrl-click is its right click.
+                let button = if keymap::MAC && button == MouseButton::Left && state == ElementState::Pressed && self.modifiers.control_key() { MouseButton::Right } else { button };
                 if state == ElementState::Pressed { self.snippet = None; }
                 let size = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32));
                 // The right click's menu takes the click on it; one off it
@@ -23543,6 +23576,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
             self.open_positions(&files, focus);
             opened = true;
         }
+        #[cfg(target_os = "macos")]
+        self.sync_mac_windows();
         let plan = self.plan_wake(Instant::now());
         if plan.redraw || opened {
             for frame in 0..self.frames.len() {
@@ -26131,6 +26166,8 @@ configure_board stm32
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!("fenix-gui-test-{name}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
+            // A Mac's temporary folder is reached by a link (`/var`).
+            let dir = fenix_lsp::normalize(dir.canonicalize().unwrap());
             Self(dir)
         }
         fn path(&self) -> &Path {
