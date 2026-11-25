@@ -102,6 +102,50 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  macos:
+    name: macOS workspace (${{ matrix.gates }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: macos-15
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        gates: [Tests, Lint]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust stable with Clippy
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup override set stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.gates }}
+          save-if: ${{ github.event_name == 'push' }}
+      - name: ${{ matrix.gates == 'Tests' && 'Test' || 'Lint and build' }}
+        run: ./scripts/ci.ps1 -Suite Workspace -Gates ${{ matrix.gates }}
+      - name: Fenix.app
+        # Made as a release makes it, less what's downloaded for one.
+        if: matrix.gates == 'Lint'
+        shell: bash
+        run: |
+          packaging/macos/build-app.sh 0.0.0 target/debug dist Fenix
+          dist/Fenix.app/Contents/MacOS/fenix --version
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: macos-ci-logs-${{ matrix.gates }}
+          path: target/ci/
+          if-no-files-found: warn
+          retention-days: 14
+
   linux-reliability:
     name: Linux reliability
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository

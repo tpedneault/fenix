@@ -3,11 +3,12 @@ name: Build
 # Fenix's release files, for the release workflow (release.yml) and the
 # nightly (nightly.yml), so the two build alike: for Windows a zip and an
 # installer (packaging/windows/fenix.iss), for Linux an archive, a .deb
-# and an .rpm (packaging/linux), each with a .sha256. Not run on its own.
+# and an .rpm (packaging/linux), for macOS an archive and a disk image
+# (packaging/macos) for each kind of Mac, each with a .sha256. Not run on its own.
 #
 # A release uploads them to its draft as they're built (`release`). The
 # nightly keeps them as this run's artifacts (`release` empty), for its
-# publish job to put on the rolling `nightly` release once both builds
+# publish job to put on the rolling `nightly` release once all the builds
 # are done.
 
 on:
@@ -81,6 +82,25 @@ jobs:
             companion: fenix-pdfium
             pdfium: linux
             pdfium_library: libpdfium.so
+          - name: macOS Apple silicon
+            os: macos-15
+            target: aarch64-apple-darwin
+            exe: fenix
+            companion: fenix-pdfium
+            pdfium: mac-arm64
+            pdfium_library: libpdfium.dylib
+          - name: macOS Intel
+            # Built on Apple silicon: the runner has both targets' SDK, and
+            # Rosetta to ask the binary its version.
+            os: macos-15
+            target: x86_64-apple-darwin
+            exe: fenix
+            companion: fenix-pdfium
+            pdfium: mac-x64
+            pdfium_library: libpdfium.dylib
+    env:
+      # The oldest macOS the binaries run on; only a Mac's build reads it.
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     defaults:
       run:
         shell: bash
@@ -137,7 +157,7 @@ jobs:
             tar -czf "$name.tar.gz" "$name"
             archive="$name.tar.gz"
           fi
-          sha256sum "$archive" > "$archive.sha256"
+          if [ "$RUNNER_OS" = "macOS" ]; then shasum -a 256 "$archive" > "$archive.sha256"; else sha256sum "$archive" > "$archive.sha256"; fi
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
           echo "UNPACKED=$name" >> "$GITHUB_ENV"
       # The installer, beside the zip: packaging/windows/fenix.iss, with
@@ -170,17 +190,27 @@ jobs:
         run: |
           packaging/linux/build-packages.sh "$VERSION" "$UNPACKED" dist $PACKAGES_NAME
           echo "PACKAGES=$(ls dist/*.deb dist/*.rpm dist/*.sha256 | tr '\n' ' ')" >> "$GITHUB_ENV"
+      # Fenix.app in a disk image, beside the archive: packaging/macos.
+      # Signed ad hoc: there's no Developer ID to sign with yet.
+      - name: macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          image="$NAME-${{ matrix.target }}"
+          packaging/macos/build-app.sh "$VERSION" "target/${{ matrix.target }}/release" dist "$image"
+          mv "dist/$image.dmg" .
+          shasum -a 256 "$image.dmg" > "$image.dmg.sha256"
+          echo "DMG=$image.dmg" >> "$GITHUB_ENV"
       - name: Upload to the draft
         if: inputs.release != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$RELEASE" "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} $PACKAGES --clobber
+        run: gh release upload "$RELEASE" "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} ${DMG:+"$DMG" "$DMG.sha256"} $PACKAGES --clobber
       - name: Gather the files
         if: inputs.release == ''
         run: |
           mkdir out
-          cp "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} $PACKAGES out/
+          cp "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} ${DMG:+"$DMG" "$DMG.sha256"} $PACKAGES out/
           ls -l out
       - name: Keep them for publishing
         if: inputs.release == ''

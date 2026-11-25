@@ -44,9 +44,11 @@ mod unix {
 
     pub fn start(mut command: Command, size: Size) -> io::Result<Started> {
         let (mut master, mut slave) = (0, 0);
-        let size = winsize(size);
+        let mut size = winsize(size);
         // SAFETY: two out-parameters and a size; no name or termios asked.
-        check(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size) })?;
+        // The pointers are raw so each system's own signature fits: macOS
+        // takes the termios and the size as `*mut`, Linux as `*const`.
+        check(unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &raw mut size) })?;
         // SAFETY: both were just opened, and are owned here alone.
         let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         // The program gets the slave end only; the master isn't left open

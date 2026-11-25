@@ -93,13 +93,13 @@ impl KeyPress {
     }
 
     /// The form chords are bound and looked up in: a letter pressed with
-    /// Ctrl or Alt is lower case, its Shift in `mods` (`C-S-p`, however the
+    /// Ctrl, Alt or Super is lower case, its Shift in `mods` (`C-S-p`, however the
     /// platform reported the letter). Any other character carries its
     /// Shift itself (`C-+`, `C-?`), so it has none.
     #[must_use]
     pub fn chord(mut self) -> Self {
         if let KeyCode::Char(c) = self.code {
-            if (self.mods.ctrl || self.mods.alt) && c.is_alphabetic() {
+            if (self.mods.ctrl || self.mods.alt || self.mods.super_) && c.is_alphabetic() {
                 if c.is_uppercase() {
                     self.mods.shift = true;
                 }

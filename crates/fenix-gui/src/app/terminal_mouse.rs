@@ -153,7 +153,7 @@ impl App {
     /// terminal, is underlined and the pointer a hand -- what a click
     /// would follow. True when there's one.
     pub(super) fn terminal_hover(&mut self, pos: Option<(f32, f32)>) -> bool {
-        let found = pos.filter(|_| self.modifiers.control_key()).and_then(|pos| {
+        let found = pos.filter(|_| self.ctrl_or_command()).and_then(|pos| {
             let (target, (row, col)) = self.terminal_cell_at(pos)?;
             let text = self.term_session(target)?.row_text(row);
             let (_, a, b) = link_span_in(&text, col as usize)?;
@@ -180,7 +180,7 @@ impl App {
             self.term_select = None;
             return false;
         };
-        if self.modifiers.control_key() {
+        if self.ctrl_or_command() {
             let row = self.term_session(target).map(|s| s.row_text(cell.0)).unwrap_or_default();
             if let Some(link) = link_in(&row, cell.1 as usize) {
                 self.terminal_follow(target, link);
@@ -242,7 +242,10 @@ impl App {
     /// `Ctrl-Shift-C` and `Ctrl-Shift-V` in a terminal that has the
     /// keyboard: copy and paste. True when `key` was one of them.
     pub(super) fn terminal_clipboard_key(&mut self, target: TermTarget, key: KeyPress) -> bool {
-        if !(key.mods.ctrl && self.modifiers.shift_key()) {
+        // A Mac's own: Command-C and Command-V. Nothing else with Command
+        // is the program's.
+        let command = crate::keymap::MAC && key.mods.super_ && !key.mods.ctrl;
+        if !command && !(key.mods.ctrl && self.modifiers.shift_key()) {
             return false;
         }
         match key.code {
@@ -256,7 +259,7 @@ impl App {
                 self.terminal_paste(target);
                 true
             }
-            _ => false,
+            _ => command,
         }
     }
 

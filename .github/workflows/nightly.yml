@@ -145,7 +145,8 @@ jobs:
           ls -l
           sha256sum -c ./*.sha256
           for f in fenix-nightly-x86_64-pc-windows-msvc.zip fenix-nightly-x86_64-pc-windows-msvc-setup.exe \
-                   fenix-nightly-x86_64-unknown-linux-gnu.tar.gz fenix-nightly_amd64.deb fenix-nightly.x86_64.rpm; do
+                   fenix-nightly-x86_64-unknown-linux-gnu.tar.gz fenix-nightly_amd64.deb fenix-nightly.x86_64.rpm \
+                   fenix-nightly-aarch64-apple-darwin.dmg fenix-nightly-x86_64-apple-darwin.dmg; do
             test -f "$f" && test -f "$f.sha256" || { echo "::error::no $f"; exit 1; }
           done
       - name: The notes

@@ -426,6 +426,9 @@ impl BufferList {
     pub fn path_changed(&mut self, id: BufferId, old_path: Option<&Path>) {
         if let Some(old) = old_path {
             self.path_index.remove(&path_key(old));
+            // A renamed file's old key may not be the one it was put under:
+            // on a Mac that's the disk's spelling, and it's gone from there.
+            self.path_index.retain(|_, other| *other != id);
         }
         if let Some(new_path) = self.buffers.get(&id).and_then(|ob| ob.buffer.path()) {
             self.path_index.insert(path_key(new_path), id);
@@ -446,8 +449,9 @@ impl BufferList {
     /// to the caller (which knows about panes; this registry doesn't).
     pub fn close(&mut self, id: BufferId) {
         if let Some(open) = self.buffers.remove(&id) {
-            if let Some(path) = open.buffer.path() {
-                self.path_index.remove(&path_key(path));
+            if open.buffer.path().is_some() {
+                // By the buffer, not the path: see `path_changed`.
+                self.path_index.retain(|_, other| *other != id);
             }
         }
         self.mru.retain(|&x| x != id);

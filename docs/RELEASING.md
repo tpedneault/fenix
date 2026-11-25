@@ -61,6 +61,8 @@ working:
 | Linux archive | `fenix-nightly-x86_64-unknown-linux-gnu.tar.gz` |
 | Debian, Ubuntu | `fenix-nightly_amd64.deb` |
 | Fedora, openSUSE | `fenix-nightly.x86_64.rpm` |
+| macOS, Apple silicon | `fenix-nightly-aarch64-apple-darwin.dmg` |
+| macOS, Intel | `fenix-nightly-x86_64-apple-darwin.dmg` |
 
 Each has a `.sha256` beside it. `fenix --version` says which nightly
 you're running and the commit it was built from:

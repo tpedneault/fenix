@@ -119,6 +119,13 @@ impl Terminal {
         if let Some(cwd) = &start_dir {
             command.cwd(cwd);
         }
+        // What the emulator speaks. Launched from Finder Fenix has no TERM
+        // to hand on, and launched from a terminal it has that one's.
+        #[cfg(target_os = "macos")]
+        {
+            command.env("TERM", "xterm-256color");
+            command.env("COLORTERM", "truecolor");
+        }
         let child = pair.slave.spawn_command(command).map_err(|err| std::io::Error::other(err.to_string()))?;
         // The slave end is only needed to spawn the child -- dropping it
         // here (rather than holding it in `Terminal`) matches portable-
@@ -332,7 +339,15 @@ pub fn default_shell() -> (String, Vec<String>) {
         let args = shell_args(&program, vec!["-NoLogo".to_string()]);
         (program, args)
     }
-    #[cfg(not(windows))]
+    // macOS's terminals start login shells, and what people put on their
+    // PATH is written for that (`.zprofile`, `path_helper`).
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/bin/zsh".to_string());
+        let login = ["zsh", "bash", "fish", "sh", "ksh", "tcsh", "csh"].contains(&program_name(&shell).as_str());
+        (shell, if login { vec!["-l".to_string()] } else { Vec::new() })
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         (std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/bin/sh".to_string()), Vec::new())
     }

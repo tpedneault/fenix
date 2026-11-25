@@ -88,6 +88,12 @@ impl Launcher {
                     .with_maximized(first.maximized);
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::ActiveEventLoopExtMacOS;
+            // Windows are Fenix's frames, not the system's tabs.
+            event_loop.set_allows_automatic_window_tabbing(false);
+        }
         let window = Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
         crate::profile::launch_mark("window");
         // A screen reader's adapter has to be there before the window is

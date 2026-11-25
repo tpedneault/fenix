@@ -456,6 +456,7 @@ mod tests {
     fn a_folder_opened_from_outside_stays_the_project() {
         let dir = std::env::temp_dir().join(format!("fenix-crumb-outside-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let dir = fenix_lsp::normalize(dir.canonicalize().unwrap());
         let file = dir.join("notes.txt");
         std::fs::write(&file, "x
 ").unwrap();

@@ -83,7 +83,7 @@ pub(crate) struct Pipelines {
     /// What a gate passes on, by run, for `e` to edit.
     passing: HashMap<u64, String>,
     /// The steps of runs that ended, for `[s` / `]s` still.
-    ended: Vec<Vec<ThreadId>>,
+    pub(super) ended: Vec<Vec<ThreadId>>,
     /// Commands running, by run.
     commands: HashMap<u64, Command>,
 }

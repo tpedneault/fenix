@@ -60,6 +60,8 @@ mod processes;
 mod formatter;
 mod lsp;
 mod markdown;
+#[cfg(target_os = "macos")]
+mod mac;
 mod mcp;
 mod motion;
 mod mouse;
@@ -91,6 +93,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use app::FenixUserEvent;
 
 fn main() -> anyhow::Result<()> {
+    // The environment, before anything reads it or starts a thread.
+    #[cfg(target_os = "macos")]
+    mac::prepare();
     // Two runs that aren't Fenix the editor, and whose stdio is spoken
     // for, so they come before anything that prints or opens a window.
     // `ssh`, started by a Fenix connecting to a remote machine, runs this
@@ -220,6 +225,8 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<FenixUserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    #[cfg(target_os = "macos")]
+    mac::install(proxy.clone());
     // Winit doesn't say when the machine wakes; the watchdog notices.
     let waking = proxy.clone();
     watchdog::on_wake(move |slept| {

@@ -400,7 +400,7 @@ impl App {
         // Standard keys: Alt+click (or Ctrl+click) adds a cursor, Alt+Shift
         // starts a column of them, and the other one goes to a definition.
         if self.standard_keys() && clicks == 1 {
-            let ctrl = self.modifiers.control_key();
+            let ctrl = self.ctrl_or_command();
             let by_ctrl = self.config.text_value("editor.multi_cursor_modifier") == Some("ctrl");
             let (adds, defines) = if by_ctrl { (ctrl, alt) } else { (alt, ctrl) };
             let at = self.hit_char(&hit);

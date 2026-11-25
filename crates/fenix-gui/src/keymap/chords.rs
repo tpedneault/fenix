@@ -7,7 +7,7 @@
 //! extensions', yours -- and the last that fits wins; an `unbind` entry
 //! that fits takes the key away instead.
 
-use fenix_keymap::KeyPress;
+use fenix_keymap::{KeyCode, KeyPress, NamedKey};
 
 /// The key scheme an entry is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -133,6 +133,26 @@ impl ChordMap {
         self.entries.push(chord);
     }
 
+    /// A Mac's keys: each standard-keys chord with Ctrl also with Command
+    /// (`C-S-f`, `⌘S-f`), the extensions' too -- but where `mac_keymap.toml`
+    /// says something else, and those that are macOS's (Command-Tab,
+    /// Command-H, and Command-arrows, which move in text).
+    pub fn add_command_keys(&mut self) {
+        let mirrored: Vec<Chord> = self
+            .entries
+            .iter()
+            .filter(|c| c.key.mods.ctrl && !c.key.mods.super_ && c.scheme != Scheme::Vim && c.command.is_some())
+            .filter_map(|c| {
+                let mut key = c.key;
+                key.mods.ctrl = false;
+                key.mods.super_ = true;
+                let systems = matches!(key.code, KeyCode::Named(NamedKey::Tab | NamedKey::Left | NamedKey::Right | NamedKey::Up | NamedKey::Down)) || (key.code == KeyCode::Char('h') && !key.mods.shift);
+                (!systems && !self.entries.iter().any(|o| o.key == key && (o.scheme == c.scheme || o.scheme == Scheme::Any))).then(|| Chord { key, ..c.clone() })
+            })
+            .collect();
+        self.entries.extend(mirrored);
+    }
+
     /// The command `key` runs here, if any (in no `SPC m` context).
     pub fn lookup(&self, key: KeyPress, at: &ChordContext) -> Option<&'static str> {
         self.lookup_in(key, at, &[])
@@ -189,6 +209,28 @@ mod tests {
         assert_eq!(map.lookup_in(run, &at, &["http"]), Some("http.send"));
         assert_eq!(map.lookup_in(run, &at, &["tcl"]), None);
         assert_eq!(map.lookup(run, &at), None);
+    }
+
+    #[test]
+    fn command_does_what_ctrl_does_but_for_what_a_mac_has_already() {
+        let mut map = ChordMap::new();
+        let with_command = |c: char| {
+            let mut key = KeyPress::char(c);
+            key.mods.super_ = true;
+            key
+        };
+        map.push(chord(KeyPress::char('f').with_ctrl().with_shift(), Scheme::Standard, When::Anywhere, Some("search.project")));
+        map.push(chord(KeyPress::char('h').with_ctrl(), Scheme::Standard, When::Anywhere, Some("search.replace_buffer")));
+        map.push(chord(KeyPress::char('o').with_ctrl(), Scheme::Vim, When::Anywhere, Some("nav.jump_back")));
+        map.push(chord(KeyPress::char('y').with_ctrl(), Scheme::Any, When::Anywhere, Some("edit.redo")));
+        map.push(chord(with_command('y'), Scheme::Any, When::Anywhere, Some("mac.own")));
+        map.add_command_keys();
+        let at = ChordContext { scheme: Scheme::Standard, text: true, ..ChordContext::default() };
+        assert_eq!(map.lookup(with_command('f').with_shift(), &at), Some("search.project"));
+        assert_eq!(map.lookup(with_command('F'), &at), Some("search.project"), "however it's cased");
+        assert_eq!(map.lookup(with_command('h'), &at), None, "Hide");
+        assert_eq!(map.lookup(with_command('o'), &ChordContext { scheme: Scheme::Vim, ..at }), None, "Vim's Ctrl keys stay Ctrl's");
+        assert_eq!(map.lookup(with_command('y'), &at), Some("mac.own"));
     }
 
     #[test]

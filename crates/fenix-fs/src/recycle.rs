@@ -55,12 +55,27 @@ impl Outcome {
 pub fn to_recycle_bin(paths: &[PathBuf]) -> Vec<Outcome> {
     paths
         .iter()
-        .map(|path| match trash::delete(path) {
+        .map(|path| match move_to_bin(path) {
             _ if fenix_vfs::is_remote(path) => crate::remote::no_recycle_bin(path),
             Ok(()) => Outcome::ok(path.clone()),
             Err(err) => Outcome::failed(path.clone(), describe(&err)),
         })
         .collect()
+}
+
+/// `trash`'s own default on macOS asks Finder to do it, over AppleScript:
+/// slow, with Finder's sound, and refused until you let Fenix control
+/// Finder. `NSFileManager` puts it in the same Trash with none of that.
+fn move_to_bin(path: &Path) -> Result<(), trash::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        use trash::macos::{DeleteMethod, TrashContextExtMacos};
+        let mut context = trash::TrashContext::new();
+        context.set_delete_method(DeleteMethod::NsFileManager);
+        context.delete(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    trash::delete(path)
 }
 
 /// Deletes every path outright, with no way back. Only ever reached

@@ -88,7 +88,11 @@ pub fn volumes() -> Vec<Volume> {
         }
         probe_drive_letters()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        query_mac_volumes()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         // One root, and nothing useful to say about it without parsing
         // `/proc/mounts` -- which is a different feature for a different
@@ -198,6 +202,90 @@ fn probe_drive_letters() -> Vec<Volume> {
         .collect()
 }
 
+/// The startup disk, and what's mounted in `/Volumes` (external disks,
+/// disk images, network shares), from `mount` and `df`.
+///
+/// The startup disk is in `/Volumes` too, as a link to `/`: that's where
+/// its name comes from. A volume that doesn't answer isn't asked for its
+/// space: `df` is given a moment, and the list goes without sizes.
+#[cfg(target_os = "macos")]
+fn query_mac_volumes() -> Vec<Volume> {
+    let mounts = command("/sbin/mount").output().map(|o| parse_mount(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    // `-l`: the local disks only. A share whose server is gone would hang it.
+    let space = command("/bin/df").args(["-klP"]).output().map(|o| parse_df(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    let startup = std::fs::read_dir("/Volumes")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find(|e| std::fs::read_link(e.path()).is_ok_and(|to| to == std::path::Path::new("/")))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let sized = |at: &str| space.iter().find(|(mounted, _, _)| mounted == at).map(|&(_, total, free)| (total, free));
+    let mut out = vec![Volume { root: PathBuf::from("/"), name: startup, kind: VolumeKind::Fixed, remote: None, free: sized("/").map(|s| s.1), total: sized("/").map(|s| s.0) }];
+    for mount in mounts.iter().filter(|m| m.at.starts_with("/Volumes/") && !m.hidden) {
+        let network = matches!(mount.fs.as_str(), "smbfs" | "nfs" | "afpfs" | "webdav" | "cifs");
+        let kind = match mount.fs.as_str() {
+            _ if network => VolumeKind::Network,
+            "cd9660" | "udf" | "cddafs" => VolumeKind::Optical,
+            _ => VolumeKind::Removable,
+        };
+        let space = sized(&mount.at);
+        out.push(Volume {
+            root: PathBuf::from(&mount.at),
+            name: mount.at.trim_start_matches("/Volumes/").to_string(),
+            kind,
+            remote: network.then(|| mount.device.clone()),
+            free: space.map(|s| s.1),
+            total: space.map(|s| s.0),
+        });
+    }
+    out
+}
+
+/// One line of `mount`.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+struct Mount {
+    device: String,
+    at: String,
+    fs: String,
+    /// `nobrowse`: the system's own, which Finder doesn't show either.
+    hidden: bool,
+}
+
+/// `//me@nas/media on /Volumes/media (smbfs, nodev, nosuid)`. A name may
+/// have spaces, and parentheses: the options are the last pair.
+#[cfg(target_os = "macos")]
+fn parse_mount(text: &str) -> Vec<Mount> {
+    text.lines()
+        .filter_map(|line| {
+            let (rest, options) = line.strip_suffix(')')?.rsplit_once(" (")?;
+            let (device, at) = rest.split_once(" on ")?;
+            let mut options = options.split(", ");
+            let fs = options.next()?.to_string();
+            Some(Mount { device: device.to_string(), at: at.to_string(), fs, hidden: options.any(|o| o == "nobrowse") })
+        })
+        .collect()
+}
+
+/// `df -kP`'s lines, as (where it's mounted, total, free), in bytes. The
+/// mount point is everything after the `NN%`, spaces and all.
+#[cfg(target_os = "macos")]
+fn parse_df(text: &str) -> Vec<(String, u64, u64)> {
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (numbers, at) = line.split_once("% ")?;
+            let mut fields = numbers.split_whitespace().rev();
+            let _percent = fields.next()?;
+            let free: u64 = fields.next()?.parse().ok()?;
+            let _used = fields.next()?;
+            let total: u64 = fields.next()?.parse().ok()?;
+            Some((at.trim().to_string(), total * 1024, free * 1024))
+        })
+        .collect()
+}
+
 /// A `Command` that does not flash a console window on Windows -- the
 /// same `CREATE_NO_WINDOW` treatment `fenix-git`'s own process helper
 /// applies, for the same reason: these run while the editor is drawing.
@@ -216,6 +304,19 @@ fn command(program: &str) -> Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_mac_s_volumes_are_read() {
+        let mounts = parse_mount("/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n/dev/disk4s1 on /Volumes/My Disk (old) (msdos, local, nodev)\n//me@nas/media on /Volumes/media (smbfs, nodev, nosuid, nobrowse)\n");
+        assert_eq!(mounts[1], Mount { device: "/dev/disk4s1".into(), at: "/Volumes/My Disk (old)".into(), fs: "msdos".into(), hidden: false });
+        assert!(mounts[2].hidden);
+        let df = parse_df("Filesystem 1024-blocks Used Available Capacity  Mounted on\n/dev/disk4s1 1000 400 600 40% /Volumes/My Disk\n");
+        assert_eq!(df, [("/Volumes/My Disk".to_string(), 1_024_000, 614_400)]);
+        let all = volumes();
+        assert_eq!(all[0].root, PathBuf::from("/"));
+        assert!(all[0].total.is_some_and(|t| t > 0), "{all:?}");
+    }
 
     #[test]
     #[cfg(windows)]

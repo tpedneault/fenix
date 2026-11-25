@@ -13,6 +13,7 @@ and Cargo versions so toolchain changes can be diagnosed.
 | Check | Coverage |
 | --- | --- |
 | Windows workspace | Full workspace tests, strict Clippy for the whole workspace, and a debug GUI executable build on Windows Server 2022/MSVC. No package or test-name exclusions. |
+| macOS workspace | The same gates as Windows on Apple silicon, and `Fenix.app` put together from the debug build (`packaging/macos`). |
 | Linux reliability | Storage, core, configuration, project tool settings, recovery, task process groups, RPC framing, the control channel (Unix socket, private directory, protocol), LSP edits, DAP, and Vim tests; strict Clippy for the crates it tests that build without a display. No GUI/system-display dependency. |
 
 The Windows checkout path contains a space. Storage tests also exercise Unicode

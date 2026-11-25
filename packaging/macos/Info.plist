@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleDisplayName</key><string>Fenix</string>
+  <key>CFBundleName</key><string>Fenix</string>
+  <key>CFBundleExecutable</key><string>fenix</string>
+  <key>CFBundleIconFile</key><string>Fenix</string>
+  <key>CFBundleIdentifier</key><string>dev.pedneault.fenix</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@SHORT_VERSION@</string>
+  <key>CFBundleVersion</key><string>@SHORT_VERSION@</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+  <key>LSMinimumSystemVersion</key><string>@MINIMUM@</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSPrincipalClass</key><string>NSApplication</string>
+  <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <key>NSSupportsAutomaticTermination</key><false/>
+  <key>NSSupportsSuddenTermination</key><false/>
+  <!-- Offered for any text file and for folders, never made the default. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Text</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.text</string>
+        <string>public.source-code</string>
+        <string>public.script</string>
+        <string>public.json</string>
+        <string>public.xml</string>
+        <string>public.data</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Folder</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array><string>public.folder</string></array>
+    </dict>
+  </array>
+  <!-- What a terminal, a task or a language server started by Fenix may ask for. -->
+  <key>NSDesktopFolderUsageDescription</key><string>Fenix opens and saves files in the folders you work in.</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>Fenix opens and saves files in the folders you work in.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>Fenix opens and saves files in the folders you work in.</string>
+  <key>NSNetworkVolumesUsageDescription</key><string>Fenix opens and saves files in the folders you work in.</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>Fenix opens and saves files in the folders you work in.</string>
+</dict>
+</plist>

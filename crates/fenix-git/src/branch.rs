@@ -54,15 +54,18 @@ fn parse_line(line: &str) -> Option<Branch> {
 /// branch that remote calls default, so listing it would show the same
 /// branch twice under two names.
 ///
-/// The filter is "the short name contains no `/`", not "it ends in
-/// `/HEAD`", because `%(refname:short)` *already* shortens
-/// `refs/remotes/origin/HEAD` all the way down to `origin` -- so the
-/// obvious check never matches, and a bare remote name (`origin`) leaks
-/// into what is supposed to be a list of branches.
+/// Not by the short name: `%(refname:short)` makes `refs/remotes/origin/
+/// HEAD` `origin` in some Gits and `origin/HEAD` in others (Apple's).
 pub fn list_remote_branches(repo: &Path) -> Vec<String> {
-    run_lines(repo, &["for-each-ref", "refs/remotes", "--format=%(refname:short)"])
+    // The full name is what says HEAD for certain.
+    run_lines(repo, &["for-each-ref", "refs/remotes", "--format=%(refname)\x1f%(refname:short)"])
         .into_iter()
-        .filter(|name| name.contains('/'))
+        .filter_map(|line| {
+            let (full, short) = line.split_once('\x1f')?;
+            // `refs/remotes/<remote>/HEAD`: a branch can be `<remote>/x/HEAD`.
+            let head = full.strip_prefix("refs/remotes/").is_some_and(|r| r.matches('/').count() == 1 && r.ends_with("/HEAD"));
+            (!head && short.contains('/')).then(|| short.to_string())
+        })
         .collect()
 }
 
