@@ -7330,14 +7330,13 @@ impl App {
     /// The project `file` is in, as far as Fenix is concerned: the
     /// active workspace's when the file is inside it -- a crate or a
     /// package nested in the project you opened is still that project,
-    /// not one of its own -- else the nearest folder with a project's
-    /// marker.
+    /// not one of its own, and a folder you opened as a project is that
+    /// project, marker or not -- else the nearest folder with a
+    /// project's marker.
     pub(super) fn project_root_of_file(&self, file: &Path) -> Option<PathBuf> {
-        let nearest = fenix_project::find_project_root(file);
-        let workspace = self.workspaces.active_workspace().project.as_deref().filter(|root| file.starts_with(root));
-        match (nearest, workspace) {
-            (Some(nearest), Some(workspace)) if nearest.starts_with(workspace) => Some(workspace.to_path_buf()),
-            (nearest, _) => nearest,
+        match self.workspaces.active_workspace().project.as_deref().filter(|root| file.starts_with(root)) {
+            Some(workspace) => Some(workspace.to_path_buf()),
+            None => fenix_project::find_project_root(file),
         }
     }
 
@@ -31322,6 +31321,21 @@ configure_board stm32
         // And back to the subproject's workspace: the subproject again.
         app.open_project(child_root.clone(), None, false);
         assert_eq!(app.project_root.as_deref(), Some(child_root.as_path()));
+    }
+
+    #[test]
+    fn a_folder_opened_as_a_project_is_that_project_marker_or_not() {
+        let dir = TempDir::new("plain_folder_project");
+        dir.mkdir(".git");
+        let docs = dir.mkdir("docs");
+        let docs = fenix_lsp::normalize(std::fs::canonicalize(&docs).unwrap());
+        let file = dir.write("docs/guide.md", "# Guide\n");
+        let file = fenix_lsp::normalize(std::fs::canonicalize(&file).unwrap());
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.open_project(docs.clone(), Some(file.clone()), false);
+        assert_eq!(app.project_root.as_deref(), Some(docs.as_path()), "the folder opened, not the repository around it");
+        assert_eq!(app.focused_project().as_deref(), Some(docs.as_path()), "extensions follow it too");
     }
 
     #[test]
