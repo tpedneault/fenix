@@ -10,6 +10,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A new workspace (`SPC TAB n`) starts on a Home of its own, not on the
   buffer you were in -- that stays in the workspace you left.
+- `SPC e G` opens the Git page of the repository the folder is in,
+  without making it the project.
 
 ### Fixed
 
@@ -52,11 +54,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   last file.
 - `fenix <dir>` with a session of several windows keeps the focus where
   the project opened.
-
-### Changed (projects)
-
-- `SPC e G` opens the Git page of the repository the folder is in,
-  without making it the project.
 
 - A forge extension asked to act on a repository other than its project's
   (`o` on a Git page) starts again in that repository first: your agent
