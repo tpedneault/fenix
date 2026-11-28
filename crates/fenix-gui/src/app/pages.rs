@@ -162,11 +162,14 @@ pub(super) struct PageState {
     rows: Option<usize>,
     /// The height it was last laid out for.
     laid_rows: Option<usize>,
+    /// Text dragged over with the mouse: where the drag started and where
+    /// it is, as (line, column) of the page (`page_select`).
+    pub(super) selection: Option<((usize, usize), (usize, usize))>,
 }
 
 impl PageState {
     fn new(model: PageModel) -> Self {
-        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None, rows: None, laid_rows: None }
+        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None, rows: None, laid_rows: None, selection: None }
     }
 
     /// Whether a text field on the page has the keyboard -- then every
@@ -721,6 +724,12 @@ impl App {
                 None => crate::reading_page::layout(p, cols),
             };
         }
+        // A selection, tinted over whatever the page drew.
+        if let Some((a, b)) = state.selection.filter(|(a, b)| a != b) {
+            for (line, cells) in crate::page::selected_cells(&state.page.text, a, b) {
+                state.page.backgrounds.push((line, cells, crate::page::Shade::Selection));
+            }
+        }
         state.cols = cols;
         state.laid_rows = rows;
         state.stale = false;
@@ -774,6 +783,10 @@ impl App {
     /// page's own `gg` still works.
     pub(super) fn page_key(&mut self, keypress: KeyPress) -> bool {
         let id = self.focused_buffer_id();
+        if self.page_selection_key(id, keypress) {
+            self.wake_caret();
+            return true;
+        }
         let Some(state) = self.pages.get(&id) else {
             self.page_g_pending = false;
             return false;
@@ -2431,6 +2444,32 @@ mod tests {
         press(&mut app, "\n");
         assert_eq!(app.workspaces.len(), 2, "no third workspace: a already had one");
         assert_eq!(app.workspaces.active_name(), a_name);
+    }
+
+    #[test]
+    fn text_dragged_over_on_any_page_is_copied_with_y_and_esc_lets_go() {
+        let a = Scratch::new("page-select");
+        std::fs::write(a.0.join("README.md"), "# a").unwrap();
+        let mut app = app_with(&[&a.0]);
+        app.cmd_project_hub();
+        let text = page_text(&mut app);
+        let id = app.focused_buffer_id();
+        let (line, row) = text.lines().enumerate().find(|(_, l)| l.contains("page-select")).map(|(i, l)| (i, l.to_string())).expect("the project's row");
+        let at = row.find("page-select").unwrap();
+        // Esc lets go, and is taken.
+        app.pages.get_mut(&id).unwrap().selection = Some(((line, at), (line, at + 3)));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Escape)));
+        assert!(app.pages[&id].selection.is_none());
+        // y copies it.
+        app.pages.get_mut(&id).unwrap().selection = Some(((line, at), (line, at + 10)));
+        assert!(app.page_key(KeyPress::char('y')));
+        assert!(app.modeline_pieces().1.contains("copied 1 lines"), "{}", app.modeline_pieces().1);
+        assert!(app.pages[&id].selection.is_none());
+        // Laid out, a selection is tinted.
+        app.pages.get_mut(&id).unwrap().selection = Some(((line, at), (line, at + 4)));
+        app.pages.get_mut(&id).unwrap().stale = true;
+        let _ = page_text(&mut app);
+        assert!(app.pages[&id].page.backgrounds.iter().any(|(l, cells, shade)| *l == line && cells.start == at && *shade == crate::page::Shade::Selection));
     }
 
     #[test]

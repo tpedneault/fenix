@@ -18,8 +18,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Agents: `SPC a I` sends a picture file with the prompt, offering your
   newest screenshot; `@` on a picture sends the picture; a picture
   dropped on the window goes with the prompt.
-- Agents: drag over the thread's text to select it; `y` or `Ctrl+C`
-  copies it.
+- Any page's text -- an agent's thread, the Git pages, Search, a task's
+  output, the tests, an extension's page -- is selected by dragging over
+  it; `y` or `Ctrl+C` copies it, `Esc` lets go.
 
 ### Changed
 

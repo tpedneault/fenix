@@ -806,6 +806,11 @@ its extension. The rest is built into Fenix.
   on Linux, a Windows toast, macOS's), as `notifications.system` says.
   `notifications.test` shows one of each. Extensions notify with
   `notify-with` (API 1.3).
+- **Copying from pages**: drag over any page's text -- the Git pages,
+  Search, a task's output, the tests, an agent's thread, an extension's
+  page -- to select it; `y` or `Ctrl+C` copies it, `Esc` lets go, and any
+  other key lets go and goes to the page. A listing and an extension's
+  page that takes the mouse keep their own clicks.
 - **The mouse**, for when the hand is on it anyway -- every keyboard way
   stays. A click in a file puts the cursor on the glyph clicked (through
   the gutter, folds, tabs, an extension's inlays, the sticky headers and

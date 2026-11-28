@@ -79,6 +79,7 @@ pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
 mod explorer_watch;
+mod page_select;
 mod search_host;
 pub(crate) use explorer_host::ExplorerTarget;
 pub(crate) use search_host::SearchOpen;
@@ -5408,6 +5409,9 @@ pub struct App {
     explorer_watch: Option<explorer_watch::ExplorerWatch>,
     explorer_dirty: HashSet<ExplorerTarget>,
     explorer_dirty_due: Option<Instant>,
+    /// A drag over a page's text under way: its pane, the page, and where
+    /// the page's text starts on screen (`page_select`).
+    page_dragging: Option<(fenix_window::WindowId, BufferId, (f32, f32))>,
     /// Source of `ExplorerRequest::id`. Global rather than per-buffer so
     /// an id is never reused across buffers, which keeps a late result
     /// from a closed buffer from ever matching a live request.
@@ -6484,6 +6488,7 @@ impl App {
             explorer_watch: None,
             explorer_dirty: HashSet::new(),
             explorer_dirty_due: None,
+            page_dragging: None,
             next_explorer_request: 0,
             pane_titles: HashMap::new(),
             gutter_hunks: HashMap::new(),
@@ -20651,8 +20656,8 @@ impl App {
                             }
                         }
                     }
-                    // The agent's thread: a drag over its text selects it.
-                    if pos.1 >= content.y && self.agents_select_press(id, (content.x, content.y), pos) {
+                    // A page's text: a drag over it selects it.
+                    if pos.1 >= content.y && self.page_select_press(id, (content.x, content.y), pos) {
                         self.wake_caret();
                         return;
                     }
@@ -23608,7 +23613,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     // A selection or a divider following the pointer; the
                     // menu's row under it; the hover's wait.
                     self.mouse_drag_to(pos, window_width, window_height);
-                    self.agents_select_drag(pos);
+                    self.page_select_drag(pos);
                     self.menu_hover_at(pos, window_width, window_height);
                     self.pointer_rest_at(pos, Instant::now(), window_width, window_height);
                 }
