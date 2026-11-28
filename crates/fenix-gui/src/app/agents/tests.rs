@@ -959,11 +959,32 @@ fn a_commit_message_is_asked_for_with_the_staged_diff() {
     assert!(f.app.pane_titles.values().any(|t| t.contains("A while it's untouched has the agent write it")));
     press_big_a(&mut f);
     assert_eq!(f.app.vim.mode(), Mode::Normal, "A isn't Vim's here");
-    assert!(f.pump(|app| app.agents.hub.status() == Default::default() && app.agents.commit_message.is_none()), "the answer came");
-    let blocks = first_prompt(&f);
+    let thread = f.app.agents.commit_message.clone().expect("asked");
+    let blocks = f.app.agents.hub.view(&thread).and_then(|v| v.thread.entries.iter().find_map(|e| if let Entry::User { blocks, .. } = e { Some(blocks.clone()) } else { None })).expect("a prompt");
     assert!(matches!(&blocks[1], ContentBlock::Resource { text: Some(t), .. } if t.contains("+one")), "{blocks:?}");
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default() && app.agents.commit_message.is_none()), "the answer came");
     assert!(!f.app.buffers.get(compose).unwrap().buffer.text().trim().is_empty(), "it's in the box");
     assert_eq!(f.app.focused_pane_id(), f.app.compose.as_ref().unwrap().pane, "you're still in the box");
+    assert!(f.app.agents.hub.thread_ids().is_empty(), "its thread is gone once it's written");
+    assert!(f.app.agents.shown(&f.app.pages).is_none(), "the dock didn't come up for it");
+}
+
+#[test]
+fn a_commit_message_never_goes_into_the_thread_you_re_talking_in() {
+    let mut f = fixture("");
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&f.root).status().unwrap();
+    git(&["init", "-q"]);
+    std::fs::write(f.root.join("a.txt"), "one\n").unwrap();
+    git(&["add", "a.txt"]);
+    f.app.agents_open_panel();
+    let mine = f.app.agents.shown(&f.app.pages).expect("a thread in the dock");
+    let root = f.root.clone();
+    open_to_normal(&mut f, ComposePurpose::GitCommit { repo_root: root, compose: crate::git_status::Compose::New(Default::default()) });
+    press_big_a(&mut f);
+    assert!(f.pump(|app| app.agents.commit_message.is_none() && app.agents.hub.status() == Default::default()), "the answer came");
+    assert_eq!(f.app.agents.hub.thread_ids(), std::slice::from_ref(&mine), "yours, and only yours, is left");
+    let entries = f.app.agents.hub.view(&mine).map(|v| v.thread.entries.len()).unwrap_or_default();
+    assert_eq!(entries, 0, "nothing was asked in it");
 }
 
 /// `A`, as `route_keypress` takes it in a compose pane.

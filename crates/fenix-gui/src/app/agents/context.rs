@@ -423,23 +423,19 @@ impl App {
         let template = if template.is_empty() { root.join(".gitmessage") } else { root.join(home_path(&template)) };
         let template = std::fs::read_to_string(template).unwrap_or_default();
         let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md")).ok().and_then(|t| commits_section(&t)).unwrap_or_default();
-        let thread = match self.agents.shown(&self.pages) {
-            Some(thread) => thread,
-            None => {
-                let entries = self.agents_configure();
-                let wanted = self.config.text_value("agents.ask.agent").map(str::trim).filter(|a| !a.is_empty()).map(catalog::slug);
-                let Some(agent) = wanted.or_else(|| self.agents_default_of(&entries)) else {
-                    self.agents_none_found(&entries);
-                    return;
-                };
-                let thread = self.agents.hub.new_thread(&agent, &root);
-                // The dock comes up to show it working; you stay in the box.
-                let pane = self.focused_pane_id();
-                self.agents_show(thread.clone());
-                self.windows_mut().focus(pane);
-                thread
-            }
+        // A thread of its own, every time -- never the one you're talking
+        // in -- kept off the dock and the thread list, and deleted once
+        // the message is written: there's nothing to come back to.
+        let entries = self.agents_configure();
+        let wanted = self.config.text_value("agents.ask.agent").map(str::trim).filter(|a| !a.is_empty()).map(catalog::slug);
+        let Some(agent) = wanted.or_else(|| self.agents_default_of(&entries)) else {
+            self.agents_none_found(&entries);
+            return;
         };
+        let thread = self.agents.hub.new_thread(&agent, &root);
+        if let Some(t) = self.agents.hub.thread_mut(&thread) {
+            t.title = Some("Commit message".into());
+        }
         let mut blocks = vec![
             ContentBlock::text("Write a commit message for this staged change: a subject line under 72 characters, a blank line, then a short body saying why. Follow the style of the project's recent commits and any rules given. Reply with only the message, nothing before or after it, and don't change any files."),
             ContentBlock::Resource { uri: "fenix://git-diff-cached".into(), text: Some(cut(diff)), mime_type: Some("text/x-diff".into()) },
@@ -493,13 +489,19 @@ impl App {
         self.agents_commit_message_streamed(thread);
         let into = self.agents.commit_into.take();
         self.agents.commit_message = None;
-        let Some(text) = self.agents.hub.view(thread).and_then(|v| {
+        let text = self.agents.hub.view(thread).and_then(|v| {
             v.thread.entries.iter().rev().find_map(|e| match e {
                 fenix_acp::thread::Entry::Agent { text, .. } if !text.trim().is_empty() => Some(text.clone()),
                 _ => None,
             })
-        }) else {
-            return;
+        });
+        // Written (or not): the thread goes, session and all.
+        let fx = self.agents.hub.delete(thread, Instant::now());
+        self.agents_run(fx);
+        self.agents.baselines.remove(thread);
+        self.agents.unknown.remove(thread);
+        let Some(text) = text else {
+            return self.set_error("the agent wrote no message");
         };
         if let Some(buffer) = into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) {
             self.agents_fill_compose(buffer, &text);
