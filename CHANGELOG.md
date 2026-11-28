@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The sidebar and the explorer pages watch the folders they show: a file
+  made, removed or renamed by something else shows as it happens, not on
+  the next disk poll (which stays, for shares).
+
 - Agents: `SPC a w` gives this project's agents folders and files outside
   it -- sent as the session's other folders, readable and writable
   through Fenix, and `@`-mentionable.

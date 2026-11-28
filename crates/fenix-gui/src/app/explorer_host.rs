@@ -804,6 +804,7 @@ impl App {
                 }
                 self.render_explorer(target, true);
                 self.remember_visited_directory(&path);
+                self.explorer_watch_sync();
             }
             Err(err) => {
                 // The listing stays where it was, which is the useful
@@ -913,6 +914,7 @@ impl App {
         self.sidebar_open = false;
         self.sidebar_focused = false;
         self.sidebar = None;
+        self.explorer_watch_sync();
     }
 
     /// Opens the sidebar on the file being edited's project, showing
@@ -947,6 +949,7 @@ impl App {
                     self.sidebar_view.current = Some(file.clone());
                     self.explorer_reveal_path(ExplorerTarget::Sidebar, &file);
                 }
+                self.explorer_watch_sync();
             }
             Err(err) => self.set_error(format!("couldn't list {} ({err})", dir.display())),
         }

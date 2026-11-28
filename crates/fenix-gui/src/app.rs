@@ -78,6 +78,7 @@ mod bidi_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
+mod explorer_watch;
 mod search_host;
 pub(crate) use explorer_host::ExplorerTarget;
 pub(crate) use search_host::SearchOpen;
@@ -2030,6 +2031,8 @@ pub enum FenixUserEvent {
     ExplorerListed { target: ExplorerTarget, request: u64, result: Result<fenix_explorer::Listing, String> },
     /// What the disk poll's worker saw of the open files (`disk_probe`).
     DiskProbed(Box<disk_probe::ProbeResult>),
+    /// Folders an explorer shows whose names changed (`explorer_watch`).
+    ExplorerFoldersChanged(Vec<PathBuf>),
     /// `ssh`, connecting to a remote machine, has a question (`remote`).
     RemoteQuestion(remote::RemoteQuestion),
     /// A connection to a remote machine was made, or couldn't be.
@@ -2441,6 +2444,7 @@ impl FenixUserEvent {
             Self::TerminalOutput { .. } => "TerminalOutput",
             Self::ExplorerListed { .. } => "ExplorerListed",
             Self::DiskProbed { .. } => "DiskProbed",
+            Self::ExplorerFoldersChanged(_) => "ExplorerFoldersChanged",
             Self::RemoteQuestion { .. } => "RemoteQuestion",
             Self::RemoteConnected { .. } => "RemoteConnected",
             Self::RemoteStatus { .. } => "RemoteStatus",
@@ -5399,6 +5403,11 @@ pub struct App {
     /// What each listing's folders looked like on disk (`ExplorerStamps`),
     /// for the disk poll to tell when something else changed them.
     explorer_stamps: HashMap<ExplorerTarget, explorer_host::ExplorerStamps>,
+    /// The explorers' folders watched (`explorer_watch`), and the listings
+    /// a change touched, to read again once it's settled (`..._due`).
+    explorer_watch: Option<explorer_watch::ExplorerWatch>,
+    explorer_dirty: HashSet<ExplorerTarget>,
+    explorer_dirty_due: Option<Instant>,
     /// Source of `ExplorerRequest::id`. Global rather than per-buffer so
     /// an id is never reused across buffers, which keeps a late result
     /// from a closed buffer from ever matching a live request.
@@ -6472,6 +6481,9 @@ impl App {
             dired_states: HashMap::new(),
             explorer_requests: HashMap::new(),
             explorer_stamps: HashMap::new(),
+            explorer_watch: None,
+            explorer_dirty: HashSet::new(),
+            explorer_dirty_due: None,
             next_explorer_request: 0,
             pane_titles: HashMap::new(),
             gutter_hunks: HashMap::new(),
@@ -16945,6 +16957,7 @@ impl App {
             },
             // Said whether they changed anything, in `handle_user_event`.
             FenixUserEvent::GitStatusReady(_) | FenixUserEvent::DiskProbed(_) => {}
+            FenixUserEvent::ExplorerFoldersChanged(folders) => self.explorer_folders_changed(folders, Instant::now()),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
@@ -23825,6 +23838,8 @@ impl App {
             needs_redraw = true;
         }
 
+        // Folders whose names changed, once the burst has settled.
+        let relist_due = self.explorer_relist_dirty(now);
         if now >= self.next_disk_check {
             self.poll_files_changed_on_disk();
         }
@@ -23858,6 +23873,7 @@ impl App {
         let wait_until = if layer_wake.is_some() { wait_until.min(self.next_layer_frame) } else { wait_until };
         let wait_until = wait_until.min(self.next_disk_check);
         let wait_until = changes_told_at.map_or(wait_until, |at| wait_until.min(at));
+        let wait_until = relist_due.map_or(wait_until, |at| wait_until.min(at));
         // An extension's layer whose next frame the loop just woke for.
         let motion_on = crate::motion::level(&self.config) != crate::motion::Level::Off;
         if self.wasm.layers.frame_due(now, motion_on) {
@@ -29285,6 +29301,28 @@ configure_board stm32
         std::fs::write(dir.path().join("later.md"), "x").unwrap();
         app.start_disk_probe();
         assert!(!shown(&app, "later.md"));
+    }
+
+    #[test]
+    fn a_folder_s_names_changing_reads_the_sidebar_again_once_it_settles() {
+        let (dir, mut app) = app_in_a_project("sidebar_watched");
+        app.toggle_sidebar();
+        app.sidebar_focused = false;
+        let shown = |app: &App, name: &str| app.sidebar.as_ref().unwrap().entries.iter().any(|e| e.name == name);
+        std::fs::write(dir.path().join("src").join("watched.rs"), "x").unwrap();
+        let now = Instant::now();
+        // What the watcher says (`folders_changed`), for `src`.
+        app.explorer_folders_changed(vec![dir.path().join("src")], now);
+        assert_eq!(app.explorer_relist_dirty(now), Some(now + explorer_watch::SETTLE), "a burst settles first");
+        assert!(!shown(&app, "watched.rs"));
+        assert_eq!(app.explorer_relist_dirty(now + explorer_watch::SETTLE), None);
+        assert!(shown(&app, "watched.rs"), "read again, src still open");
+        // A folder no listing shows changes nothing.
+        let elsewhere = TempDir::new("sidebar_watched_elsewhere");
+        let before = app.next_explorer_request;
+        app.explorer_folders_changed(vec![elsewhere.path().to_path_buf()], now);
+        assert_eq!(app.explorer_relist_dirty(now + explorer_watch::SETTLE), None);
+        assert_eq!(app.next_explorer_request, before);
     }
 
     #[test]

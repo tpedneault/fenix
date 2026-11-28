@@ -412,11 +412,13 @@ its extension. The rest is built into Fenix.
 
   **It keeps up with the disk**: a file or folder made, removed or
   renamed by something else -- a terminal, an agent, a save as, a
-  `git checkout` -- shows in the sidebar and the explorer pages within a
-  couple of seconds (or as you come back to the window), in the folders
-  you have open, with your selection kept. `editor.watch_files = false`
-  turns it off with the rest of the disk checks; a listing on a share or
-  another machine isn't looked at.
+  `git checkout` -- shows in the sidebar and the explorer pages as it
+  happens, in the folders you have open, with your selection kept: the
+  folders shown are watched, and a burst of changes is read once. Where
+  the system sends no notice (a network share) the disk poll catches it
+  within a couple of seconds, or as you come back to the window.
+  `editor.watch_files = false` turns it off with the rest of the disk
+  checks; a listing on another machine isn't looked at.
 
   **The mouse**: a click selects a row (and gives that listing the
   keyboard), a second click opens it, a click on a chevron opens or
