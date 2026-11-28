@@ -151,7 +151,7 @@ impl App {
             return Err("the test explorer is off (tests.enabled)".into());
         }
         let raw = match path {
-            Some(path) => fenix_project::find_project_root(path).ok_or_else(|| format!("{} isn't in a project", path.display()))?,
+            Some(path) => self.project_root_of_file(path).ok_or_else(|| format!("{} isn't in a project", path.display()))?,
             None => self.integration_root(),
         };
         if fenix_vfs::is_remote(&raw) {

@@ -1314,7 +1314,9 @@ impl App {
         self.recent_files
             .paths()
             .iter()
-            .find(|p| p.starts_with(root) && p.is_file())
+            // On another machine: not looked at from here, where it
+            // isn't (asking would wait on the connection).
+            .find(|p| p.starts_with(root) && (fenix_vfs::is_remote(p) || p.is_file()))
             .cloned()
             .or_else(|| fenix_project::main_file(root, self.project_kind_of(root)))
             .or_else(|| Some(root.join("README.md")).filter(|p| p.is_file()))
@@ -1652,7 +1654,7 @@ impl App {
     pub(super) fn hub_fetch_with(&mut self, id: BufferId, kinds: bool) {
         let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else { return };
         let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
-            hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
+            hub.projects.iter().filter(|p| p.exists && p.parent.is_none() && !fenix_vfs::is_remote(&p.root)).map(|p| (p.root.clone(), p.kind)).collect();
         let probe = self.app_probe();
         let generation = self.kinds_generation;
         self.page_spawn(move |send| {

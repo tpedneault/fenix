@@ -405,7 +405,7 @@ impl App {
         if poll {
             self.editorconfig_cache.clear();
         }
-        let root = self.project_root.clone();
+        let root = self.settings_root();
         let same = self.project_settings.as_ref().map(|(r, _)| r) == root.as_ref();
         if same && !poll {
             return;
@@ -441,7 +441,7 @@ impl App {
     /// they changed -- and only if it's still the focused project. Whether
     /// they did.
     pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) -> bool {
-        if self.project_root.as_ref() != Some(&root) {
+        if self.settings_root().as_ref() != Some(&root) {
             return false;
         }
         let before = self.project_settings.as_ref().map(|(_, p)| p.values());

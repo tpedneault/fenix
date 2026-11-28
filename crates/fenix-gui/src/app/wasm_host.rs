@@ -548,33 +548,41 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     fenix_lsp::normalize(refactor::identity(a)) == fenix_lsp::normalize(refactor::identity(b))
 }
 
+/// Whether what an extension gave for the project at `registered` (its
+/// `/project`) is for the project at `root`: the same one, or one nested
+/// in it -- a crate of the Cargo workspace it runs in, a package of the
+/// monorepo, an Arduino sketch in a repository.
+fn covers(registered: &Path, root: &Path) -> bool {
+    same_dir(registered, root) || fenix_lsp::normalize(refactor::identity(root)).starts_with(fenix_lsp::normalize(refactor::identity(registered)))
+}
+
 impl WasmHost {
     /// The language servers extensions added beside the others in the
     /// project at `root` (`language-server-add`).
     pub(crate) fn added_servers(&self, root: &Path) -> Vec<fenix_project::tools::AdditionalServer> {
-        self.added_servers.iter().filter(|((_, r), _)| same_dir(r, root)).flat_map(|(_, list)| list.iter().cloned()).collect()
+        self.added_servers.iter().filter(|((_, r), _)| covers(r, root)).flat_map(|(_, list)| list.iter().cloned()).collect()
     }
 
     /// The language server an extension gave for `language` files in the
     /// project at `root`.
     pub(crate) fn language_server(&self, root: &Path, language: fenix_syntax::LanguageId) -> Option<fenix_project::tools::CommandSpec> {
         let name = crate::lsp::language_config_name(language);
-        self.servers.iter().find(|((_, r), (languages, _))| same_dir(r, root) && languages.contains(&name)).map(|(_, (_, spec))| spec.clone())
+        self.servers.iter().find(|((_, r), (languages, _))| covers(r, root) && languages.contains(&name)).map(|(_, (_, spec))| spec.clone())
     }
 
     /// The debug adapter an extension gave for `language` files in the
     /// project at `root`.
     pub(crate) fn debug_adapter(&self, root: &Path, language: fenix_syntax::LanguageId) -> Option<crate::dap::Adapter> {
         let name = crate::lsp::language_config_name(language);
-        let stdio = self.adapters.iter().find(|((_, r), (languages, _))| same_dir(r, root) && languages.contains(&name)).map(|(_, (_, spec))| crate::dap::Adapter::stdio(spec.clone()));
-        stdio.or_else(|| self.adapter_sockets.iter().find(|((_, r), (languages, _))| same_dir(r, root) && languages.contains(&name)).map(|(_, (_, adapter))| adapter.clone()))
+        let stdio = self.adapters.iter().find(|((_, r), (languages, _))| covers(r, root) && languages.contains(&name)).map(|(_, (_, spec))| crate::dap::Adapter::stdio(spec.clone()));
+        stdio.or_else(|| self.adapter_sockets.iter().find(|((_, r), (languages, _))| covers(r, root) && languages.contains(&name)).map(|(_, (_, adapter))| adapter.clone()))
     }
 
     /// The formatter an extension gave for `language` files in the project
     /// at `root`, and whether what it writes is kept when it fails.
     pub(crate) fn formatter(&self, root: &Path, language: fenix_syntax::LanguageId) -> Option<(fenix_project::tools::CommandSpec, bool)> {
         let name = crate::lsp::language_config_name(language);
-        self.formatters.iter().find(|((_, r), (languages, _))| same_dir(r, root) && languages.contains(&name)).map(|(key, (_, spec))| (spec.clone(), self.keep_output.contains(key)))
+        self.formatters.iter().find(|((_, r), (languages, _))| covers(r, root) && languages.contains(&name)).map(|(key, (_, spec))| (spec.clone(), self.keep_output.contains(key)))
     }
 
     /// The keychain secrets are kept in: the system's, none in tests.
@@ -588,7 +596,7 @@ impl WasmHost {
     /// The launches the extensions offer as they run in the project at
     /// `root` (`launches-set`).
     pub(crate) fn launches(&self, root: &Path) -> Vec<crate::dap::Template> {
-        let mut all: Vec<crate::dap::Template> = self.launches.iter().filter(|((_, r), _)| same_dir(r, root)).flat_map(|(_, t)| t.iter().cloned()).collect();
+        let mut all: Vec<crate::dap::Template> = self.launches.iter().filter(|((_, r), _)| covers(r, root)).flat_map(|(_, t)| t.iter().cloned()).collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
         all
     }
@@ -596,13 +604,13 @@ impl WasmHost {
     /// What `${name}` is filled in from in the project at `root`, when an
     /// extension says (`launch-variable-set`).
     pub(crate) fn launch_variable(&self, root: &Path, name: &str) -> Option<Vec<fenix_wasm::host::PickerItem>> {
-        self.launch_variables.iter().filter(|((_, r), _)| same_dir(r, root)).find_map(|(_, vars)| vars.get(name).cloned())
+        self.launch_variables.iter().filter(|((_, r), _)| covers(r, root)).find_map(|(_, vars)| vars.get(name).cloned())
     }
 
     /// The settings extensions gave the server `name` in the project at
     /// `root` (`language-server-settings`), laid over each other.
     pub(crate) fn server_settings(&self, root: &Path, name: &str) -> Option<serde_json::Value> {
-        let mut given = self.server_settings.iter().filter(|((_, r), _)| same_dir(r, root)).filter_map(|((ext, _), by)| by.get(name).map(|v| (ext, v))).collect::<Vec<_>>();
+        let mut given = self.server_settings.iter().filter(|((_, r), _)| covers(r, root)).filter_map(|((ext, _), by)| by.get(name).map(|v| (ext, v))).collect::<Vec<_>>();
         given.sort_by(|a, b| a.0.cmp(b.0));
         given.into_iter().map(|(_, v)| v.clone()).reduce(fenix_lsp::pull::merge)
     }
@@ -1771,7 +1779,11 @@ impl App {
         };
         let is_text = !self.is_page_buffer(self.focused_buffer_id()) && ob.kind.tracks_unsaved_changes();
         let cursor_info = is_text.then(|| fenix_wasm::host::CursorInfo { at: place(cursor.char_idx), selection: selected.then(|| (place(from), place(to))), selected });
-        let project = path.as_deref().and_then(fenix_project::find_project_root).or_else(|| self.project_root.clone()).map(|root| {
+        // The project as the extension's `/project` is: the workspace's
+        // for a file in it, nested projects' markers or not -- else what
+        // an extension builds from `root` (`/project/<path under it>`)
+        // names files that aren't there.
+        let project = path.as_deref().and_then(|p| self.project_root_of_file(p)).or_else(|| self.project_root.clone()).map(|root| {
             // Its kind, by id (Fenix 1.6): no WIT change, one more pair.
             let kind = ("kind".to_string(), self.project_kind_of(&root).id().to_string());
             let meta = fenix_project::meta::jira_key(&root).map(|k| ("jira".to_string(), k)).into_iter().chain(std::iter::once(kind)).collect();

@@ -2670,7 +2670,8 @@ enum ActivePicker {
     /// discover_tasks` -- built-in per-project-marker defaults plus any
     /// `.fenix/project.ini` `[tasks]` overrides) -- confirming runs it
     /// (`App::run_task`) in the Task Output panel.
-    Task(fenix_picker::PickerState<fenix_tasks::TaskDef>),
+    /// Each task with the project it runs in.
+    Task(fenix_picker::PickerState<(fenix_tasks::TaskDef, PathBuf)>),
     /// `SPC g c`: the ref to compare HEAD with (the Compare page).
     CompareTarget(fenix_picker::PickerState<String>),
     /// `R` on the Compare page: your own side, other than HEAD. Carries
@@ -7397,6 +7398,30 @@ impl App {
             .map(|(i, _)| i)
     }
 
+    /// The folder whose `.fenix` speaks for the focused file: the nearest
+    /// one on the way up to the project's top that `holds` says has its
+    /// own (a nested crate's, a monorepo package's), else the project's.
+    pub(super) fn nearest_fenix_root(&self, holds: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+        let root = self.project_root.clone()?;
+        let file = self.open().buffer.path().filter(|f| !fenix_vfs::is_remote(f) && path_within(f, &root));
+        let nearest = file.and_then(Path::parent).and_then(|dir| {
+            dir.ancestors().take_while(|d| path_within(d, &root) && place_key(d) != place_key(&root)).find(|d| holds(d)).map(Path::to_path_buf)
+        });
+        Some(nearest.unwrap_or(root))
+    }
+
+    /// Where the focused file's project settings come from
+    /// (`.fenix/settings.toml`): `nearest_fenix_root`'s.
+    pub(super) fn settings_root(&self) -> Option<PathBuf> {
+        self.nearest_fenix_root(|d| d.join(".fenix").join("settings.toml").is_file() || d.join(".fenix").join("project.ini").is_file())
+    }
+
+    /// Where the programs that apply to the focused file are named
+    /// (`.fenix/tools.json`, `.fenix/lsp`): `nearest_fenix_root`'s.
+    pub(super) fn trust_root(&self) -> Option<PathBuf> {
+        self.nearest_fenix_root(|d| !fenix_project::trust::files(d).is_empty())
+    }
+
     /// The project of what has the focus: its file's
     /// (`project_root_of_file`), else -- Home, a page -- the active
     /// workspace's.
@@ -10873,19 +10898,34 @@ impl App {
             self.set_error("no project root detected for the focused buffer".to_string());
             return;
         };
-        let tasks = match self.tasks_for(&root) { Ok(tasks) => tasks, Err(error) => { self.set_error(error); return; } };
-        if tasks.is_empty() {
-            self.set_error(format!("no known tasks for {}", root.display()));
+        // A file of a project nested in this one (a crate, a package):
+        // its own tasks first -- where test-at-cursor and code lenses run
+        // -- then the whole project's.
+        let member = self.open().buffer.path().filter(|f| path_within(f, &root)).map(tool_sessions::root_for_path).filter(|m| place_key(m) != place_key(&root));
+        let mut candidates = Vec::new();
+        let mut first_error = None;
+        for at in member.iter().cloned().chain([root.clone()]) {
+            let tasks = match self.tasks_for(&at) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let own = self.project_tools(&at).map(|tools| tools.tasks).unwrap_or_default();
+            let prefix = if member.is_some() { format!("{}: ", at.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) } else { String::new() };
+            for t in tasks {
+                let label = format!("{prefix}{}", task_picker_label(&t, &self.task_source(&at, &t, own.contains_key(&t.name))));
+                candidates.push(fenix_picker::Candidate::new(label, (t, at.clone())));
+            }
+        }
+        if candidates.is_empty() {
+            match first_error {
+                Some(error) => self.set_error(error),
+                None => self.set_error(format!("no known tasks for {}", root.display())),
+            }
             return;
         }
-        let own = self.project_tools(&root).map(|tools| tools.tasks).unwrap_or_default();
-        let candidates = tasks
-            .into_iter()
-            .map(|t| {
-                let label = task_picker_label(&t, &self.task_source(&root, &t, own.contains_key(&t.name)));
-                fenix_picker::Candidate::new(label, t)
-            })
-            .collect();
         self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -15258,10 +15298,9 @@ impl App {
                 self.debug_start_from(template);
             }
             Some(ActivePicker::Task(state)) => {
-                let Some(task) = state.selected().map(|c| c.payload.clone()) else { return };
+                let Some((task, root)) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
                 self.run_task(task, root);
             }
 
@@ -31515,6 +31554,50 @@ configure_board stm32
         app.toggle_terminal();
         assert_eq!(app.terminal_shell, b_shell, "b's again, as it was");
         app.toggle_terminal();
+    }
+
+    /// A Cargo workspace opened as a project, a member crate in it with
+    /// its own `.fenix`: (dir, app, mono, member, the member's file),
+    /// the file focused.
+    fn a_monorepo(name: &str) -> (TempDir, App, PathBuf, PathBuf, PathBuf) {
+        let dir = TempDir::new(name);
+        dir.mkdir(".git");
+        dir.write("Cargo.toml", "[workspace]\n");
+        dir.write("crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
+        dir.write("crates/core/.fenix/settings.toml", "[editor]\nindent_width = 7\n");
+        let file = dir.write("crates/core/src/lib.rs", "\n");
+        let canon = |p: &Path| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap());
+        let (mono, member, file) = (canon(dir.path()), canon(&dir.path().join("crates/core")), canon(&file));
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.open_project(mono.clone(), Some(file.clone()), false);
+        (dir, app, mono, member, file)
+    }
+
+    #[test]
+    fn a_nested_project_s_own_fenix_folder_speaks_for_its_files() {
+        let (_dir, app, mono, member, _file) = a_monorepo("nested_fenix");
+        assert_eq!(app.project_root.as_deref(), Some(mono.as_path()));
+        assert_eq!(app.settings_root().as_deref(), Some(member.as_path()), "the crate's settings.toml");
+        assert_eq!(app.project_settings.as_ref().map(|(r, _)| r.clone()), Some(member.clone()));
+        assert_eq!(app.trust_root().as_deref(), Some(mono.as_path()), "no tools.json in the crate: the project's");
+    }
+
+    #[test]
+    fn the_task_picker_offers_the_nested_project_s_tasks_then_the_project_s() {
+        let (_dir, mut app, mono, member, _file) = a_monorepo("nested_tasks");
+        app.picker_tasks();
+        let Some(ActivePicker::Task(state)) = &app.active_picker else { panic!("a task picker: {}", app.modeline_pieces().1) };
+        let roots: Vec<PathBuf> = (0..state.len()).filter_map(|i| state.visible_rows(i, 1).next().map(|(_, c)| c.payload.1.clone())).collect();
+        assert_eq!(roots.first(), Some(&member), "the crate's first");
+        assert!(roots.contains(&mono), "then the workspace's");
+    }
+
+    #[test]
+    fn an_extension_is_told_the_project_it_runs_in_for_a_nested_project_s_file() {
+        let (_dir, app, mono, _member, _file) = a_monorepo("nested_here");
+        let (here, _) = app.editor_where();
+        assert_eq!(here.project.map(|p| PathBuf::from(p.root)), Some(mono));
     }
 
     #[test]

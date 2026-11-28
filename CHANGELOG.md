@@ -24,6 +24,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   search, tasks, Git and extensions follow.
 - An extension follows you to another workspace's project from its Home
   or a page, not only from a file.
+- Home's project rows, `SPC p P` and `project:` launchers open a project
+  in its own workspace, as the hub does; a file of a project that has a
+  workspace opens there; going back to a project's workspace leaves what
+  it shows; a project whose folder is gone isn't opened (or restored) as
+  an empty workspace; two projects of one folder name get workspaces told
+  apart (`back/app`).
+- Git actions, the Git panel and the history act on the project you're
+  in, not on one whose panel was left open in another workspace.
+- `SPC a a` in another project brings that project's last thread; new
+  threads and the thread list are the project's, never the folder Fenix
+  was started from.
+- The terminal panel is each project's own shell; another project's runs
+  on until you're back.
+- An extension started again in another project gets that project's
+  settings; a file of no project doesn't keep it in the old one.
+- A new workspace's Home is in no project, not the last one you were in.
+- In a project with nested ones (a Cargo workspace, a monorepo): a nested
+  project's own `.fenix/settings.toml` and `.fenix/tools.json` apply to
+  its files (and `SPC p y` asks about them); `SPC p t` offers its tasks,
+  then the project's; extensions' language servers, formatters and
+  launches apply to its files; extensions are told the project they run
+  in; it has one tests page with its providers.
+- One project reached through a link, or spelled in another case on
+  Windows, is one project in the list and one workspace.
+- Remote projects aren't shown as missing in the hub, and open on their
+  last file.
+- `fenix <dir>` with a session of several windows keeps the focus where
+  the project opened.
+
+### Changed (projects)
+
+- `SPC e G` opens the Git page of the repository the folder is in,
+  without making it the project.
+
 - A forge extension asked to act on a repository other than its project's
   (`o` on a Git page) starts again in that repository first: your agent
   writing a merge request's description read the branch's diff and
