@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 pub struct ProjectMeta {
     pinned: BTreeSet<PathBuf>,
     groups: BTreeMap<PathBuf, String>,
+    /// Each project's folders and files outside it that its coding
+    /// agents may read and write too (`SPC a w`). Yours, not the
+    /// project's: kept here, never in its `.fenix`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    agent_paths: BTreeMap<PathBuf, Vec<PathBuf>>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -48,6 +53,7 @@ impl ProjectMeta {
         Self {
             pinned: self.pinned.into_iter().map(crate::plain_path).collect(),
             groups: self.groups.into_iter().map(|(root, group)| (crate::plain_path(root), group)).collect(),
+            agent_paths: self.agent_paths.into_iter().map(|(root, paths)| (crate::plain_path(root), paths)).collect(),
             path,
         }
     }
@@ -98,6 +104,38 @@ impl ProjectMeta {
         let root = Self::key(root);
         self.pinned.remove(&root);
         self.groups.remove(&root);
+        self.agent_paths.remove(&root);
+    }
+
+    /// The folders and files outside `root` its agents may use.
+    pub fn agent_paths(&self, root: &Path) -> &[PathBuf] {
+        self.agent_paths.get(&Self::key(root)).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// Every project's, for handing to the agents at once.
+    pub fn all_agent_paths(&self) -> impl Iterator<Item = (&PathBuf, &Vec<PathBuf>)> {
+        self.agent_paths.iter()
+    }
+
+    /// `path` given to `root`'s agents too; false when it was already.
+    pub fn add_agent_path(&mut self, root: &Path, path: PathBuf) -> bool {
+        let list = self.agent_paths.entry(Self::key(root)).or_default();
+        if list.contains(&path) {
+            return false;
+        }
+        list.push(path);
+        true
+    }
+
+    /// `path` no longer given to `root`'s agents.
+    pub fn remove_agent_path(&mut self, root: &Path, path: &Path) {
+        let key = Self::key(root);
+        if let Some(list) = self.agent_paths.get_mut(&key) {
+            list.retain(|p| p != path);
+            if list.is_empty() {
+                self.agent_paths.remove(&key);
+            }
+        }
     }
 }
 

@@ -401,6 +401,8 @@ keys'; the palette has the commands).
 | `SPC a d` | Ask the agent to fix the problem on the cursor's line |
 | `SPC a h` | Hand the thread off to another agent: the conversation goes with it |
 | `SPC a D` | Delete the thread (asks first) |
+| `SPC a w` | Folders and files outside the project the agent may use too |
+| `SPC a I` | Send a picture with the prompt (the newest screenshot is offered) |
 | `SPC a U` | What the agents used: turns, time, tokens and cost per agent and thread, today, this session and by day |
 | `Tab` / `Enter` (agent usage) | The threads of today, this session or the last 7 days / show the focused thread |
 | `SPC a f` | Follow the agent: the pane beside its thread shows where it works |

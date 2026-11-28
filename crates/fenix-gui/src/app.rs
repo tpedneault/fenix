@@ -23683,6 +23683,22 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     self.code_surface_pointer(pos, Some((button, state == ElementState::Pressed)));
                 }
             }
+            // A file dropped on the window: a picture goes to the agent
+            // when its thread is out (a screenshot, to look at a bug);
+            // anything else, or with no thread out, opens.
+            WindowEvent::DroppedFile(path) => {
+                let picture = agents::image_mime(&path).is_some() && self.agents.shown(&self.pages).is_some();
+                if picture {
+                    if let Err(why) = self.agents_attach_image(&path) {
+                        self.set_error(why);
+                    }
+                } else if path.is_file() {
+                    self.open_file_from_picker(&path);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.mouse.menu = None;
                 self.close_mouse_hover();

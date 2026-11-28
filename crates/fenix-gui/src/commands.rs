@@ -266,6 +266,8 @@ impl CommandRegistry {
         registry.register("agents.handoff", "Continue the thread with another agent: the conversation goes with it", |ctx| ctx.app.agents_pick_handoff());
         registry.register("agents.continue", "Continue a read-only thread in a new session of its agent", |ctx| ctx.app.agents_continue_anew());
         registry.register("agents.delete", "Delete the thread (asks first)", |ctx| ctx.app.agents_delete_thread());
+        registry.register("agents.paths", "Folders and files outside the project the agent may use too", |ctx| ctx.app.agents_pick_paths());
+        registry.register("agents.attach_image", "Send a picture with the prompt: a screenshot saved to disk (the newest is offered)", |ctx| ctx.app.agents_attach_image_prompt());
         registry.external("agents.secret", "An API key for the coding agents, kept in the keychain (SPC a s)", |app| app.agents_pick_secret());
         registry.external("agents.usage", "What the agents used: turns, time, tokens and cost, per agent and thread, today, this session and by day (SPC a U)", |app| app.open_agents_usage_page());
         registry.external("agents.log", "What each agent connection sent and was sent (ACP)", |app| app.agents_open_log());

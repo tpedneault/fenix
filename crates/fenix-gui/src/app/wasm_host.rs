@@ -4122,6 +4122,9 @@ impl App {
                 let p = self.wasm.prompt.take().unwrap();
                 self.remote_answered(Some(p.input));
             }
+            KeyCode::Named(FenixNamedKey::Escape) if prompt.ext == super::agents::PATHS_PROMPT || prompt.ext == super::agents::IMAGE_PROMPT => {
+                self.wasm.prompt = None;
+            }
             KeyCode::Named(FenixNamedKey::Escape) => {
                 let p = self.wasm.prompt.take().unwrap();
                 self.code_deliver(&p.ext, Notice::Prompted((p.id, None)));
@@ -4130,6 +4133,16 @@ impl App {
             KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::agents::SECRET_PROMPT => {
                 let p = self.wasm.prompt.take().unwrap();
                 self.agents_secret_entered(&p.label, &p.input);
+            }
+            // `SPC a I`'s picture.
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::agents::IMAGE_PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.agents_image_typed(&p.input);
+            }
+            // `SPC a w`'s folder or file.
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::agents::PATHS_PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.agents_path_typed(&p.input);
             }
             // A field of an agent's form.
             KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::agents::FORM_PROMPT => {

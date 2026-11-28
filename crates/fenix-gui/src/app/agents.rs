@@ -52,6 +52,10 @@ pub(crate) enum Pick {
     Restart(ConnId),
     /// `@` in the prompt: what follows the `@`.
     Mention(String),
+    /// `SPC a w`: a folder or file outside the project for its agents,
+    /// added, or taken away.
+    AddPath,
+    RemovePath(PathBuf),
     /// `/` at the start of the prompt: the agent's command.
     Command(String),
     /// `SPC a h`: the thread goes on with this agent.
@@ -444,6 +448,7 @@ impl App {
     pub(super) fn agents_configure(&mut self) -> Vec<CatalogEntry> {
         let entries = self.agents_catalog();
         self.agents.hub.set_agents(entries.iter().map(|e| e.spec.clone()).collect());
+        self.agents_sync_paths();
         let mut servers = Vec::new();
         let fenix = self.config.bool_value("agents.mcp.fenix").unwrap_or(true);
         let brief = fenix && self.config.bool_value("agents.mcp.fenix_brief").unwrap_or(true);
@@ -869,6 +874,8 @@ impl App {
                 self.agents_focus_composer();
                 self.agents_composer_insert(&format!("{what} "));
             }
+            Pick::AddPath => self.agents_add_path_prompt(),
+            Pick::RemovePath(path) => self.agents_remove_path(&path),
             Pick::Command(name) => {
                 self.agents_focus_composer();
                 self.agents_composer_insert(&format!("{name} "));
@@ -1462,11 +1469,11 @@ impl App {
     /// question to you first).
     fn agents_serve(&mut self, conn: ConnId, thread: &ThreadId, id: Value, request: ClientRequest) -> Option<Result<Value, RpcError>> {
         let root = self.agents.hub.meta(thread).map(|m| m.root.clone())?;
-        let outside = |path: &Path| RpcError::new(code::INVALID_PARAMS, format!("{} is outside the project ({})", path.display(), root.display()));
+        let outside = |path: &Path| RpcError::new(code::INVALID_PARAMS, format!("{} is outside the project ({}) and what SPC a w gives it", path.display(), root.display()));
         match request {
             ClientRequest::ReadTextFile { path, line, limit, .. } => {
                 let path = PathBuf::from(path);
-                if !within(&root, &path) {
+                if !self.agents_may_use(&root, &path) {
                     return Some(Err(outside(&path)));
                 }
                 let text = match self.buffers.id_for_path(&path).and_then(|id| self.buffers.get(id)) {
@@ -1481,7 +1488,7 @@ impl App {
             }
             ClientRequest::WriteTextFile { path, content, .. } => {
                 let path = PathBuf::from(path);
-                if !within(&root, &path) {
+                if !self.agents_may_use(&root, &path) {
                     return Some(Err(outside(&path)));
                 }
                 let open = self.buffers.id_for_path(&path);
@@ -1723,6 +1730,8 @@ pub(crate) use install::SECRET_PROMPT;
 pub(super) use terminals::agent_command;
 mod answer;
 mod extensions;
+mod paths;
+pub(crate) use paths::{image_mime, IMAGE_PROMPT, PATHS_PROMPT};
 mod usage;
 
 #[cfg(test)]

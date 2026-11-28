@@ -119,6 +119,27 @@ fn notices(hub: &Hub, id: &ThreadId) -> Vec<(NoticeKind, String)> {
 }
 
 #[test]
+fn a_session_gets_the_project_s_other_folders_when_the_agent_takes_them() {
+    let start = |takes: bool| {
+        let mut h = Harness::new();
+        h.hub.set_directories(&root(), vec![PathBuf::from("/work/docs")]);
+        let id = h.hub.new_thread("claude", &root());
+        let fx = h.hub.focus(&id);
+        let conn = spawned(&fx).unwrap();
+        let fx = h.hub.on_spawned(conn, 1, Ok(()), h.now);
+        let init = request(&fx, "initialize").unwrap();
+        let mut reply = claude_init();
+        if takes {
+            reply["agentCapabilities"]["sessionCapabilities"]["additionalDirectories"] = json!({});
+        }
+        let fx = h.answer(conn, init.0, reply);
+        request(&fx, "session/new").unwrap().1
+    };
+    assert_eq!(start(true)["additionalDirectories"], json!(["/work/docs"]));
+    assert!(start(false).get("additionalDirectories").is_none(), "not to one that doesn't say it takes them");
+}
+
+#[test]
 fn a_new_thread_starts_nothing_until_it_is_looked_at() {
     let mut h = Harness::new();
     let id = h.hub.new_thread("claude", &root());

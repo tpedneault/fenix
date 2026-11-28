@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Agents: `SPC a w` gives this project's agents folders and files outside
+  it -- sent as the session's other folders, readable and writable
+  through Fenix, and `@`-mentionable.
+- Agents: `SPC a I` sends a picture file with the prompt, offering your
+  newest screenshot; `@` on a picture sends the picture; a picture
+  dropped on the window goes with the prompt.
+- Agents: drag over the thread's text to select it; `y` or `Ctrl+C`
+  copies it.
+
 ### Changed
 
 - A new workspace (`SPC TAB n`) starts on a Home of its own, not on the
@@ -15,6 +26,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A commit message, or a request's description, written by the agent is
+  written in a thread of its own -- never the one you're talking in --
+  deleted once it's written.
 - The sidebar (`SPC e t`) and the explorer pages catch up with files and
   folders made, removed or renamed by something else -- a terminal, an
   agent, a save as, `git checkout` -- within a couple of seconds, keeping

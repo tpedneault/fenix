@@ -75,6 +75,22 @@ prompt goes to and in which mode.
   included), `@selection` (`SPC a e` puts it there), `@file` (the one
   beside the panel), `@diagnostics` and `@diff`. `/` offers the agent's
   own commands. `Ctrl-V` pastes a picture.
+- **Pictures**, to show it a bug: `Ctrl-V` pastes one from the
+  clipboard; `SPC a I` sends a picture file, the prompt line starting on
+  your newest screenshot (Enter sends it); `@` on a PNG, JPEG, GIF or
+  WebP sends the picture itself; and a picture dropped on the window goes
+  with the prompt. Each is `[image n]` in it. (For an agent that takes
+  pictures.)
+- **Outside the project**: `SPC a w` lists the folders and files outside
+  it that this project's agents may use too -- a docs checkout, a log, the
+  other repository of a pair -- and adds or takes one away. A folder goes
+  to each session started (or taken back) afterwards, for an agent that
+  takes more folders; the agent may read and write them through Fenix,
+  and `@/full/path` names a file in them. The list is yours, kept with
+  your projects' state, never in the project's `.fenix`.
+- **Copying**: drag over the thread's text to select it, then `y` (or
+  `Ctrl+C`) copies it; `Esc` lets go. `y` on a card copies the card,
+  `Y` the answer or the whole thread.
 - When the agent asks before it edits or runs something, the question is
   an outlined card in the thread with its answers, one a line on its
   key's cap (`y`, `Y`, `n`, …), and the modeline says an agent is waiting

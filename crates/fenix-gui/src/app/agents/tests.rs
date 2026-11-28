@@ -2158,3 +2158,40 @@ fn text_dragged_over_in_the_thread_is_copied_with_y() {
     let PageModel::Agent(p) = &f.app.pages[&page].model else { unreachable!() };
     assert!(p.selection.is_none(), "let go once copied");
 }
+
+#[test]
+fn a_folder_given_with_spc_a_w_is_the_agent_s_to_read_and_nothing_else_is() {
+    let mut f = fixture("--fs");
+    f.app.project_meta = fenix_project::meta::ProjectMeta::load_or_default(f.root.join("meta-paths.json"));
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    let thread = f.thread();
+    let conn = f.app.agents.hub.connection_of(&thread).unwrap();
+    let session = f.view().meta.session_id.clone().unwrap();
+    let docs = tempfile::tempdir().unwrap();
+    std::fs::write(docs.path().join("guide.md"), "the guide\n").unwrap();
+    let guide = fenix_lsp::normalize(std::fs::canonicalize(docs.path().join("guide.md")).unwrap());
+    let read = |f: &mut Fixture, n: i64| f.app.agents_serve(conn, &thread, json!(n), ClientRequest::ReadTextFile { session_id: session.clone(), path: guide.to_string_lossy().into_owned(), line: None, limit: None });
+    assert!(matches!(read(&mut f, 1), Some(Err(_))), "not before it's given");
+    f.app.agents_path_typed(&docs.path().display().to_string());
+    assert_eq!(read(&mut f, 2).unwrap().unwrap(), json!({ "content": "the guide\n" }));
+    let other = std::env::temp_dir().join("elsewhere-still.txt");
+    let result = f.app.agents_serve(conn, &thread, json!(3), ClientRequest::ReadTextFile { session_id: session.clone(), path: other.to_string_lossy().into_owned(), line: None, limit: None });
+    assert!(matches!(result, Some(Err(_))), "only what was given");
+    // Taken away again.
+    let dir = fenix_lsp::normalize(std::fs::canonicalize(docs.path()).unwrap());
+    f.app.agents_remove_path(&dir);
+    assert!(matches!(read(&mut f, 4), Some(Err(_))));
+}
+
+#[test]
+fn a_picture_file_goes_with_the_prompt() {
+    let mut f = connected();
+    let dir = tempfile::tempdir().unwrap();
+    let shot = dir.path().join("screenshot.png");
+    std::fs::write(&shot, b"\x89PNG\r\n\x1a\nfake").unwrap();
+    f.app.agents_attach_image(&shot).expect("the mock agent takes pictures");
+    assert!(matches!(f.app.agents.images.last(), Some(ContentBlock::Image { mime_type, .. }) if mime_type == "image/png"));
+    assert!(f.app.buffers.get(f.app.agents.composer.unwrap()).unwrap().buffer.text().contains("[image 1]"));
+    assert!(f.app.agents_attach_image(&dir.path().join("notes.txt")).is_err(), "not a picture");
+}

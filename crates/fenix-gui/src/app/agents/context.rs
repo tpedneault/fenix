@@ -199,6 +199,11 @@ impl App {
             .filter(|(name, _)| *name != "selection" || self.agents.selection.is_some())
             .map(|(name, what)| fenix_picker::Candidate::new(format!("@{name}   {what}"), Pick::Mention(name.to_string())))
             .collect();
+        // The files outside it you've let its agents use (`SPC a w`).
+        for extra in self.agents_extra_paths(&root).into_iter().filter(|p| p.is_file()) {
+            let shown = extra.display().to_string();
+            candidates.push(fenix_picker::Candidate::new(format!("@{shown}   outside the project"), Pick::Mention(shown)));
+        }
         match self.listed_files(&root) {
             Some(files) => candidates.extend(files.iter().map(|c| fenix_picker::Candidate::new(c.label.clone(), Pick::Mention(c.label.replace('\\', "/"))))),
             None => self.prewarm_file_index(&root),
@@ -310,8 +315,10 @@ impl App {
                 Some(resource("fenix://git-diff".into(), String::from_utf8_lossy(&out.stdout).into_owned(), "The working tree's changes"))
             }
             path => {
+                // A path of the project, or -- written in full -- one of
+                // what `SPC a w` lets its agents use.
                 let path = root.join(path);
-                if !within(root, &path) || !path.is_file() {
+                if !self.agents_may_use(root, &path) || !path.is_file() {
                     return None;
                 }
                 self.agents_file_block(root, &path, embedded)
@@ -321,6 +328,16 @@ impl App {
 
     pub(super) fn agents_file_block(&self, root: &Path, path: &Path, embedded: bool) -> Option<ContentBlock> {
         let name = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
+        // A picture (a screenshot in the project): sent as one, to an
+        // agent that takes them.
+        if let Some(mime) = super::paths::image_mime(path) {
+            let takes = self.agents.shown(&self.pages).and_then(|t| self.agents.hub.connection_of(&t)).and_then(|c| self.agents.hub.connection(c)).and_then(|c| c.info.as_ref()).is_some_and(|i| i.prompt_image);
+            if takes {
+                if let Some(bytes) = std::fs::read(path).ok().filter(|b| b.len() as u64 <= 20 * 1024 * 1024) {
+                    return Some(ContentBlock::Image { data: base64(&bytes), mime_type: mime.into(), uri: Some(file_uri(path)) });
+                }
+            }
+        }
         if embedded {
             let text = self.agents_current(path)?;
             Some(ContentBlock::Resource { uri: file_uri(path), text: Some(cut(text)), mime_type: Some("text/plain".into()) })
