@@ -74,6 +74,8 @@ pub(super) fn stat(path: &Path) -> Option<std::io::Result<std::fs::Metadata>> {
 pub(super) struct ProbeRequest {
     buffers: Vec<(BufferId, PathBuf)>,
     project: Option<PathBuf>,
+    /// The explorers' folders (`explorer_folders_to_watch`).
+    listings: Vec<(ExplorerTarget, Vec<PathBuf>)>,
 }
 
 /// What was seen. A file missing from `buffers` wasn't looked at (its
@@ -82,6 +84,10 @@ pub(super) struct ProbeRequest {
 pub(crate) struct ProbeResult {
     buffers: HashMap<BufferId, Option<DiskFingerprint>>,
     project: Option<(PathBuf, fenix_config::ProjectSettings)>,
+    /// Each listing's folders' modification times; `None` for one
+    /// that's gone. A folder not looked at (its volume isn't answering)
+    /// is left out.
+    listings: Vec<(ExplorerTarget, Vec<(PathBuf, Option<std::time::SystemTime>)>)>,
 }
 
 // By hand: the project's settings have no `Debug` of their own.
@@ -106,6 +112,10 @@ fn run(request: ProbeRequest) -> ProbeResult {
         if let Some(meta) = stat(&path) {
             result.buffers.insert(id, DiskFingerprint::from_meta(meta.ok()));
         }
+    }
+    for (target, dirs) in request.listings {
+        let looked = dirs.into_iter().filter_map(|dir| stat(&dir).map(|meta| (dir, meta.ok().and_then(|m| m.modified().ok())))).collect();
+        result.listings.push((target, looked));
     }
     if let Some(root) = request.project {
         if stat(&root).is_some() {
@@ -138,6 +148,7 @@ impl App {
                     request.buffers.push((id, path.to_path_buf()));
                 }
             }
+            request.listings = self.explorer_folders_to_watch();
         }
         request.project = self.project_root.clone();
         self.disk_probe_out = Some(Instant::now());
@@ -172,8 +183,9 @@ impl App {
         if !self.config.watch_files.unwrap_or(true) {
             return settings_changed;
         }
+        let relisted = self.explorer_folders_seen(result.listings);
         let sweep = self.reload_buffers_seen(&result.buffers);
-        let Some(message) = sweep.message() else { return settings_changed || !sweep.is_empty() };
+        let Some(message) = sweep.message() else { return settings_changed || relisted || !sweep.is_empty() };
         if sweep.is_bad() {
             self.set_error(message);
         } else {
@@ -216,7 +228,7 @@ mod tests {
         let id = app.focused_buffer_id();
         let probe = |app: &mut App| {
             app.disk_probe_basis = app.disk_state.clone();
-            ProbeResult { buffers: HashMap::from([(id, DiskFingerprint::of(&file))]), project: None }
+            ProbeResult { buffers: HashMap::from([(id, DiskFingerprint::of(&file))]), project: None, listings: Vec::new() }
         };
         let same = probe(&mut app);
         assert!(!app.apply_disk_probe(same), "nothing changed on disk");
