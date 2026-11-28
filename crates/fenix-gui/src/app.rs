@@ -267,6 +267,13 @@ pub(crate) fn place_key(path: &Path) -> PathBuf {
     fenix_core::path_key(real.as_deref().unwrap_or(path))
 }
 
+/// Whether `a` and `b` are in the same git repository (or, in none,
+/// are the same folder).
+pub(crate) fn same_repository(a: &Path, b: &Path) -> bool {
+    let repository = |p: &Path| fenix_project::vcs::repository_root(p).map(|r| place_key(&r)).unwrap_or_else(|| place_key(p));
+    repository(a) == repository(b)
+}
+
 /// Whether `path` is `root` or inside it, however each was spelled.
 pub(crate) fn path_within(path: &Path, root: &Path) -> bool {
     path.starts_with(root) || place_key(path).starts_with(place_key(root))
@@ -1078,6 +1085,10 @@ pub(crate) enum TerminalTarget {
     /// The popup panel (`SPC o t`) -- one per application, shared by
     /// every workspace and every frame.
     Panel,
+    /// One of the panel's shells by its id (`App::terminal_shell`): the
+    /// one shown, or another project's, kept running while you're
+    /// elsewhere (`App::parked_terminals`).
+    PanelShell(u64),
     /// One pane-resident shell (`SPC o T`), identified by its own
     /// buffer -- see `BufferKind::Terminal` for why a buffer, and not a
     /// pane, is the identity.
@@ -5010,6 +5021,13 @@ pub struct App {
     /// hidden). `None` before the panel's ever been opened, or right
     /// after a respawn is triggered because the previous shell exited.
     terminal: Option<TerminalState>,
+    /// The panel shell's id and the folder it was started in: its
+    /// project's.
+    terminal_shell: u64,
+    terminal_root: Option<PathBuf>,
+    /// Other projects' panel shells, running on while you're in another:
+    /// each comes back as you open the panel in its project again.
+    parked_terminals: Vec<(u64, PathBuf, TerminalState)>,
     /// Whether the terminal panel is currently shown -- a pure layout/
     /// rendering concern, independent of whether the session underneath
     /// it is alive (compare `sidebar_open`, which the sidebar's `Option`
@@ -6380,6 +6398,9 @@ impl App {
             sidebar_open: false,
             sidebar_focused: false,
             terminal: None,
+            terminal_shell: 0,
+            terminal_root: None,
+            parked_terminals: Vec::new(),
             terminal_open: false,
             terminal_focused: false,
             terminal_spawning: false,
@@ -7386,6 +7407,14 @@ impl App {
         }
     }
 
+    /// Whether the focus is on the Home of a workspace of no project: a
+    /// new one (`SPC TAB n`), or what's left after closing one. It's in
+    /// no project, not the last one you were in.
+    fn on_a_projectless_home(&self) -> bool {
+        let ws = self.workspaces.active_workspace();
+        ws.project.is_none() && ws.home == Some(self.focused_buffer_id())
+    }
+
     fn refresh_project_root(&mut self) {
         let path = self.open().buffer.path().map(Path::to_path_buf);
         // Home, and any other buffer that belongs to no project, is in
@@ -7401,7 +7430,7 @@ impl App {
             // a file of: `SPC p t` from the practice runs its tasks. Never
             // the Git lesson's practice repository, which is no project
             // of yours.
-            .or_else(|| self.last_project.clone().filter(|_| path.is_none()));
+            .or_else(|| self.last_project.clone().filter(|_| path.is_none() && !self.on_a_projectless_home()));
         if path.is_some() {
             let practice = self.tutorial_progress.with_file_name("tutorial-repo");
             if let Some(root) = self.project_root.clone().filter(|r| !r.starts_with(&practice)) {
@@ -9833,6 +9862,7 @@ impl App {
             return;
         }
         self.terminal_open = true;
+        self.terminal_for_this_project();
         let needs_spawn = self.terminal.as_mut().is_none_or(|t| !t.session.is_alive());
         if needs_spawn {
             self.terminal_focused = false;
@@ -9840,6 +9870,7 @@ impl App {
             let rows = text::TERMINAL_ROWS as u16;
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
+            self.terminal_root = self.project_root.clone();
             let shell = self.terminal_shell_to_spawn();
             let spawn = move || spawn_shell(rows, cols, cwd.as_deref(), shell.as_ref(), false);
             match self.event_proxy.clone() {
@@ -9862,6 +9893,29 @@ impl App {
             self.terminal_focused = true;
         }
         self.wake_caret();
+    }
+
+    /// The panel, opened in another project than its shell's: that
+    /// shell is kept running for when you're back there, and this
+    /// project's comes back -- or, none yet, one is started here.
+    fn terminal_for_this_project(&mut self) {
+        let Some(here) = self.project_root.clone() else { return };
+        let key = place_key(&here);
+        if self.terminal_root.as_deref().is_none_or(|root| place_key(root) == key) {
+            return;
+        }
+        if let (Some(mut shell), Some(root)) = (self.terminal.take(), self.terminal_root.take()) {
+            if shell.session.is_alive() {
+                self.parked_terminals.push((self.terminal_shell, root, shell));
+            }
+        }
+        self.parked_terminals.retain_mut(|(_, _, t)| t.session.is_alive());
+        if let Some(i) = self.parked_terminals.iter().position(|(_, root, _)| place_key(root) == key) {
+            let (shell, root, state) = self.parked_terminals.remove(i);
+            self.terminal_shell = shell;
+            self.terminal_root = Some(root);
+            self.terminal = Some(state);
+        }
     }
 
     /// Starts the thread that reads a freshly spawned shell's output.
@@ -9891,7 +9945,9 @@ impl App {
         self.terminal_spawning = false;
         match result {
             Ok((session, reader)) => {
-                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Panel, reader);
+                let shell = self.parked_terminals.iter().map(|(id, _, _)| *id).chain([self.terminal_shell]).max().unwrap_or(0) + 1;
+                self.terminal_shell = shell;
+                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::PanelShell(shell), reader);
                 self.terminal = Some(TerminalState::new(session, Some(terminal_reader)));
                 if self.terminal_open {
                     self.terminal_focused = true;
@@ -9952,6 +10008,8 @@ impl App {
     fn apply_terminal_output(&mut self, target: TerminalTarget, bytes: Vec<u8>) {
         let state = match target {
             TerminalTarget::Panel => self.terminal.as_mut(),
+            TerminalTarget::PanelShell(id) if id == self.terminal_shell => self.terminal.as_mut(),
+            TerminalTarget::PanelShell(id) => self.parked_terminals.iter_mut().find(|(shell, _, _)| *shell == id).map(|(_, _, t)| t),
             TerminalTarget::Buffer(id) => self.terminal_buffers.get_mut(&id),
         };
         let Some(state) = state else { return };
@@ -12317,7 +12375,14 @@ impl App {
     /// structural difference (every `fenix-git` call targets a specific
     /// repo root, not a daemon reachable regardless of cwd).
     pub(crate) fn open_git_panel(&mut self) {
-        if let Some(session) = &self.git_session {
+        let wanted = self.git_repo_wanted();
+        if let Some(session) = &mut self.git_session {
+            // Asked for from another project: the panel shows its
+            // repository from now on.
+            if let Some(wanted) = wanted.filter(|w| session.workspace_index != self.workspaces.active && !same_repository(w, &session.repo_root)) {
+                session.repo_root = wanted;
+                session.files.clear();
+            }
             let (workspace_index, staged_pane) = (session.workspace_index, session.staged_pane);
             self.workspaces.switch_to_index(workspace_index);
             self.windows_mut().focus(staged_pane);
@@ -13234,16 +13299,26 @@ impl App {
 
     // -- Rebase, merge and the operations that suspend -----------------
 
-    /// The repo any Git action should target: whichever Git-ish view is
-    /// open, else the focused buffer's project.
+    /// The repository the Git panel or the history is wanted for, asked
+    /// from where you are: the focused project's.
+    fn git_repo_wanted(&self) -> Option<PathBuf> {
+        self.project_root.clone()
+    }
+
+    /// The repo any Git action should target: the Git page's, the Git
+    /// panel's or the history's you're in, else the focused buffer's
+    /// project. A panel left open in another workspace -- another
+    /// project's -- isn't where you are.
     fn git_action_repo_root(&self) -> PathBuf {
         if let Some(root) = self.focused_git_page_root() {
             return root;
         }
+        let here = self.workspaces.active_index();
         self.git_session
             .as_ref()
+            .filter(|s| s.workspace_index == here)
             .map(|s| s.repo_root.clone())
-            .or_else(|| self.history_session.as_ref().map(|s| s.repo_root.clone()))
+            .or_else(|| self.history_session.as_ref().filter(|s| s.workspace_index == here).map(|s| s.repo_root.clone()))
             .or_else(|| self.project_root.clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
@@ -14527,7 +14602,13 @@ impl App {
     /// each local branch stands against its upstream, and the selected
     /// commit's diff in the shared diff viewer.
     pub(crate) fn open_history_view(&mut self) {
-        if let Some(session) = &self.history_session {
+        let wanted = self.git_repo_wanted();
+        if let Some(session) = &mut self.history_session {
+            if let Some(wanted) = wanted.filter(|w| session.workspace_index != self.workspaces.active && !same_repository(w, &session.repo_root)) {
+                session.repo_root = wanted;
+                session.commits.clear();
+                session.last_detail_commit = None;
+            }
             let (workspace_index, graph_pane) = (session.workspace_index, session.graph_pane);
             self.workspaces.switch_to_index(workspace_index);
             self.windows_mut().focus(graph_pane);
@@ -16172,6 +16253,7 @@ impl App {
         let id = self.new_home_buffer();
         self.workspaces.new_workspace(id, Cursor::at_start());
         self.ensure_workspace_home();
+        self.refresh_project_root();
         self.wake_caret();
     }
 
@@ -16860,7 +16942,7 @@ impl App {
                 self.wake_caret();
             }
             FenixUserEvent::GutterHunks(started, found) => self.apply_gutter_hunks(started, found),
-            FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, result) => self.apply_terminal_spawned(result.0),
+            FenixUserEvent::TerminalSpawned(TerminalTarget::Panel | TerminalTarget::PanelShell(_), result) => self.apply_terminal_spawned(result.0),
             FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
             // A new window asked for here is opened by `about_to_wait`:
@@ -27465,30 +27547,37 @@ configure_board stm32
     }
 
     #[test]
-    fn making_this_the_project_moves_everything_else_with_it() {
-        // Rather than pointing one panel elsewhere while `SPC p f` and
-        // `SPC s p` still look at the old project.
+    fn git_here_opens_the_folder_s_repository_and_leaves_the_project() {
+        // Not moving the project behind everyone's back: search, tasks,
+        // agents and extensions stay where you are.
         let dir = TempDir::new("last_mile_git_here");
         let repo = dir.mkdir("repo");
         std::fs::create_dir(repo.join(".git")).unwrap();
         let inner = dir.mkdir("repo/src");
         let mut app = app_with_places("last_mile_git_here", &inner);
+        let before = app.project_root.clone();
 
         app.explorer_git_here();
 
         // The repository root, not the directory that happened to be open.
-        assert_eq!(app.project_root.as_deref(), Some(repo.as_path()));
-        assert!(app.modeline_pieces().1.contains("project is now") || app.git_session.is_some());
+        let root = |a: &App| match a.pages.get(&a.focused_buffer_id()).map(|s| &s.model) {
+            Some(PageModel::Git(g)) => Some(g.root.clone()),
+            _ => None,
+        };
+        assert_eq!(root(&app), Some(fenix_lsp::normalize(repo.clone())));
+        assert_eq!(app.project_root, before);
     }
 
     #[test]
-    fn a_directory_with_no_project_markers_becomes_the_project_itself() {
+    fn git_here_in_a_folder_of_no_repository_says_so() {
         let dir = TempDir::new("last_mile_git_here_plain");
         let mut app = app_with_places("last_mile_git_here_plain", dir.path());
+        let before = app.project_root.clone();
 
         app.explorer_git_here();
 
-        assert_eq!(app.project_root.as_deref(), Some(dir.path()));
+        assert!(app.modeline_pieces().1.contains("isn't in a git repository"), "{}", app.modeline_pieces().1);
+        assert_eq!(app.project_root, before);
     }
 
     // -- Links --------------------------------------------------------------
@@ -31368,6 +31457,64 @@ configure_board stm32
         // And back to the subproject's workspace: the subproject again.
         app.open_project(child_root.clone(), None, false);
         assert_eq!(app.project_root.as_deref(), Some(child_root.as_path()));
+    }
+
+    /// Two git repositories opened as projects, each in its workspace;
+    /// b's active.
+    fn two_repositories(name: &str) -> (TempDir, App, PathBuf, PathBuf) {
+        let dir = TempDir::new(name);
+        let mut roots = Vec::new();
+        for repo in ["alpha", "beta"] {
+            let root = dir.mkdir(repo);
+            assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+            std::fs::write(root.join("README.md"), "# r\n").unwrap();
+            roots.push(fenix_lsp::normalize(std::fs::canonicalize(&root).unwrap()));
+        }
+        let (a, b) = (roots[0].clone(), roots[1].clone());
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.open_project(a.clone(), None, false);
+        app.open_project(b.clone(), None, false);
+        (dir, app, a, b)
+    }
+
+    #[test]
+    fn the_git_panel_left_in_one_project_isn_t_where_another_s_git_goes() {
+        let (_dir, mut app, a, b) = two_repositories("git_panel_moves");
+        app.open_project(a.clone(), None, false);
+        app.open_git_panel();
+        assert_eq!(app.git_session.as_ref().map(|s| s.repo_root.clone()), Some(a.clone()));
+        app.open_project(b.clone(), None, false);
+        assert_eq!(app.git_action_repo_root(), b, "b's, not the panel's");
+        app.open_git_panel();
+        assert_eq!(app.git_session.as_ref().map(|s| s.repo_root.clone()), Some(b), "asked for from b: b's");
+    }
+
+    #[test]
+    fn a_new_workspace_s_home_is_in_no_project() {
+        let (_dir, mut app, _a, b) = two_repositories("fresh_home");
+        assert_eq!(app.project_root.as_deref(), Some(b.as_path()));
+        app.new_workspace();
+        assert_eq!(app.project_root, None, "not the last project you were in");
+    }
+
+    #[test]
+    fn the_terminal_panel_is_each_project_s_own() {
+        let (_dir, mut app, a, b) = two_repositories("terminal_per_project");
+        app.toggle_terminal();
+        assert_eq!(app.terminal_root.as_deref(), Some(b.as_path()));
+        let b_shell = app.terminal_shell;
+        app.toggle_terminal();
+        app.open_project(a.clone(), None, false);
+        app.toggle_terminal();
+        assert_eq!(app.terminal_root.as_deref(), Some(a.as_path()), "a shell of a's");
+        assert_ne!(app.terminal_shell, b_shell);
+        assert_eq!(app.parked_terminals.len(), 1, "b's runs on");
+        app.toggle_terminal();
+        app.open_project(b.clone(), None, false);
+        app.toggle_terminal();
+        assert_eq!(app.terminal_shell, b_shell, "b's again, as it was");
+        app.toggle_terminal();
     }
 
     #[test]

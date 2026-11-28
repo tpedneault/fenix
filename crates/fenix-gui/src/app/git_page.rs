@@ -322,6 +322,12 @@ impl App {
             }
             return;
         };
+        self.open_git_status_at(root);
+    }
+
+    /// The status page for the repository at `root`: the one already
+    /// open for it, or a new one.
+    pub(crate) fn open_git_status_at(&mut self, root: PathBuf) {
         let root = fenix_lsp::normalize(root);
         let id = match self.find_page(|m| matches!(m, PageModel::Git(g) if g.root == root)) {
             Some(id) => {

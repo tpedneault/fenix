@@ -183,7 +183,7 @@ impl CommandRegistry {
         registry.register("explorer.yank_path", "Copy the full path", cmd_explorer_yank_path);
         registry.register("explorer.terminal_here", "Open a shell in this directory", cmd_explorer_terminal_here);
         registry.register("explorer.grep_here", "Search this directory", cmd_explorer_grep_here);
-        registry.register("explorer.git_here", "Make this the project and open the Git panel", cmd_explorer_git_here);
+        registry.register("explorer.git_here", "The Git page of the repository this folder is in", cmd_explorer_git_here);
         registry.register("explorer.rename_mode", "Edit the listing's names as text", cmd_explorer_rename_mode);
         registry.register("explorer.rename_apply", "Apply the edited names", cmd_explorer_rename_apply);
         registry.register("explorer.go_to_path", "Go to a path you type", cmd_explorer_go_to_path);

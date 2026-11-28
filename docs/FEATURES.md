@@ -523,9 +523,9 @@ its extension. The rest is built into Fenix.
   is what the pane-terminal work made possible -- without a working
   directory the first thing anybody types is a `cd`. `SPC e g` searches
   this directory once, leaving the next unqualified search meaning the
-  project again, and `SPC e G` makes this the project and opens the Git
-  panel on it, so `SPC p f` and `SPC s p` follow rather than one panel
-  pointing somewhere the rest of the editor is not.
+  project again, and `SPC e G` opens the Git page of the repository
+  this folder is in, leaving the project where it was (open the folder
+  as a project, `SPC p p`, to move everything there).
 
   Links and junctions are shown as links (`name →`) and coloured
   differently from real directories, because following one into a tree

@@ -1100,6 +1100,10 @@ impl App {
                 Err(e) => return self.set_error(format!("extensions can't run code here: {e:#}")),
             }
         }
+        // Where it works, first: its settings are that project's
+        // (`.fenix/settings.toml`), not those of where it last ran.
+        let project = self.wasm.start_in.remove(&ext.id).or_else(|| self.code_project());
+        self.wasm.projects.insert(ext.id.clone(), project.clone());
         let (settings, secrets) = self.code_settings_now(&ext);
         let settings = Arc::new(RwLock::new(settings));
         let secrets = Arc::new(RwLock::new(secrets));
@@ -1127,12 +1131,11 @@ impl App {
         // `/project` is fixed for as long as the worker runs; moving to
         // another project starts it again there when it's next used
         // (`code_focus_changed`, `code_call`).
-        spec.project = self.wasm.start_in.remove(&ext.id).or_else(|| self.code_project());
+        spec.project = project;
         spec.events = ext.manifest.contributes.events.clone();
         // Its test providers, the ones `test-provider-set` may name.
         spec.test_providers = ext.manifest.contributes.test_providers.iter().map(|p| p.id.clone()).collect();
         spec.tools_dir = if cfg!(test) { None } else { fenix_storage::paths::tools_dir() };
-        self.wasm.projects.insert(ext.id.clone(), spec.project.clone());
         spec.settings = settings;
         spec.own_settings = ext.manifest.contributes.settings.iter().map(|s| s.key.clone()).collect();
         // One it may read by pattern that's no setting of anyone's -- one it
@@ -1261,8 +1264,14 @@ impl App {
                 }
                 continue;
             }
-            // Back in its own project: it carries on as it was.
-            self.wasm.stale.remove(&ext.id);
+            // Back in its own project: it carries on as it was. Somewhere
+            // of no project (a loose file, a page of a workspace of none)
+            // isn't its project, and doesn't undo a move.
+            if project.is_some() {
+                self.wasm.stale.remove(&ext.id);
+            } else if self.wasm.stale.contains(&ext.id) {
+                continue;
+            }
             let guest = match (&file, &theirs) {
                 (Some(file), Some(root)) => file.strip_prefix(root).ok().map(|rel| format!("/project/{}", rel.to_string_lossy().replace('\\', "/"))),
                 _ => None,
@@ -5336,6 +5345,14 @@ pub(crate) mod tests {
         app.code_call("test.hello", Call::FocusMoved(Focus::None), COMMAND_TICKS, Pending::Other);
         assert_eq!(app.wasm.calls.len(), calls);
         assert!(app.wasm.stale.contains("test.hello"));
+        // A file of no project on the way isn't a way back to a's.
+        let loose = tempfile::tempdir().unwrap();
+        std::fs::write(loose.path().join("notes.txt"), "\n").unwrap();
+        app.open_file_from_picker(&loose.path().join("notes.txt"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(app.wasm.stale.contains("test.hello"), "still a's, still to start again");
+        app.open_file_from_picker(&b.path().join("b.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
 
         // Used: it starts again here, and runs.
         app.run_extension_command("test.hello", "hello.greet");

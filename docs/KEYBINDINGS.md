@@ -254,7 +254,7 @@ keys'; the palette has the commands).
 | `SPC e y` | Copy the full path |
 | `SPC e T` | Open a shell in this directory |
 | `SPC e g` | Search this directory |
-| `SPC e G` | Make this the project and open the Git panel |
+| `SPC e G` | The Git page of the repository this folder is in |
 | `SPC e k` | Stop the running file operation |
 | `SPC e w` | Edit the listing's names as text |
 | `SPC e W` | Apply the edited names |

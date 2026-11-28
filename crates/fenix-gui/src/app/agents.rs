@@ -478,7 +478,18 @@ impl App {
                 return root;
             }
         }
-        self.project_root.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."))
+        self.agents_project_root()
+    }
+
+    /// Where a new thread works, whatever the dock shows: the project
+    /// you're in, else your home folder -- never the folder Fenix
+    /// happened to be started from (`/`, from a desktop).
+    pub(super) fn agents_project_root(&self) -> PathBuf {
+        self.project_root
+            .clone()
+            .or_else(dirs::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     // -----------------------------------------------------------------
@@ -496,14 +507,16 @@ impl App {
             }
             return;
         }
-        // Put away earlier: back on the thread it showed.
-        if let Some(thread) = self.agents.shown(&self.pages) {
+        // Put away earlier: back on the thread it showed -- when it's
+        // this project's. Put away in another project, it's this one's
+        // last thread instead.
+        let root = self.agents_project_root();
+        if let Some(thread) = self.agents.shown(&self.pages).filter(|t| self.agents.hub.meta(t).is_some_and(|m| crate::app::place_key(&m.root) == crate::app::place_key(&root))) {
             self.agents_show(thread);
             self.agents_focus_composer();
             return;
         }
         let entries = self.agents_configure();
-        let root = self.agents_root();
         // The project's last thread, not one put away (archived).
         let existing = self.agents.load_threads(&root, 20);
         let archived = |hub: &fenix_acp::hub::Hub, t: &ThreadId| hub.meta(t).is_some_and(|m| m.archived);
@@ -537,7 +550,8 @@ impl App {
             self.agents_none_found(&entries);
             return;
         };
-        let id = self.agents.hub.new_thread(&agent, &self.agents_root());
+        // The project you're in, even from the dock showing another's.
+        let id = self.agents.hub.new_thread(&agent, &self.agents_project_root());
         self.agents_show(id);
         self.agents_focus_composer();
     }
@@ -799,7 +813,7 @@ impl App {
                     self.set_error(format!("{agent} isn't installed: install it, or set agents.servers"));
                     return;
                 }
-                let id = self.agents.hub.new_thread(&agent, &self.agents_root());
+                let id = self.agents.hub.new_thread(&agent, &self.agents_project_root());
                 self.agents_show(id);
             }
             Pick::Thread(id) => self.thread_list_open_thread(id),
