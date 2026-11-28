@@ -565,6 +565,7 @@ impl App {
         // where it put you in a listing.
         self.settle_keys();
         self.terminal_mouse_release();
+        self.agents_select_release();
         self.mouse.drag = None;
         self.mouse.scrolled_at = None;
         if self.mouse.split.take().is_some() {

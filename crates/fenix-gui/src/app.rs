@@ -20638,6 +20638,11 @@ impl App {
                             }
                         }
                     }
+                    // The agent's thread: a drag over its text selects it.
+                    if pos.1 >= content.y && self.agents_select_press(id, (content.x, content.y), pos) {
+                        self.wake_caret();
+                        return;
+                    }
                     // Text: the cursor to the glyph, a selection started.
                     if pos.1 >= content.y && self.text_press(id, rect, pos, Instant::now()) {
                         self.unfocus_terminal_buffer();
@@ -23590,6 +23595,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     // A selection or a divider following the pointer; the
                     // menu's row under it; the hover's wait.
                     self.mouse_drag_to(pos, window_width, window_height);
+                    self.agents_select_drag(pos);
                     self.menu_hover_at(pos, window_width, window_height);
                     self.pointer_rest_at(pos, Instant::now(), window_width, window_height);
                 }
