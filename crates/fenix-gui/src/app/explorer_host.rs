@@ -151,6 +151,9 @@ pub(crate) enum ExplorerTarget {
     Overlay,
 }
 
+/// How much coarser than the clock a folder's modification time can be.
+const COARSE_TIMES: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// When a listing was read, and each of its folders' modification time
 /// as the disk poll has seen it since. A folder's time moves when a
 /// name in it is added, removed or renamed -- by a terminal, an agent,
@@ -173,7 +176,11 @@ impl ExplorerStamps {
         for (dir, time) in looked {
             changed |= match self.seen.get(dir) {
                 Some(before) => before != time,
-                None => time.is_none_or(|t| t > self.listed_at),
+                // Within a second of the listing counts: a folder's time
+                // is coarser than the clock on some file systems, and a
+                // change just after the read can carry a time just
+                // before it. At worst, one read too many.
+                None => time.is_none_or(|t| t + COARSE_TIMES > self.listed_at),
             };
             self.seen.insert(dir.clone(), *time);
         }
@@ -2726,9 +2733,15 @@ impl App {
         for (target, looked) in seen {
             let Some(cwd) = self.explorer_state(target).map(|s| s.cwd.clone()) else { continue };
             let changed = self.explorer_stamps.get_mut(&target).is_some_and(|stamps| stamps.changed(&looked));
+            let looked: Vec<(PathBuf, Option<std::time::SystemTime>)> = looked;
             let reading = self.explorer_requests.get(&target).is_some_and(|r| !r.done);
             if changed && !reading && !self.explorer_editing(target) {
                 self.explorer_navigate(target, &cwd);
+                // What was just seen is what the new read is of: the next
+                // look compares with it, not with the clock.
+                if let Some(stamps) = self.explorer_stamps.get_mut(&target) {
+                    stamps.seen.extend(looked);
+                }
                 any = true;
             }
         }
