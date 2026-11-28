@@ -1010,8 +1010,46 @@ pub(crate) fn project_kinds_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The text of `page_text` from `a` to `b` (either way round), both
+/// ends in: what a drag over the page selected.
+pub fn selected_text(page_text: &str, a: (usize, usize), b: (usize, usize)) -> String {
+    let (start, end) = if a <= b { (a, b) } else { (b, a) };
+    let lines: Vec<&str> = page_text.lines().collect();
+    let mut out = Vec::new();
+    for line in start.0..=end.0.min(lines.len().saturating_sub(1)) {
+        let chars: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
+        let from = if line == start.0 { start.1.min(chars.len()) } else { 0 };
+        let to = if line == end.0 { (end.1 + 1).min(chars.len()) } else { chars.len() };
+        out.push(chars[from..to.max(from)].iter().collect::<String>().trim_end().to_string());
+    }
+    out.join("\n").trim_matches('\n').to_string()
+}
+
+/// The cells `a` to `b` cover on each line of `page_text`, for the tint.
+pub fn selected_cells(page_text: &str, a: (usize, usize), b: (usize, usize)) -> Vec<(usize, std::ops::Range<usize>)> {
+    let (start, end) = if a <= b { (a, b) } else { (b, a) };
+    let lines: Vec<&str> = page_text.lines().collect();
+    (start.0..=end.0.min(lines.len().saturating_sub(1)))
+        .filter_map(|line| {
+            let len = lines.get(line).map(|l| l.chars().count()).unwrap_or(0);
+            let from = if line == start.0 { start.1.min(len) } else { 0 };
+            let to = if line == end.0 { (end.1 + 1).min(len) } else { len };
+            (to > from).then_some((line, from..to))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_drag_selects_from_where_it_started_to_where_it_is_either_way() {
+        let text = "Agent\n  The answer is here,\n  over two lines.\nnext";
+        assert_eq!(selected_text(text, (1, 6), (1, 11)), "answer");
+        assert_eq!(selected_text(text, (2, 9), (1, 13)), "is here,\n  over two", "backwards too");
+        assert_eq!(selected_cells(text, (1, 6), (2, 3)), vec![(1, 6..21), (2, 0..4)]);
+        assert_eq!(selected_text(text, (1, 40), (1, 50)), "", "past a line's end: nothing");
+    }
+
     use super::*;
 
     /// A wide character takes two cells, as `ui-kit` lays it out: columns

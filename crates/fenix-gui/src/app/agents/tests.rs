@@ -2150,13 +2150,10 @@ fn text_dragged_over_in_the_thread_is_copied_with_y() {
     let text = f.app.pages[&page].page.text.clone();
     let (line, row) = text.lines().enumerate().find(|(_, l)| l.trim().len() > 4).map(|(i, l)| (i, l.to_string())).expect("a line of text");
     let start = row.find(|c: char| !c.is_whitespace()).unwrap();
-    if let PageModel::Agent(p) = &mut f.app.pages.get_mut(&page).unwrap().model {
-        p.selection = Some(((line, start), (line, start + 3)));
-    }
-    f.app.agents_page_key(page, crate::page::Key::Char('y'));
+    f.app.pages.get_mut(&page).unwrap().selection = Some(((line, start), (line, start + 3)));
+    assert!(f.app.page_selection_key(page, KeyPress::char('y')));
     assert!(f.app.modeline_pieces().1.contains("copied 1 lines"), "{}", f.app.modeline_pieces().1);
-    let PageModel::Agent(p) = &f.app.pages[&page].model else { unreachable!() };
-    assert!(p.selection.is_none(), "let go once copied");
+    assert!(f.app.pages[&page].selection.is_none(), "let go once copied");
 }
 
 #[test]

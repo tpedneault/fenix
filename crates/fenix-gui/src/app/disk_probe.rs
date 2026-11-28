@@ -149,6 +149,9 @@ impl App {
                 }
             }
             request.listings = self.explorer_folders_to_watch();
+            // What's watched follows what's shown (a page closed, a
+            // folder folded).
+            self.explorer_watch_sync();
         }
         request.project = self.settings_root();
         self.disk_probe_out = Some(Instant::now());

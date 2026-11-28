@@ -89,7 +89,7 @@ prompt goes to and in which mode.
   and `@/full/path` names a file in them. The list is yours, kept with
   your projects' state, never in the project's `.fenix`.
 - **Copying**: drag over the thread's text to select it, then `y` (or
-  `Ctrl+C`) copies it; `Esc` lets go. `y` on a card copies the card,
+  `Ctrl+C`) copies it; `Esc` lets go. (Every page does the same.) `y` on a card copies the card,
   `Y` the answer or the whole thread.
 - When the agent asks before it edits or runs something, the question is
   an outlined card in the thread with its answers, one a line on its

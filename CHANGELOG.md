@@ -8,14 +8,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The sidebar and the explorer pages watch the folders they show: a file
+  made, removed or renamed by something else shows as it happens, not on
+  the next disk poll (which stays, for shares).
+
 - Agents: `SPC a w` gives this project's agents folders and files outside
   it -- sent as the session's other folders, readable and writable
   through Fenix, and `@`-mentionable.
 - Agents: `SPC a I` sends a picture file with the prompt, offering your
   newest screenshot; `@` on a picture sends the picture; a picture
   dropped on the window goes with the prompt.
-- Agents: drag over the thread's text to select it; `y` or `Ctrl+C`
-  copies it.
+- Any page's text -- an agent's thread, the Git pages, Search, a task's
+  output, the tests, an extension's page -- is selected by dragging over
+  it; `y` or `Ctrl+C` copies it, `Esc` lets go.
 
 ### Changed
 

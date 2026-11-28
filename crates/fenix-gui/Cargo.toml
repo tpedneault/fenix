@@ -50,6 +50,9 @@ fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }
 fenix-tests = { path = "../fenix-tests" }
 fenix-rpc = { path = "../fenix-rpc" }
+# The explorers' folders watched for names added, removed or renamed
+# (the disk poll stays for shares, where notifications don't come).
+notify = { version = "8", default-features = false }
 # A project's files walked through its ignores, as Search walks them
 # (fenix-project), for the test explorer's first scan.
 ignore = "0.4.34"
