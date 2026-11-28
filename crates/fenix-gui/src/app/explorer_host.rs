@@ -151,6 +151,36 @@ pub(crate) enum ExplorerTarget {
     Overlay,
 }
 
+/// When a listing was read, and each of its folders' modification time
+/// as the disk poll has seen it since. A folder's time moves when a
+/// name in it is added, removed or renamed -- by a terminal, an agent,
+/// a save as, `git checkout` -- which is when the listing is read again.
+pub(crate) struct ExplorerStamps {
+    pub(super) listed_at: std::time::SystemTime,
+    pub(super) seen: HashMap<PathBuf, Option<std::time::SystemTime>>,
+}
+
+impl ExplorerStamps {
+    pub(super) fn now() -> Self {
+        ExplorerStamps { listed_at: std::time::SystemTime::now(), seen: HashMap::new() }
+    }
+
+    /// Whether what the poll saw says the listing is out of date: a
+    /// folder seen before at another time, or gone; one seen for the
+    /// first time changed since the listing was read. Remembers it.
+    pub(super) fn changed(&mut self, looked: &[(PathBuf, Option<std::time::SystemTime>)]) -> bool {
+        let mut changed = false;
+        for (dir, time) in looked {
+            changed |= match self.seen.get(dir) {
+                Some(before) => before != time,
+                None => time.is_none_or(|t| t > self.listed_at),
+            };
+            self.seen.insert(dir.clone(), *time);
+        }
+        changed
+    }
+}
+
 /// One directory read, in flight or just finished, for one explorer
 /// listing.
 ///
@@ -673,6 +703,7 @@ impl App {
         let request = self.next_explorer_request;
         let path = path.to_path_buf();
         self.explorer_requests.insert(target, ExplorerRequest { id: request, path: path.clone(), started: Instant::now(), done: false });
+        self.explorer_stamps.insert(target, ExplorerStamps::now());
 
         match self.event_proxy.clone() {
             Some(proxy) => {
@@ -893,6 +924,7 @@ impl App {
         // its width.
         let saved = self.explorer_sessions.get(&dir).cloned().unwrap_or_default();
         let folders: Vec<PathBuf> = saved.folders.iter().map(|f| dir.join(f)).collect();
+        self.explorer_stamps.insert(ExplorerTarget::Sidebar, ExplorerStamps::now());
         match fenix_explorer::read_tree(&dir, &folders, false) {
             Ok(listing) => {
                 let mut explorer = ExplorerState::pending_at(&dir);
@@ -928,9 +960,9 @@ impl App {
 
     /// Where the sidebar is rooted for `file`: its project, else the
     /// workspace's, else where the explorer starts.
-    fn sidebar_root_for(&self, file: Option<&Path>) -> PathBuf {
+    pub(super) fn sidebar_root_for(&self, file: Option<&Path>) -> PathBuf {
         file.filter(|f| !is_unc(f))
-            .and_then(fenix_project::find_project_root)
+            .and_then(|f| self.project_root_of_file(f))
             .or_else(|| self.workspaces.active_workspace().project.clone().filter(|root| file.is_none_or(|f| f.starts_with(root))))
             .unwrap_or_else(|| self.explorer_start_dir())
     }
@@ -2671,6 +2703,40 @@ impl App {
             Some(first) if failures.len() == total => self.set_error(first.clone()),
             Some(first) => self.set_error(format!("{} of {total} failed -- {first}", failures.len())),
         }
+    }
+
+    /// The folders of each listing on screen -- the sidebar's, the
+    /// explorer pages' -- for the disk poll to look at: where each is and
+    /// the folders open in it. One on a share or another machine isn't
+    /// looked at: a poll mustn't wait on a server.
+    pub(super) fn explorer_folders_to_watch(&self) -> Vec<(ExplorerTarget, Vec<PathBuf>)> {
+        let sidebar = self.sidebar.as_ref().filter(|_| self.sidebar_open).map(|s| (ExplorerTarget::Sidebar, s));
+        let pages = self.dired_states.iter().filter(|(id, _)| self.pane_showing(**id).is_some()).map(|(id, s)| (ExplorerTarget::Buffer(*id), s));
+        sidebar
+            .into_iter()
+            .chain(pages)
+            .filter(|(_, s)| !is_unc(&s.cwd) && !fenix_vfs::is_remote(&s.cwd))
+            .map(|(target, s)| (target, std::iter::once(s.cwd.clone()).chain(s.open_folders()).collect()))
+            .collect()
+    }
+
+    /// What the disk poll saw of the listings' folders: each one a name
+    /// was added to, removed from or renamed in since is read again, as
+    /// it is -- its open folders, its selection, its filter. Not one
+    /// being read already, or with a name being typed in it. Whether any
+    /// was.
+    pub(super) fn explorer_folders_seen(&mut self, seen: Vec<(ExplorerTarget, Vec<(PathBuf, Option<std::time::SystemTime>)>)>) -> bool {
+        let mut any = false;
+        for (target, looked) in seen {
+            let Some(cwd) = self.explorer_state(target).map(|s| s.cwd.clone()) else { continue };
+            let changed = self.explorer_stamps.get_mut(&target).is_some_and(|stamps| stamps.changed(&looked));
+            let reading = self.explorer_requests.get(&target).is_some_and(|r| !r.done);
+            if changed && !reading && !self.explorer_editing(target) {
+                self.explorer_navigate(target, &cwd);
+                any = true;
+            }
+        }
+        any
     }
 
     /// Re-reads whichever listing is active.

@@ -5362,6 +5362,9 @@ pub struct App {
     /// directory supersedes whatever was being read, rather than
     /// queueing behind it.
     explorer_requests: HashMap<ExplorerTarget, ExplorerRequest>,
+    /// What each listing's folders looked like on disk (`ExplorerStamps`),
+    /// for the disk poll to tell when something else changed them.
+    explorer_stamps: HashMap<ExplorerTarget, explorer_host::ExplorerStamps>,
     /// Source of `ExplorerRequest::id`. Global rather than per-buffer so
     /// an id is never reused across buffers, which keeps a late result
     /// from a closed buffer from ever matching a live request.
@@ -6431,6 +6434,7 @@ impl App {
             home_logo: None,
             dired_states: HashMap::new(),
             explorer_requests: HashMap::new(),
+            explorer_stamps: HashMap::new(),
             next_explorer_request: 0,
             pane_titles: HashMap::new(),
             gutter_hunks: HashMap::new(),
@@ -7323,6 +7327,30 @@ impl App {
         Some((self.project_kind_of(root), name))
     }
 
+    /// The project `file` is in, as far as Fenix is concerned: the
+    /// active workspace's when the file is inside it -- a crate or a
+    /// package nested in the project you opened is still that project,
+    /// not one of its own -- else the nearest folder with a project's
+    /// marker.
+    pub(super) fn project_root_of_file(&self, file: &Path) -> Option<PathBuf> {
+        let nearest = fenix_project::find_project_root(file);
+        let workspace = self.workspaces.active_workspace().project.as_deref().filter(|root| file.starts_with(root));
+        match (nearest, workspace) {
+            (Some(nearest), Some(workspace)) if nearest.starts_with(workspace) => Some(workspace.to_path_buf()),
+            (nearest, _) => nearest,
+        }
+    }
+
+    /// The project of what has the focus: its file's
+    /// (`project_root_of_file`), else -- Home, a page -- the active
+    /// workspace's.
+    pub(super) fn focused_project(&self) -> Option<PathBuf> {
+        match self.open().buffer.path() {
+            Some(file) => self.project_root_of_file(file),
+            None => self.workspaces.active_workspace().project.clone(),
+        }
+    }
+
     fn refresh_project_root(&mut self) {
         let path = self.open().buffer.path().map(Path::to_path_buf);
         // Home, and any other buffer that belongs to no project, is in
@@ -7331,7 +7359,7 @@ impl App {
         let was = self.project_root.clone();
         self.project_root = path
             .as_deref()
-            .and_then(fenix_project::find_project_root)
+            .and_then(|file| self.project_root_of_file(file))
             .or_else(|| self.workspaces.active_workspace().project.clone())
             // A buffer of no file in a workspace of no project -- a page,
             // a lesson's practice -- stays in the last project you were in
@@ -16099,15 +16127,12 @@ impl App {
     /// current buffer (so it starts on something, not a blank scratch
     /// buffer) -- becomes active immediately.
     pub(crate) fn new_workspace(&mut self) {
-        let focused = self.focused_buffer_id();
-        // A workspace's Home is its own: seed the new one with a fresh
-        // Home rather than the one it was opened from.
-        // And the dock comes along by itself, so neither of its panes is
-        // what the new workspace is seeded with.
-        let dock = self.agents_is_dock_pane(self.focused_pane_id());
-        let id = if dock || self.is_a_workspace_home(focused) { self.new_home_buffer() } else { focused };
-        let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
-        self.workspaces.new_workspace(id, cursor);
+        // A new workspace starts on a Home of its own -- not on the
+        // buffer it was opened from, which is still in the workspace you
+        // left (and the dock comes along by itself).
+        let id = self.new_home_buffer();
+        self.workspaces.new_workspace(id, Cursor::at_start());
+        self.ensure_workspace_home();
         self.wake_caret();
     }
 
@@ -16388,7 +16413,7 @@ impl App {
     }
 
     /// Switches to an already-open plain workspace named `name`, or
-    /// else creates one (seeded with the focused buffer, via the same
+    /// else creates one (on a Home of its own, via the same
     /// `new_workspace` `SPC TAB n` itself uses). The "no live session
     /// to check instead" counterpart of the VNC extension's/`open_
     /// docker_panel`'s own idempotence -- see `open_configured_
@@ -29035,6 +29060,40 @@ configure_board stm32
     }
 
     #[test]
+    fn the_sidebar_catches_up_with_files_made_removed_and_renamed_elsewhere() {
+        let (dir, mut app) = app_in_a_project("sidebar_outside_changes");
+        app.toggle_sidebar();
+        app.sidebar_focused = false;
+        let names = |app: &App| app.sidebar.as_ref().unwrap().entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        let shown = |app: &App, name: &str| names(app).iter().any(|n| n == name);
+        assert!(shown(&app, "main.rs"), "{:?}", names(&app));
+
+        // A terminal, an agent, a save as: in the project and in a folder
+        // open in it.
+        std::fs::write(dir.path().join("notes.md"), "x").unwrap();
+        std::fs::write(dir.path().join("src").join("extra.rs"), "x").unwrap();
+        app.start_disk_probe();
+        assert!(shown(&app, "notes.md") && shown(&app, "extra.rs"), "{:?}", names(&app));
+
+        std::fs::rename(dir.path().join("src").join("extra.rs"), dir.path().join("src").join("renamed.rs")).unwrap();
+        std::fs::remove_file(dir.path().join("notes.md")).unwrap();
+        app.start_disk_probe();
+        assert!(shown(&app, "renamed.rs") && !shown(&app, "extra.rs") && !shown(&app, "notes.md"), "{:?}", names(&app));
+        assert!(shown(&app, "main.rs"), "src stays open: {:?}", names(&app));
+
+        // Nothing changed: not read again.
+        let before = app.next_explorer_request;
+        app.start_disk_probe();
+        assert_eq!(app.next_explorer_request, before);
+
+        // Watching switched off: left as it is.
+        app.config.watch_files = Some(false);
+        std::fs::write(dir.path().join("later.md"), "x").unwrap();
+        app.start_disk_probe();
+        assert!(!shown(&app, "later.md"));
+    }
+
+    #[test]
     fn the_sidebar_follows_the_file_being_edited_without_taking_the_keyboard() {
         let (dir, mut app) = app_in_a_project("follow_switch");
         app.toggle_sidebar();
@@ -30254,8 +30313,10 @@ configure_board stm32
     }
 
     #[test]
-    fn new_workspace_becomes_active_and_is_seeded_with_the_current_buffer() {
-        let mut app = App::with_file(None);
+    fn new_workspace_becomes_active_and_opens_on_a_home_of_its_own() {
+        let dir = TempDir::new("new_workspace_home");
+        let file = dir.write("a.txt", "a\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         let buffer_id = app.focused_buffer_id();
 
         app.new_workspace();
@@ -30263,7 +30324,9 @@ configure_board stm32
         assert_eq!(app.workspaces.len(), 2);
         assert_eq!(app.workspaces.active_index(), 1);
         assert_eq!(app.workspaces.active_name(), "workspace-2");
-        assert_eq!(app.focused_buffer_id(), buffer_id); // seeded, not a blank scratch
+        assert_ne!(app.focused_buffer_id(), buffer_id, "the file stays in the workspace it was in");
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
+        assert!(app.is_a_workspace_home(app.focused_buffer_id()));
         assert_eq!(app.windows().window_count(), 1); // new workspace starts unsplit
     }
 
@@ -31228,6 +31291,37 @@ configure_board stm32
 
         assert!(app.project_root.is_some(), "project_root itself should still auto-detect");
         assert!(app.known_projects.roots().is_empty(), "known_projects should stay empty until SPC p a");
+    }
+
+    #[test]
+    fn a_subproject_s_file_in_the_parent_project_s_workspace_is_the_parent_project() {
+        let dir = TempDir::new("nested_projects");
+        let root = fenix_lsp::normalize(std::fs::canonicalize(dir.path()).unwrap());
+        dir.mkdir(".git");
+        dir.write("Cargo.toml", "[workspace]\n");
+        let child = dir.write("tool/Cargo.toml", "[package]\n");
+        let child_root = child.parent().unwrap().to_path_buf();
+        let file = dir.write("tool/src/main.rs", "fn main() {}\n");
+        let file = fenix_lsp::normalize(std::fs::canonicalize(&file).unwrap());
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+
+        // In the subproject's own workspace: the subproject.
+        app.open_project(child_root.clone(), Some(file.clone()), false);
+        let child_root = fenix_lsp::normalize(std::fs::canonicalize(&child_root).unwrap());
+        assert_eq!(app.project_root.as_deref(), Some(child_root.as_path()));
+
+        // The parent opened, landing on that same file: the parent, not
+        // stuck in the subproject.
+        app.open_project(root.clone(), Some(file.clone()), false);
+        assert_eq!(app.workspaces.active_workspace().project.as_deref(), Some(root.as_path()));
+        assert_eq!(app.open().buffer.path(), Some(file.as_path()));
+        assert_eq!(app.project_root.as_deref(), Some(root.as_path()));
+        assert_eq!(app.sidebar_root_for(Some(&file)), root);
+
+        // And back to the subproject's workspace: the subproject again.
+        app.open_project(child_root.clone(), None, false);
+        assert_eq!(app.project_root.as_deref(), Some(child_root.as_path()));
     }
 
     #[test]
@@ -39196,7 +39290,8 @@ FIVE
 ");
         let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
         let killed = app.focused_buffer_id();
-        app.new_workspace(); // seeded with a.txt too -- now shown in both
+        app.new_workspace();
+        app.open_file_from_picker(&a); // a.txt now shown in both
         let second = app.workspaces.active_index();
         app.workspaces.switch_to_index(second - 1);
         app.kill_buffer();

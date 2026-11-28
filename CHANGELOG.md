@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- A new workspace (`SPC TAB n`) starts on a Home of its own, not on the
+  buffer you were in -- that stays in the workspace you left.
+
+### Fixed
+
+- The sidebar (`SPC e t`) and the explorer pages catch up with files and
+  folders made, removed or renamed by something else -- a terminal, an
+  agent, a save as, `git checkout` -- within a couple of seconds, keeping
+  their open folders and selection.
+- Opening a project whose last file was in a project nested in it (a
+  crate of a Cargo workspace, a package of a monorepo) lands in the
+  project you opened, not the nested one: in a project's workspace, its
+  files are its own, whatever project markers sit between. The sidebar,
+  search, tasks, Git and extensions follow.
+- An extension follows you to another workspace's project from its Home
+  or a page, not only from a file.
+- A forge extension asked to act on a repository other than its project's
+  (`o` on a Git page) starts again in that repository first: your agent
+  writing a merge request's description read the branch's diff and
+  commits from the project the extension had started in, and couldn't
+  find the branch.
+
 ## [1.6.0] - 2026-11-15
 
 ### Added

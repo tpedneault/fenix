@@ -410,6 +410,14 @@ its extension. The rest is built into Fenix.
   closed, its width, its open folders, its filter -- and gets it back
   when you return to it, in this session or the next.
 
+  **It keeps up with the disk**: a file or folder made, removed or
+  renamed by something else -- a terminal, an agent, a save as, a
+  `git checkout` -- shows in the sidebar and the explorer pages within a
+  couple of seconds (or as you come back to the window), in the folders
+  you have open, with your selection kept. `editor.watch_files = false`
+  turns it off with the rest of the disk checks; a listing on a share or
+  another machine isn't looked at.
+
   **The mouse**: a click selects a row (and gives that listing the
   keyboard), a second click opens it, a click on a chevron opens or
   closes the folder, a breadcrumb segment goes to that folder, the wheel
@@ -561,7 +569,11 @@ its extension. The rest is built into Fenix.
   is untouched), `c` creates a new one, `h` and `,` open its doctor and
   settings. Opening a project gives it a workspace of its own and
   returns there next time -- `[windows] workspace_per_project = false`
-  turns that off. `SPC p P` is the old path-only quick switcher.
+  turns that off. In a project's workspace, a file of a project nested in
+  it -- a crate of a Cargo workspace, a package of a monorepo -- is in the
+  project you opened: its search, tasks, Git and extensions are that
+  project's. Open the nested one as a project of its own to work in it
+  alone. `SPC p P` is the old path-only quick switcher.
 - **New projects** (`SPC p c`, or Home's *new project* row): a four-step
   wizard -- template, location (typed, or `b` to pick the folder in the
   explorer), the template's own questions, then a review of every file it
@@ -820,7 +832,8 @@ its extension. The rest is built into Fenix.
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
-  workspaces (`SPC TAB`) -- name one (`SPC TAB r`), jump straight to it
+  workspaces (`SPC TAB`) -- a new one (`SPC TAB n`) starts on a Home of
+  its own; name one (`SPC TAB r`), jump straight to it
   by name instead of only cycling (`SPC TAB TAB`), or define a shelf of
   them in `SPC ,` (Workspaces) and open-or-switch-to one on
   demand (`SPC TAB f`). Every pane shows a small title bar naming its

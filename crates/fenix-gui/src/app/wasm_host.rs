@@ -276,6 +276,9 @@ pub(crate) struct WasmHost {
     restored: u64,
     /// The project each worker was started in: its `/project`.
     pub(super) projects: HashMap<String, Option<PathBuf>>,
+    /// The project one is to start in next, instead of the one you're in:
+    /// a forge's, handed a repository outside its `/project`.
+    pub(super) start_in: HashMap<String, PathBuf>,
     /// Those running in a project other than the one you're in: started
     /// again there the next time they're used (a command, a page, a
     /// service, a language server), not all at once as you move. `/project`
@@ -888,7 +891,7 @@ impl App {
             self.start_code_extension(&ext.id);
         }
         let file = self.open().buffer.path().map(Path::to_path_buf);
-        let project = file.as_deref().and_then(fenix_project::find_project_root);
+        let project = file.as_deref().and_then(|file| self.project_root_of_file(file));
         self.code_start_waiting(file.as_deref(), project.as_deref());
     }
 
@@ -1124,7 +1127,7 @@ impl App {
         // `/project` is fixed for as long as the worker runs; moving to
         // another project starts it again there when it's next used
         // (`code_focus_changed`, `code_call`).
-        spec.project = self.code_project();
+        spec.project = self.wasm.start_in.remove(&ext.id).or_else(|| self.code_project());
         spec.events = ext.manifest.contributes.events.clone();
         // Its test providers, the ones `test-provider-set` may name.
         spec.test_providers = ext.manifest.contributes.test_providers.iter().map(|p| p.id.clone()).collect();
@@ -1231,11 +1234,13 @@ impl App {
     /// where you are -- or, if it's a project other than its `/project`,
     /// started again there, its pages kept.
     fn code_focus_changed(&mut self) {
-        // Only a file moves it: a page (its own, Home) belongs to no
-        // project, and following those would start it again each time
-        // you went between its page and your code.
+        // A file moves it to its project; a page (its own, Home) to its
+        // workspace's -- the project you switched to -- and not at all in
+        // a workspace of no project. Pages in the workspace of the code
+        // you're in are in that code's project, so going between an
+        // extension's page and your code doesn't start it again.
         let file = self.open().buffer.path().map(Path::to_path_buf);
-        let project = file.as_deref().and_then(fenix_project::find_project_root);
+        let project = self.focused_project();
         self.code_start_waiting(file.as_deref(), project.as_deref());
         let running: Vec<CodeExtension> = self.wasm.installed.iter().filter(|e| self.wasm.workers.contains_key(&e.id) && e.manifest.permissions.filesystem != fenix_extensions::manifest::Filesystem::None).cloned().collect();
         for ext in running {
@@ -1579,7 +1584,7 @@ impl App {
         // Its test provider's run under way stops as after a trap; the new
         // instance is never asked about it (test explorer, §6.4).
         let name = self.wasm.installed.iter().find(|e| e.id == ext).map_or(ext.to_string(), |e| e.name.clone());
-        let there = self.code_project().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "another project".into());
+        let there = self.wasm.start_in.get(ext).cloned().or_else(|| self.code_project()).and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "another project".into());
         self.tests_extension_gone(ext, &format!("{name} started again in {there}"), false);
         // Let go, not waited for: one still loading or in a call would hold
         // the UI thread until it's done.
@@ -1828,10 +1833,36 @@ impl App {
             }
             return false;
         };
+        // Only for what's done with the repository: the Git page's header
+        // line (`forge.branch`) doesn't start it again for each page read.
+        if service != "forge.branch" {
+            self.code_forge_move_to(&ext, root);
+        }
         // It may read the repository, and run git there.
         self.code_call(&ext, Call::Grant(fenix_lsp::normalize(root.to_path_buf())), COMMAND_TICKS, Pending::Other);
         self.code_serve(&ext, service, payload, ServiceCaller::Fenix, Answer::Fenix(then));
         true
+    }
+
+    /// Forge `ext` is handed the repository at `root`: when its `/project`
+    /// (or, not running, the project it would start in) is another
+    /// repository, it starts in `root`'s project instead. What it does for
+    /// the repository -- a request's description written by your agent,
+    /// with the branch's diff and commits -- is then read from that
+    /// repository, not from the project it happened to start in.
+    fn code_forge_move_to(&mut self, ext: &str, root: &Path) {
+        let running = self.wasm.workers.contains_key(ext);
+        let now = if running { self.wasm.projects.get(ext).cloned().flatten() } else { self.code_project() };
+        let repository = |p: &Path| fenix_project::vcs::repository_root(p).map(fenix_lsp::normalize);
+        let wanted = repository(root);
+        if wanted.is_none() || now.as_deref().and_then(repository) == wanted {
+            return;
+        }
+        let project = self.project_root_of_file(root).filter(|p| repository(p) == wanted).unwrap_or_else(|| root.to_path_buf());
+        self.wasm.start_in.insert(ext.to_string(), project);
+        if running {
+            self.restart_code_extension_saying(ext, "-- handed another repository: starting again there");
+        }
     }
 
     /// The Git status page `id` was read: its branch's request, from a code
@@ -5683,6 +5714,42 @@ pub(crate) mod tests {
         pump_until(&mut app, |a| said(a, "forge.open, its HEAD read: Some(true)"));
         git(&["remote", "set-url", "origin", "https://github.com/o/r.git"]);
         assert!(!app.code_forge_open(&repo, "forge.open", None), "not a host it serves");
+    }
+
+    /// A forge handed another repository than its `/project`'s to act on
+    /// starts again in that one, so what it reads there -- a branch's
+    /// diff for your agent -- is that repository's, not the project it
+    /// happened to start in. The Git page's header line doesn't move it.
+    #[test]
+    fn a_forge_handed_another_repository_starts_again_in_it() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("[permissions]\nfilesystem = \"project-read\"\n\n[[contributes.forges]]\nname = \"Hub\"\nhosts = [\"example.test\"]\n")];
+        let repo = |name: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(dir.path()).output().unwrap().status.success(), "git {args:?}");
+            git(&["init", "-q"]);
+            git(&["remote", "add", "origin", "git@example.test:o/r.git"]);
+            std::fs::write(dir.path().join(name), "\n").unwrap();
+            dir
+        };
+        let (a, b) = (repo("a.txt"), repo("b.txt"));
+        let name = |app: &App| app.wasm.projects.get("test.hello").cloned().flatten().and_then(|p| p.file_name().map(|n| n.to_owned()));
+        app.open_file_from_picker(&a.path().join("a.txt"));
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.code_ready("test.hello"));
+        assert_eq!(name(&app).as_deref(), a.path().file_name());
+
+        assert!(app.code_forge_call(b.path(), "forge.branch", None, Box::new(|_, _| {})));
+        assert_eq!(name(&app).as_deref(), a.path().file_name(), "a header line doesn't start it again");
+
+        assert!(app.code_forge_open(b.path(), "forge.open", Some(7)));
+        assert_eq!(name(&app).as_deref(), b.path().file_name());
+        pump_until(&mut app, |a| said(a, "forge.open, its HEAD read: Some(true)"));
+        assert!(said(&app, "handed another repository: starting again there"));
+
+        // Its own repository again: carried on with, not started again.
+        assert!(app.code_forge_open(b.path(), "forge.open", Some(7)));
+        assert_eq!(app.extension_output_text().matches("handed another repository").count(), 1);
     }
 
     /// `page-focus` brings its surface to the pane you're in, out of the
