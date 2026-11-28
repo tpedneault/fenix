@@ -257,6 +257,21 @@ const STATS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// writes its own temp file is worse than one that takes a moment.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
+/// What two spellings of one folder or file have in common: the folder
+/// it really is (a link followed, `/tmp` and `/private/tmp` one) and, on
+/// Windows, in one case. A path that isn't there, is on a share or on
+/// another machine is taken as written.
+pub(crate) fn place_key(path: &Path) -> PathBuf {
+    let local = !fenix_vfs::is_remote(path) && !explorer_host::is_unc(path);
+    let real = if local { std::fs::canonicalize(path).ok() } else { None };
+    fenix_core::path_key(real.as_deref().unwrap_or(path))
+}
+
+/// Whether `path` is `root` or inside it, however each was spelled.
+pub(crate) fn path_within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root) || place_key(path).starts_with(place_key(root))
+}
+
 /// How long a recovery snapshot is kept before being cleaned up.
 ///
 /// Two weeks: long enough to cover a crash before a holiday, short
@@ -7334,10 +7349,31 @@ impl App {
     /// project, marker or not -- else the nearest folder with a
     /// project's marker.
     pub(super) fn project_root_of_file(&self, file: &Path) -> Option<PathBuf> {
-        match self.workspaces.active_workspace().project.as_deref().filter(|root| file.starts_with(root)) {
+        match self.workspaces.active_workspace().project.as_deref().filter(|root| path_within(file, root)) {
             Some(workspace) => Some(workspace.to_path_buf()),
             None => fenix_project::find_project_root(file),
         }
+    }
+
+    /// The workspace of another project than the active one's that `file`
+    /// belongs in: the one whose project holds it most closely. `None`
+    /// when the active workspace's project holds it, when no workspace's
+    /// does, or with `workspace_per_project` off.
+    pub(super) fn workspace_for_file(&self, file: &Path) -> Option<usize> {
+        if self.config.workspace_per_project == Some(false) {
+            return None;
+        }
+        let active = self.workspaces.active_index();
+        if self.workspaces.workspaces[active].project.as_deref().is_some_and(|root| path_within(file, root)) {
+            return None;
+        }
+        self.workspaces
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.project.as_deref().filter(|root| path_within(file, root)).map(|root| (i, root.components().count())))
+            .max_by_key(|(_, depth)| *depth)
+            .map(|(i, _)| i)
     }
 
     /// The project of what has the focus: its file's
@@ -15048,7 +15084,7 @@ impl App {
             Some(ActivePicker::SwitchProject(state)) => {
                 let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
-                self.switch_to_project(root);
+                self.open_project(root, None, true);
             }
             Some(ActivePicker::ProjectTodos(state) | ActivePicker::Problems(state) | ActivePicker::ProjectSymbols(state)) => {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -15410,6 +15446,10 @@ impl App {
         let keep_disk_state = was_open == Some(id) && (self.externally_changed.contains(&id) || self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()));
         if !keep_disk_state {
             self.note_disk_state(id);
+        }
+        // A file of a project that has a workspace of its own opens there.
+        if let Some(i) = self.workspace_for_file(path) {
+            self.workspaces.switch_to_index(i);
         }
         self.open_buffer_in_focused_pane_as(id, preview);
         self.refresh_project_root();
@@ -16439,8 +16479,13 @@ impl App {
             self.workspaces.switch_to_index(idx);
             return;
         }
-        self.new_workspace();
-        self.switch_to_project(root);
+        // As any other way of opening it: a workspace of its own (the
+        // one it has, or a new one), named as the launcher says.
+        let key = place_key(&root);
+        self.open_project(root, None, true);
+        if self.workspaces.active_workspace().project.as_deref().is_some_and(|p| place_key(p) == key) {
+            self.workspaces.rename_active(name.to_string());
+        }
     }
 
     pub(crate) fn undo(&mut self) {
@@ -30487,7 +30532,9 @@ configure_board stm32
 
         app.open_configured_workspace("My Project");
 
-        assert_eq!(app.workspaces.len(), 3, "must not have created a second My Project workspace");
+        // The start screen's workspace became My Project, as the hub's
+        // opening does; then one more.
+        assert_eq!(app.workspaces.len(), 2, "must not have created a second My Project workspace");
         assert_eq!(app.workspaces.active_name(), "My Project");
     }
 

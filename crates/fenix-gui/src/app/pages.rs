@@ -1292,6 +1292,22 @@ impl App {
     // Opening projects: a workspace each
     // --------------------------------------------------------------
 
+    /// The name a new workspace for `root` takes: its folder's, or --
+    /// another workspace having that name already (two `app`s, two
+    /// worktrees of one repository) -- with the folder above it too.
+    fn workspace_name_for(&self, root: &Path) -> String {
+        let leaf = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+        let active = self.workspaces.active_index();
+        let taken = |name: &str| self.workspaces.workspaces.iter().enumerate().any(|(i, w)| i != active && w.name == name);
+        if !taken(&leaf) {
+            return leaf;
+        }
+        match root.parent().and_then(Path::file_name) {
+            Some(parent) => format!("{}/{leaf}", parent.to_string_lossy()),
+            None => leaf,
+        }
+    }
+
     /// The file to land on in a project: the one you had open most
     /// recently there, else its main file, else its README.
     fn project_entry_file(&self, root: &Path) -> Option<PathBuf> {
@@ -1315,6 +1331,13 @@ impl App {
         if self.remote_must_connect(&root, remote::Then::OpenProject { root: root.clone(), file: file.clone() }) {
             return;
         }
+        // A folder that isn't there any more (moved, deleted, a drive not
+        // plugged in) isn't opened as an empty workspace.
+        if !fenix_vfs::is_remote(&root) && !root.is_dir() {
+            self.set_error(format!("{} isn't there any more -- d d on it in SPC p p takes it off the list", readable_path(&root)));
+            self.wake_caret();
+            return;
+        }
         let root = std::fs::canonicalize(&root).map(fenix_lsp::normalize).unwrap_or(root);
         if register {
             self.known_projects.add(root.clone());
@@ -1322,12 +1345,15 @@ impl App {
                 eprintln!("fenix: couldn't save project history: {err}");
             }
         }
+        let asked = file.clone();
         let file = file.or_else(|| self.project_entry_file(&root));
         if self.config.workspace_per_project != Some(false) {
-            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-            if let Some(i) = self.workspaces.workspaces.iter().position(|w| w.project.as_deref() == Some(root.as_path())) {
+            let key = crate::app::place_key(&root);
+            if let Some(i) = self.workspaces.workspaces.iter().position(|w| w.project.as_deref().is_some_and(|p| crate::app::place_key(p) == key)) {
+                // Its workspace, as you left it: only a file asked for
+                // replaces what it shows.
                 self.workspaces.switch_to_index(i);
-                if let Some(file) = &file {
+                if let Some(file) = &asked {
                     self.open_file_from_picker(file);
                 }
                 self.main_view = MainView::Editor;
@@ -1352,6 +1378,7 @@ impl App {
                 let cursor = self.buffers.get(content).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
                 self.workspaces.new_workspace(content, cursor);
             }
+            let name = self.workspace_name_for(&root);
             self.workspaces.rename_active(name);
             let active = self.workspaces.active_index();
             self.workspaces.workspaces[active].project = Some(root.clone());
@@ -2577,5 +2604,92 @@ mod tests {
         app.open_project(dir.0.clone(), None, false);
         assert_eq!(app.workspaces.active_name(), before);
         assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")));
+    }
+
+    /// Two projects, each opened once: (app, a, b), b's workspace active.
+    fn two_projects(name: &str) -> (Scratch, App, PathBuf, PathBuf) {
+        let dir = Scratch::new(name);
+        let (a, b) = (dir.0.join("alpha"), dir.0.join("beta"));
+        for root in [&a, &b] {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(root.join("README.md"), "# r").unwrap();
+            std::fs::write(root.join("src").join("lib.rs"), "").unwrap();
+        }
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.0.join("projects.txt"));
+        app.open_project(a.clone(), None, false);
+        app.open_project(b.clone(), None, false);
+        (dir, app, a, b)
+    }
+
+    fn workspace_of(app: &App, root: &Path) -> usize {
+        app.workspaces.workspaces.iter().position(|w| w.project.as_deref() == Some(root)).expect("a workspace of its own")
+    }
+
+    #[test]
+    fn home_and_the_quick_switcher_open_a_project_in_its_own_workspace() {
+        let (_dir, mut app, a, b) = two_projects("home-entry");
+        let count = app.workspaces.workspaces.len();
+        app.activate_home_entry(crate::dashboard::HomeEntry::Project(a.clone()));
+        assert_eq!(app.workspaces.active_index(), workspace_of(&app, &a));
+        assert_eq!(app.workspaces.workspaces.len(), count, "its own workspace, not another");
+        assert_eq!(app.project_root.as_deref(), Some(a.as_path()));
+        app.activate_home_entry(crate::dashboard::HomeEntry::Project(b.clone()));
+        assert_eq!(app.workspaces.active_index(), workspace_of(&app, &b));
+    }
+
+    #[test]
+    fn a_file_of_another_project_opens_in_that_project_s_workspace() {
+        let (_dir, mut app, a, b) = two_projects("file-goes-home");
+        assert_eq!(app.workspaces.active_index(), workspace_of(&app, &b));
+        app.open_file_from_picker(&a.join("src").join("lib.rs"));
+        assert_eq!(app.workspaces.active_index(), workspace_of(&app, &a));
+        assert_eq!(app.open().buffer.path(), Some(a.join("src").join("lib.rs").as_path()));
+        // A file of no project's stays where you are.
+        let loose = _dir.0.join("loose.txt");
+        std::fs::write(&loose, "x").unwrap();
+        app.open_file_from_picker(&loose);
+        assert_eq!(app.workspaces.active_index(), workspace_of(&app, &a));
+    }
+
+    #[test]
+    fn going_back_to_a_project_s_workspace_leaves_what_it_shows() {
+        let (_dir, mut app, a, _b) = two_projects("back-as-left");
+        app.open_project(a.clone(), Some(a.join("src").join("lib.rs")), false);
+        app.open_project(a.clone(), Some(a.join("README.md")), false);
+        // A file outside it, shown in its workspace.
+        let other = _dir.0.join("other.txt");
+        std::fs::write(&other, "x").unwrap();
+        app.open_file_from_picker(&other);
+        let shown = app.focused_buffer_id();
+        app.workspaces.next();
+        app.open_project(a.clone(), None, false);
+        assert_eq!(app.workspaces.active_index(), workspace_of(&app, &a));
+        assert_eq!(app.focused_buffer_id(), shown, "as it was left");
+    }
+
+    #[test]
+    fn a_project_whose_folder_is_gone_isnt_opened() {
+        let dir = Scratch::new("gone");
+        let mut app = App::with_file(None);
+        let count = app.workspaces.workspaces.len();
+        app.open_project(dir.0.join("moved-away"), None, false);
+        assert_eq!(app.workspaces.workspaces.len(), count);
+        assert!(app.modeline_pieces().1.contains("isn't there any more"), "{}", app.modeline_pieces().1);
+    }
+
+    #[test]
+    fn two_projects_of_one_name_get_workspaces_told_apart() {
+        let dir = Scratch::new("same-name");
+        let (one, two) = (dir.0.join("front").join("app"), dir.0.join("back").join("app"));
+        for root in [&one, &two] {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("README.md"), "# r").unwrap();
+        }
+        let mut app = App::with_file(None);
+        app.open_project(one, None, false);
+        app.open_project(two, None, false);
+        let names: Vec<&str> = app.workspaces.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&"app") && names.contains(&"back/app"), "{names:?}");
     }
 }

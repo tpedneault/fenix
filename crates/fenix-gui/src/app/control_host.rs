@@ -378,6 +378,11 @@ impl App {
     /// finder is closed again rather than left over them.
     pub(crate) fn apply_startup(&mut self, files: &[PathPosition], project: Option<&Path>) {
         if let Some(project) = project {
+            // Opened in the first window's workspaces: that window keeps
+            // the focus once the session's others are open, as with a file.
+            if let Some((_, focused)) = self.session.pending.as_mut() {
+                *focused = 0;
+            }
             if let Err(e) = self.open_project_from_outside(&OpenProjectParams {
                 root: project.to_string_lossy().into_owned(),
             }) {
