@@ -914,9 +914,12 @@ impl App {
     }
 
     /// The project of file `path`, as the host keys it: its root
-    /// canonicalized, the spelling it was found by kept as another.
+    /// canonicalized, the spelling it was found by kept as another. The
+    /// workspace's project for a file in it (`project_root_of_file`) --
+    /// the project its test providers run in -- so a nested crate's file
+    /// and the project's Home have one tests page, with its providers.
     fn tests_root_of(&mut self, path: &Path) -> Option<PathBuf> {
-        let raw = fenix_project::find_project_root(path)?;
+        let raw = self.project_root_of_file(path)?;
         let root = self.tests_canon(&raw);
         self.tests_alias(&root, &raw);
         Some(root)

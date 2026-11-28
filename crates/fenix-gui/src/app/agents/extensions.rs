@@ -331,10 +331,13 @@ impl App {
         if let Some(t) = self.agents.hub.thread_mut(&thread) {
             t.title = Some(format!("{name}: {}", options.prompt.lines().next().unwrap_or_default().chars().take(60).collect::<String>()));
         }
-        let hidden = match options.show.as_deref() {
-            Some(show) => show == "hidden",
-            None => self.config.text_value("agents.ask.show") == Some("hidden"),
-        };
+        // Writing a box's text (a description, a summary) is never a
+        // thread to keep: it goes once it's written.
+        let hidden = self.agents_composing(ext, call)
+            || match options.show.as_deref() {
+                Some(show) => show == "hidden",
+                None => self.config.text_value("agents.ask.show") == Some("hidden"),
+            };
         let timeout = options.timeout.unwrap_or(ASK_TIMEOUT).min(MAX_ASK_TIMEOUT);
         self.agents.asks.insert(
             thread.clone(),

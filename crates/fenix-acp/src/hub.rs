@@ -293,6 +293,9 @@ pub struct Hub {
     mcp_servers: Vec<McpServer>,
     /// A note for the agent, before the first prompt of a new session.
     briefing: Option<String>,
+    /// Folders outside each project its sessions may work in too, by the
+    /// project's root (`additionalDirectories`, when the agent takes it).
+    directories: HashMap<PathBuf, Vec<PathBuf>>,
     /// The tools of the `fenix` MCP server it needn't ask to use.
     allowed_fenix_tools: Vec<String>,
     /// Every tool of the `fenix` server is let through (Fenix asks).
@@ -318,6 +321,7 @@ impl Hub {
             client_version: client_version.into(),
             mcp_servers: Vec::new(),
             briefing: None,
+            directories: HashMap::new(),
             allowed_fenix_tools: Vec::new(),
             fenix_tools_guarded: false,
             idle_timeout: Duration::from_secs(600),
@@ -334,6 +338,23 @@ impl Hub {
 
     // -----------------------------------------------------------------
     // Configuration
+
+    /// The folders outside the project at `root` its new and taken-back
+    /// sessions may work in too. Sessions already up keep what they had.
+    pub fn set_directories(&mut self, root: &Path, directories: Vec<PathBuf>) {
+        if directories.is_empty() {
+            self.directories.remove(root);
+        } else {
+            self.directories.insert(root.to_path_buf(), directories);
+        }
+    }
+
+    /// `additionalDirectories` for a session in `root`, when `info`'s
+    /// agent takes them.
+    fn directories_for(&self, info: &AgentInfo, root: &Path) -> Option<Value> {
+        let dirs = self.directories.get(root).filter(|d| !d.is_empty() && info.additional_directories)?;
+        Some(json!(dirs.iter().map(|d| path_text(d)).collect::<Vec<_>>()))
+    }
 
     pub fn set_agents(&mut self, agents: Vec<AgentSpec>) {
         self.agents = agents.into_iter().map(|a| (a.id.clone(), a)).collect();
@@ -900,8 +921,12 @@ impl Hub {
     fn send_attach(&mut self, id: &ThreadId, conn: ConnId, fx: &mut Vec<Effect>) {
         let info = self.connections[&conn].info.clone().unwrap_or_default();
         let servers = self.mcp_values(&info, id);
+        let directories = self.threads.get(id).and_then(|s| self.directories_for(&info, &s.meta.root));
         let Some(slot) = self.threads.get_mut(id) else { return };
         let mut params = json!({ "cwd": path_text(&slot.meta.root), "mcpServers": servers });
+        if let Some(directories) = directories {
+            params["additionalDirectories"] = directories;
+        }
         let (method, how) = match &slot.meta.session_id {
             None => ("session/new", Attach::New),
             Some(session) => {
@@ -1243,7 +1268,10 @@ impl Hub {
                         let root = path_text(&slot.meta.root);
                         self.routes.insert((conn, session.clone()), id.clone());
                         let info = self.connections[&conn].info.clone().unwrap_or_default();
-                        let params = json!({ "sessionId": session, "cwd": root, "mcpServers": self.mcp_values(&info, id) });
+                        let mut params = json!({ "sessionId": session, "cwd": root, "mcpServers": self.mcp_values(&info, id) });
+                        if let Some(directories) = self.threads.get(id).and_then(|s| self.directories_for(&info, &s.meta.root)) {
+                            params["additionalDirectories"] = directories;
+                        }
                         self.send(conn, "session/load", params, Pending::Attach { thread: id.clone(), how: Attach::Load }, fx);
                     }
                     Attach::Resume | Attach::Load => {

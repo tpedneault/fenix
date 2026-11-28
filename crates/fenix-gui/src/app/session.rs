@@ -555,7 +555,16 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000), scroll_row: 0,
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: workspace.agent_thread.map(fenix_acp::hub::ThreadId) });
+                // A project folder gone since (moved, deleted, a drive not
+                // plugged in): the workspace comes back, no longer its.
+                let project = workspace.project.filter(|root| {
+                    let there = fenix_vfs::is_remote(root) || root.is_dir();
+                    if !there {
+                        warnings.push(format!("{} isn't there any more", root.display()));
+                    }
+                    there
+                });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: workspace.agent_thread.map(fenix_acp::hub::ThreadId) });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }

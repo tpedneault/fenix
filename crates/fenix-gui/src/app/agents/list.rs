@@ -123,7 +123,7 @@ impl App {
 
     /// The project the list is about, as the list spells it.
     fn thread_list_root(&self, listed: &[Listed]) -> PathBuf {
-        let root = self.agents_root();
+        let root = self.agents_project_root();
         listed.iter().map(|l| &l.root).find(|r| same_project(r, &root)).cloned().unwrap_or(root)
     }
 

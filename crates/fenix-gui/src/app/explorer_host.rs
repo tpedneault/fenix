@@ -2622,21 +2622,14 @@ impl App {
             self.set_error("no directory open");
             return;
         };
-        let root = fenix_project::find_project_root(&cwd).unwrap_or(cwd);
-        if self.git_session.is_some() {
-            // A panel already open is pointed at the old root and would
-            // simply refresh against it, which looks like the key did
-            // nothing.
-            self.git_session_close();
-        }
-        self.project_root = Some(root.clone());
-        self.open_git_panel();
-        // Set again afterwards: opening the panel focuses a pathless
-        // buffer, and `refresh_project_root` derives the root from
-        // whatever the focused buffer's path is -- which for a panel is
-        // nothing, so it would clear what was just chosen.
-        self.project_root = Some(root.clone());
-        self.set_message(format!("project is now {}", readable_path(&root)));
+        // The Git page of the repository you're looking at -- without
+        // making it the project behind everyone's back: your search,
+        // tasks, agents and extensions stay where you are.
+        let Some(root) = fenix_project::vcs::repository_root(&cwd) else {
+            self.set_error(format!("{} isn't in a git repository", readable_path(&cwd)));
+            return;
+        };
+        self.open_git_status_at(root);
     }
 
     /// The path an entry-scoped action should act on.

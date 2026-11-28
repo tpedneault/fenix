@@ -150,7 +150,7 @@ impl App {
             }
             request.listings = self.explorer_folders_to_watch();
         }
-        request.project = self.project_root.clone();
+        request.project = self.settings_root();
         self.disk_probe_out = Some(Instant::now());
         self.disk_probe_basis = self.disk_state.clone();
         match self.event_proxy.clone() {

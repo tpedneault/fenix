@@ -52,6 +52,10 @@ pub(crate) enum Pick {
     Restart(ConnId),
     /// `@` in the prompt: what follows the `@`.
     Mention(String),
+    /// `SPC a w`: a folder or file outside the project for its agents,
+    /// added, or taken away.
+    AddPath,
+    RemovePath(PathBuf),
     /// `/` at the start of the prompt: the agent's command.
     Command(String),
     /// `SPC a h`: the thread goes on with this agent.
@@ -164,6 +168,9 @@ pub(crate) struct AgentHost {
     pub(super) commit_message: Option<ThreadId>,
     /// The commit composer the message goes into.
     pub(super) commit_into: Option<BufferId>,
+    /// A drag over the thread page's text under way: its pane, the page,
+    /// and where the page's text starts on screen.
+    pub(super) dragging: Option<(fenix_window::WindowId, BufferId, (f32, f32))>,
     /// An extension's compose pane the agent is writing (`A`).
     pub(super) compose_ask: Option<extensions::ComposeAsk>,
     /// Commands agents run through Fenix, by terminal id.
@@ -234,6 +241,7 @@ impl AgentHost {
             recalled: None,
             commit_message: None,
             commit_into: None,
+            dragging: None,
             compose_ask: None,
             terminals: HashMap::new(),
             next_terminal: 1,
@@ -267,7 +275,13 @@ impl AgentHost {
             let (tail, exit) = t.tail(12);
             (id.clone(), agent_page::TermView { line: t.line.clone(), tail, exit })
         }).collect();
-        agent_page::layout(page, view.thread, view.link, view.turn, &status, cols)
+        let mut laid = agent_page::layout(page, view.thread, view.link, view.turn, &status, cols);
+        if let Some((a, b)) = page.selection.filter(|(a, b)| a != b) {
+            for (line, cells) in agent_page::selected_cells(&laid.text, a, b) {
+                laid.backgrounds.push((line, cells, crate::page::Shade::Selection));
+            }
+        }
+        laid
     }
 
     fn status_of(&self, id: &ThreadId) -> agent_page::Status {
@@ -434,6 +448,7 @@ impl App {
     pub(super) fn agents_configure(&mut self) -> Vec<CatalogEntry> {
         let entries = self.agents_catalog();
         self.agents.hub.set_agents(entries.iter().map(|e| e.spec.clone()).collect());
+        self.agents_sync_paths();
         let mut servers = Vec::new();
         let fenix = self.config.bool_value("agents.mcp.fenix").unwrap_or(true);
         let brief = fenix && self.config.bool_value("agents.mcp.fenix_brief").unwrap_or(true);
@@ -478,7 +493,18 @@ impl App {
                 return root;
             }
         }
-        self.project_root.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."))
+        self.agents_project_root()
+    }
+
+    /// Where a new thread works, whatever the dock shows: the project
+    /// you're in, else your home folder -- never the folder Fenix
+    /// happened to be started from (`/`, from a desktop).
+    pub(super) fn agents_project_root(&self) -> PathBuf {
+        self.project_root
+            .clone()
+            .or_else(dirs::home_dir)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
     }
 
     // -----------------------------------------------------------------
@@ -496,14 +522,16 @@ impl App {
             }
             return;
         }
-        // Put away earlier: back on the thread it showed.
-        if let Some(thread) = self.agents.shown(&self.pages) {
+        // Put away earlier: back on the thread it showed -- when it's
+        // this project's. Put away in another project, it's this one's
+        // last thread instead.
+        let root = self.agents_project_root();
+        if let Some(thread) = self.agents.shown(&self.pages).filter(|t| self.agents.hub.meta(t).is_some_and(|m| crate::app::place_key(&m.root) == crate::app::place_key(&root))) {
             self.agents_show(thread);
             self.agents_focus_composer();
             return;
         }
         let entries = self.agents_configure();
-        let root = self.agents_root();
         // The project's last thread, not one put away (archived).
         let existing = self.agents.load_threads(&root, 20);
         let archived = |hub: &fenix_acp::hub::Hub, t: &ThreadId| hub.meta(t).is_some_and(|m| m.archived);
@@ -537,7 +565,8 @@ impl App {
             self.agents_none_found(&entries);
             return;
         };
-        let id = self.agents.hub.new_thread(&agent, &self.agents_root());
+        // The project you're in, even from the dock showing another's.
+        let id = self.agents.hub.new_thread(&agent, &self.agents_project_root());
         self.agents_show(id);
         self.agents_focus_composer();
     }
@@ -799,7 +828,7 @@ impl App {
                     self.set_error(format!("{agent} isn't installed: install it, or set agents.servers"));
                     return;
                 }
-                let id = self.agents.hub.new_thread(&agent, &self.agents_root());
+                let id = self.agents.hub.new_thread(&agent, &self.agents_project_root());
                 self.agents_show(id);
             }
             Pick::Thread(id) => self.thread_list_open_thread(id),
@@ -845,6 +874,8 @@ impl App {
                 self.agents_focus_composer();
                 self.agents_composer_insert(&format!("{what} "));
             }
+            Pick::AddPath => self.agents_add_path_prompt(),
+            Pick::RemovePath(path) => self.agents_remove_path(&path),
             Pick::Command(name) => {
                 self.agents_focus_composer();
                 self.agents_composer_insert(&format!("{name} "));
@@ -910,8 +941,88 @@ impl App {
         }
     }
 
+    /// A press on the thread page in `pane`, whose text starts at
+    /// `origin`: a drag over its text may start there. Whether it was the
+    /// thread's.
+    pub(in crate::app) fn agents_select_press(&mut self, pane: fenix_window::WindowId, origin: (f32, f32), pos: (f32, f32)) -> bool {
+        let Some(page) = self.windows().content(pane).copied().filter(|b| Some(*b) == self.agents.page) else { return false };
+        let at = self.cell_at(pos, origin, self.pane_state(pane).scroll_line);
+        if let Some(state) = self.pages.get_mut(&page) {
+            if let PageModel::Agent(p) = &mut state.model {
+                p.selection = Some((at, at));
+            }
+            state.stale = true;
+        }
+        self.agents.dragging = Some((pane, page, origin));
+        true
+    }
+
+    /// The pointer moved with the button down: the selection follows it.
+    pub(in crate::app) fn agents_select_drag(&mut self, pos: (f32, f32)) {
+        let Some((pane, page, origin)) = self.agents.dragging else { return };
+        let at = self.cell_at(pos, origin, self.pane_state(pane).scroll_line);
+        if let Some(state) = self.pages.get_mut(&page) {
+            if let PageModel::Agent(p) = &mut state.model {
+                if let Some((_, head)) = &mut p.selection {
+                    if *head != at {
+                        *head = at;
+                        state.stale = true;
+                    }
+                }
+            }
+        }
+        self.wake_caret();
+    }
+
+    /// The button let go: a drag's selection stays to be copied; a click
+    /// selected nothing.
+    pub(in crate::app) fn agents_select_release(&mut self) {
+        let Some((_, page, _)) = self.agents.dragging.take() else { return };
+        let mut said = false;
+        if let Some(state) = self.pages.get_mut(&page) {
+            if let PageModel::Agent(p) = &mut state.model {
+                match p.selection {
+                    Some((a, b)) if a == b => p.selection = None,
+                    Some(_) => said = true,
+                    None => {}
+                }
+            }
+            state.stale = true;
+        }
+        if said {
+            self.set_message(if self.standard_keys() { "Ctrl+C copies what's selected" } else { "y copies what's selected -- Esc lets go" });
+        }
+    }
+
+    /// A key while text is selected on the thread page `id`: `y` or
+    /// Ctrl+C copies it, Esc lets go of it, anything else lets go and is
+    /// the page's. Whether the key was taken.
+    fn agents_selection_key(&mut self, id: BufferId, key: &crate::page::Key) -> bool {
+        use crate::page::Key;
+        let Some(state) = self.pages.get_mut(&id) else { return false };
+        let PageModel::Agent(p) = &mut state.model else { return false };
+        let Some((a, b)) = p.selection.take() else { return false };
+        state.stale = true;
+        match key {
+            Key::Char('y') | Key::CtrlC => {
+                let text = agent_page::selected_text(&state.page.text, a, b);
+                if let Some(clipboard) = &mut self.clipboard {
+                    let _ = clipboard.set_text(text.clone());
+                }
+                self.set_message(format!("copied {} lines", text.lines().count().max(1)));
+                true
+            }
+            Key::Escape => true,
+            _ => false,
+        }
+    }
+
     /// A key for the panel's page.
     pub(super) fn agents_page_key(&mut self, id: BufferId, key: crate::page::Key) {
+        if self.agents_selection_key(id, &key) {
+            self.wake_caret();
+            return;
+        }
         let action = {
             let Some(PageModel::Agent(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
             let Some(view) = self.agents.hub.view(&page.thread) else { return };
@@ -1358,11 +1469,11 @@ impl App {
     /// question to you first).
     fn agents_serve(&mut self, conn: ConnId, thread: &ThreadId, id: Value, request: ClientRequest) -> Option<Result<Value, RpcError>> {
         let root = self.agents.hub.meta(thread).map(|m| m.root.clone())?;
-        let outside = |path: &Path| RpcError::new(code::INVALID_PARAMS, format!("{} is outside the project ({})", path.display(), root.display()));
+        let outside = |path: &Path| RpcError::new(code::INVALID_PARAMS, format!("{} is outside the project ({}) and what SPC a w gives it", path.display(), root.display()));
         match request {
             ClientRequest::ReadTextFile { path, line, limit, .. } => {
                 let path = PathBuf::from(path);
-                if !within(&root, &path) {
+                if !self.agents_may_use(&root, &path) {
                     return Some(Err(outside(&path)));
                 }
                 let text = match self.buffers.id_for_path(&path).and_then(|id| self.buffers.get(id)) {
@@ -1377,7 +1488,7 @@ impl App {
             }
             ClientRequest::WriteTextFile { path, content, .. } => {
                 let path = PathBuf::from(path);
-                if !within(&root, &path) {
+                if !self.agents_may_use(&root, &path) {
                     return Some(Err(outside(&path)));
                 }
                 let open = self.buffers.id_for_path(&path);
@@ -1619,6 +1730,8 @@ pub(crate) use install::SECRET_PROMPT;
 pub(super) use terminals::agent_command;
 mod answer;
 mod extensions;
+mod paths;
+pub(crate) use paths::{image_mime, IMAGE_PROMPT, PATHS_PROMPT};
 mod usage;
 
 #[cfg(test)]

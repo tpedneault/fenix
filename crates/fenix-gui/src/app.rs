@@ -257,6 +257,28 @@ const STATS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// writes its own temp file is worse than one that takes a moment.
 const DISK_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
+/// What two spellings of one folder or file have in common: the folder
+/// it really is (a link followed, `/tmp` and `/private/tmp` one) and, on
+/// Windows, in one case. A path that isn't there, is on a share or on
+/// another machine is taken as written.
+pub(crate) fn place_key(path: &Path) -> PathBuf {
+    let local = !fenix_vfs::is_remote(path) && !explorer_host::is_unc(path);
+    let real = if local { std::fs::canonicalize(path).ok() } else { None };
+    fenix_core::path_key(real.as_deref().unwrap_or(path))
+}
+
+/// Whether `a` and `b` are in the same git repository (or, in none,
+/// are the same folder).
+pub(crate) fn same_repository(a: &Path, b: &Path) -> bool {
+    let repository = |p: &Path| fenix_project::vcs::repository_root(p).map(|r| place_key(&r)).unwrap_or_else(|| place_key(p));
+    repository(a) == repository(b)
+}
+
+/// Whether `path` is `root` or inside it, however each was spelled.
+pub(crate) fn path_within(path: &Path, root: &Path) -> bool {
+    path.starts_with(root) || place_key(path).starts_with(place_key(root))
+}
+
 /// How long a recovery snapshot is kept before being cleaned up.
 ///
 /// Two weeks: long enough to cover a crash before a holiday, short
@@ -1063,6 +1085,10 @@ pub(crate) enum TerminalTarget {
     /// The popup panel (`SPC o t`) -- one per application, shared by
     /// every workspace and every frame.
     Panel,
+    /// One of the panel's shells by its id (`App::terminal_shell`): the
+    /// one shown, or another project's, kept running while you're
+    /// elsewhere (`App::parked_terminals`).
+    PanelShell(u64),
     /// One pane-resident shell (`SPC o T`), identified by its own
     /// buffer -- see `BufferKind::Terminal` for why a buffer, and not a
     /// pane, is the identity.
@@ -2644,7 +2670,8 @@ enum ActivePicker {
     /// discover_tasks` -- built-in per-project-marker defaults plus any
     /// `.fenix/project.ini` `[tasks]` overrides) -- confirming runs it
     /// (`App::run_task`) in the Task Output panel.
-    Task(fenix_picker::PickerState<fenix_tasks::TaskDef>),
+    /// Each task with the project it runs in.
+    Task(fenix_picker::PickerState<(fenix_tasks::TaskDef, PathBuf)>),
     /// `SPC g c`: the ref to compare HEAD with (the Compare page).
     CompareTarget(fenix_picker::PickerState<String>),
     /// `R` on the Compare page: your own side, other than HEAD. Carries
@@ -4995,6 +5022,13 @@ pub struct App {
     /// hidden). `None` before the panel's ever been opened, or right
     /// after a respawn is triggered because the previous shell exited.
     terminal: Option<TerminalState>,
+    /// The panel shell's id and the folder it was started in: its
+    /// project's.
+    terminal_shell: u64,
+    terminal_root: Option<PathBuf>,
+    /// Other projects' panel shells, running on while you're in another:
+    /// each comes back as you open the panel in its project again.
+    parked_terminals: Vec<(u64, PathBuf, TerminalState)>,
     /// Whether the terminal panel is currently shown -- a pure layout/
     /// rendering concern, independent of whether the session underneath
     /// it is alive (compare `sidebar_open`, which the sidebar's `Option`
@@ -6365,6 +6399,9 @@ impl App {
             sidebar_open: false,
             sidebar_focused: false,
             terminal: None,
+            terminal_shell: 0,
+            terminal_root: None,
+            parked_terminals: Vec::new(),
             terminal_open: false,
             terminal_focused: false,
             terminal_spawning: false,
@@ -7334,10 +7371,55 @@ impl App {
     /// project, marker or not -- else the nearest folder with a
     /// project's marker.
     pub(super) fn project_root_of_file(&self, file: &Path) -> Option<PathBuf> {
-        match self.workspaces.active_workspace().project.as_deref().filter(|root| file.starts_with(root)) {
+        match self.workspaces.active_workspace().project.as_deref().filter(|root| path_within(file, root)) {
             Some(workspace) => Some(workspace.to_path_buf()),
             None => fenix_project::find_project_root(file),
         }
+    }
+
+    /// The workspace of another project than the active one's that `file`
+    /// belongs in: the one whose project holds it most closely. `None`
+    /// when the active workspace's project holds it, when no workspace's
+    /// does, or with `workspace_per_project` off.
+    pub(super) fn workspace_for_file(&self, file: &Path) -> Option<usize> {
+        if self.config.workspace_per_project == Some(false) {
+            return None;
+        }
+        let active = self.workspaces.active_index();
+        if self.workspaces.workspaces[active].project.as_deref().is_some_and(|root| path_within(file, root)) {
+            return None;
+        }
+        self.workspaces
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.project.as_deref().filter(|root| path_within(file, root)).map(|root| (i, root.components().count())))
+            .max_by_key(|(_, depth)| *depth)
+            .map(|(i, _)| i)
+    }
+
+    /// The folder whose `.fenix` speaks for the focused file: the nearest
+    /// one on the way up to the project's top that `holds` says has its
+    /// own (a nested crate's, a monorepo package's), else the project's.
+    pub(super) fn nearest_fenix_root(&self, holds: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+        let root = self.project_root.clone()?;
+        let file = self.open().buffer.path().filter(|f| !fenix_vfs::is_remote(f) && path_within(f, &root));
+        let nearest = file.and_then(Path::parent).and_then(|dir| {
+            dir.ancestors().take_while(|d| path_within(d, &root) && place_key(d) != place_key(&root)).find(|d| holds(d)).map(Path::to_path_buf)
+        });
+        Some(nearest.unwrap_or(root))
+    }
+
+    /// Where the focused file's project settings come from
+    /// (`.fenix/settings.toml`): `nearest_fenix_root`'s.
+    pub(super) fn settings_root(&self) -> Option<PathBuf> {
+        self.nearest_fenix_root(|d| d.join(".fenix").join("settings.toml").is_file() || d.join(".fenix").join("project.ini").is_file())
+    }
+
+    /// Where the programs that apply to the focused file are named
+    /// (`.fenix/tools.json`, `.fenix/lsp`): `nearest_fenix_root`'s.
+    pub(super) fn trust_root(&self) -> Option<PathBuf> {
+        self.nearest_fenix_root(|d| !fenix_project::trust::files(d).is_empty())
     }
 
     /// The project of what has the focus: its file's
@@ -7348,6 +7430,14 @@ impl App {
             Some(file) => self.project_root_of_file(file),
             None => self.workspaces.active_workspace().project.clone(),
         }
+    }
+
+    /// Whether the focus is on the Home of a workspace of no project: a
+    /// new one (`SPC TAB n`), or what's left after closing one. It's in
+    /// no project, not the last one you were in.
+    fn on_a_projectless_home(&self) -> bool {
+        let ws = self.workspaces.active_workspace();
+        ws.project.is_none() && ws.home == Some(self.focused_buffer_id())
     }
 
     fn refresh_project_root(&mut self) {
@@ -7365,7 +7455,7 @@ impl App {
             // a file of: `SPC p t` from the practice runs its tasks. Never
             // the Git lesson's practice repository, which is no project
             // of yours.
-            .or_else(|| self.last_project.clone().filter(|_| path.is_none()));
+            .or_else(|| self.last_project.clone().filter(|_| path.is_none() && !self.on_a_projectless_home()));
         if path.is_some() {
             let practice = self.tutorial_progress.with_file_name("tutorial-repo");
             if let Some(root) = self.project_root.clone().filter(|r| !r.starts_with(&practice)) {
@@ -9797,6 +9887,7 @@ impl App {
             return;
         }
         self.terminal_open = true;
+        self.terminal_for_this_project();
         let needs_spawn = self.terminal.as_mut().is_none_or(|t| !t.session.is_alive());
         if needs_spawn {
             self.terminal_focused = false;
@@ -9804,6 +9895,7 @@ impl App {
             let rows = text::TERMINAL_ROWS as u16;
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
+            self.terminal_root = self.project_root.clone();
             let shell = self.terminal_shell_to_spawn();
             let spawn = move || spawn_shell(rows, cols, cwd.as_deref(), shell.as_ref(), false);
             match self.event_proxy.clone() {
@@ -9826,6 +9918,29 @@ impl App {
             self.terminal_focused = true;
         }
         self.wake_caret();
+    }
+
+    /// The panel, opened in another project than its shell's: that
+    /// shell is kept running for when you're back there, and this
+    /// project's comes back -- or, none yet, one is started here.
+    fn terminal_for_this_project(&mut self) {
+        let Some(here) = self.project_root.clone() else { return };
+        let key = place_key(&here);
+        if self.terminal_root.as_deref().is_none_or(|root| place_key(root) == key) {
+            return;
+        }
+        if let (Some(mut shell), Some(root)) = (self.terminal.take(), self.terminal_root.take()) {
+            if shell.session.is_alive() {
+                self.parked_terminals.push((self.terminal_shell, root, shell));
+            }
+        }
+        self.parked_terminals.retain_mut(|(_, _, t)| t.session.is_alive());
+        if let Some(i) = self.parked_terminals.iter().position(|(_, root, _)| place_key(root) == key) {
+            let (shell, root, state) = self.parked_terminals.remove(i);
+            self.terminal_shell = shell;
+            self.terminal_root = Some(root);
+            self.terminal = Some(state);
+        }
     }
 
     /// Starts the thread that reads a freshly spawned shell's output.
@@ -9855,7 +9970,9 @@ impl App {
         self.terminal_spawning = false;
         match result {
             Ok((session, reader)) => {
-                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::Panel, reader);
+                let shell = self.parked_terminals.iter().map(|(id, _, _)| *id).chain([self.terminal_shell]).max().unwrap_or(0) + 1;
+                self.terminal_shell = shell;
+                let terminal_reader = self.spawn_terminal_reader(TerminalTarget::PanelShell(shell), reader);
                 self.terminal = Some(TerminalState::new(session, Some(terminal_reader)));
                 if self.terminal_open {
                     self.terminal_focused = true;
@@ -9916,6 +10033,8 @@ impl App {
     fn apply_terminal_output(&mut self, target: TerminalTarget, bytes: Vec<u8>) {
         let state = match target {
             TerminalTarget::Panel => self.terminal.as_mut(),
+            TerminalTarget::PanelShell(id) if id == self.terminal_shell => self.terminal.as_mut(),
+            TerminalTarget::PanelShell(id) => self.parked_terminals.iter_mut().find(|(shell, _, _)| *shell == id).map(|(_, _, t)| t),
             TerminalTarget::Buffer(id) => self.terminal_buffers.get_mut(&id),
         };
         let Some(state) = state else { return };
@@ -10779,19 +10898,34 @@ impl App {
             self.set_error("no project root detected for the focused buffer".to_string());
             return;
         };
-        let tasks = match self.tasks_for(&root) { Ok(tasks) => tasks, Err(error) => { self.set_error(error); return; } };
-        if tasks.is_empty() {
-            self.set_error(format!("no known tasks for {}", root.display()));
+        // A file of a project nested in this one (a crate, a package):
+        // its own tasks first -- where test-at-cursor and code lenses run
+        // -- then the whole project's.
+        let member = self.open().buffer.path().filter(|f| path_within(f, &root)).map(tool_sessions::root_for_path).filter(|m| place_key(m) != place_key(&root));
+        let mut candidates = Vec::new();
+        let mut first_error = None;
+        for at in member.iter().cloned().chain([root.clone()]) {
+            let tasks = match self.tasks_for(&at) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let own = self.project_tools(&at).map(|tools| tools.tasks).unwrap_or_default();
+            let prefix = if member.is_some() { format!("{}: ", at.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()) } else { String::new() };
+            for t in tasks {
+                let label = format!("{prefix}{}", task_picker_label(&t, &self.task_source(&at, &t, own.contains_key(&t.name))));
+                candidates.push(fenix_picker::Candidate::new(label, (t, at.clone())));
+            }
+        }
+        if candidates.is_empty() {
+            match first_error {
+                Some(error) => self.set_error(error),
+                None => self.set_error(format!("no known tasks for {}", root.display())),
+            }
             return;
         }
-        let own = self.project_tools(&root).map(|tools| tools.tasks).unwrap_or_default();
-        let candidates = tasks
-            .into_iter()
-            .map(|t| {
-                let label = task_picker_label(&t, &self.task_source(&root, &t, own.contains_key(&t.name)));
-                fenix_picker::Candidate::new(label, t)
-            })
-            .collect();
         self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -12281,7 +12415,14 @@ impl App {
     /// structural difference (every `fenix-git` call targets a specific
     /// repo root, not a daemon reachable regardless of cwd).
     pub(crate) fn open_git_panel(&mut self) {
-        if let Some(session) = &self.git_session {
+        let wanted = self.git_repo_wanted();
+        if let Some(session) = &mut self.git_session {
+            // Asked for from another project: the panel shows its
+            // repository from now on.
+            if let Some(wanted) = wanted.filter(|w| session.workspace_index != self.workspaces.active && !same_repository(w, &session.repo_root)) {
+                session.repo_root = wanted;
+                session.files.clear();
+            }
             let (workspace_index, staged_pane) = (session.workspace_index, session.staged_pane);
             self.workspaces.switch_to_index(workspace_index);
             self.windows_mut().focus(staged_pane);
@@ -13198,16 +13339,26 @@ impl App {
 
     // -- Rebase, merge and the operations that suspend -----------------
 
-    /// The repo any Git action should target: whichever Git-ish view is
-    /// open, else the focused buffer's project.
+    /// The repository the Git panel or the history is wanted for, asked
+    /// from where you are: the focused project's.
+    fn git_repo_wanted(&self) -> Option<PathBuf> {
+        self.project_root.clone()
+    }
+
+    /// The repo any Git action should target: the Git page's, the Git
+    /// panel's or the history's you're in, else the focused buffer's
+    /// project. A panel left open in another workspace -- another
+    /// project's -- isn't where you are.
     fn git_action_repo_root(&self) -> PathBuf {
         if let Some(root) = self.focused_git_page_root() {
             return root;
         }
+        let here = self.workspaces.active_index();
         self.git_session
             .as_ref()
+            .filter(|s| s.workspace_index == here)
             .map(|s| s.repo_root.clone())
-            .or_else(|| self.history_session.as_ref().map(|s| s.repo_root.clone()))
+            .or_else(|| self.history_session.as_ref().filter(|s| s.workspace_index == here).map(|s| s.repo_root.clone()))
             .or_else(|| self.project_root.clone())
             .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
@@ -14491,7 +14642,13 @@ impl App {
     /// each local branch stands against its upstream, and the selected
     /// commit's diff in the shared diff viewer.
     pub(crate) fn open_history_view(&mut self) {
-        if let Some(session) = &self.history_session {
+        let wanted = self.git_repo_wanted();
+        if let Some(session) = &mut self.history_session {
+            if let Some(wanted) = wanted.filter(|w| session.workspace_index != self.workspaces.active && !same_repository(w, &session.repo_root)) {
+                session.repo_root = wanted;
+                session.commits.clear();
+                session.last_detail_commit = None;
+            }
             let (workspace_index, graph_pane) = (session.workspace_index, session.graph_pane);
             self.workspaces.switch_to_index(workspace_index);
             self.windows_mut().focus(graph_pane);
@@ -15048,7 +15205,7 @@ impl App {
             Some(ActivePicker::SwitchProject(state)) => {
                 let Some(root) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
-                self.switch_to_project(root);
+                self.open_project(root, None, true);
             }
             Some(ActivePicker::ProjectTodos(state) | ActivePicker::Problems(state) | ActivePicker::ProjectSymbols(state)) => {
                 let Some(m) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -15141,10 +15298,9 @@ impl App {
                 self.debug_start_from(template);
             }
             Some(ActivePicker::Task(state)) => {
-                let Some(task) = state.selected().map(|c| c.payload.clone()) else { return };
+                let Some((task, root)) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
                 self.run_task(task, root);
             }
 
@@ -15410,6 +15566,10 @@ impl App {
         let keep_disk_state = was_open == Some(id) && (self.externally_changed.contains(&id) || self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()));
         if !keep_disk_state {
             self.note_disk_state(id);
+        }
+        // A file of a project that has a workspace of its own opens there.
+        if let Some(i) = self.workspace_for_file(path) {
+            self.workspaces.switch_to_index(i);
         }
         self.open_buffer_in_focused_pane_as(id, preview);
         self.refresh_project_root();
@@ -16132,6 +16292,7 @@ impl App {
         let id = self.new_home_buffer();
         self.workspaces.new_workspace(id, Cursor::at_start());
         self.ensure_workspace_home();
+        self.refresh_project_root();
         self.wake_caret();
     }
 
@@ -16439,8 +16600,13 @@ impl App {
             self.workspaces.switch_to_index(idx);
             return;
         }
-        self.new_workspace();
-        self.switch_to_project(root);
+        // As any other way of opening it: a workspace of its own (the
+        // one it has, or a new one), named as the launcher says.
+        let key = place_key(&root);
+        self.open_project(root, None, true);
+        if self.workspaces.active_workspace().project.as_deref().is_some_and(|p| place_key(p) == key) {
+            self.workspaces.rename_active(name.to_string());
+        }
     }
 
     pub(crate) fn undo(&mut self) {
@@ -16815,7 +16981,7 @@ impl App {
                 self.wake_caret();
             }
             FenixUserEvent::GutterHunks(started, found) => self.apply_gutter_hunks(started, found),
-            FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, result) => self.apply_terminal_spawned(result.0),
+            FenixUserEvent::TerminalSpawned(TerminalTarget::Panel | TerminalTarget::PanelShell(_), result) => self.apply_terminal_spawned(result.0),
             FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
             // A new window asked for here is opened by `about_to_wait`:
@@ -20472,6 +20638,11 @@ impl App {
                             }
                         }
                     }
+                    // The agent's thread: a drag over its text selects it.
+                    if pos.1 >= content.y && self.agents_select_press(id, (content.x, content.y), pos) {
+                        self.wake_caret();
+                        return;
+                    }
                     // Text: the cursor to the glyph, a selection started.
                     if pos.1 >= content.y && self.text_press(id, rect, pos, Instant::now()) {
                         self.unfocus_terminal_buffer();
@@ -23424,6 +23595,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     // A selection or a divider following the pointer; the
                     // menu's row under it; the hover's wait.
                     self.mouse_drag_to(pos, window_width, window_height);
+                    self.agents_select_drag(pos);
                     self.menu_hover_at(pos, window_width, window_height);
                     self.pointer_rest_at(pos, Instant::now(), window_width, window_height);
                 }
@@ -23509,6 +23681,22 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 if let Some(pos) = self.cursor_pos {
                     self.code_surface_pointer(pos, Some((button, state == ElementState::Pressed)));
+                }
+            }
+            // A file dropped on the window: a picture goes to the agent
+            // when its thread is out (a screenshot, to look at a bug);
+            // anything else, or with no thread out, opens.
+            WindowEvent::DroppedFile(path) => {
+                let picture = agents::image_mime(&path).is_some() && self.agents.shown(&self.pages).is_some();
+                if picture {
+                    if let Err(why) = self.agents_attach_image(&path) {
+                        self.set_error(why);
+                    }
+                } else if path.is_file() {
+                    self.open_file_from_picker(&path);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -27420,30 +27608,37 @@ configure_board stm32
     }
 
     #[test]
-    fn making_this_the_project_moves_everything_else_with_it() {
-        // Rather than pointing one panel elsewhere while `SPC p f` and
-        // `SPC s p` still look at the old project.
+    fn git_here_opens_the_folder_s_repository_and_leaves_the_project() {
+        // Not moving the project behind everyone's back: search, tasks,
+        // agents and extensions stay where you are.
         let dir = TempDir::new("last_mile_git_here");
         let repo = dir.mkdir("repo");
         std::fs::create_dir(repo.join(".git")).unwrap();
         let inner = dir.mkdir("repo/src");
         let mut app = app_with_places("last_mile_git_here", &inner);
+        let before = app.project_root.clone();
 
         app.explorer_git_here();
 
         // The repository root, not the directory that happened to be open.
-        assert_eq!(app.project_root.as_deref(), Some(repo.as_path()));
-        assert!(app.modeline_pieces().1.contains("project is now") || app.git_session.is_some());
+        let root = |a: &App| match a.pages.get(&a.focused_buffer_id()).map(|s| &s.model) {
+            Some(PageModel::Git(g)) => Some(g.root.clone()),
+            _ => None,
+        };
+        assert_eq!(root(&app), Some(fenix_lsp::normalize(repo.clone())));
+        assert_eq!(app.project_root, before);
     }
 
     #[test]
-    fn a_directory_with_no_project_markers_becomes_the_project_itself() {
+    fn git_here_in_a_folder_of_no_repository_says_so() {
         let dir = TempDir::new("last_mile_git_here_plain");
         let mut app = app_with_places("last_mile_git_here_plain", dir.path());
+        let before = app.project_root.clone();
 
         app.explorer_git_here();
 
-        assert_eq!(app.project_root.as_deref(), Some(dir.path()));
+        assert!(app.modeline_pieces().1.contains("isn't in a git repository"), "{}", app.modeline_pieces().1);
+        assert_eq!(app.project_root, before);
     }
 
     // -- Links --------------------------------------------------------------
@@ -30487,7 +30682,9 @@ configure_board stm32
 
         app.open_configured_workspace("My Project");
 
-        assert_eq!(app.workspaces.len(), 3, "must not have created a second My Project workspace");
+        // The start screen's workspace became My Project, as the hub's
+        // opening does; then one more.
+        assert_eq!(app.workspaces.len(), 2, "must not have created a second My Project workspace");
         assert_eq!(app.workspaces.active_name(), "My Project");
     }
 
@@ -31321,6 +31518,108 @@ configure_board stm32
         // And back to the subproject's workspace: the subproject again.
         app.open_project(child_root.clone(), None, false);
         assert_eq!(app.project_root.as_deref(), Some(child_root.as_path()));
+    }
+
+    /// Two git repositories opened as projects, each in its workspace;
+    /// b's active.
+    fn two_repositories(name: &str) -> (TempDir, App, PathBuf, PathBuf) {
+        let dir = TempDir::new(name);
+        let mut roots = Vec::new();
+        for repo in ["alpha", "beta"] {
+            let root = dir.mkdir(repo);
+            assert!(std::process::Command::new("git").args(["init", "-q"]).current_dir(&root).status().unwrap().success());
+            std::fs::write(root.join("README.md"), "# r\n").unwrap();
+            roots.push(fenix_lsp::normalize(std::fs::canonicalize(&root).unwrap()));
+        }
+        let (a, b) = (roots[0].clone(), roots[1].clone());
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.open_project(a.clone(), None, false);
+        app.open_project(b.clone(), None, false);
+        (dir, app, a, b)
+    }
+
+    #[test]
+    fn the_git_panel_left_in_one_project_isn_t_where_another_s_git_goes() {
+        let (_dir, mut app, a, b) = two_repositories("git_panel_moves");
+        app.open_project(a.clone(), None, false);
+        app.open_git_panel();
+        assert_eq!(app.git_session.as_ref().map(|s| s.repo_root.clone()), Some(a.clone()));
+        app.open_project(b.clone(), None, false);
+        assert_eq!(app.git_action_repo_root(), b, "b's, not the panel's");
+        app.open_git_panel();
+        assert_eq!(app.git_session.as_ref().map(|s| s.repo_root.clone()), Some(b), "asked for from b: b's");
+    }
+
+    #[test]
+    fn a_new_workspace_s_home_is_in_no_project() {
+        let (_dir, mut app, _a, b) = two_repositories("fresh_home");
+        assert_eq!(app.project_root.as_deref(), Some(b.as_path()));
+        app.new_workspace();
+        assert_eq!(app.project_root, None, "not the last project you were in");
+    }
+
+    #[test]
+    fn the_terminal_panel_is_each_project_s_own() {
+        let (_dir, mut app, a, b) = two_repositories("terminal_per_project");
+        app.toggle_terminal();
+        assert_eq!(app.terminal_root.as_deref(), Some(b.as_path()));
+        let b_shell = app.terminal_shell;
+        app.toggle_terminal();
+        app.open_project(a.clone(), None, false);
+        app.toggle_terminal();
+        assert_eq!(app.terminal_root.as_deref(), Some(a.as_path()), "a shell of a's");
+        assert_ne!(app.terminal_shell, b_shell);
+        assert_eq!(app.parked_terminals.len(), 1, "b's runs on");
+        app.toggle_terminal();
+        app.open_project(b.clone(), None, false);
+        app.toggle_terminal();
+        assert_eq!(app.terminal_shell, b_shell, "b's again, as it was");
+        app.toggle_terminal();
+    }
+
+    /// A Cargo workspace opened as a project, a member crate in it with
+    /// its own `.fenix`: (dir, app, mono, member, the member's file),
+    /// the file focused.
+    fn a_monorepo(name: &str) -> (TempDir, App, PathBuf, PathBuf, PathBuf) {
+        let dir = TempDir::new(name);
+        dir.mkdir(".git");
+        dir.write("Cargo.toml", "[workspace]\n");
+        dir.write("crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
+        dir.write("crates/core/.fenix/settings.toml", "[editor]\nindent_width = 7\n");
+        let file = dir.write("crates/core/src/lib.rs", "\n");
+        let canon = |p: &Path| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap());
+        let (mono, member, file) = (canon(dir.path()), canon(&dir.path().join("crates/core")), canon(&file));
+        let mut app = App::with_file(None);
+        app.known_projects = fenix_project::KnownProjects::load_or_default(dir.path().join("projects.txt"));
+        app.open_project(mono.clone(), Some(file.clone()), false);
+        (dir, app, mono, member, file)
+    }
+
+    #[test]
+    fn a_nested_project_s_own_fenix_folder_speaks_for_its_files() {
+        let (_dir, app, mono, member, _file) = a_monorepo("nested_fenix");
+        assert_eq!(app.project_root.as_deref(), Some(mono.as_path()));
+        assert_eq!(app.settings_root().as_deref(), Some(member.as_path()), "the crate's settings.toml");
+        assert_eq!(app.project_settings.as_ref().map(|(r, _)| r.clone()), Some(member.clone()));
+        assert_eq!(app.trust_root().as_deref(), Some(mono.as_path()), "no tools.json in the crate: the project's");
+    }
+
+    #[test]
+    fn the_task_picker_offers_the_nested_project_s_tasks_then_the_project_s() {
+        let (_dir, mut app, mono, member, _file) = a_monorepo("nested_tasks");
+        app.picker_tasks();
+        let Some(ActivePicker::Task(state)) = &app.active_picker else { panic!("a task picker: {}", app.modeline_pieces().1) };
+        let roots: Vec<PathBuf> = (0..state.len()).filter_map(|i| state.visible_rows(i, 1).next().map(|(_, c)| c.payload.1.clone())).collect();
+        assert_eq!(roots.first(), Some(&member), "the crate's first");
+        assert!(roots.contains(&mono), "then the workspace's");
+    }
+
+    #[test]
+    fn an_extension_is_told_the_project_it_runs_in_for_a_nested_project_s_file() {
+        let (_dir, app, mono, _member, _file) = a_monorepo("nested_here");
+        let (here, _) = app.editor_where();
+        assert_eq!(here.project.map(|p| PathBuf::from(p.root)), Some(mono));
     }
 
     #[test]

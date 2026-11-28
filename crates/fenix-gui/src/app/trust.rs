@@ -102,7 +102,7 @@ impl App {
     /// Says, once a session, that the project you're in names programs
     /// nobody has allowed yet, and what that means meanwhile.
     pub(super) fn project_trust_notice(&mut self) {
-        let Some(root) = self.project_root.clone() else { return };
+        let Some(root) = self.trust_root() else { return };
         if self.project_verdict(&root) != Verdict::Unknown || !self.trust.noticed.insert(root.clone()) {
             return;
         }
@@ -118,7 +118,7 @@ impl App {
     /// `SPC p y` (`project.trust`): shows what the project names to run,
     /// and asks on the prompt line whether it may.
     pub(crate) fn cmd_project_trust(&mut self) {
-        let Some(root) = self.project_root.clone() else { return self.set_message("no project here") };
+        let Some(root) = self.trust_root() else { return self.set_message("no project here") };
         let files = fenix_project::trust::files(&root);
         let verdict = self.project_verdict(&root);
         if !self.trust.enforced || files.is_empty() || verdict == Verdict::Nothing {

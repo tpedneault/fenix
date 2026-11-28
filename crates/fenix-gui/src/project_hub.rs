@@ -43,7 +43,9 @@ pub struct HubProject {
 impl HubProject {
     pub fn new(root: PathBuf, kind: ProjectKind) -> Self {
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-        let exists = root.is_dir();
+        // A project on another machine is there for all this one can
+        // tell without connecting: never shown as missing.
+        let exists = fenix_vfs::is_remote(&root) || root.is_dir();
         HubProject {
             root,
             name,

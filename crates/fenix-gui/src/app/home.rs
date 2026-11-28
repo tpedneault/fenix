@@ -453,7 +453,7 @@ impl App {
         match entry {
             HomeEntry::Find => self.picker_find_file(),
             HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
-            HomeEntry::Project(root) => self.switch_to_project(root),
+            HomeEntry::Project(root) => self.open_project(root, None, true),
             HomeEntry::NewProject => self.cmd_project_new(),
             HomeEntry::Code { ext, value } => self.code_deliver(&ext, fenix_wasm::host::Notice::HomePicked(value)),
             HomeEntry::Todo { path, line, col } => {

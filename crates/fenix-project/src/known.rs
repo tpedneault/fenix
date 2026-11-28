@@ -58,7 +58,8 @@ impl KnownProjects {
     /// reached once through `canonicalize` and once not is one project.
     pub fn add(&mut self, root: PathBuf) {
         let root = plain_path(root);
-        self.roots.retain(|r| r != &root);
+        let key = same_folder_key(&root);
+        self.roots.retain(|r| same_folder_key(r) != key);
         self.roots.insert(0, root);
     }
 
@@ -67,9 +68,9 @@ impl KnownProjects {
     /// there to begin with," though most callers (picking `root` from a
     /// picker built off `roots()` itself) can only ever hit the former.
     pub fn remove(&mut self, root: &Path) -> bool {
-        let root = plain_path(root.to_path_buf());
+        let key = same_folder_key(&plain_path(root.to_path_buf()));
         let before = self.roots.len();
-        self.roots.retain(|r| r != &root);
+        self.roots.retain(|r| same_folder_key(r) != key);
         self.roots.len() != before
     }
 
@@ -166,6 +167,21 @@ pub fn plain_path(path: PathBuf) -> PathBuf {
     }
 }
 
+/// What two spellings of one project's folder have in common: the folder
+/// it really is (a link followed) and, on Windows, in one case -- so
+/// `C:\src\App` and `c:\src\app`, or `~/code/app` and the folder it
+/// links to, are one project. A folder that isn't there, or is on
+/// another machine, is taken as written.
+fn same_folder_key(path: &Path) -> PathBuf {
+    let real = if fenix_vfs::path::is_remote_text(&path.to_string_lossy()) { None } else { std::fs::canonicalize(path).ok().map(plain_path) };
+    let key = real.unwrap_or_else(|| path.to_path_buf());
+    if cfg!(windows) && !fenix_vfs::path::is_remote_text(&key.to_string_lossy()) {
+        PathBuf::from(key.to_string_lossy().to_lowercase())
+    } else {
+        key
+    }
+}
+
 /// A list of paths, one per line -- how `projects.txt`, `recent_files.txt`
 /// and `recent_dirs.txt` were kept before the state files. For moving
 /// them over.
@@ -211,6 +227,22 @@ mod tests {
 
         let reloaded = KnownProjects::load(path).unwrap();
         assert_eq!(reloaded.roots(), &[PathBuf::from("/repo/two"), PathBuf::from("/repo/one")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_project_by_a_link_and_by_its_folder_is_listed_once() {
+        let dir = TempDir::new("known_link");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut known = KnownProjects::load(dir.path().join("projects.txt")).unwrap();
+        known.add(real.clone());
+        known.add(link.clone());
+        assert_eq!(known.roots(), std::slice::from_ref(&link));
+        assert!(known.remove(&real));
+        assert!(known.roots().is_empty());
     }
 
     #[test]
